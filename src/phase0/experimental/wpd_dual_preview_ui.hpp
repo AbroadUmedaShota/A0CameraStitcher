@@ -9,7 +9,20 @@ bool closing=false,preview_joined=false,all_sessions_passed=true;
 std::array<std::array<HWND,3>,2> focus_buttons{};
 std::array<HWND,2> capture_buttons{};
 std::array<HWND,5> merge_buttons{};
-HWND pair_button{},review_button{},inspect_button{},session_button{},seam_button{};
+HWND pair_button{},review_button{},inspect_button{},session_button{},seam_button{},settings_button{};
+// Read-only camera settings (#416 stage A). The table is touched on the UI thread only. The read runs in
+// settings_future (A is read and closed, then B). settings_stop belongs to one read: it is only ever set,
+// never cleared, and nothing else uses it. settings_close_failed: a body could not be closed after a read,
+// so neither another read nor a Live restart is offered. The backend and the restart override are replaced
+// only by --settings-ui-smoke, which runs without a camera.
+struct SettingsView {std::vector<D810ComparisonRow> rows;std::wstring status;};
+std::optional<SettingsView> settings_view;
+std::future<SettingsReadOutcome> settings_future;
+std::shared_ptr<std::atomic<bool>> settings_stop;
+bool settings_close_failed=false;
+unsigned settings_reads_started{};
+SettingsBackend settings_backend=RealSettingsBackend;
+std::function<void()> preview_restart_override;
 bool focus_smoke=false,capture_smoke=false,merge_smoke=false,pair_smoke=false,level_smoke=false;
 bool restart_smoke=false,capture_restart_blocked=false;
 bool manual_restart_waiting=false;
@@ -93,16 +106,23 @@ void LogPreviewChoice(const FixedPreviewChoice& choice){
 }
 bool CanFocus(Camera& camera){
     std::lock_guard lock(camera.mutex);
-    return !stopping && !closing && !capture_pending && !capture_future.valid() && !camera.done && !camera.failed && camera.frames>=20 &&
+    return !stopping && !closing && !capture_pending && !capture_future.valid() && !settings_future.valid() && !camera.done && !camera.failed && camera.frames>=20 &&
         Clock::now()-camera.last<std::chrono::seconds(2) && camera.focus_mailbox.Available();
 }
-bool CanRestartPreview(){
+// Both Live sessions are joined and closed, nothing is pending: the state in which a Live restart or a
+// settings read may start. Each of them also checks that no settings read is running.
+bool LiveStoppedAndClosed(){
     if(!preview_joined)return false; // All following non-atomic state is joined.
     std::array<PreviewClosedState,2> state;
     for(size_t i=0;i<2;++i){const auto& c=*cameras[i];state[i]={c.opened,c.start_attempted,c.stopped,c.closed};}
     return PreviewRestartAllowed(preview_joined,closing,cleanup_only,
         capture_pending.has_value() || capture_future.valid() || capture_restart_blocked,state);
 }
+bool SettingsReadBusy(){return settings_future.valid();}
+bool CanRestartPreview(){return !SettingsReadBusy() && !settings_close_failed && LiveStoppedAndClosed();}
+// Re-checked inside the handler, not only through the button state.
+bool CanReadSettings(){return !SettingsReadBusy() && !settings_close_failed && LiveStoppedAndClosed() && settings_backend;}
+void DiscardSettingsView(){settings_view.reset();}
 PairCycleObservation ObservePairCycle(){
     PairCycleObservation view{!all_sessions_passed || capture_restart_blocked,
         !capture_pending && !capture_future.valid() && !closing && !stopping,
@@ -252,8 +272,8 @@ void MergeLoop(std::stop_token stop){
     }
 }
 void StartPreview(){
-    if(capture_future.valid() || camera_workers[0].joinable() || camera_workers[1].joinable() || merge_worker.joinable())throw std::runtime_error("preview workers must be closed before restart");
-    stopping=false;camera_end_observed=false;ready_count=0;preview_joined=false;ClearMerge();
+    if(capture_future.valid() || settings_future.valid() || camera_workers[0].joinable() || camera_workers[1].joinable() || merge_worker.joinable())throw std::runtime_error("preview workers must be closed before restart");
+    stopping=false;camera_end_observed=false;ready_count=0;preview_joined=false;ClearMerge();DiscardSettingsView();
     if(!cleanup_only)LoadFixedSource(); // before the merge worker exists (#401)
     for(int i=0;i<2;++i){cameras[i]=std::make_unique<Camera>();cameras[i]->id=registered_ids[i];cameras[i]->alias=i==0?"CAM-A":"CAM-B";}
     camera_workers[0]=std::jthread([]{cameras[0]->Run();});
@@ -295,6 +315,7 @@ void LayoutButtons(HWND hwnd){
     if(review_button)MoveWindow(review_button,1005,rect.bottom/2+52,225,28,TRUE);
     if(inspect_button)MoveWindow(inspect_button,std::max(12L,rect.right-215),rect.bottom/2+88,200,28,TRUE);
     if(session_button)MoveWindow(session_button,std::max(12L,rect.right-430),rect.bottom/2+88,200,28,TRUE);
+    if(settings_button)MoveWindow(settings_button,std::max(12L,rect.right-645),rect.bottom/2+88,200,28,TRUE);
     if(seam_button)MoveWindow(seam_button,1245,rect.bottom/2+52,140,28,TRUE);
 }
 void OpenSavedInspector(){
@@ -400,6 +421,78 @@ int RunLevelUiSmoke(){
     SelectObject(dc,old);DeleteObject(bitmap);DeleteDC(dc);
     Log("level_ui_checks="+std::to_string(checks)+" failures="+std::to_string(failures)+" camera_operations=0");return failures?1:0;
 }
+const wchar_t* SettingLabel(D810SettingId id){
+    switch(id){
+    case D810SettingId::ExposureMode:return L"露出モード";
+    case D810SettingId::ShutterSpeed:return L"シャッター速度";
+    case D810SettingId::Aperture:return L"絞り";
+    case D810SettingId::Iso:return L"ISO感度";
+    case D810SettingId::IsoAuto:return L"ISO感度自動制御";
+    case D810SettingId::WhiteBalance:return L"ホワイトバランス";
+    case D810SettingId::Metering:return L"測光";
+    case D810SettingId::ExposureCompensation:return L"露出補正";
+    case D810SettingId::PictureControl:return L"ピクチャーコントロール";
+    case D810SettingId::ActiveDLighting:return L"アクティブD-ライティング";
+    default:return L"";
+    }
+}
+// The side-by-side table of the two bodies' settings (#416). Display only: nothing here sends a command.
+bool DrawSettingsView(HDC dc,RECT client){
+    if(!settings_view)return false;
+    const int top=client.bottom/2+88,left=12,label_width=236;
+    const int column=std::max<int>(100,(client.right-2*left-label_width)/3);
+    const wchar_t* title=L"両台のカメラ設定（読み取り専用・カメラの設定は変えていません）";
+    TextOutW(dc,left,top,title,lstrlenW(title));
+    const auto cell=[&](int x,int y,const std::wstring& text,int width){
+        RECT area{x,y,x+width-6,y+22};DrawTextW(dc,text.c_str(),-1,&area,DT_LEFT|DT_SINGLELINE|DT_NOPREFIX|DT_END_ELLIPSIS);
+    };
+    int y=top+34;
+    cell(left,y,L"項目",label_width);cell(left+label_width,y,L"CAM-A（左）",column);cell(left+label_width+column,y,L"CAM-B（右）",column);cell(left+label_width+2*column,y,L"差",column);
+    y+=24;
+    for(const auto& row:settings_view->rows){
+        const bool differs=row.difference==D810Difference::Different;
+        SetTextColor(dc,differs?RGB(255,200,90):RGB(240,240,240));
+        cell(left,y,SettingLabel(row.id),label_width);
+        cell(left+label_width,y,WidenUtf8(row.a_text),column);cell(left+label_width+column,y,WidenUtf8(row.b_text),column);
+        cell(left+label_width+2*column,y,differs?L"差あり":row.difference==D810Difference::Same?L"同じ":L"比較不可",column);
+        y+=22;
+    }
+    SetTextColor(dc,RGB(240,240,240));
+    return true;
+}
+// Folds a finished read into the table and the status line. UI thread only.
+void ApplySettingsOutcome(const SettingsReadOutcome& outcome){
+    LogSettingsOutcome(outcome);
+    settings_close_failed=!outcome.CleanClose();
+    SettingsView view;
+    view.rows=CompareD810Settings(outcome.cameras[0].read.readings,outcome.cameras[1].read.readings);
+    if(settings_close_failed)view.status=L"設定を読んだあとにカメラとの接続を閉じられませんでした。ライブは再開できません。この画面を閉じて、本体・USB接続を確認してください。";
+    else if(outcome.Complete())view.status=L"両台の設定を読みました（読み取りのみ）。差のある項目: "+std::to_wstring(CountD810Differences(view.rows))+L" / 「ライブ再開」を押すと表は消えます。";
+    else{
+        view.status=L"設定の読み取りを途中で止めました。読めた項目だけ表示しています。";
+        for(const auto& camera:outcome.cameras)if(!camera.read.Complete())
+            view.status+=L" "+WidenUtf8(camera.read.alias)+L": "+WidenUtf8(camera.read.stop_reason);
+    }
+    capture_status=view.status;settings_view=std::move(view);
+}
+void RequestSettingsRead(){
+    // The button state is not trusted: every condition is checked again here.
+    if(!CanReadSettings()){Log("ui_settings_read_refused=1 setting_writes=0");return;}
+    review_visible=false;DiscardSettingsView();
+    auto stop=std::make_shared<std::atomic<bool>>(false);settings_stop=stop;
+    const auto deadline=Clock::now()+std::chrono::seconds(30);
+    capture_status=L"両台の設定を読んでいます（読み取りのみ。A を閉じてから B を開きます）…";
+    ++settings_reads_started;Log("ui_settings_read_requested=1 setting_writes=0 shutter_commands=0");
+    settings_future=std::async(std::launch::async,[ids=registered_ids,stop,deadline,backend=settings_backend]{
+        try{ComScope com;return ReadBothSettings(ids,deadline,*stop,backend);}
+        catch(const std::exception& error){
+            Log(std::string("settings_read_failure: ")+error.what());
+            SettingsReadOutcome failed;
+            for(int i=0;i<2;++i){failed.cameras[i].read.alias=i==0?"CAM-A":"CAM-B";MarkSettingsUnread(failed.cameras[i],"exception");}
+            return failed;
+        }
+    });
+}
 std::array<std::uint64_t,6> Paint(HDC dc,RECT client){
     std::array<std::uint64_t,6> drawn{};
     FillRect(dc,&client,static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(240,240,240));
@@ -423,6 +516,8 @@ std::array<std::uint64_t,6> Paint(HDC dc,RECT client){
         if(DrawPixels(dc,review_pixels,12,client.bottom/2+140,client.right-24,client.bottom/2-155))drawn[3]=1;
         return drawn;
     }
+    // Both Live sessions are closed and a read finished: the settings table takes the place of C until Live restarts.
+    if(settings_view && preview_joined){DrawSettingsView(dc,client);return drawn;}
     std::lock_guard lock(merged.mutex);
     // The title and the standing note name the kind of C (#401): drawn with the fixed composite condition,
     // not drawn although a condition exists, or the uncalibrated C when there is none.
@@ -451,6 +546,7 @@ std::array<std::uint64_t,6> Paint(HDC dc,RECT client){
 }
 void RequestCapture(int index){
     if(camera_end_restart_smoke)return; // This explicit lifecycle test never exposes.
+    if(settings_future.valid())return; // No exposure while the settings are being read.
     if(index<0 || index>2 || !CanFocus(*cameras[0]) || !CanFocus(*cameras[1]))return;
     if(index==2){std::lock_guard lock(merged.mutex);
         // C without a picture because the fixed condition cannot be applied (#401) does not stop the pair capture:
@@ -529,6 +625,9 @@ CaptureUiOutcome SavePairReview(const std::array<std::wstring,2>& ids,ReviewGeom
     return result;
 }
 void AdvanceCapture(HWND hwnd){
+    if(settings_future.valid() && settings_future.wait_for(std::chrono::seconds(0))==std::future_status::ready){
+        auto outcome=settings_future.get();settings_stop.reset();ApplySettingsOutcome(outcome);
+    }
     if(!preview_joined && cameras[0]->done && cameras[1]->done){
         const bool safe=FinishPreview();
         if(capture_pending && !closing){
@@ -584,7 +683,8 @@ void AdvanceCapture(HWND hwnd){
             Log("ui_capture_failed no_retry=1");
         }
     }
-    if(closing && preview_joined && !capture_future.valid())DestroyWindow(hwnd);
+    // A settings read in progress is waited for: its Close must finish before the window (and the lease) goes.
+    if(closing && preview_joined && !capture_future.valid() && !settings_future.valid())DestroyWindow(hwnd);
 }
 LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM w,LPARAM l){
     switch(message){
@@ -608,12 +708,17 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM w,LPARAM l){
         if(id==402 && HIWORD(w)==BN_CLICKED && reinterpret_cast<HWND>(l)==inspect_button){
             try{OpenSavedInspector();}catch(const std::exception&){capture_status=L"拡大確認画面を開けませんでした。撮影結果は保存されています。";}return 0;
         }
+        if(id==405 && HIWORD(w)==BN_CLICKED && reinterpret_cast<HWND>(l)==settings_button){RequestSettingsRead();return 0;}
         if(id==403 && HIWORD(w)==BN_CLICKED && reinterpret_cast<HWND>(l)==session_button){
+            if(SettingsReadBusy()){Log("ui_live_restart_refused=1 settings_read_in_progress=1");return 0;}
             if(CanRestartPreview()){
                 try{
                     // Re-resolve registered identities only after old workers
                     // and both sessions have closed; keep the same lease.
-                    registered_ids=Discover();review_visible=false;StartPreview();++manual_preview_restarts;manual_restart_waiting=true;
+                    DiscardSettingsView(); // The table describes the stopped state; it does not survive a restart.
+                    if(preview_restart_override)preview_restart_override();
+                    else{registered_ids=Discover();review_visible=false;StartPreview();}
+                    ++manual_preview_restarts;manual_restart_waiting=true;
                     capture_status=L"ライブビューを再開しています。撮影・AFの自動実行はありません。";
                     Log("manual_preview_restart=1 fresh_channels=1 previous_sessions_closed=1");
                 }catch(const std::exception& error){
@@ -666,8 +771,12 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM w,LPARAM l){
         }EndPaint(hwnd,&ps);return 0;}
     case WM_ERASEBKGND:return 1;
     case WM_KEYDOWN:if(w==VK_ESCAPE)SendMessageW(hwnd,WM_CLOSE,0,0);return 0;
-    case WM_CLOSE:closing=true;stopping=true;capture_stop_requested=true;capture_pending.reset();SetWindowTextW(hwnd,L"A0 - stopping both cameras / finishing current save...");return 0;
+    case WM_CLOSE:closing=true;stopping=true;capture_stop_requested=true;capture_pending.reset();
+        if(settings_stop)settings_stop->store(true); // Only set. The read ends, closes its body, then the window goes.
+        SetWindowTextW(hwnd,L"A0 - stopping both cameras / finishing current save...");return 0;
     case WM_TIMER:
+        // Every path that sets `closing` (finite runs, failures) also stops a running settings read.
+        if(closing && settings_stop)settings_stop->store(true);
         if(manual_restart_waiting && CanFocus(*cameras[0]) && CanFocus(*cameras[1])){
             manual_restart_waiting=false;capture_status=L"ライブビューを再開しました。撮影ボタンで両Liveを停止して撮影・PC保存できます。";
             Log("manual_preview_restart_live=1 both_fresh=1");
@@ -677,6 +786,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM w,LPARAM l){
         if(pair_button)EnableWindow(pair_button,CanFocus(*cameras[0]) && CanFocus(*cameras[1]));
         if(review_button){EnableWindow(review_button,!review_pixels.bytes.empty());SetWindowTextW(review_button,review_visible?L"ライブCに戻す":L"撮影結果を見る");}
         if(inspect_button)EnableWindow(inspect_button,!review_path.empty());
+        if(settings_button)EnableWindow(settings_button,CanReadSettings());
         if(session_button){
             EnableWindow(session_button,CanRestartPreview() || (!preview_joined && CanFocus(*cameras[0]) && CanFocus(*cameras[1])));
             SetWindowTextW(session_button,preview_joined?L"ライブ再開":stopping?L"停止・切断中…":L"ライブ停止");
@@ -803,6 +913,148 @@ int RunLifecycleUiSmoke(){
     // The same failure still ends a finite test, so it cannot hang CI.
     run_seconds=20;SendMessageW(window,WM_TIMER,1,0);check(!IsWindow(window) && closing);
     Log("lifecycle_ui_checks="+std::to_string(checks)+" failures="+std::to_string(failures)+" camera_operations=0");return failures?1:0;
+}
+// Camera-free contract of the read-only settings table (#416 stage A). The real window procedure, timer,
+// buttons, future and close path run; only the backend that opens a body is replaced by a synthetic one,
+// and a Live restart is replaced by a counter. No Discover/Open/Run and no hardware lease.
+int RunSettingsUiSmoke(){
+    Log("settings_ui_synthetic=1 camera_operations=0");
+    unsigned checks{},failures{};const auto check=[&](bool ok){++checks;if(!ok){++failures;Log("settings_ui_failed_check="+std::to_string(checks));}};
+    for(int i=0;i<2;++i){cameras[i]=std::make_unique<Camera>();auto& c=*cameras[i];
+        c.alias=i==0?"CAM-A":"CAM-B";c.opened=true;c.start_attempted=true;c.started=true;
+        c.frames=25;c.painted=15;c.first=Clock::now()-std::chrono::seconds(3);c.last=Clock::now();}
+    stopping=false;run_seconds=0;run_start=Clock::now();preview_joined=false;
+    auto instance=GetModuleHandleW(nullptr);WNDCLASSW wc{};wc.lpfnWndProc=WindowProc;wc.hInstance=instance;wc.lpszClassName=L"A0SettingsUiSmoke";
+    if(!RegisterClassW(&wc))return 2;
+    HWND window=CreateWindowExW(0,wc.lpszClassName,L"synthetic settings test",WS_OVERLAPPEDWINDOW,0,0,1400,960,nullptr,nullptr,instance,nullptr);
+    if(!window)return 2;
+    session_button=CreateWindowExW(0,L"BUTTON",L"x",WS_CHILD,0,0,200,28,window,reinterpret_cast<HMENU>(403),instance,nullptr);
+    settings_button=CreateWindowExW(0,L"BUTTON",L"x",WS_CHILD,0,0,200,28,window,reinterpret_cast<HMENU>(405),instance,nullptr);
+    capture_buttons[0]=CreateWindowExW(0,L"BUTTON",L"x",WS_CHILD,0,0,200,28,window,reinterpret_cast<HMENU>(200),instance,nullptr);
+    if(!session_button || !settings_button || !capture_buttons[0]){DestroyWindow(window);return 2;}
+    struct Fake {
+        std::mutex mutex;std::condition_variable wake;
+        bool release=false,saw_stop=false,fail_close=false;
+        std::vector<int> started;int closed=0,active=0,max_active=0;
+    } fake;
+    const auto reading=[](const D810SettingSpec& spec,int index){
+        D810SettingReading r;r.id=spec.id;r.available=true;r.mtp_response=0x2001;r.desc.code=spec.code;r.desc.data_type=static_cast<std::uint16_t>(spec.type);r.desc.get_set=1;
+        r.desc.current_value=spec.id==D810SettingId::ShutterSpeed?(index?5000:1667):spec.id==D810SettingId::Iso?(index?125:64):spec.id==D810SettingId::WhiteBalance?(index?2:1):1;
+        return r;
+    };
+    settings_backend=[&](int index,const std::wstring&,Clock::time_point,const std::atomic<bool>& stop){
+        SettingsCameraResult result;result.read.alias=index==0?"CAM-A":"CAM-B";
+        if(stop.load()){MarkSettingsUnread(result,"not_started");return result;}
+        {std::unique_lock lock(fake.mutex);fake.started.push_back(index);++fake.active;fake.max_active=std::max(fake.max_active,fake.active);
+            fake.wake.wait(lock,[&]{return fake.release;}); // the read, then the Close, take their time
+            if(stop.load())fake.saw_stop=true;
+            --fake.active;++fake.closed;}
+        result.clean_close=!(fake.fail_close && index==1);
+        if(stop.load()){MarkSettingsUnread(result,"interrupted");return result;}
+        for(const auto& spec:kD810SettingSpecs)result.read.readings.push_back(reading(spec,index));
+        return result;
+    };
+    unsigned restarts{};preview_restart_override=[&]{++restarts;};
+    const auto tick=[&]{SendMessageW(window,WM_TIMER,1,0);};
+    const auto click=[&](int id,HWND button){SendMessageW(window,WM_COMMAND,MAKEWPARAM(id,BN_CLICKED),reinterpret_cast<LPARAM>(button));};
+    const auto wait_until=[&](auto ready){for(int i=0;i<400;++i){if(ready())return true;std::this_thread::sleep_for(std::chrono::milliseconds(5));}return false;};
+    const auto started_count=[&]{std::lock_guard lock(fake.mutex);return fake.started.size();};
+    const auto release=[&]{{std::lock_guard lock(fake.mutex);fake.release=true;}fake.wake.notify_all();};
+    const auto rearm=[&]{std::lock_guard lock(fake.mutex);fake.release=false;fake.started.clear();};
+    const auto finished=[&]{return settings_future.valid() && settings_future.wait_for(std::chrono::seconds(0))==std::future_status::ready;};
+    const auto stop_live=[&]{for(auto& camera:cameras){camera->done=true;camera->stopped=true;camera->closed=true;}preview_joined=true;stopping=true;};
+
+    // 1. While Live runs: the button is off and a direct command does nothing.
+    tick();check(!IsWindowEnabled(settings_button));
+    click(405,settings_button);
+    check(!settings_future.valid() && settings_reads_started==0 && started_count()==0);
+
+    // 2. Live stopped and both sessions closed: the read is offered.
+    stop_live();tick();
+    check(IsWindowEnabled(settings_button)!=FALSE && IsWindowEnabled(session_button)!=FALSE && CanReadSettings());
+
+    // 3. A read starts; A is open and nothing else is.
+    click(405,settings_button);
+    check(settings_future.valid() && settings_reads_started==1 && settings_stop && !settings_stop->load());
+    check(wait_until([&]{return started_count()==1;}));
+    check(capture_status.find(L"読んでいます")!=std::wstring::npos);
+
+    // 4. While it runs: no second read, no Live restart, no capture, even if the cameras looked live.
+    tick();
+    check(!IsWindowEnabled(settings_button) && !IsWindowEnabled(session_button));
+    click(405,settings_button);click(403,session_button);
+    check(settings_reads_started==1 && restarts==0 && manual_preview_restarts==0 && started_count()==1);
+    check(!CanRestartPreview() && !CanReadSettings());
+    stopping=false;for(auto& camera:cameras){camera->done=false;camera->last=Clock::now();}
+    check(!CanFocus(*cameras[0]) && !CanFocus(*cameras[1]));
+    RequestCapture(0);RequestCapture(1);RequestCapture(2);click(200,capture_buttons[0]);
+    check(!capture_pending.has_value());
+    stop_live();
+    release();
+    check(wait_until(finished));
+    {std::lock_guard lock(fake.mutex);check(fake.max_active==1 && fake.started.size()==2 && fake.started[0]==0 && fake.started[1]==1 && fake.closed==2);}
+
+    // 5. The result: the table with the differences, in place of C.
+    tick();
+    check(!settings_future.valid() && !settings_close_failed && settings_view.has_value());
+    if(settings_view){
+        check(settings_view->rows.size()==10 && CountD810Differences(settings_view->rows)==3);
+        for(const auto& row:settings_view->rows)
+            if(row.id==D810SettingId::ShutterSpeed)check(row.a_text=="1/6 s" && row.b_text=="1/2 s" && row.difference==D810Difference::Different);
+            else if(row.id==D810SettingId::Aperture)check(row.difference==D810Difference::Same);
+    }
+    check(capture_status.find(L"差のある項目: 3")!=std::wstring::npos);
+    tick(); // the buttons follow the state of the previous tick's end
+    check(IsWindowEnabled(settings_button)!=FALSE && IsWindowEnabled(session_button)!=FALSE);
+    {
+        HDC dc=CreateCompatibleDC(nullptr);BITMAPINFO info{};info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);info.bmiHeader.biWidth=1400;info.bmiHeader.biHeight=-960;
+        info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;void* bits{};auto bitmap=CreateDIBSection(dc,&info,DIB_RGB_COLORS,&bits,nullptr,0);
+        if(!dc || !bitmap)check(false);
+        else{
+            auto old=SelectObject(dc,bitmap);SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(240,240,240));
+            const RECT client{0,0,1400,960};
+            unsigned lit{};for(int y=client.bottom/2+100;y<client.bottom/2+400;++y)for(int x=12;x<1000;++x)if(GetPixel(dc,x,y)!=RGB(0,0,0))++lit;
+            check(lit==0);
+            Paint(dc,client);GdiFlush();
+            unsigned drawn{};for(int y=client.bottom/2+100;y<client.bottom/2+400;++y)for(int x=12;x<1000;++x)if(GetPixel(dc,x,y)!=RGB(0,0,0))++drawn;
+            check(drawn>200);
+            SelectObject(dc,old);DeleteObject(bitmap);DeleteDC(dc);
+        }
+    }
+
+    // 6. Live restart: the table goes away.
+    click(403,session_button);
+    check(restarts==1 && manual_preview_restarts==1 && !settings_view.has_value());
+    manual_restart_waiting=false;
+
+    // 7. A body that cannot be closed after a read: no further read, no Live restart.
+    rearm();fake.fail_close=true;
+    click(405,settings_button);
+    check(wait_until([&]{return started_count()==1;}));
+    release();check(wait_until(finished));tick();tick();
+    check(settings_close_failed && settings_view.has_value());
+    check(!CanReadSettings() && !CanRestartPreview() && !IsWindowEnabled(settings_button) && !IsWindowEnabled(session_button));
+    click(405,settings_button);click(403,session_button);
+    check(settings_reads_started==2 && restarts==1);
+    settings_close_failed=false;fake.fail_close=false;DiscardSettingsView();tick();
+    check(CanReadSettings());
+
+    // 8. WM_CLOSE during a read: the window and the lease wait for the body to be closed.
+    rearm();
+    click(405,settings_button);
+    check(wait_until([&]{return started_count()==1;}));
+    SendMessageW(window,WM_CLOSE,0,0);
+    check(settings_stop && settings_stop->load());
+    for(int i=0;i<3;++i){tick();std::this_thread::sleep_for(std::chrono::milliseconds(20));}
+    check(IsWindow(window)!=FALSE && settings_future.valid());
+    {std::lock_guard lock(fake.mutex);check(fake.closed==4);} // A is still being read and closed
+    release();check(wait_until(finished));tick();
+    check(!IsWindow(window) && !settings_future.valid());
+    {std::lock_guard lock(fake.mutex);check(fake.saw_stop && fake.closed==5 && fake.started.size()==1);} // B was never opened
+
+    if(IsWindow(window))DestroyWindow(window);
+    settings_backend=RealSettingsBackend;preview_restart_override=nullptr;stopping=true;
+    Log("settings_ui_checks="+std::to_string(checks)+" failures="+std::to_string(failures)+" camera_operations=0");return failures?1:0;
 }
 // Camera-free contract of C with a fixed composite condition (#401), on synthetic frames. The real merge
 // worker, Paint, the position buttons, the seam checkbox and the pair-capture admission run; the condition
@@ -1034,7 +1286,9 @@ int RunPreviewWindow(const std::array<std::wstring,2>& ids){
     session_button=CreateWindowExW(0,L"BUTTON",L"ライブ停止",WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,0,0,0,0,window,reinterpret_cast<HMENU>(403),instance,nullptr);
     // The seam line of the fixed composite C (#401): display only, on by default, enabled once C is drawn with a condition.
     seam_button=CreateWindowExW(0,L"BUTTON",L"継ぎ目の線を表示",WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_AUTOCHECKBOX,0,0,0,0,window,reinterpret_cast<HMENU>(404),instance,nullptr);
-    if(!pair_button || !review_button || !inspect_button || !session_button || !seam_button)throw std::runtime_error("create pair review buttons failed");EnableWindow(pair_button,FALSE);EnableWindow(review_button,FALSE);EnableWindow(inspect_button,FALSE);EnableWindow(session_button,FALSE);
+    // Read-only settings of both bodies (#416 stage A): enabled only while both Live sessions are stopped and closed.
+    settings_button=CreateWindowExW(0,L"BUTTON",L"両台の設定を読む",WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,0,0,0,0,window,reinterpret_cast<HMENU>(405),instance,nullptr);
+    if(!pair_button || !review_button || !inspect_button || !session_button || !seam_button || !settings_button)throw std::runtime_error("create pair review buttons failed");EnableWindow(pair_button,FALSE);EnableWindow(review_button,FALSE);EnableWindow(inspect_button,FALSE);EnableWindow(session_button,FALSE);EnableWindow(settings_button,FALSE);
     SendMessageW(seam_button,BM_SETCHECK,BST_CHECKED,0);EnableWindow(seam_button,FALSE);
     LayoutButtons(window);run_start=Clock::now();StartPreview();SetTimer(window,1,50,nullptr);
     // A hidden console launch can supply STARTF_USESHOWWINDOW/SW_HIDE. This
@@ -1047,6 +1301,10 @@ int RunPreviewWindow(const std::array<std::wstring,2>& ids){
     while((state=GetMessageW(&message,nullptr,0,0))>0){if(message.message==WM_KEYDOWN && message.wParam==VK_ESCAPE){SendMessageW(window,WM_CLOSE,0,0);continue;}if(!IsDialogMessageW(window,&message)){TranslateMessage(&message);DispatchMessageW(&message);}}
     stopping=true;
     if(!preview_joined)FinishPreview();
+    // The lease is released only after a running settings read has ended and closed its body.
+    if(settings_stop)settings_stop->store(true);
+    if(settings_future.valid()){auto outcome=settings_future.get();all_sessions_passed=all_sessions_passed && outcome.CleanClose();LogSettingsOutcome(outcome);}
+    if(settings_close_failed)all_sessions_passed=false;
     if(capture_future.valid()){auto result=capture_future.get();all_sessions_passed=all_sessions_passed && result.capture.success && result.capture.closed;}
     if(state<0)all_sessions_passed=false;
     if(capture_once_alias && all_sessions_passed){const auto& c=*cameras[*capture_once_alias];auto result=SaveStillOnce(c.id,c.alias,true);return result.success && result.closed?0:1;}

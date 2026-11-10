@@ -25,6 +25,26 @@ int main() {
     wrong->SetUnsignedIntegerValue(WPD_PROPERTY_COMMON_COMMAND_ID, WPD_COMMAND_MTP_EXT_EXECUTE_COMMAND_WITH_DATA_TO_WRITE.pid);
     check(!AllowedD810PreviewRequest(wrong.Get()));
     check(!AllowedD810PreviewRequest(nullptr));
+    // #416 stage A adds a separate read-only gate and leaves this one as it was: WRITE_DATA, and
+    // SetDevicePropValue in either execute form, stay refused here.
+    {
+        auto write_data=BuildWpdLiveViewRead(L"test",16);
+        write_data->SetUnsignedIntegerValue(WPD_PROPERTY_COMMON_COMMAND_ID,WPD_COMMAND_MTP_EXT_WRITE_DATA.pid);
+        check(!AllowedD810PreviewRequest(write_data.Get()));
+        check(!AdmitD810PreviewDispatch(write_data.Get(),true,false,false));
+        for(auto form:{WpdLiveViewOperation::Start,WpdLiveViewOperation::Frame}){
+            auto set_value=BuildWpdLiveViewOperation(form);
+            set_value->SetUnsignedIntegerValue(WPD_PROPERTY_MTP_EXT_OPERATION_CODE,0x1016);
+            check(!AllowedD810PreviewRequest(set_value.Get()));
+            check(!AdmitD810PreviewDispatch(set_value.Get(),true,false,false));
+            Microsoft::WRL::ComPtr<IPortableDevicePropVariantCollection> args;
+            set_value->GetIPortableDevicePropVariantCollectionValue(WPD_PROPERTY_MTP_EXT_OPERATION_PARAMS,&args);
+            PROPVARIANT value{};value.vt=VT_UI4;value.ulVal=0x500d;args->Add(&value);
+            check(!AllowedD810PreviewRequest(set_value.Get()));
+            set_value->SetUnsignedIntegerValue(WPD_PROPERTY_COMMON_COMMAND_ID,WPD_COMMAND_MTP_EXT_EXECUTE_COMMAND_WITH_DATA_TO_WRITE.pid);
+            check(!AllowedD810PreviewRequest(set_value.Get()));
+        }
+    }
     for(DWORD mode:{0u,1u}){
         auto request=BuildWpdLiveViewOperation(WpdLiveViewOperation::Start);
         request->SetUnsignedIntegerValue(WPD_PROPERTY_MTP_EXT_OPERATION_CODE,0x90c2);
