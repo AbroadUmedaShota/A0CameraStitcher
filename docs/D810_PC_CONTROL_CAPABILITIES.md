@@ -27,6 +27,8 @@ attempted hybridはWPD baseline timeoutとdatetime相関不成立によりReject
 | 二台同時Live View | 将来目標・技術gate待ち | ADR-0031のSDK capabilityと安全性証拠まで有効化しない |
 | 動画、RAW | 対象外 | MVPでは使用しない |
 
+ADR-0038で改定（Accepted、#416）: 上の表の「露出・WB・画質等の変更」の「別途承認」は、露出の5項目（露出モードをMにする・ISO感度自動制御をOFFにする・ISO感度・シャッター速度・絞り）についてADR-0038が当たる。書けるのはCAM-Aから読んだ値をCAM-Bへ写すことだけで、WPDの経路の専用のgateを通す。段Bは開発用プレビュー、段Cは本番の画面（段Cの前提条件が揃うまでは今の文面が効く）。WB・画質・ピクチャーコントロールほかの項目は未承認のまま。Phase 0のCLI（`sdk-status`ほか）は設定を変更しないまま（下の方針の1）。本文の書き換えは後の変更で行う。
+
 ## PCから扱える候補
 
 次はD810用Nikon Camera Remote SDKのcapability定義と付属サンプルに存在する代表項目です。「候補」はSDKに項目があることを示し、この製品での実装済み・全状態での書き込み可能を意味しません。
