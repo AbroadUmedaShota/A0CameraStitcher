@@ -1506,6 +1506,33 @@ void StopsBeforeSending() {
         check(bench.Writes() == 0 && bench.a.read_begins + bench.b.read_begins == reads && bench.controller->CaptureAllowed(), "not even read, no block");
     }
     {
+        // The margin at its boundary: three steps of 5000 ms need 15000 ms.
+        Bench exact;
+        exact.left = std::chrono::milliseconds(15000);
+        check(exact.CopyRun().sent == 3, "margin: exactly steps x budget passes");
+        Bench short_by_one;
+        short_by_one.left = std::chrono::milliseconds(14999);
+        const auto run = short_by_one.CopyRun();
+        check(run.sent == 0 && run.reason == "deadline_margin" && short_by_one.Writes() == 0, "margin: one ms short stops");
+    }
+    {
+        // A budget so large that budget x steps would wrap round to a small
+        // number (3 x 0x5555555555555556 is 2 in 64 bits): it must stop, not write.
+        Bench bench;
+        bench.options.step_budget = std::chrono::milliseconds(0x5555555555555556LL);
+        const auto run = bench.CopyRun();
+        check(run.sent == 0 && run.reason == "deadline_margin" && bench.Writes() == 0, "a huge budget stops, it does not wrap");
+    }
+    {
+        // The largest budget with two steps (2 x max wraps to -2).
+        Bench bench(Adr38Only({D810WriteItem::Iso, D810WriteItem::Aperture}));
+        bench.options.step_budget = std::chrono::milliseconds::max();
+        const auto plan = bench.Copy();
+        check(plan.Ok() && plan.plan->steps.size() == 2, "two steps");
+        const auto run = bench.Run(plan);
+        check(run.sent == 0 && run.reason == "deadline_margin" && bench.Writes() == 0, "the largest budget stops, it does not wrap");
+    }
+    {
         // The time left drops while the step's reads run: the check right
         // before the begin stops it.
         Bench bench;

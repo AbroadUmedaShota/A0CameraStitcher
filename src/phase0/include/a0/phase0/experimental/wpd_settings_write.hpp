@@ -984,10 +984,13 @@ private:
 
         void Say(const std::string& line) const { if (options.log) options.log(line); }
         // Enough time for step `i` and every step after it, on both cameras
-        // (ADR-0038 decision 10). `remaining` is checked present by Execute.
+        // (ADR-0038 decision 10). `remaining` is checked present and
+        // `step_budget` positive by Execute. Divided, not multiplied: a large
+        // budget cannot wrap round into "enough time" (for integers and a
+        // positive count, remaining / left >= budget is remaining >= budget * left).
         bool MarginLeft(std::size_t i) const {
             const auto left = static_cast<long long>(plan.steps.size() - i);
-            return options.remaining() >= options.step_budget * left;
+            return options.remaining().count() / left >= options.step_budget.count();
         }
         bool Append(const std::string& line) {
             if (self.journal_.Append(line)) return true;
