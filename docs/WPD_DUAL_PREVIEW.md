@@ -148,9 +148,9 @@ PC-control mode 0/1の明示比較（mode 1後は0復元確認）とWPD event su
 
 ### #416 設定の書き込み（段B、ADR-0038）
 
-CAM-Aの露出の5項目（露出モード・ISO感度自動制御・ISO・シャッター速度・絞り）をCAM-Bへ写す書き込みの部品。今の段階は、偽の本体の試験までで、画面にはつないでいない。**既定のbuildでは何も書けない**。書ける行を決めるのはリポジトリの中の固定の表だけで、その表は今、全部の行が無効になっている（下の「書ける行を決める物」）。実機にはまだ1回も書いていない（※未検証）。
+CAM-Aの露出の5項目（露出モード・ISO感度自動制御・ISO・シャッター速度・絞り）をCAM-Bへ写す書き込み。部品と、ONのbuildの画面（下の「画面」）まで入っている。**既定のbuildでは何も書けない**。書ける行を決めるのはリポジトリの中の固定の表だけで、その表は今、全部の行が無効になっている（下の「書ける行を決める物」）。だからONのbuildでも、画面の「写す」は押せない。実機にはまだ1回も書いていない（※未検証）。
 
-**build option**: `A0_BUILD_WPD_SETTINGS_WRITE`（既定OFF。`A0_BUILD_WPD_DUAL_PREVIEW` とは別）。OFFの間は、`wpd_settings_write.hpp` をプレビューに入れるとコンパイルが止まる（`#error`）。だから、書き込みのchannelも「写す」のボタンもOFFのbuildには入らない。実機に向けるbuildは、AGENTS.mdの例外が人の手で入るまでOFFのままにする。書き込みのコマンドラインの入口は作らない。
+**build option**: `A0_BUILD_WPD_SETTINGS_WRITE`（既定OFF。`A0_BUILD_WPD_DUAL_PREVIEW` とは別）。OFFの間は、`wpd_settings_write.hpp` をプレビューに入れるとコンパイルが止まる（`#error`）。だから、書き込みのchannelも「写す」のボタンもOFFのbuildには入らない（`preview_settings_write_binary_contracts` がOFFのexeに書き込みの文字列が無いことを確かめる）。ONにすると、configureでWARNINGが出て、起動時のログの最初の行に `settings_write_build=1` が出て、窓の題名に「設定の書き込みあり（開発用・#416 段B）」が付く。実機に向けるbuildは、AGENTS.mdの例外が人の手で入るまでOFFのままにする。書き込みのコマンドラインの入口は作らない（ONのbuildにある `--settings-write-ui-smoke` は、製品の表と一時のフォルダの記録で画面を確かめるだけで、カメラを開かない）。
 
 **部品**（`d810_settings_write.hpp` は純粋な関数、`wpd_settings_write.hpp` はWPD・ファイル・画面から呼ぶ入口）
 
@@ -191,7 +191,10 @@ CAM-Aの露出の5項目（露出モード・ISO感度自動制御・ISO・シ�
 | ReadBegun／ReadOpen／ReadEnding（ReadOpen） | 自分が開いた読み取りのREAD_DATAとEND | beginの拒否・HRESULTの失敗はRetired。ENDが0x2001でデータがきれいならIdle（読んだ値を今の世代に記録）。それ以外はRetired |
 | WriteBegun／WriteOpen（WriteBegun） | 応答の後、そのcontextのWRITE_DATAを1回だけ（NUM_BYTES_TO_WRITE・要素数・中身が計画の値の符号化と完全一致） | 応答にcontextが無ければRetired |
 | WriteSent／WriteEnding（WriteSent） | WRITE_DATAの応答の後、そのcontextのENDだけ | ENDが0x2001でWRITE_DATAが全部書けていればIdle（世代を進める）。どんな拒否もRetired |
-| Retired | 開いていた転送のENDを1回だけ（watchdogのCancelの後は何も） | なし |
+| Retired | 開いていた転送のENDを1回だけ（watchdogのCancelの後は何も。ENDも送らない） | なし |
+
+- watchdog（I/Oが12秒止まったら `Cancel`、※仮）のthreadは、旗（`D810CancelFlag`、`std::atomic<bool>`）を立てて本体の `Cancel` を呼ぶだけで、gateにもsessionにも触らない。sessionはI/Oのthreadで、各命令の前とtransportが返った後に旗を見て、立っていればgateをcleanupなしのRetiredにする。だからCancelの後は、開いている転送のENDも送らない（段Aの読み取りはCancelの後もENDを送る作りで、ここは違う）。Cancelの後に返ってきた応答は信じない。その項目の結果は「不明」になり、撮影が止まる。
+- `D810SettingsWriteController` は排他していない。呼び出しは重ならない（1つのthreadから。workerに渡した呼び出しは、futureで結果を受け取るまで、ほかの呼び出しをしない）。画面（`D810SettingsWriteScreen`）はこれを守る。
 
 - Armの鍵は（宛先、code、値）。Armできるのは、計画にある組、そのcodeをまだ書いていない、今の世代でLiveの0を読んだ、今の世代でそのcodeのPropDescを読んで値が書ける、前提（露出・ISO自動）を今の世代で読んだ時だけ。
 - beginをtransportに渡す前に、Armを消費して世代を進める。「送った」はこの時点で数え、beginが例外で終わっても送ったに数える。
@@ -206,8 +209,18 @@ CAM-Aの露出の5項目（露出モード・ISO感度自動制御・ISO・シ�
 - 解き方: 「読み直す」（`Reread`）。読むだけのsessionで両台を読み、止めの対象の項目（5項目と、有効にした追加の項目）がすべてAとBで一致した時だけ、読み直しの一致の行を書いて解く。読み直して違いがあれば、止めは「不一致」のまま（「不明」「未確認」は「不一致」に変わり、次の計画を作れるようになる）。記録が読めない時は解けないので、人が記録を確かめて退避する。
 - 記録のファイルを消すと止めは解ける（※段Cの前提条件(b)の論点。段Cで別の場所にも未解決の印を持つ）。
 
-**画面への組み込み**（まだ。順番を決めて入れる）
+**画面**（`A0_BUILD_WPD_SETTINGS_WRITE` をONにしたbuildだけ）
 
-`A0_BUILD_WPD_SETTINGS_WRITE` をONにしたbuildだけで、`wpd_dual_preview_ui.hpp` の読み取りの表の横に置く。入口は `D810SettingsWriteController`（表は受け取らない。製品の入口のconstructorは内部で `kD810ProductWriteTable` を値で持ち、構築の時に製品の規則でも確かめる。表を受け取るconstructorは、試験のtargetだけが定義する `A0_SETTINGS_WRITE_TEST_TABLES` の内側にあり、ほかのbuildでは `static_assert` で無いことを固定する。記録は `OpenProductD810SettingsJournal()`、持ち主はLiveと撮影の経路と共有する1つの `D810CameraOwnership`）。画面に出す材料は `Status()`（止めの種類、撮影を許すか、写すを許すか、有効な行の数）と、計画の `steps`・`skipped`・`reasons` の符号、実行の `verdict`・`reason`。
+判断は `D810SettingsWriteScreen`（`d810_settings_write_screen.hpp`。窓のコードを持たず、試験のtargetからも動かせる）にあり、窓とカメラを開く所は `src/phase0/experimental/wpd_settings_write_ui.hpp` にある。`wpd_dual_preview_ui.hpp` には `#if` の差し込みだけを置いた。Controllerは製品の入口（表を受け取らないconstructor）だけで作る。ONのbuildの画面のTUで、表を受け取るconstructorが無いことと `kD810ControllerTestTables` が偽であることを `static_assert` で確かめる。
 
-**試験**: `d810_settings_write_contracts`（表と値、製品の表、承認らしいファイルを置いても何も有効にならない、計画、gateの掃引（Armしたgateは全opcode×命令の種類×引数、ほかの状態は関係するopcodeと上位bitを立てた読み取りのopcode。Armは全code×値。命令の7種類×5つの状態×自分と他人のcontext）、読み取りのbeginとDeviceReadyの拒否・HRESULTの失敗でRetired、Armの条件、転送の順序と失敗、偽の本体での実行、記録と止め、読み直し）。
+- 置き場所: 両台のLiveが止まり切断を確かめた後（「両台の設定を読む」が押せる時と同じ条件）に、窓の下の行に「A の設定を B に写す」「設定を読み直す」が出る。その上の行に、押せない理由か、押すと何をするかを出す。
+- 「A の設定を B に写す」: workerのthreadで、読むだけのsessionでAを読んで閉じ、Bを読んで閉じる（読む段、30秒、※仮）。結果から計画を作り、確定の画面をCの場所に出す。確定の画面には、項目ごとの「CAM-B の今の値 → 書く値」、外した項目（`skipped`）とその理由、「自動では元に戻りません」、「書き込みは項目ごとに 1 回だけです。失敗しても再送しません」を出す。確定を待つ間、sessionは開いていない。
+- 「書き込む（1回だけ）」: Controllerの `Confirm` を呼ぶのはこのボタンだけ。押すとworkerのthreadで `Execute` を1回だけ走らせる（書く段、60秒、※仮）。結果は一致／不一致／不明と、項目ごとの結果、止めた理由。再送と前の値への書き戻しはしない。「やめる」は計画を捨てる（何も書かない）。
+- 「設定を読み直す」: 読むだけで両台を読み、止めの対象の項目が両台で同じなら撮影の止めを解く。
+- 撮影の止め: 撮影の起動点（A・Bの撮影と両台撮影のボタンの処理、`RequestCapture`、`--capture-a`／`--capture-b`）で、記録を読み直して `CaptureAllowed()` を確かめる。止まっている時は撮影を始めず、理由を状態の行に出す。止まっている間はボタンも押せない。起動時に記録を読み、前回の未確認・不一致・不明が残っていれば止めたまま始まる。書き込み・読み直しの最中は、Liveの再開・撮影・「両台の設定を読む」も受け付けない。
+- 表の有効な行が0の間（今の製品の表）は「写す」は押せず、理由（ISO感度自動制御とシャッター速度の番号が本体で未確定、書く本体の機種・版も未確認）を出す。
+- カメラを開く: `D810SettingsCameraAccess` の実装は、開く時に登録済みのidentityと照合し直し、合わなければ何も渡さない。Controllerに渡すのはtransportの関数と機種・版の文字列とwatchdogの旗だけで、`IPortableDevice` は渡さない。identityの読み取り（serial・機種・版、device objectのproperty）のほかにContent・Properties・ResourcesのAPIを使わない。AとBを同時に開かない（2つ目のOpenは拒む）。leaseの下で使う。
+- 窓を閉じる時: 停止の旗を立て、workerの終わり（その中でBのClose）を待ってから、leaseを手放す（`RunPreviewWindow` が返る前に待つ）。Closeできなかった時は、段Aと同じく、読み直し・写す・Liveの再開を出さない。
+- 記録は `OpenProductD810SettingsJournal()`。置き場所が取れなければ、書けない記録として扱い、撮影を止める。持ち主の `D810CameraOwnership` は、計画の読み取り・書き込み・読み直しの間だけ設定が取る。Liveと撮影の経路はまだこれを取らず、画面の条件（Liveの停止と切断、撮影の待ちが無いこと、workerが無いこと）で同時に動かないようにしている（※未対応。段Cの前提条件の(a)・(f)で1か所にまとめる）。
+
+**試験**: `d810_settings_write_contracts`（表と値、製品の表、承認らしいファイルを置いても何も有効にならない、計画、gateの掃引（Armしたgateは全opcode×命令の種類×引数、ほかの状態は関係するopcodeと上位bitを立てた読み取りのopcode。Armは全code×値。命令の7種類×5つの状態×自分と他人のcontext）、読み取りのbeginとDeviceReadyの拒否・HRESULTの失敗でRetired、Armの条件、転送の順序と失敗、偽の本体での実行、記録と止め、読み直し、期限の余裕の桁あふれ、watchdogの旗（WRITE_DATAの途中で別のthreadから立てる）、書き込みのsessionの中の「0 bytes→ENDで0x200A」、画面の通しの流れ（計画→確定→実行→読み戻し→止め／解け、外した項目の表示、片方だけの失敗、Cancel、窓を閉じる時の停止の旗））。試験の表と偽の本体はこのtargetだけにあり、製品のexeには選ぶ入口が無い。`preview_settings_write_ui_contracts`（ONのbuildだけ。`--settings-write-ui-smoke`。製品の表で「写す」が押せず理由が出ること、一時のフォルダに置いた前回の未確認の記録で起動時から撮影が止まること、カメラを開かないこと）。`preview_settings_write_binary_contracts`（OFFのexeに書き込みの文字列が無いこと、ONのexeには有ること）。
