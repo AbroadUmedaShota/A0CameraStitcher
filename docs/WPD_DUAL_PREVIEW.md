@@ -143,3 +143,68 @@ PC-control mode 0/1の明示比較（mode 1後は0復元確認）とWPD event su
 **試験**: `d810_settings_contracts`（解析の境界、整形、比較、gateの掃引、転送の順序、偽の本体での読み取り）、`preview_settings_ui_contracts`（`--settings-ui-smoke`。合成のbackend）。既存の `d810_preview_contracts` にはWRITE_DATAと0x1016の拒否を足した。
 
 **実機で確かめること**（`--settings-read-diagnostics`）: 0x1014 の応答が `mtp=0x2001` か、0x500E／0x500D／0x5007 の getset と一覧（form=2 の first／last）、ISO感度自動制御が 0xD054 と 0xD16A のどちらに答えるか、0xD100 の有無、0xD200 の型、ISO・シャッター速度・WB・測光が本体の表示（EXIF）と一致するか、Live中は読まず `live_view_on` で止まること。`reason=mtp_rejected_at_end` や `empty_payload` が出た時は、その次の項目の 0x1014 が通ったか（END の拒否で転送が閉じたという推定の確認）。途中で止まった時は、行の `mtp` と直後の `settings_stop` の行（END のコード）を保存する。
+
+### #416 設定の書き込み（段B、ADR-0038）
+
+CAM-Aの露出の5項目（露出モード・ISO感度自動制御・ISO・シャッター速度・絞り）をCAM-Bへ写す書き込みの部品。今の段階は、偽の本体の試験までで、画面にはつないでいない。**既定のbuildでは何も書けない**。書ける行を決めるのはリポジトリの中の固定の表だけで、その表は今、全部の行が無効になっている（下の「書ける行を決める物」）。実機にはまだ1回も書いていない（※未検証）。
+
+**build option**: `A0_BUILD_WPD_SETTINGS_WRITE`（既定OFF。`A0_BUILD_WPD_DUAL_PREVIEW` とは別）。OFFの間は、`wpd_settings_write.hpp` をプレビューに入れるとコンパイルが止まる（`#error`）。だから、書き込みのchannelも「写す」のボタンもOFFのbuildには入らない。実機に向けるbuildは、AGENTS.mdの例外が人の手で入るまでOFFのままにする。書き込みのコマンドラインの入口は作らない。
+
+**部品**（`d810_settings_write.hpp` は純粋な関数、`wpd_settings_write.hpp` はWPD・ファイル・画面から呼ぶ入口）
+
+- `kD810WriteItems`: 書く可能性のある項目の表。露出モード（0x500E、Mだけ）、ISO感度自動制御（0xD054か0xD16A、OFFだけ）、ISO（0x500F）、シャッター速度（0x500Dか0xD100）、絞り（0x5007）、ADR-0041の候補のWB（0x5005）・測光（0x500B）・露出補正（0x5010、INT16）。表の順が書く順。ピクチャーコントロールとアクティブD-ライティングは型が確定していないので載せない。画質・画像サイズ・フォーカス・記録先・ほかのプロパティは表に無く、どこからも書けない。WBのManual（1）・色温度（0x8012）・Preset（0x8013）は本体の別の中身に頼る値なので書かず、止めを解く比較でも「不明」として扱う。
+- `D810WriteTable` と `kD810ProductWriteTable`: 項目×カメラの行（確定したcode、有効・無効）、計画の種類（写す／値を選ぶ）、確かめた機種とfirmwareの版。
+- `D810SettingsWriteGate`: 書き込み専用のgate。`WpdSettingsWriteSession`: 1台分のsession。`D810SettingsWriteController`: 画面から呼ぶ入口。
+- `D810SettingsReadGate` と `AllowedD810PreviewRequest` は1行も変えていない。今までどおり0x1016・WITH_DATA_TO_WRITE・WRITE_DATAを拒否する。
+
+**書ける行を決める物**（固定の表だけ）
+
+- 有効にする手段は、表を変えるcommit（レビュー付き）だけ。実行時のファイル・環境変数・レジストリ・コマンドラインの引数では、行を有効にすることも、codeを確定することも、計画の種類を足すこともできない。実行時の物は止める方向にだけ効く。
+- `static_assert` で縛る: 製品の表で有効にできるのはCAM-B×ADR-0038の5項目だけ。CAM-Aの行、追加の項目の行、「値を選ぶ」を有効にした表はコンパイルが通らない（ADR-0038の不変条件2「Aには書かない」をコンパイル時に成り立たせる）。今は有効な行が0であることも `static_assert` にしてある。
+- ISO感度自動制御とシャッター速度のcodeは、段Aの実機の読み取りで1つに確定するまで0（未確定）。未確定の間は、Aの条件（ISO自動OFF）もBの前提（ISO自動OFF）も読めないので、ISO・シャッター速度・絞りも含めて計画を作れない。実行時に候補を探したり切り替えたりはしない。0xD100はBulb・Timeの符号化と単位の出典が無いので、表に確定させられない（`static_assert`）。
+- 確かめた機種とfirmwareの版を表に持たせる（今はfirmwareが未記入で、どの本体も一致しない）。書く相手の本体がidentityで報告する機種と版が表と違えば、1件も送らない。版の文字列は記録にもログにも書かない。
+- 表で有効でも、書く直前にそのsessionで読み直したPropDescで毎回確かめる: 型が表と一致、GetSet=1、FormFlagがEnum（値あり）かRange（stepが正）、書く値がその一覧・範囲にある。段Aの `D810PropDesc::Writable()` はFormFlagがNoneでも真を返すので、書き込みの判定には使わず、`D810DescWritable` を使う。
+
+**計画**（`PlanCopy`、`PlanChosen`）
+
+- 写す（ADR-0038）: Aが M・ISO自動OFF・シャッター速度がBulb／Time／0でなく1秒以下（`kD810MaxWritableExposureUnits`、※仮）の時だけ作る。差のある項目だけを書く。値はAから読んだ値（露出モードはM、ISO自動はOFFの固定値）。Bがその値を広告していなければ計画を作らない。行が無効な項目と、操作者が外した項目（`only`）は `skipped` に理由と一緒に載り、書かない（値を別の値に置き換えることはない）。「1項目だけ」はこの外し方で行う。Bの露出モードがMでなく、露出モードを書けない時は、計画を作らず「本体でMにしてください」の理由（`exposure_mode_not_manual_set_on_body`）を返す（決定14）。
+- 値を選ぶ（ADR-0041、Proposed）: コードはあるが、製品の表で無効。有効にしても、最初の版は「両台に同じ値」だけで、両台が広告している値だけ。
+- 計画は `Confirm` で確定した物だけを `Execute` できる。確定は1回限りで、実行すると消える。
+
+**実行**（`Execute`）
+
+1. 撮影の止めが「不明」「未確認」「記録が読めない」の間は始めない（先に「読み直す」）。
+2. カメラの持ち主（なし／Live／撮影／設定）を1つのatomicでcompare-and-swapし、なしから設定に移れなければ送信0。
+3. 記録に計画と各項目の前の値を書いてflushする。書けなければ送信0。
+4. 計画が頼る全部のカメラを、読むだけのsession（段Aの `WpdSettingsReadSession`）で開いて読み直し、閉じる。値が1つでも計画と違う、または書く相手の機種・版が表と違えば、送信0で止める。
+5. 書く相手ごとに（Aがあれば先にA）、書き込みのsessionを開き、項目ごとに: Liveの状態（0xD1A2が0）→露出モード→ISO自動（必要な項目だけ）→その項目のPropDescを読み直し、前の値が計画どおりか確かめる→Arm→begin（0x1016）→WRITE_DATA→END→読み戻し→一致／不一致／不明。期限は両台の残りの項目の全部で数え、足りなければbeginを渡さない。
+6. 一致以外、送る前の拒否、途中の停止で、その操作の残りは送らない。操作の掛け金（`D810OperationLatch`）が落ち、もう片方のカメラは書き込みで開かない。再送しない。前の値に戻さない（「元に戻す」機能は作らない）。
+
+**gateの状態機械**（`D810SettingsWriteGate`、1つのsessionに1つ）
+
+| 状態（ADR-0038決定9の呼び名） | 受け付ける物 | 次 |
+|---|---|---|
+| Idle | 0x90C8（引数なし）、0x1015（0xD1A2だけ）、0x1014（計画のcodeと0x500E・確定したISO自動のcode）、Armした組の0x1016 | 各状態へ |
+| ReadyPending／ReadBegun／ReadOpen／ReadEnding（ReadOpen） | 自分が開いた読み取りのREAD_DATAとEND | ENDが0x2001でデータがきれいならIdle（読んだ値を今の世代に記録）。それ以外はRetired |
+| WriteBegun／WriteOpen（WriteBegun） | 応答の後、そのcontextのWRITE_DATAを1回だけ（NUM_BYTES_TO_WRITE・要素数・中身が計画の値の符号化と完全一致） | 応答にcontextが無ければRetired |
+| WriteSent／WriteEnding（WriteSent） | WRITE_DATAの応答の後、そのcontextのENDだけ | ENDが0x2001でWRITE_DATAが全部書けていればIdle（世代を進める）。どんな拒否もRetired |
+| Retired | 開いていた転送のENDを1回だけ（watchdogのCancelの後は何も） | なし |
+
+- Armの鍵は（宛先、code、値）。Armできるのは、計画にある組、そのcodeをまだ書いていない、今の世代でLiveの0を読んだ、今の世代でそのcodeのPropDescを読んで値が書ける、前提（露出・ISO自動）を今の世代で読んだ時だけ。
+- beginをtransportに渡す前に、Armを消費して世代を進める。「送った」はこの時点で数え、beginが例外で終わっても送ったに数える。
+- 読み取りのgateの「明示の拒否ならIdleに戻る」は持ち込んでいない。拒否の判定の関数（`IsExplicitMtpRejection`）も使っていない。本体の拒否、応答の欠落、例外、watchdogは、どれも結果を「不明」にする。
+- 通るopcodeは0x90C8・0x1014・0x1015・0x1016だけで、0x9207・0x90C2ほかのvendor operationを送る道は無い。
+
+**記録と撮影の止め**
+
+- 置き場所: `SHGetKnownFolderPath(FOLDERID_LocalAppData)` の下の `A0CameraStitcher\settings-write\journal.txt`。取れなければ書かない（cwdやtempに逃げない）。親のフォルダの各段がフォルダでreparse pointでないこと、記録が通常のファイルであることを毎回確かめる。各行はwrite-throughで書いてflushする。
+- 行: 計画（時刻・種類・項目の数・digest）、項目（alias・項目・code・前の値・書く値）、結果（読み戻しの値・一致／不一致／不明）、終わり（結果・送った数・理由）、読み直し（一致／不一致）。device ID・serial・機種・版・context・生のbytesは書かない。
+- 止め（`Block()`）: 記録のディスクの中身が正本。不一致・不明で終わった操作、終わりの行の無い操作（未確認）、読めない行（未確認）、読めない記録（読めない）の間は撮影を止める。プロセスの再起動、Controllerの作り直しでは解けない。後の操作が一致で終わっても解けない。
+- 解き方: 「読み直す」（`Reread`）。読むだけのsessionで両台を読み、止めの対象の項目（5項目と、有効にした追加の項目）がすべてAとBで一致した時だけ、読み直しの一致の行を書いて解く。読み直して違いがあれば、止めは「不一致」のまま（「不明」「未確認」は「不一致」に変わり、次の計画を作れるようになる）。記録が読めない時は解けないので、人が記録を確かめて退避する。
+- 記録のファイルを消すと止めは解ける（※段Cの前提条件(b)の論点。段Cで別の場所にも未解決の印を持つ）。
+
+**画面への組み込み**（まだ。順番を決めて入れる）
+
+`A0_BUILD_WPD_SETTINGS_WRITE` をONにしたbuildだけで、`wpd_dual_preview_ui.hpp` の読み取りの表の横に置く。入口は `D810SettingsWriteController`（製品の表は `kD810ProductWriteTable`、記録は `OpenProductD810SettingsJournal()`、持ち主はLiveと撮影の経路と共有する1つの `D810CameraOwnership`）。画面に出す材料は `Status()`（止めの種類、撮影を許すか、写すを許すか、有効な行の数）と、計画の `steps`・`skipped`・`reasons` の符号、実行の `verdict`・`reason`。
+
+**試験**: `d810_settings_write_contracts`（表と値、製品の表、承認らしいファイルを置いても何も有効にならない、計画、gateの掃引（Armしたgateは全opcode×命令の種類×引数、ほかの状態は関係するopcode。Armは全code×値）、Armの条件、転送の順序と失敗、偽の本体での実行、記録と止め、読み直し）。

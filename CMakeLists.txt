@@ -1036,6 +1036,17 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME d810_settings_contracts COMMAND a0_d810_settings_tests)
     set_tests_properties(d810_settings_contracts PROPERTIES TIMEOUT 180)
+    # Settings write (#416 stage B): item table, the fixed write table, plans, the write gate's sweep, the write
+    # session and the operation record against synthetic bodies and a temporary folder. No device, no camera.
+    # The test is not a product binary; the product's write path is behind A0_BUILD_WPD_SETTINGS_WRITE below.
+    add_executable(a0_d810_settings_write_tests tests/d810_settings_write_tests.cpp)
+    target_compile_definitions(a0_d810_settings_write_tests PRIVATE A0_ENABLE_WPD_SETTINGS_WRITE=1)
+    target_link_libraries(a0_d810_settings_write_tests PRIVATE a0_wpd_live_view_transfer ole32 shell32 PortableDeviceGuids)
+    if(MSVC)
+        target_compile_options(a0_d810_settings_write_tests PRIVATE /W4 /permissive- /EHsc)
+    endif()
+    add_test(NAME d810_settings_write_contracts COMMAND a0_d810_settings_write_tests)
+    set_tests_properties(d810_settings_write_contracts PROPERTIES TIMEOUT 600)
     add_executable(a0_preview_back_buffer_tests tests/preview_back_buffer_tests.cpp)
     target_include_directories(a0_preview_back_buffer_tests PRIVATE src/phase0/include)
     target_compile_definitions(a0_preview_back_buffer_tests PRIVATE NOMINMAX)
@@ -1219,6 +1230,15 @@ if(BUILD_TESTING)
         # Read-only settings table (#416 stage A): the real window procedure with a synthetic backend.
         add_test(NAME preview_settings_ui_contracts COMMAND A0CameraStitcher.WpdDualPreview --settings-ui-smoke)
         set_tests_properties(preview_settings_ui_contracts PROPERTIES TIMEOUT 60)
+        # Camera settings write (#416 stage B, ADR-0038). OFF by default and separate from the preview option: only with
+        # it ON may the preview include wpd_settings_write.hpp (the header refuses to compile otherwise), so an OFF build
+        # carries neither the write channel nor a copy button. Keep it OFF in any build used on the real bodies until
+        # the AGENTS.md exception is in place.
+        option(A0_BUILD_WPD_SETTINGS_WRITE "Build the camera settings write path into the development preview (#416 stage B)" OFF)
+        if(A0_BUILD_WPD_SETTINGS_WRITE)
+            target_compile_definitions(A0CameraStitcher.WpdDualPreview PRIVATE A0_ENABLE_WPD_SETTINGS_WRITE=1)
+            target_link_libraries(A0CameraStitcher.WpdDualPreview PRIVATE shell32)
+        endif()
         if(MSVC)
             target_compile_options(A0CameraStitcher.WpdDualPreview PRIVATE /W4 /permissive- /EHsc /utf-8)
         endif()
