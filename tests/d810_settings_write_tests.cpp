@@ -3,16 +3,20 @@
 // value objects and files in a temporary folder. No device, no camera.
 #include "a0/phase0/experimental/wpd_settings_write.hpp"
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <fstream>
 #include <iostream>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <regex>
 #include <set>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace a0::phase0::experimental;
@@ -301,13 +305,21 @@ struct FakeAccess final: D810SettingsCameraAccess {
     bool close_ok[2]{true, true};
     bool open_fail[2]{};
     std::string model[2]{"D810", "D810"}, firmware[2]{"1.00", "1.00"};
+    // The flag a watchdog of camera i would raise (shared by all its opens here).
+    std::shared_ptr<std::atomic<bool>> cancel[2];
+    // Requests that reached a body after its flag was raised.
+    int after_cancel[2]{};
     D810OpenedCamera Open(D810Camera camera) override {
         const auto i = static_cast<int>(camera);
         if (open != -1) overlap = true;
         if (open_fail[i]) return {};
         open = i;
         ++opens[i];
-        return {[this, i](IPortableDeviceValues* request) { return (*bodies[i])(request); }, model[i], firmware[i]};
+        return {[this, i](IPortableDeviceValues* request) {
+                    if (cancel[i] && cancel[i]->load()) ++after_cancel[i];
+                    return (*bodies[i])(request);
+                },
+            model[i], firmware[i], cancel[i]};
     }
     bool Close(D810Camera camera) override {
         const auto i = static_cast<int>(camera);
@@ -1589,6 +1601,58 @@ void StopsBeforeSending() {
         check(run.verdict == D810WriteVerdict::Unknown && run.sent == 3, "close failure");
     }
 }
+// The I/O watchdog (ADR-0038 decision 10, M3): its thread only raises the
+// flag; the session sees it on the I/O thread, sends nothing more (not even
+// the END of the open transfer) and the result is unknown.
+void WatchdogCancel() {
+    {
+        Bench bench;
+        const auto flag = std::make_shared<std::atomic<bool>>(false);
+        bench.access.cancel[1] = flag;
+        std::mutex mutex;
+        std::condition_variable wake;
+        bool entered = false, released = false;
+        // WRITE_DATA hangs in the transport until the "watchdog" has acted.
+        bench.b.after = [&](const std::string& entry) {
+            if (entry != "write_data") return;
+            std::unique_lock lock(mutex);
+            entered = true;
+            wake.notify_all();
+            wake.wait(lock, [&] { return released; });
+        };
+        std::thread watchdog([&] {
+            std::unique_lock lock(mutex);
+            wake.wait(lock, [&] { return entered; });
+            flag->store(true); // all the watchdog does, besides IPortableDevice::Cancel
+            released = true;
+            wake.notify_all();
+        });
+        const auto run = bench.CopyRun();
+        watchdog.join();
+        const auto& trace = bench.b.trace;
+        const auto data = std::find(trace.begin(), trace.end(), "write_data");
+        check(data != trace.end() && data + 1 == trace.end(), "cancel: nothing after the stuck WRITE_DATA, not even its END");
+        check(bench.access.after_cancel[1] == 0 && bench.b.write_ends == 0 && bench.b.write_datas == 1, "cancel: no request reached the body after the flag");
+        check(run.sent == 1 && run.verdict == D810WriteVerdict::Unknown && run.reason == "result_unknown", "cancel: the result is unknown");
+        check(bench.b.begins_by_code.count(0x500d) == 0 && NoResend(bench.b), "cancel: the rest is not sent, nothing resent");
+        check(!bench.controller->CaptureAllowed() && bench.controller->Block() == D810CaptureBlock::Unknown, "cancel: capture held");
+        check(bench.Restarted().Block() == D810CaptureBlock::Unknown, "cancel: held after a restart");
+    }
+    {
+        // The flag raised during a read in the write session, before the first
+        // write: nothing is sent and nothing more reaches the body.
+        Bench bench;
+        const auto flag = std::make_shared<std::atomic<bool>>(false);
+        bench.access.cancel[1] = flag;
+        int seen = 0;
+        // 1: the plan's read, 2: the verification read, 3: the write session.
+        bench.b.after = [&](const std::string& entry) { if (entry == "1015(d1a2)" && ++seen == 3) flag->store(true); };
+        const auto run = bench.CopyRun();
+        check(seen == 3 && !bench.b.trace.empty() && bench.b.trace.back() == "1015(d1a2)", "cancel in a read: that request is the last, no END");
+        check(run.sent == 0 && run.verdict == D810WriteVerdict::NotSent && bench.Writes() == 0 && bench.access.after_cancel[1] == 0, "cancel in a read: nothing sent");
+        check(bench.controller->CaptureAllowed(), "cancel in a read: nothing sent, no block");
+    }
+}
 void OwnershipIsCompareAndSwap() {
     D810CameraOwnership owner;
     check(owner.TryAcquire(D810CameraUse::Settings) && !owner.TryAcquire(D810CameraUse::Live) && !owner.TryAcquire(D810CameraUse::Capture), "one owner");
@@ -1635,6 +1699,7 @@ int main() {
     run("JournalStates", JournalStates);
     run("ChosenRuns", ChosenRuns);
     run("StopsBeforeSending", StopsBeforeSending);
+    run("WatchdogCancel", WatchdogCancel);
     run("OwnershipIsCompareAndSwap", OwnershipIsCompareAndSwap);
     std::cout << checks << " checks, " << failures << " failures, "
               << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() << " ms\n";

@@ -17,7 +17,8 @@
 // transport; the END of a write advances it again, so the next write needs new
 // reads. Any refusal, missing reply, exception, timeout or cancel during a write
 // retires the gate: nothing more is sent on that session except the END of a
-// transfer that is open. The read-only gate's "an explicit refusal returns to
+// transfer that is open, and after the I/O watchdog's cancel not even that
+// (D810CancelFlag). The read-only gate's "an explicit refusal returns to
 // Idle" rule is not used here, and the read gate's refusal test is not shared.
 //
 // Only targets built with A0_ENABLE_WPD_SETTINGS_WRITE (the CMake option
@@ -271,6 +272,8 @@ public:
         Retire("transport_failed", open ? context_ : std::wstring());
     }
     // The I/O watchdog cancelled the device: nothing more, not even an END.
+    // Called on the I/O thread only (the session does it when it sees the
+    // watchdog's flag); the gate is never touched from another thread.
     void Cancelled() {
         Retire("cancelled");
         cleanup_context_.clear();
@@ -469,19 +472,28 @@ struct D810WriteAttempt {
     // value is decided by reading it back, not here.
     bool ended{};
 };
+// The I/O watchdog's signal (ADR-0038 decision 10, M3). The watchdog thread
+// only sets the flag (and cancels the device); it never calls the session or
+// the gate. The session reads the flag on the I/O thread before and after each
+// request, and on seeing it retires the gate with no cleanup: after a cancel
+// nothing more is sent on that session, not even the END of an open transfer,
+// and a reply that comes back after the cancel is not trusted.
+using D810CancelFlag = std::shared_ptr<const std::atomic<bool>>;
+inline bool D810CancelRaised(const D810CancelFlag& flag) { return flag && flag->load(); }
+
 class WpdSettingsWriteSession {
 public:
     using Transport = WpdSettingsReadSession::Transport;
-    WpdSettingsWriteSession(Transport transport, std::function<bool()> may_continue, std::function<bool()> may_cleanup, D810WriteGateConfig config):
-        transport_(std::move(transport)), may_continue_(std::move(may_continue)), may_cleanup_(std::move(may_cleanup)), gate_(std::move(config)) {
+    WpdSettingsWriteSession(Transport transport, std::function<bool()> may_continue, std::function<bool()> may_cleanup, D810WriteGateConfig config,
+        D810CancelFlag cancelled = nullptr):
+        transport_(std::move(transport)), may_continue_(std::move(may_continue)), may_cleanup_(std::move(may_cleanup)), gate_(std::move(config)),
+        cancelled_(std::move(cancelled)) {
         if (!transport_ || !may_continue_ || !may_cleanup_) throw std::invalid_argument("missing settings write admission");
     }
     WpdSettingsWriteSession(const WpdSettingsWriteSession&) = delete;
     WpdSettingsWriteSession& operator=(const WpdSettingsWriteSession&) = delete;
     const D810SettingsWriteGate& Gate() const { return gate_; }
-    bool Poisoned() const { return poisoned_ || gate_.Retired(); }
-    // Called by the I/O watchdog's owner after it cancelled the device.
-    void Cancelled() { gate_.Cancelled(); poisoned_ = true; }
+    bool Poisoned() const { return poisoned_ || gate_.Retired() || D810CancelRaised(cancelled_); }
 
     bool Ready() {
         for (;;) {
@@ -552,11 +564,25 @@ private:
     private:
         WpdSettingsWriteSession& session_;
     };
+    // The watchdog's flag, seen on this (the I/O) thread: the gate retires
+    // with no cleanup left.
+    bool CancelSeen() {
+        if (!D810CancelRaised(cancelled_)) return false;
+        gate_.Cancelled();
+        poisoned_ = true;
+        return true;
+    }
     WpdLiveViewExchange Send(IPortableDeviceValues* request) {
+        if (CancelSeen()) throw std::runtime_error("settings write cancelled");
         if (!gate_.Admit(request)) throw std::runtime_error("settings write request not admitted");
         WpdLiveViewExchange reply;
         try { reply = transport_(request); }
-        catch (...) { gate_.TransportFailed(); poisoned_ = true; throw; }
+        catch (...) {
+            if (!CancelSeen()) gate_.TransportFailed();
+            poisoned_ = true;
+            throw;
+        }
+        if (CancelSeen()) throw std::runtime_error("settings write cancelled");
         gate_.Observe(reply);
         return reply;
     }
@@ -583,6 +609,7 @@ private:
     Transport transport_;
     std::function<bool()> may_continue_, may_cleanup_;
     D810SettingsWriteGate gate_;
+    D810CancelFlag cancelled_;
     bool poisoned_{};
 };
 
@@ -737,16 +764,20 @@ inline D810CaptureBlock D810JournalBlock(const D810TextFile& file) {
 }
 
 // --- Camera access ---------------------------------------------------------------------------
-// An opened camera: its transport, and the model and firmware version its
-// identity reports (compared with the fixed table, never logged or recorded).
+// An opened camera: its transport, the model and firmware version its identity
+// reports (compared with the fixed table, never logged or recorded), and the
+// flag its I/O watchdog sets when it cancels the device (empty: no watchdog).
+// No device object: the controller and the sessions see only these.
 struct D810OpenedCamera {
     WpdSettingsWriteSession::Transport transport;
     std::string model;
     std::string firmware;
+    D810CancelFlag cancelled;
 };
 // Opens the registered camera (the implementation re-checks its identity
 // against the registration) or returns an empty transport. One camera at a
-// time: Close comes before the next Open.
+// time: Close comes before the next Open. After the watchdog's flag is raised
+// the transport sends nothing more.
 class D810SettingsCameraAccess {
 public:
     virtual ~D810SettingsCameraAccess() = default;
@@ -822,6 +853,13 @@ inline const char* D810ControllerTableProblem(const D810WriteTable& table, bool 
 // The entry points for the screen: plan, confirm, run, reread, status. There is
 // no other way in (no command line, no automation), no "undo" and no write of
 // an earlier value (ADR-0038 decision 7).
+//
+// Not thread-safe (the plans and the in-memory block are not locked): calls
+// never overlap. They come from one thread at a time, and a call handed to a
+// worker thread (the read for a plan, Execute, Reread) is the only call until
+// its result has been taken back through a future or a join, which orders the
+// worker's changes before the next call. The screen (D810SettingsWriteScreen)
+// keeps to this; the I/O watchdog never calls the controller.
 class D810SettingsWriteController {
     struct AnyTable {};
 public:
@@ -954,7 +992,8 @@ private:
         bool ok{};
         bool verified{};
     };
-    // Open, read every table code with the read-only session, Close.
+    // Open, read every table code with the read-only session, Close. After the
+    // watchdog's flag nothing more reaches the transport, not even an END.
     CameraRead ReadCamera(D810SettingsCameraAccess& access, D810Camera camera, const D810WriteRunOptions& options) const {
         CameraRead out;
         auto opened = access.Open(camera);
@@ -962,7 +1001,13 @@ private:
         out.verified = D810BodyVerified(table_, opened.model, opened.firmware);
         bool complete = false;
         try {
-            WpdSettingsReadSession session(std::move(opened.transport), options.may_continue, options.may_cleanup);
+            const auto cancelled = opened.cancelled;
+            auto transport = [inner = std::move(opened.transport), cancelled](IPortableDeviceValues* request) {
+                if (D810CancelRaised(cancelled)) throw std::runtime_error("settings read cancelled");
+                return inner(request);
+            };
+            WpdSettingsReadSession session(std::move(transport), [&options, cancelled] { return !D810CancelRaised(cancelled) && options.may_continue(); },
+                [&options, cancelled] { return !D810CancelRaised(cancelled) && options.may_cleanup(); });
             out.read = session.ReadAll(D810CameraAlias(camera), options.log);
             complete = out.read.Complete();
         } catch (...) {}
@@ -1042,7 +1087,7 @@ private:
             if (!D810BodyVerified(self.table_, opened.model, opened.firmware)) stop = std::string("body_not_verified:") + D810CameraAlias(camera);
             else {
                 try {
-                    WpdSettingsWriteSession session(std::move(opened.transport), options.may_continue, options.may_cleanup, std::move(config));
+                    WpdSettingsWriteSession session(std::move(opened.transport), options.may_continue, options.may_cleanup, std::move(config), opened.cancelled);
                     stop = session.Ready() ? WriteSteps(session, camera) : "device_not_ready";
                 } catch (...) {
                     stop = "exception";
