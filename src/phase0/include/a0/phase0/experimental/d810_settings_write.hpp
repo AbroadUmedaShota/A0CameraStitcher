@@ -375,10 +375,6 @@ inline void CheckPreconditions(const D810WritePlan& plan, D810Camera camera, con
     if (needs_iso_off && !writes_iso_off && !(iso_auto && iso_auto->desc.current_value == kD810IsoAutoOff))
         reasons.push_back("iso_auto_not_off:" + alias);
 }
-inline std::uint64_t Fnv1a(std::uint64_t hash, std::uint64_t value) {
-    for (int i = 0; i < 8; ++i) { hash ^= (value >> (8 * i)) & 0xff; hash *= 1099511628211ULL; }
-    return hash;
-}
 } // namespace d810_plan_detail
 
 // ADR-0038: copy CAM-A's five exposure items to CAM-B. CAM-A must be in M with
@@ -517,24 +513,6 @@ inline std::string D810PlanTableRefusal(const D810WritePlan& plan, const D810Wri
     }
     return {};
 }
-// A digest of everything the plan would send and everything it relies on.
-inline std::uint64_t D810PlanDigest(const D810WritePlan& plan) {
-    using d810_plan_detail::Fnv1a;
-    std::uint64_t hash = 14695981039346656037ULL;
-    hash = Fnv1a(hash, static_cast<std::uint64_t>(plan.source));
-    hash = Fnv1a(hash, plan.iso_auto_code);
-    for (const auto& step : plan.steps) {
-        hash = Fnv1a(hash, static_cast<std::uint64_t>(step.camera) << 32 | static_cast<std::uint64_t>(step.item) << 16 | step.code);
-        hash = Fnv1a(hash, static_cast<std::uint64_t>(step.before));
-        hash = Fnv1a(hash, static_cast<std::uint64_t>(step.value));
-    }
-    for (const auto& seen : plan.observed) {
-        hash = Fnv1a(hash, static_cast<std::uint64_t>(seen.camera) << 16 | seen.code);
-        hash = Fnv1a(hash, static_cast<std::uint64_t>(seen.value));
-    }
-    return hash;
-}
-
 // --- Release of a capture block ----------------------------------------------------
 // Both cameras read in full and every block item reads the same on both. An
 // item with two candidate codes is compared at the confirmed code; while the
@@ -572,12 +550,13 @@ inline D810ReleaseCheck CheckD810Release(const D810SettingsSnapshot& a, const D8
 
 // --- Operation record (journal) ---------------------------------------------------------
 // One line per event, appended and flushed before the next step:
-//   a0sw1 op=<16 hex> ev=plan t=<utc> source=copy|chosen steps=<n> digest=<16 hex>
+//   a0sw1 op=<16 hex> ev=plan t=<utc> source=copy|chosen steps=<n>
 //   a0sw1 op=<16 hex> ev=step i=<n> alias=<CAM-x> item=<name> code=0x.... before=0x... value=0x...
 //   a0sw1 op=<16 hex> ev=result i=<n> readback=0x...|none verdict=match|mismatch|unknown
 //   a0sw1 op=<16 hex> ev=end t=<utc> verdict=match|mismatch|unknown|not_sent sent=<n> reason=<token>
 //   a0sw1 ev=reread t=<utc> verdict=match|mismatch
-// No device identity, serial, model, firmware, transfer context or raw transfer bytes.
+// No device identity, serial, digest, model, firmware, transfer context or raw
+// transfer bytes (ADR-0038 decision 11). `op` is a random operation id.
 enum class D810WriteVerdict : std::uint8_t { NotSent, Match, Mismatch, Unknown };
 inline const char* D810WriteVerdictToken(D810WriteVerdict verdict) {
     switch (verdict) {
@@ -612,8 +591,7 @@ inline std::string D810ValueField(const D810WriteItemSpec& spec, std::int64_t va
 }
 inline std::string D810JournalOp(std::uint64_t op) { return std::string(kD810JournalPrefix) + " op=" + D810Hex(op, 16).substr(2); }
 inline std::string FormatD810JournalPlan(std::uint64_t op, const std::string& time, const D810WritePlan& plan) {
-    return D810JournalOp(op) + " ev=plan t=" + time + " source=" + D810PlanSourceToken(plan.source) + " steps=" + std::to_string(plan.steps.size()) +
-        " digest=" + D810Hex(D810PlanDigest(plan), 16).substr(2);
+    return D810JournalOp(op) + " ev=plan t=" + time + " source=" + D810PlanSourceToken(plan.source) + " steps=" + std::to_string(plan.steps.size());
 }
 inline std::string FormatD810JournalStep(std::uint64_t op, std::size_t index, const D810WriteStep& step) {
     const auto& spec = D810WriteItemOf(step.item);
@@ -710,7 +688,7 @@ inline D810JournalState ParseD810Journal(std::string_view text) {
         const auto event = D810FieldValue(fields[2], "ev");
         if (!op || !hex16(*op) || !event) { malformed(); continue; }
         if (*event == "plan") {
-            if (fields.size() != 7) { malformed(); continue; }
+            if (fields.size() != 6) { malformed(); continue; }
             close_open();
             open_op = std::string(*op);
             ++state.operations;

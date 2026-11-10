@@ -983,6 +983,10 @@ void HappyCopy() {
     check(Contains(journal, "ev=plan") && Contains(journal, "ev=step i=2 alias=CAM-B item=aperture code=0x5007 before=0x0230 value=0x0320"), "journal plan and steps");
     check(Contains(journal, "ev=result i=0 readback=0x0040 verdict=match") && Contains(journal, "ev=end t=2000-01-01T00:00:00Z verdict=match sent=3"), "journal results");
     check(!HasIdentifierShape(journal), "journal has no identifiers or contexts");
+    // ADR-0038 decision 11: no digest; the plan line has six fields.
+    check(!Contains(journal, "digest") && Contains(journal, " ev=plan t=2000-01-01T00:00:00Z source=copy steps=3\n"), "plan line without a digest");
+    for (const auto line : SplitD810RecordLines(journal))
+        if (Contains(std::string(line), "ev=plan")) check(SplitD810Fields(line).size() == 6, "six plan fields");
     for (const auto& line : bench.log) check(!HasIdentifierShape(line), "log has no identifiers or contexts");
     // Order: for each item Live, the preconditions and the code, then the write, then the read back.
     const auto& trace = bench.b.trace;
@@ -1176,16 +1180,21 @@ void RereadReleases() {
 void JournalStates() {
     const auto op = std::string("a0sw1 op=00000000000000aa ");
     check(ParseD810Journal("").block == D810CaptureBlock::None, "empty");
-    check(ParseD810Journal(op + "ev=plan t=x source=copy steps=1 digest=0\n").block == D810CaptureBlock::Unconfirmed, "plan without end");
-    check(ParseD810Journal(op + "ev=plan t=x source=copy steps=1 digest=0\n" + op + "ev=end t=x verdict=not_sent sent=0 reason=x\n").block == D810CaptureBlock::None, "not sent");
-    check(ParseD810Journal(op + "ev=plan t=x source=copy steps=1 digest=0\n" + op + "ev=end t=x verdict=not_sent sent=1 reason=x\n").block == D810CaptureBlock::Unconfirmed, "not_sent with sends is malformed");
-    check(ParseD810Journal(op + "ev=plan t=x source=copy steps=1 digest=0\n" + op + "ev=end t=x verdict=unknown sent=1 reason=x\n").block == D810CaptureBlock::Unknown, "unknown");
+    check(ParseD810Journal(op + "ev=plan t=x source=copy steps=1\n").block == D810CaptureBlock::Unconfirmed, "plan without end");
+    check(ParseD810Journal(op + "ev=plan t=x source=copy steps=1\n" + op + "ev=end t=x verdict=not_sent sent=0 reason=x\n").block == D810CaptureBlock::None, "not sent");
+    check(ParseD810Journal(op + "ev=plan t=x source=copy steps=1\n" + op + "ev=end t=x verdict=not_sent sent=1 reason=x\n").block == D810CaptureBlock::Unconfirmed, "not_sent with sends is malformed");
+    check(ParseD810Journal(op + "ev=plan t=x source=copy steps=1\n" + op + "ev=end t=x verdict=unknown sent=1 reason=x\n").block == D810CaptureBlock::Unknown, "unknown");
+    {
+        // A plan line with an extra field (the earlier digest) is malformed: it holds capture, it is not ignored.
+        const auto extra = ParseD810Journal(op + "ev=plan t=x source=copy steps=1 digest=0\n" + op + "ev=end t=x verdict=not_sent sent=0 reason=x\n");
+        check(extra.block == D810CaptureBlock::Unconfirmed && extra.malformed_lines >= 1 && extra.operations == 0, "seven plan fields are malformed");
+    }
     check(ParseD810Journal("a0sw1 op=00000000000000aa ev=pl").block == D810CaptureBlock::Unconfirmed, "torn line");
     check(ParseD810Journal("a0sw1 op=00000000000000aa ev=pl\na0sw1 ev=reread t=x verdict=match\n").block == D810CaptureBlock::None, "torn line released");
-    check(ParseD810Journal(op + "ev=plan t=x source=copy steps=1 digest=0\n" + op + "ev=end t=x verdict=mismatch sent=1 reason=x\na0sw1 ev=reread t=x verdict=mismatch\n").block == D810CaptureBlock::Mismatch, "mismatch stays");
+    check(ParseD810Journal(op + "ev=plan t=x source=copy steps=1\n" + op + "ev=end t=x verdict=mismatch sent=1 reason=x\na0sw1 ev=reread t=x verdict=mismatch\n").block == D810CaptureBlock::Mismatch, "mismatch stays");
     // An operation without its end line, then a mismatching reread: the block
     // becomes a known mismatch, it is not dropped.
-    const auto open_then_reread = op + "ev=plan t=x source=copy steps=1 digest=0\n" + op +
+    const auto open_then_reread = op + "ev=plan t=x source=copy steps=1\n" + op +
         "ev=step i=0 alias=CAM-B item=iso code=0x500f before=0x0064 value=0x0040\na0sw1 ev=reread t=x verdict=mismatch\n";
     check(ParseD810Journal(open_then_reread).block == D810CaptureBlock::Mismatch, "unended operation then mismatching reread stays blocked");
     check(ParseD810Journal(open_then_reread + "a0sw1 ev=reread t=x verdict=match\n").block == D810CaptureBlock::None, "a matching reread releases it");
@@ -1193,7 +1202,7 @@ void JournalStates() {
         // A crash during a write, a restart, then a reread that finds A and B
         // still different: capture stays blocked, also after another restart.
         Bench bench(kAdr38Table, -1, true);
-        WriteFile(bench.file.Path(), op + "ev=plan t=x source=copy steps=1 digest=0\n" + op + "ev=step i=0 alias=CAM-B item=iso code=0x500f before=0x0064 value=0x0040\n");
+        WriteFile(bench.file.Path(), op + "ev=plan t=x source=copy steps=1\n" + op + "ev=step i=0 alias=CAM-B item=iso code=0x500f before=0x0064 value=0x0040\n");
         auto restarted = bench.Restarted();
         check(restarted.Block() == D810CaptureBlock::Unconfirmed, "restart: unconfirmed");
         const auto reread = restarted.Reread(bench.access, bench.options);
@@ -1210,7 +1219,7 @@ void JournalStates() {
     {
         // Crash after the plan line: the next start is blocked as unconfirmed.
         Bench bench(kAdr38Table, -1, true);
-        WriteFile(bench.file.Path(), op + "ev=plan t=x source=copy steps=1 digest=0\n" + op + "ev=step i=0 alias=CAM-B item=iso code=0x500f before=0x0064 value=0x0040\n");
+        WriteFile(bench.file.Path(), op + "ev=plan t=x source=copy steps=1\n" + op + "ev=step i=0 alias=CAM-B item=iso code=0x500f before=0x0064 value=0x0040\n");
         check(bench.controller->Block() == D810CaptureBlock::Unconfirmed && !bench.Copy().Ok(), "unconfirmed blocks plans");
         // A torn last line is closed before the next line is appended.
         WriteFile(bench.file.Path(), "a0sw1 op=00000000000000aa ev=pl");
