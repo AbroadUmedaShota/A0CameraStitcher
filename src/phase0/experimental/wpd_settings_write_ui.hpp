@@ -224,6 +224,25 @@ HWND settings_panel_open_button{},settings_panel_close_button{},settings_panel_c
 std::array<std::array<std::vector<std::optional<std::int64_t>>,kD810ChoiceItemCount>,2> settings_panel_values;
 std::uint64_t settings_panel_built_serial=~std::uint64_t{},settings_panel_synced_serial=~std::uint64_t{};
 unsigned settings_panel_picks{};
+// The panel stops Live when it is opened and starts it again when it is closed (#416, ADR-0041). The stop and the restart are
+// the ones of the "ライブ停止" / "ライブ再開" button, asked for by the panel; nothing about a capture or a camera changes.
+// `settings_panel_open_pending`: the operator asked for the panel while Live runs; the panel reads the cameras when Live is
+// stopped and closed (the timer), and is given up when a capture, a close or a failed close gets in the way.
+bool settings_panel_open_pending=false;
+unsigned settings_panel_auto_stops{},settings_panel_auto_restarts{};
+// Both Live sessions run and answer: the state in which the "ライブ停止" button stops them.
+bool SettingsPanelLiveStoppable(){return !preview_joined && !closing && CanFocus(*cameras[0]) && CanFocus(*cameras[1]);}
+// The panel may stop Live by itself only when nothing holds capture or has failed: a held capture, a window that is closing, a failed
+// capture and a camera that could not be closed leave Live to the operator's own buttons.
+bool SettingsPanelMayStopLive(){
+    if(!settings_write || settings_panel_open_pending)return false;
+    const auto& screen=*settings_write->screen;
+    return SettingsPanelLiveStoppable() && screen.Status().capture_allowed && !capture_restart_blocked && !settings_close_failed && !capture_pending && !capture_future.valid() && screen.PanelOpenOffered(true);
+}
+// The same conditions for the restart when the panel is closed.
+bool SettingsPanelMayRestartLive(){
+    return settings_write && !closing && settings_write->screen->Status().capture_allowed && !capture_restart_blocked && !settings_close_failed && CanRestartPreview();
+}
 bool SettingsPanelOpen(){return settings_write && settings_write->screen->PanelOpen();}
 int SettingsPanelRowY(int row){return kPanelHeaderY+row*kPanelRowHeight;}
 D810Camera SettingsPanelCamera(int camera){return camera==0?D810Camera::A:D810Camera::B;}
@@ -416,12 +435,32 @@ bool HandleSettingsWriteCommand(int id,WORD code,HWND control){
         return true;
     }
     if(id==kPanelOpenButtonId && control==settings_panel_open_button){
-        if(screen.RequestPanelOpen(ready)){review_visible=false;capture_status=screen.OfferText(ready);}
-        else capture_status=screen.OfferText(ready);
+        if(ready){
+            // Live is stopped and closed already (stopped by hand): read both cameras for the panel.
+            if(screen.RequestPanelOpen(ready)){review_visible=false;capture_status=screen.OfferText(ready);}
+            else capture_status=screen.OfferText(ready);
+        }else if(SettingsPanelMayStopLive()){
+            // Live runs: stop it as the "ライブ停止" button does; the timer opens the panel when both sessions are closed.
+            settings_panel_open_pending=true;stopping=true;++manual_preview_stops;++settings_panel_auto_stops;
+            capture_status=L"両台のライブビューを停止・切断しています…（止まったら、両台の設定を読んで、設定の画面を開きます）";
+            Log("settings_write_ui_panel_live_stop=1 capture_requests=0 setting_writes=0");
+        }else if(!screen.Status().capture_allowed){
+            capture_status=L"撮影を止めている間は、設定の画面を開くために、ライブを自動では止めません。先に「ライブ停止」を押してください。";
+        }else capture_status=L"今は設定の画面を開けません（撮影・読み取りの途中、または両台の切断を確かめられていません）。";
         return true;
     }
     if(id==kPanelCloseButtonId && control==settings_panel_close_button){
-        if(screen.PanelCloseOffered()){screen.ClosePanel();capture_status=screen.StatusLine();}
+        if(screen.PanelCloseOffered()){
+            screen.ClosePanel();
+            const std::wstring closed=screen.StatusLine();
+            if(SettingsPanelMayRestartLive()){
+                // The panel took the place of the Live area: Live starts again, by the "ライブ再開" button's own path.
+                ++settings_panel_auto_restarts;
+                SendMessageW(GetParent(control),WM_COMMAND,MAKEWPARAM(403,BN_CLICKED),reinterpret_cast<LPARAM>(session_button));
+                capture_status+=L" "+closed;
+            }else capture_status=closed+(screen.Status().capture_allowed?L" ライブは止まったままです。「ライブ再開」で再開できます。":
+                L" 撮影を止めているため、ライブは自動では再開しません。「ライブ再開」で再開できます。");
+        }
         return true;
     }
     // "N 件を書き込む…": reads both cameras again and puts up the confirmation of the picks. It sends nothing itself; the
@@ -458,6 +497,18 @@ void SettingsWriteTimer(){
         if(screen.CloseFailed())settings_close_failed=true; // as stage A: no further read, write or Live restart
     }else if(!screen.Busy() && ++settings_write_refresh_ticks>=40){settings_write_refresh_ticks=0;screen.Refresh();}
     const bool ready=CanReadSettings(),shown=preview_joined && !closing;
+    if(settings_panel_open_pending){
+        // Live was stopped for the panel: read when both sessions are closed, give up when something else got in the way.
+        if(closing || capture_pending || capture_future.valid() || capture_restart_blocked || settings_close_failed || !screen.Status().capture_allowed){
+            settings_panel_open_pending=false;
+            capture_status=L"設定の画面は開きませんでした。ライブの停止が終わらなかったか、撮影の止めが掛かっています。";
+            Log("settings_write_ui_panel_open_given_up=1 setting_writes=0");
+        }else if(ready){
+            settings_panel_open_pending=false;
+            if(screen.RequestPanelOpen(ready)){review_visible=false;capture_status=screen.OfferText(ready);}
+            else capture_status=screen.OfferText(ready);
+        }
+    }
     const bool confirming=screen.Step()==D810WriteScreenStep::Confirming;
     ShowSettingsWriteButton(settings_copy_button,shown,screen.CopyOffered(ready));
     ShowSettingsWriteButton(settings_reread_button,shown,screen.RereadOffered(ready));
@@ -465,7 +516,8 @@ void SettingsWriteTimer(){
     ShowSettingsWriteButton(settings_discard_button,shown && confirming,confirming && !screen.Busy());
     {   // The settings panel: its buttons (never together with the confirmation's), its drop-downs and the picks they show.
         const bool panel=screen.PanelOpen(),panel_shown=shown && panel;
-        ShowSettingsWriteButton(settings_panel_open_button,shown && !panel,screen.PanelOpenOffered(ready));
+        // Offered also while Live runs (the panel then stops it first), not while it is being stopped for the panel.
+        ShowSettingsWriteButton(settings_panel_open_button,!panel && !closing && (shown || settings_panel_open_pending || SettingsPanelLiveStoppable()),!settings_panel_open_pending && (screen.PanelOpenOffered(ready) || SettingsPanelMayStopLive()));
         ShowSettingsWriteButton(settings_panel_close_button,panel_shown && !confirming,screen.PanelCloseOffered());
         ShowSettingsWriteButton(settings_panel_cancel_button,panel_shown && !confirming,screen.PanelEditable() && screen.PanelEntryCount()>0);
         // "N 件を書き込む…" is offered by the screen: a change is planned and nothing else holds the cameras.
@@ -535,6 +587,7 @@ void FinishSettingsWrite(){
     auto& screen=*settings_write->screen;
     screen.Stop();screen.Wait();
     if(screen.CloseFailed())all_sessions_passed=false;
+    if(screen.PanelOpen())Log("settings_write_panel_dropped_on_exit=1 changes="+std::to_string(screen.PanelDirty())+" setting_writes=0");
     Log("settings_write_finished=1 close_failed="+std::to_string(screen.CloseFailed())+" capture_block="+D810CaptureBlockToken(screen.Status().block));
 }
 
@@ -719,11 +772,59 @@ int RunSettingsWriteUiSmoke(){
         SendMessageW(window,WM_COMMAND,MAKEWPARAM(kPanelComboBaseId,CBN_SELCHANGE),reinterpret_cast<LPARAM>(settings_panel_combos[0][0]));
         click(kPanelWriteButtonId,settings_panel_write_button);click(kPanelCancelButtonId,settings_panel_cancel_button);
         check(settings_panel_picks==picks && !SettingsWriteBusy() && opens->load()==opens_then+1);
-        // While Live runs the panel cannot be opened.
+        // While Live runs and capture is held (this record is unconfirmed): the button is there, but the panel does not stop Live by itself.
         run_live();tick();
-        check(!SettingsWriteButtonShown(settings_panel_open_button));
+        const auto stops=manual_preview_stops;
+        check(CanFocus(*cameras[0]) && SettingsWriteButtonShown(settings_panel_open_button) && !IsWindowEnabled(settings_panel_open_button));
         click(kPanelOpenButtonId,settings_panel_open_button);
-        check(!SettingsWriteBusy() && opens->load()==opens_then+1);
+        check(!stopping && manual_preview_stops==stops && !settings_panel_open_pending && !SettingsWriteBusy() && opens->load()==opens_then+1 &&
+            capture_status.find(L"自動では止めません")!=std::wstring::npos);
+        stop_live();tick();
+    }
+
+    // 3c. With capture free, the panel stops Live by itself, reads when both sessions are closed, and gives up when a capture failed.
+    {
+        settings_write.reset();std::filesystem::remove_all(folder,ignored);capture_status.clear();
+        InitSettingsWrite(std::make_unique<D810SettingsFileJournal>(folder),factory);
+        screen=settings_write->screen.get();
+        run_live();preview_joined=false;tick();
+        const auto stops=manual_preview_stops;const int opens_then=opens->load();
+        check(CanFocus(*cameras[0]) && CanFocus(*cameras[1]) && SettingsWriteButtonShown(settings_panel_open_button) && IsWindowEnabled(settings_panel_open_button)!=FALSE &&
+            !SettingsWriteButtonShown(settings_copy_button));
+        click(kPanelOpenButtonId,settings_panel_open_button);
+        check(settings_panel_open_pending && stopping && manual_preview_stops==stops+1 && opens->load()==opens_then && !SettingsWriteBusy() && !SettingsPanelOpen());
+        tick();
+        check(!IsWindowEnabled(settings_panel_open_button) && opens->load()==opens_then); // being stopped: nothing is read yet
+        click(kPanelOpenButtonId,settings_panel_open_button);
+        check(manual_preview_stops==stops+1);
+        // The Live sessions end (the synthetic cameras): the tick joins them, the next tick reads for the panel.
+        for(auto& camera:cameras){camera->done=true;camera->stopped=true;camera->closed=true;}
+        tick();
+        check(preview_joined);
+        tick();
+        check(wait_idle());
+        check(!settings_panel_open_pending && opens->load()==opens_then+1 && !SettingsPanelOpen() && screen->View() && screen->View()->title.find(L"設定の画面は開きません")!=std::wstring::npos);
+        // A capture that failed while it was being stopped: given up, nothing is read.
+        run_live();preview_joined=false;capture_restart_blocked=false;tick();
+        const int opens_before=opens->load();
+        click(kPanelOpenButtonId,settings_panel_open_button);
+        check(settings_panel_open_pending);
+        capture_restart_blocked=true;
+        tick();
+        check(!settings_panel_open_pending && capture_status.find(L"設定の画面は開きませんでした")!=std::wstring::npos && opens->load()==opens_before);
+        capture_restart_blocked=false;
+        // The window closes while it is being stopped: given up too.
+        run_live();preview_joined=false;tick();
+        click(kPanelOpenButtonId,settings_panel_open_button);
+        check(settings_panel_open_pending);
+        closing=true;tick();
+        check(!settings_panel_open_pending && opens->load()==opens_before);
+        closing=false;
+        // With a capture under way nothing is stopped.
+        run_live();preview_joined=false;tick();
+        capture_pending=0;
+        check(!SettingsPanelMayStopLive());
+        capture_pending.reset();
         stop_live();tick();
     }
 
@@ -1204,6 +1305,7 @@ int RunSettingsWriteChosenSmoke(){
     };
     constexpr int kIso=static_cast<int>(D810ChoiceItem::Iso),kShutter=static_cast<int>(D810ChoiceItem::ShutterSpeed),kWb=static_cast<int>(D810ChoiceItem::WhiteBalance);
     D810SettingsWriteScreen* screen=nullptr;
+    unsigned restarts{};const auto saved_override=preview_restart_override;preview_restart_override=[&]{++restarts;}; // a Live restart is a counter here
 
     // 1. The product table: the panel opens on a read, shows both cameras, and no drop-down can be used.
     InitSettingsWrite(std::make_unique<D810SettingsFileJournal>(folder),factory);
@@ -1247,6 +1349,7 @@ int RunSettingsWriteChosenSmoke(){
     click(kPanelCloseButtonId,settings_panel_close_button);
     tick();
     check(!SettingsPanelOpen() && !screen->Panel() && !shown(combo_ok(0,kIso)) && !shown(settings_panel_close_button) && enabled(settings_panel_open_button) && CanRestartPreview());
+    check(restarts==1 && manual_preview_restarts==1 && settings_panel_auto_restarts==1 && capture_status.find(L"ライブビューを再開しています")!=std::wstring::npos);
     check(capture_status.find(L"設定の画面を閉じました")!=std::wstring::npos);
 
     // 2. A table of the test's own: the drop-downs work, a pick is a draft and sends nothing.
@@ -1327,6 +1430,7 @@ int RunSettingsWriteChosenSmoke(){
     check(choose(1,kIso,L"200") && screen->PanelDirty()==1);
     click(kPanelCloseButtonId,settings_panel_close_button);tick();
     check(!SettingsPanelOpen() && capture_status.find(L"書いていない変更 1 件を捨てて")!=std::wstring::npos && screen->PanelDirty()==0);
+    check(restarts==2 && settings_panel_auto_restarts==2 && capture_status.find(L"ライブビューを再開しています")!=std::wstring::npos); // closing gave Live back, by the restart button's own path
     check(opens->load()<=2); // the panel was put up with a read made without a camera: nothing was opened for any pick
 
     // 3. "N 件を書き込む…" and the confirmation of the picks: the window's own code draws it, and the confirm button keeps the
@@ -1472,6 +1576,60 @@ int RunSettingsWriteChosenSmoke(){
         Log("settings_write_chosen_widest_possible_line_px="+std::to_string(widest)+" window_line_px="+std::to_string(kD810WriteMinClientWidth-24)+" widest_chars="+std::to_string(which.size())+" widest_text="+which_utf8);
         check(widest>0 && widest<=kD810WriteMinClientWidth-24);
     }
+
+    // 4. Closing the panel gives Live back only when nothing holds capture and nothing has failed.
+    {
+        const auto picks_ready=[&](bool record_unconfirmed){
+            settings_write.reset();std::filesystem::remove_all(folder,ignored);capture_status.clear();
+            if(record_unconfirmed){
+                D810SettingsFileJournal journal(folder);
+                check(journal.Append("a0sw1 op=00000000000000a1 ev=plan t=2000-01-01T00:00:00Z source=copy steps=1") &&
+                    journal.Append("a0sw1 op=00000000000000a1 ev=step i=0 alias=CAM-B item=iso code=0x500f before=0x0064 value=0x0040"));
+            }
+            InitSettingsWriteWithTable(SmokeChosenTable(),std::make_unique<D810SettingsFileJournal>(folder),factory);
+            screen=settings_write->screen.get();
+            screen->TakePanelReadForTest(read_of(true,true));
+            tick();
+            check(SettingsPanelOpen() && enabled(settings_panel_close_button));
+        };
+        const auto closed_without_restart=[&](const wchar_t* said){
+            const auto before=restarts,auto_before=settings_panel_auto_restarts,manual_before=manual_preview_restarts;
+            click(kPanelCloseButtonId,settings_panel_close_button);
+            check(!SettingsPanelOpen() && restarts==before && settings_panel_auto_restarts==auto_before && manual_preview_restarts==manual_before && capture_status.find(said)!=std::wstring::npos);
+        };
+        // a. The record holds capture (a write with no end line).
+        picks_ready(true);
+        check(!screen->Status().capture_allowed);
+        closed_without_restart(L"撮影を止めているため、ライブは自動では再開しません");
+        // b. A capture failed.
+        picks_ready(false);
+        capture_restart_blocked=true;
+        closed_without_restart(L"ライブは止まったままです");
+        capture_restart_blocked=false;
+        // c. The window is closing.
+        picks_ready(false);
+        closing=true;
+        closed_without_restart(L"ライブは止まったままです");
+        closing=false;
+        // d. A camera could not be closed.
+        picks_ready(false);
+        settings_close_failed=true;
+        closed_without_restart(L"ライブは止まったままです");
+        settings_close_failed=false;
+        // e. Nothing in the way: it is given back.
+        picks_ready(false);
+        const auto before=restarts;
+        click(kPanelCloseButtonId,settings_panel_close_button);
+        check(restarts==before+1 && !SettingsPanelOpen());
+        // The way out of an open panel is its own button: the restart button does nothing, and neither does "両台の設定を読む".
+        picks_ready(false);
+        const auto restarts_open=restarts,manual_open=manual_preview_restarts;const auto reads=settings_reads_started;
+        click(403,session_button);click(405,settings_button);
+        check(restarts==restarts_open && manual_preview_restarts==manual_open && settings_reads_started==reads && SettingsPanelOpen() && !CanRestartPreview());
+        tick();
+        check(!IsWindowEnabled(session_button) && !IsWindowEnabled(settings_button));
+    }
+    preview_restart_override=saved_override;
 
     FinishSettingsWrite();
     if(IsWindow(window))DestroyWindow(window);
