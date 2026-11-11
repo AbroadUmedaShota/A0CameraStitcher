@@ -837,7 +837,7 @@ struct D810WriteStatus {
     bool write_allowed{};
     bool plan_pending{};
     bool plan_confirmed{};
-    // Rows the fixed table enables (0 in the product until codes are confirmed).
+    // Rows the fixed table enables (1 in the product: ISO on CAM-B).
     std::size_t enabled_rows{};
 };
 
