@@ -827,11 +827,20 @@ struct D810WriteRun {
     std::vector<D810StepOutcome> steps;
     D810CaptureBlock block{D810CaptureBlock::None};
 };
+// The one condition under which a block is released by the values a plan of picked values wrote, and not by comparing the
+// two cameras: the history holds such a plan with planned values to check, and no part of the record is damaged.
+inline bool D810ReleasesByPlannedValues(const D810JournalState& state) {
+    return state.chosen_unresolved && !state.history_damaged && !state.expected.empty();
+}
 struct D810RereadResult {
     bool complete{};
     D810ReleaseCheck check;
     D810CaptureBlock block{D810CaptureBlock::None};
     std::string reason;
+    // The rule the check used, read from the record when the check was made: the values the plan wrote (true), or the two
+    // cameras compared (false). `history_damaged`: part of the record could not be read. The screen tells the result by these.
+    bool by_planned_values{};
+    bool history_damaged{};
 };
 // The read step of a copy (ADR-0038 decision 5): both cameras, read-only.
 struct D810PlanRead {
@@ -957,7 +966,7 @@ public:
         if (const auto file = journal_.Read(); file.kind == D810TextFile::Kind::Read) {
             const auto state = ParseD810Journal(file.text);
             status.history_damaged = state.history_damaged;
-            status.chosen_history = state.chosen_unresolved && !state.history_damaged && !state.expected.empty();
+            status.chosen_history = D810ReleasesByPlannedValues(state);
         }
         return status;
     }
@@ -1065,7 +1074,7 @@ public:
         const auto b = ReadCamera(access, D810Camera::B, options);
         result.complete = a.ok && b.ok;
         if (!result.complete) { result.reason = "reread_incomplete"; result.block = Block(); return result; }
-        result.check = ReleaseCheck(a.read.readings, b.read.readings);
+        result.check = ReleaseCheck(a.read.readings, b.read.readings, result);
         if (!journal_.Append(FormatD810JournalReread(Now(options), result.check.released))) {
             result.reason = "record_unwritable";
             result.block = Block();
@@ -1091,7 +1100,7 @@ private:
     // plan and planned values to check uses them; anything else (copies only, no record, a chosen history whose
     // step lines gave no value, a chosen history of which part of the record is damaged) compares the two cameras,
     // the stricter rule. A record that exists but cannot be read releases nothing: which rule applies is not known.
-    D810ReleaseCheck ReleaseCheck(const D810SettingsSnapshot& a, const D810SettingsSnapshot& b) const {
+    D810ReleaseCheck ReleaseCheck(const D810SettingsSnapshot& a, const D810SettingsSnapshot& b, D810RereadResult& rule) const {
         const auto file = journal_.Read();
         if (file.kind == D810TextFile::Kind::Error) {
             D810ReleaseCheck unreadable;
@@ -1100,7 +1109,11 @@ private:
         }
         if (file.kind == D810TextFile::Kind::Read) {
             const auto state = ParseD810Journal(file.text);
-            if (state.chosen_unresolved && !state.history_damaged && !state.expected.empty()) return CheckD810ReleasePlanned(a, b, state.expected, table_);
+            rule.history_damaged = state.history_damaged;
+            if (D810ReleasesByPlannedValues(state)) {
+                rule.by_planned_values = true;
+                return CheckD810ReleasePlanned(a, b, state.expected, table_);
+            }
         }
         return CheckD810Release(a, b, table_);
     }

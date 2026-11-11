@@ -4594,6 +4594,40 @@ void ScreenChosenWorkerFailure() {
     check(screen.RequestChosen(true) && s.WaitIdle() && screen.PanelOpen() && !screen.PanelStale() && screen.PanelDirty() == 1, "worker failure: a read that fails leaves the panel and its pick");
     throwing->store(false);
 }
+void RereadRuleIsTold() {
+    using Item = D810WriteItem;
+    const auto A = D810Camera::A, B = D810Camera::B;
+    {
+        // The controller says which rule the reread used: the values written, then the cameras once the record is damaged.
+        Bench bench(kChosenTable, -1, true);
+        bench.b.apply_as[0x500f] = 400;
+        bench.Run(bench.Chosen({PickFor(B, Item::Iso, 200), PickFor(A, Item::Iso, 200)}));
+        auto reread = bench.controller->Reread(bench.access, bench.options);
+        check(reread.complete && reread.by_planned_values && !reread.history_damaged, "rule: the values written");
+        check(bench.file.Append("this is not a line of the record"), "rule: damage");
+        reread = bench.controller->Reread(bench.access, bench.options);
+        check(reread.complete && !reread.by_planned_values && reread.history_damaged, "rule: the cameras, the record is damaged");
+        check(ParseD810Journal(bench.Journal()).history_damaged && !D810ReleasesByPlannedValues(ParseD810Journal(bench.Journal())), "rule: one condition for both");
+    }
+    {
+        Bench bench(kAdr38Table, -1, true);
+        bench.CopyRun();
+        const auto reread = bench.controller->Reread(bench.access, bench.options);
+        check(reread.complete && !reread.by_planned_values && !reread.history_damaged, "rule: a copy history compares the cameras");
+    }
+}
+void ScreenRereadUsesTheRuleOfTheCheck() {
+    using Item = D810ChoiceItem;
+    // The record changes outside the application after the screen last looked at it: the reread is told by the rule that was used.
+    ScreenBench s(kChosenTable, true);
+    auto& screen = *s.screen;
+    s.bench.b.apply_as[0x500f] = 400;
+    check(OpenPanel(s) && screen.PanelPick(D810Camera::B, Item::Iso, 200) && screen.RequestChosen(true) && s.WaitIdle() && s.Confirm(), "check rule: a chosen run that did not take");
+    check(screen.Status().chosen_history, "check rule: the screen has seen a chosen history");
+    check(s.bench.file.Append("this is not a line of the record"), "check rule: the record is damaged behind the screen's back");
+    check(screen.RequestPanelReread(true) && s.WaitIdle(), "check rule: reread");
+    check(Shows(screen.View(), L"CAM-A と CAM-B で違う項目があります") && !Shows(screen.View(), L"書いた値と違う項目") && Shows(screen.View(), kD810RecordDamagedAdvice), "check rule: told by the rule the check used");
+}
 void ScreenChosenDeadline() {
     using Item = D810ChoiceItem;
     const auto A = D810Camera::A, B = D810Camera::B;
@@ -5024,6 +5058,8 @@ int main() {
     run("ScreenChosenFlow", ScreenChosenFlow);
     run("ScreenChosenRefusals", ScreenChosenRefusals);
     run("ScreenChosenWorkerFailure", ScreenChosenWorkerFailure);
+    run("RereadRuleIsTold", RereadRuleIsTold);
+    run("ScreenRereadUsesTheRuleOfTheCheck", ScreenRereadUsesTheRuleOfTheCheck);
     run("ScreenChosenDeadline", ScreenChosenDeadline);
     run("ScreenChosenDamagedRecord", ScreenChosenDamagedRecord);
     run("ScreenSkippedShown", ScreenSkippedShown);

@@ -552,8 +552,6 @@ public:
         if (!RereadOffered(screen_ready)) { Say("settings_write_ui_reread_refused=1"); return false; }
         ResetView();
         Say("settings_write_ui_reread_requested=1 setting_writes=0");
-        reread_chosen_ = status_.chosen_history;
-        reread_damaged_ = status_.history_damaged;
         Launch(D810WriteScreenStep::Rereading);
         return true;
     }
@@ -588,8 +586,6 @@ public:
         if (!panel_open_ || !RereadOffered(screen_ready)) { Say("settings_write_ui_reread_refused=1"); return false; }
         ResetView();
         Say("settings_write_ui_reread_requested=1 setting_writes=0");
-        reread_chosen_ = status_.chosen_history;
-        reread_damaged_ = status_.history_damaged;
         Launch(D810WriteScreenStep::Rereading, true);
         return true;
     }
@@ -1072,10 +1068,10 @@ private:
             return;
         }
         if (reread.check.released) {
-            finish(reread_chosen_ ? L"読み直しました: 書いた値は、各台でそのまま読めました。" : L"読み直しました: 止めの対象の項目は CAM-A と CAM-B で同じです。", {});
+            finish(reread.by_planned_values ? L"読み直しました: 書いた値は、各台でそのまま読めました。" : L"読み直しました: 止めの対象の項目は CAM-A と CAM-B で同じです。", {});
             return;
         }
-        if (reread_chosen_) {
+        if (reread.by_planned_values) {
             // The record holds a plan of picked values: the cameras are not compared; each is checked against what was written
             // (D810ChosenDifferenceText tells each symbol of the check.) The controller takes this rule only for a history that holds a
             // plan of picked values and no damaged part of the record (chosen_unresolved and not history_damaged); anything else is
@@ -1087,13 +1083,14 @@ private:
         }
         std::vector<std::wstring> lines{L"違う項目（または読めない項目）:"};
         for (const auto& difference : reread.check.differences) {
-            if (difference == "record_unreadable") { lines.push_back(D810ChosenDifferenceText(difference)); continue; }
+            // A symbol of the planned values (two colons) does not belong to this rule; if one comes, it is told by its own symbol, not as an item name.
+            if (difference == "record_unreadable" || difference.find(':') != difference.rfind(':')) { lines.push_back(D810ChosenDifferenceText(difference)); continue; }
             const auto colon = difference.find(':');
             std::wstring line = L"  " + D810WriteItemNameLabel(difference.substr(0, colon));
             if (colon != std::string::npos) line += difference.substr(colon + 1) == "unreadable" ? L"（読めない）" : L"（本体の別の中身に頼る値で比べられない）";
             lines.push_back(std::move(line));
         }
-        if (reread_damaged_) lines.push_back(std::wstring(L"  ") + kD810RecordDamagedAdvice);
+        if (reread.history_damaged) lines.push_back(std::wstring(L"  ") + kD810RecordDamagedAdvice);
         const bool record_unreadable = reread.check.differences.size() == 1 && reread.check.differences[0] == "record_unreadable";
         finish(record_unreadable ? L"読み直しました: 操作の記録を読めないため、止めは解いていません。" : L"読み直しました: CAM-A と CAM-B で違う項目があります。", std::move(lines));
     }
@@ -1121,9 +1118,5 @@ private:
     D810PlanSource run_source_{D810PlanSource::CopyAToB};
     // The picks the plan in the making is built from (a copy of the draft taken when "N 件を書き込む…" was pressed).
     std::vector<D810CameraChoice> choices_;
-    // The record held a plan of picked values when the reread was asked: the reread is told in terms of the values written.
-    bool reread_chosen_{};
-    // Part of the record could not be read when the reread was asked: the cameras are compared, and the screen says so.
-    bool reread_damaged_{};
 };
 } // namespace a0::phase0::experimental
