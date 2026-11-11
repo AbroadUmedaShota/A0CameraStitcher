@@ -83,7 +83,7 @@ inline std::wstring D810CaptureBlockBaseText(D810CaptureBlock block, bool chosen
     return L"撮影を止めています。";
 }
 // What to do when part of the record cannot be read: the cameras are compared (the rule of a copy) whatever the history holds.
-inline constexpr const wchar_t* kD810RecordDamagedAdvice = L"操作の記録の一部を読めないので、両台の止めの対象の項目を本体で同じにしてから読み直してください。";
+inline constexpr const wchar_t* kD810RecordDamagedAdvice = L"操作の記録の一部を読めない、または計画と合わないので、両台の止めの対象の項目を本体で同じにしてから読み直してください。";
 // Why capture is held, in the words of docs/WPD_DUAL_PREVIEW.md. Empty when it is not. `chosen_history`: the record holds
 // a plan of picked values that is read back against the values written (not a difference of the two cameras).
 // `history_damaged`: part of the record cannot be read; the cameras are then compared as for a copy, and the advice says so.
@@ -170,7 +170,7 @@ inline const wchar_t* D810ChosenReasonText(std::string_view what) {
     static constexpr Entry kEntries[] = {
         {"chosen_values_disabled", L"この版では、選んだ値を書くことはできません"},
         {"no_choice", L"書く値が選ばれていません"},
-        {"plan_changed", L"確定のあとに、書く相手の本体の値が変わりました。もう一度「N 件を書き込む…」から作り直してください"},
+        {"plan_changed", L"確定のあとに、本体の値が変わりました（書く台、または「A と同じ」の元にした CAM-A）。もう一度「N 件を書き込む…」から作り直してください"},
         {"read_not_current", L"書く前の読み取りが古いか、最後まで終わっていないため、計画を作りませんでした。もう一度「N 件を書き込む…」を押してください"},
         {"item_not_choosable", L"この項目は、選んで書く対象ではありません"},
         {"same_as_a_on_cam_a", L"CAM-A を「A と同じ」にはできません"},
@@ -889,8 +889,9 @@ private:
             if (outcome.step == D810WriteScreenStep::Writing) {
                 // The run may have sent before it failed: no plan stays up, and the panel does not say that nothing was written.
                 controller_.Discard();
-                MarkPanelOld();
+                const auto dropped = MarkPanelOld();
                 lines.push_back(L"書き込みの途中で止まった可能性があります。書いたかもしれないので、「設定を読み直す」で確かめてください。");
+                if (dropped) lines.push_back(L"設定の画面で選んでいた変更 " + std::to_wstring(dropped) + L" 件の下書きは捨てました。");
             }
             Finish(L"設定の処理を最後まで終えられませんでした。", std::move(lines));
             Say("settings_write_ui_failure reason=" + outcome.error);
@@ -976,6 +977,7 @@ private:
     }
     void ApplyRead(const D810PlanRead& read) {
         if (!read.complete) {
+            panel_cameras_ok_ = false; // a read of the copy that did not finish, with the panel open, also leaves the cameras not as the panel read them
             Finish(L"両台の設定を読めませんでした。何も書いていません。", {D810WriteReasonText(read.reason)});
             Say("settings_write_ui_plan_read_incomplete=1 reason=" + read.reason);
             return;

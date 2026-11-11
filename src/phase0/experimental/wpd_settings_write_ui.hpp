@@ -502,9 +502,13 @@ bool HandleSettingsWriteCommand(int id,WORD code,HWND control){
                 capture_status+=L" "+closed;
             }else{
                 ClearSettingsPanelLiveFlags();
-                capture_status=closed+(!screen.Status().capture_allowed?L" 撮影を止めているため、ライブは自動では再開しません。「ライブ再開」で再開できます。":
-                    !stopped_by_panel?L" ライブは手で止めたままです。「ライブ再開」で再開できます。":
-                    L" ライブは止まったままです。「ライブ再開」で再開できます。");
+                // Why Live stays stopped, and how to get it back; the "ライブ再開" button is named only where it can be pressed.
+                const wchar_t* why=settings_close_failed?L" カメラとの接続を閉じられなかったため、ライブは再開できません。この画面を閉じて、本体・USB接続を確認してください。":
+                    capture_restart_blocked?L" 撮影に失敗したあとのため、ライブは再開できません。この画面を閉じて、もう一度起動してください。":
+                    !screen.Status().capture_allowed?L" 撮影を止めているため、ライブは自動では再開しません。「ライブ再開」で再開できます。":
+                    !stopped_by_panel?L" ライブは止まったままです（この画面を開く前から止まっていたため、自動では再開しません）。「ライブ再開」で再開できます。":
+                    L" ライブは止まったままです。「ライブ再開」で再開できます。";
+                capture_status=closed+why;
             }
         }
         return true;
@@ -722,7 +726,7 @@ struct SettingsWriteSmokeFrame {
 };
 int RunSettingsWriteUiSmoke(){
     Log("settings_write_ui_synthetic=1 camera_operations=0");
-    unsigned checks{},failures{};const auto check=[&](bool ok){++checks;if(!ok){++failures;Log("settings_write_ui_failed_check="+std::to_string(checks));}};
+    unsigned checks{},failures{};const auto check=[&](bool ok,int line=__builtin_LINE()){++checks;if(!ok){++failures;Log("settings_write_ui_failed_check="+std::to_string(checks)+" source_line="+std::to_string(line));}};
     wchar_t temp[MAX_PATH]{};if(!GetTempPathW(MAX_PATH,temp))return 2;
     const auto folder=std::filesystem::path(temp)/(L"a0-settings-write-ui-smoke-"+std::to_wstring(GetCurrentProcessId()));
     std::error_code ignored;std::filesystem::remove_all(folder,ignored);
@@ -912,6 +916,55 @@ int RunSettingsWriteUiSmoke(){
         stop_live();tick();
     }
 
+    // 3d. The mark "the panel stopped Live" follows the real path: set with the wait, kept while the read for the panel runs, gone when the
+    //     panel did not open; never set when Live was stopped by hand; and a capture hold that arrives during the wait ends the wait.
+    {
+        settings_write.reset();std::filesystem::remove_all(folder,ignored);capture_status.clear();
+        auto read_gate=std::make_shared<BlockingSettingsAccess::Gate>();
+        InitSettingsWrite(std::make_unique<D810SettingsFileJournal>(folder),[read_gate]{return std::make_unique<BlockingSettingsAccess>(read_gate);});
+        screen=settings_write->screen.get();
+        const auto view_has=[&](const wchar_t* part){if(!screen->View())return false;for(const auto& line:screen->View()->lines)if(line.find(part)!=std::wstring::npos)return true;return false;};
+        const auto entered=[&]{for(int i=0;i<1000 && read_gate->entered.load()<1;++i)std::this_thread::sleep_for(std::chrono::milliseconds(5));return read_gate->entered.load()>=1;};
+        check(settings_write_stuck_limit>kD810LongPlanDeadline+std::chrono::seconds(12)); // the closing window waits longer than the longest write
+        run_live();preview_joined=false;tick();
+        click(kPanelOpenButtonId,settings_panel_open_button);
+        check(settings_panel_open_pending && settings_panel_stopped_live);
+        for(auto& camera:cameras){camera->done=true;camera->stopped=true;camera->closed=true;}
+        tick();check(preview_joined);
+        tick(); // the wait ends, the read for the panel starts and waits inside the camera's Open
+        check(entered() && SettingsWriteBusy() && !settings_panel_open_pending && settings_panel_stopped_live);
+        tick();tick();
+        check(SettingsWriteBusy() && settings_panel_stopped_live); // kept while the read runs
+        read_gate->release.store(true);
+        check(wait_idle());tick();
+        check(!SettingsPanelOpen() && !settings_panel_stopped_live && screen->View() && view_has(L"「ライブ再開」で再開できます"));
+        // Live stopped by hand: the button reads, and the mark is never set.
+        read_gate->release.store(false);read_gate->entered.store(0);
+        stop_live();tick();
+        click(kPanelOpenButtonId,settings_panel_open_button);
+        check(SettingsWriteBusy() && !settings_panel_stopped_live && !settings_panel_open_pending);
+        check(entered());tick();
+        check(!settings_panel_stopped_live);
+        read_gate->release.store(true);
+        check(wait_idle());tick();
+        check(!settings_panel_stopped_live && !SettingsPanelOpen());
+        // A capture hold that arrives during the wait for the stop ends the wait.
+        read_gate->release.store(false);
+        run_live();preview_joined=false;tick();
+        click(kPanelOpenButtonId,settings_panel_open_button);
+        check(settings_panel_open_pending && settings_panel_stopped_live);
+        {
+            D810SettingsFileJournal journal(folder);
+            check(journal.Append("a0sw1 op=00000000000000b1 ev=plan t=2000-01-01T00:00:00Z source=copy steps=1") &&
+                journal.Append("a0sw1 op=00000000000000b1 ev=step i=0 alias=CAM-B item=iso code=0x500f before=0x0064 value=0x0040"));
+        }
+        screen->Refresh(); // the status is read again every two seconds; the smoke does not wait for that
+        tick();
+        check(!settings_panel_open_pending && !settings_panel_stopped_live && !screen->Status().capture_allowed && capture_status.find(L"設定の画面は開きませんでした")!=std::wstring::npos);
+        read_gate->release.store(true);
+        stop_live();tick();
+    }
+
     // 4. A reread that has not ended (its Open waits): the cameras are held against everything that could ask for
     //    them. The backend and the restart are counting stand-ins, so that a missing guard cannot reach a camera.
     settings_write.reset();std::filesystem::remove_all(folder,ignored);capture_status.clear();
@@ -1042,6 +1095,18 @@ int ShownSiblingsOverlapping(HWND target){
     }
     return count;
 }
+// How many pairs of shown children of `parent` overlap, whichever they are. A confirmation, the open panel and a result are each
+// drawn with several buttons and drop-downs; no shown one may lie over another.
+int ShownChildPairsOverlapping(HWND parent){
+    std::vector<RECT> rects;
+    for(HWND child=GetWindow(parent,GW_CHILD);child;child=GetWindow(child,GW_HWNDNEXT)){
+        RECT r{};
+        if(SettingsWriteButtonShown(child) && GetWindowRect(child,&r))rects.push_back(r);
+    }
+    int count{};
+    for(std::size_t i=0;i<rects.size();++i)for(std::size_t j=i+1;j<rects.size();++j){RECT common{};if(IntersectRect(&common,&rects[i],&rects[j]))++count;}
+    return count;
+}
 // Only CAM-B's ISO row is enabled (the codes the plan reads are set): every other item is left out with the table's reason.
 D810WriteTable SmokeIsoOnlyTable(){
     auto table=SmokeConfirmTable();
@@ -1159,7 +1224,7 @@ int RunSettingsWriteConfirmSmoke(){
     paint();tick();
     check(settings_write_drawn_serial==screen->ViewSerial() && confirm_enabled() && settings_write_confirm_refusals==refusals_before+1);
     // Nothing is drawn over the confirm button: the panel's button is not shown while a confirmation is up, and no shown button overlaps it.
-    check(!SettingsWriteButtonShown(settings_panel_open_button) && ShownSiblingsOverlapping(settings_confirm_button)==0);
+    check(!SettingsWriteButtonShown(settings_panel_open_button) && ShownSiblingsOverlapping(settings_confirm_button)==0 && ShownSiblingsOverlapping(settings_discard_button)==0 && ShownChildPairsOverlapping(window)==0);
 
     // 3. The window gets one row too short: not pressable by the height alone; a paint there draws nothing whole and
     //    leaves the flag down, so growing the window back is not enough until it has been drawn again.
@@ -1452,7 +1517,7 @@ int RunSettingsWriteChosenSmoke(){
     click(kPanelCloseButtonId,settings_panel_close_button);
     tick();
     check(!SettingsPanelOpen() && !screen->Panel() && !shown(combo_ok(0,kIso)) && !shown(settings_panel_close_button) && enabled(settings_panel_open_button) && CanRestartPreview());
-    check(restarts==0 && manual_preview_restarts==0 && settings_panel_auto_restarts==0 && capture_status.find(L"ライブは手で止めたままです")!=std::wstring::npos); // Live was stopped by hand: closing does not start it
+    check(restarts==0 && manual_preview_restarts==0 && settings_panel_auto_restarts==0 && capture_status.find(L"この画面を開く前から止まっていたため、自動では再開しません")!=std::wstring::npos); // Live was stopped by hand: closing does not start it
     check(capture_status.find(L"設定の画面を閉じました")!=std::wstring::npos);
 
     // 2. A table of the test's own: the drop-downs work, a pick is a draft and sends nothing.
@@ -1485,6 +1550,7 @@ int RunSettingsWriteChosenSmoke(){
             same_rows=same_rows && GetWindowRect(settings_panel_same_buttons[item],&button) && GetWindowRect(combo_ok(1,item),&cell) && GetDlgCtrlID(settings_panel_same_buttons[item])==kPanelSameBaseId+item && button.left>cell.left && button.top<=cell.top+4 && button.top>=cell.top-4;
         }
         check(same_rows); // the "A と同じにする" button of an item is in that item's row, right of CAM-B's cell
+        check(ShownChildPairsOverlapping(window)==0); // an open panel: no shown button or drop-down lies over another
     }
     check(!enabled(settings_panel_cancel_button) && !enabled(settings_panel_write_button));
     wchar_t text[64]{};GetWindowTextW(settings_panel_write_button,text,64);check(std::wstring(text)==L"0 件を書き込む…");
@@ -1507,6 +1573,10 @@ int RunSettingsWriteChosenSmoke(){
         check(screen->PanelDirty()==2 && selected(1,kShutter)==selected(0,kShutter) && settings_panel_picks==picks+2);
         // The same value as the one read is not a change.
         check(choose(0,kWb,selected(0,kWb)) && screen->PanelDirty()==2);
+        // The number on the button and in the line under the panel counts changes: three entries (two that change, one that picks the value read now) read "2".
+        tick();
+        GetWindowTextW(settings_panel_write_button,text,64);
+        check(screen->PanelEntryCount()==3 && screen->PanelDirty()==2 && std::wstring(text)==L"2 件を書き込む…" && screen->PanelSummaryText().find(L"変更予定 2 件（")!=std::wstring::npos);
         // CAM-A picks an ISO: CAM-B's pick stays its own.
         check(choose(0,kIso,L"100") && screen->PanelDirty()==3 && selected(0,kIso)==L"100" && selected(1,kIso)==L"400");
     }
@@ -1656,7 +1726,7 @@ int RunSettingsWriteChosenSmoke(){
         screen->TakeChosenReadForTest(read);
         paint();tick();
         check(screen->ConfirmationShown() && confirm_enabled());
-        check(!shown(settings_panel_open_button) && ShownSiblingsOverlapping(settings_confirm_button)==0 && ShownSiblingsOverlapping(settings_discard_button)==0);
+        check(!shown(settings_panel_open_button) && ShownSiblingsOverlapping(settings_confirm_button)==0 && ShownSiblingsOverlapping(settings_discard_button)==0 && ShownChildPairsOverlapping(window)==0);
         // Confirmed: the run (with no camera it sends nothing), then the panel is old and the picks are used up.
         const auto refusals_now=settings_write_confirm_refusals;
         click(407,settings_confirm_button);
@@ -1691,6 +1761,7 @@ int RunSettingsWriteChosenSmoke(){
         paint();tick();
         SettingsWriteSmokeFrame frame(kD810WriteMinClientWidth,kD810WriteMinClientHeight);
         check(frame.Lit(kD810WriteMinClientHeight/2+88,kD810WriteMinClientHeight/2+130)>50 && !confirm_enabled());
+        check(ShownChildPairsOverlapping(window)==0); // the result: no shown button or drop-down lies over another
     }
     // The widest line that a confirmation of picks or its result can have fits the smallest window.
     {
@@ -1722,10 +1793,12 @@ int RunSettingsWriteChosenSmoke(){
             check(SettingsPanelOpen() && enabled(settings_panel_close_button));
             settings_panel_stopped_live=stopped_by_panel; // what the panel's open button sets when it stops Live itself
         };
-        const auto closed_without_restart=[&](const wchar_t* said){
+        const auto closed_without_restart=[&](const wchar_t* said,bool restart_button_named=true){
             const auto before=restarts,auto_before=settings_panel_auto_restarts,manual_before=manual_preview_restarts;
             click(kPanelCloseButtonId,settings_panel_close_button);
             check(!SettingsPanelOpen() && restarts==before && settings_panel_auto_restarts==auto_before && manual_preview_restarts==manual_before && capture_status.find(said)!=std::wstring::npos);
+            // The restart button is named only where it can be pressed (not after a failed capture or a camera that could not be closed).
+            check((capture_status.find(L"「ライブ再開」で再開できます")!=std::wstring::npos)==restart_button_named);
         };
         // a. The record holds capture (a write with no end line).
         picks_ready(true);
@@ -1734,7 +1807,7 @@ int RunSettingsWriteChosenSmoke(){
         // b. A capture failed.
         picks_ready(false);
         capture_restart_blocked=true;
-        closed_without_restart(L"ライブは止まったままです");
+        closed_without_restart(L"撮影に失敗したあとのため、ライブは再開できません",false);
         capture_restart_blocked=false;
         // c. The window is closing.
         picks_ready(false);
@@ -1744,7 +1817,7 @@ int RunSettingsWriteChosenSmoke(){
         // d. A camera could not be closed.
         picks_ready(false);
         settings_close_failed=true;
-        closed_without_restart(L"ライブは止まったままです");
+        closed_without_restart(L"カメラとの接続を閉じられなかったため、ライブは再開できません",false);
         settings_close_failed=false;
         // e. Nothing in the way: it is given back.
         picks_ready(false);
@@ -1753,7 +1826,7 @@ int RunSettingsWriteChosenSmoke(){
         check(restarts==before+1 && !SettingsPanelOpen());
         // f. Live was stopped by hand before the panel was opened: closing leaves it stopped.
         picks_ready(false,false);
-        closed_without_restart(L"ライブは手で止めたままです");
+        closed_without_restart(L"この画面を開く前から止まっていたため、自動では再開しません");
         // g. The last thing the panel did with the cameras did not finish (the read for "N 件を書き込む…" could not complete): closing does not start them.
         picks_ready(false);
         check(screen->PanelPick(D810Camera::B,D810ChoiceItem::Iso,400));
@@ -1762,6 +1835,23 @@ int RunSettingsWriteChosenSmoke(){
         tick();
         {wchar_t named[64]{};GetWindowTextW(settings_panel_close_button,named,64);check(std::wstring(named)==L"設定の画面を閉じる");}
         closed_without_restart(L"ライブは止まったままです");
+        // g2. The read for "A の設定を B に写す" with the panel open did not finish: closing does not start the cameras either.
+        picks_ready(false);
+        {D810PlanRead incomplete=read_of(true,true);incomplete.complete=false;screen->TakePlanReadForTest(incomplete);}
+        check(!screen->PanelCamerasWereFine() && SettingsPanelOpen());
+        closed_without_restart(L"ライブは止まったままです");
+        // g3. A run that was stopped before it sent anything, for a reason, with the panel open: the same.
+        picks_ready(false);
+        {D810WriteRun stopped;stopped.reason="open_failed";screen->TakeRunForTest(stopped,D810PlanSource::Chosen);}
+        check(!screen->PanelCamerasWereFine() && screen->PanelStale());
+        closed_without_restart(L"ライブは止まったままです");
+        // g4. A run that sent and ended in a result leaves the cameras as the panel found them: closing gives Live back.
+        picks_ready(false);
+        {D810WriteRun done;done.verdict=D810WriteVerdict::Match;done.sent=1;
+            D810StepOutcome outcome;outcome.step={D810Camera::B,D810WriteItem::Iso,0x500f,100,200};outcome.sent=true;outcome.readback=200;outcome.verdict=D810WriteVerdict::Match;done.steps.push_back(outcome);
+            screen->TakeRunForTest(done,D810PlanSource::Chosen);}
+        check(screen->PanelCamerasWereFine());
+        {const auto before_g4=restarts;click(kPanelCloseButtonId,settings_panel_close_button);check(restarts==before_g4+1);}
         // The way out of an open panel is its own button: the restart button does nothing, and neither does "両台の設定を読む".
         picks_ready(false);
         const auto restarts_open=restarts,manual_open=manual_preview_restarts;const auto reads=settings_reads_started;
@@ -1769,6 +1859,34 @@ int RunSettingsWriteChosenSmoke(){
         check(restarts==restarts_open && manual_preview_restarts==manual_open && settings_reads_started==reads && SettingsPanelOpen() && !CanRestartPreview());
         tick();
         check(!IsWindowEnabled(session_button) && !IsWindowEnabled(settings_button));
+    }
+
+    // 5. The way Live is stopped, by the real button, decides whether closing gives it back; and a value that cannot be picked still shows.
+    {
+        settings_write.reset();std::filesystem::remove_all(folder,ignored);capture_status.clear();
+        InitSettingsWriteWithTable(SmokeChosenTable(),std::make_unique<D810SettingsFileJournal>(folder),factory);
+        screen=settings_write->screen.get();
+        tick();
+        // Live is stopped already (by hand): the button reads the cameras, and the panel holds no Live.
+        check(enabled(settings_panel_open_button));
+        click(kPanelOpenButtonId,settings_panel_open_button);
+        check(!settings_panel_stopped_live && !settings_panel_open_pending && SettingsWriteBusy());
+        check(wait_idle() && !SettingsPanelOpen());
+        screen->TakePanelReadForTest(read_of(true,true)); // what the read would have given
+        tick();
+        const auto before=restarts;
+        click(kPanelCloseButtonId,settings_panel_close_button);
+        check(restarts==before && !SettingsPanelOpen() && capture_status.find(L"この画面を開く前から止まっていたため、自動では再開しません")!=std::wstring::npos);
+        // A value that the camera reads and the application cannot pick (a white balance Preset): the cell shows it, and the other values can be picked.
+        D810PlanRead preset=read_of(true,true);
+        preset.snapshots[0]=SmokeBody(250,800,200,0x8013,3);
+        screen->TakePanelReadForTest(preset);
+        tick();
+        check(selected(0,kWb).find(L"プリセット")!=std::wstring::npos && enabled(combo_ok(0,kWb)) && SmokeComboText(combo_ok(0,kWb),0).find(L"プリセット")!=std::wstring::npos);
+        check(choose_value(0,kWb,4) && screen->PanelDirty()==1 && selected(0,kWb).find(L"プリセット")==std::wstring::npos);
+        click(kPanelCancelButtonId,settings_panel_cancel_button);
+        check(selected(0,kWb).find(L"プリセット")!=std::wstring::npos && screen->PanelDirty()==0); // taken back, the value read shows again
+        click(kPanelCloseButtonId,settings_panel_close_button);
     }
     preview_restart_override=saved_override;
 

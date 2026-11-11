@@ -4672,6 +4672,11 @@ void ScreenChosenRefusals() {
         check(D810CaptureBlockText(D810CaptureBlock::Mismatch).find(L"CAM-A と合っていません") != std::wstring::npos && D810CaptureBlockText(D810CaptureBlock::Mismatch, true).find(L"CAM-A と合っていません") == std::wstring::npos &&
                 D810CaptureBlockText(D810CaptureBlock::Unknown, true) == D810CaptureBlockText(D810CaptureBlock::Unknown),
             "words: only a mismatch of picked values is told differently");
+        check(D810CaptureBlockText(D810CaptureBlock::Unreadable).find(L"消さない・動かさない") != std::wstring::npos && D810CaptureBlockText(D810CaptureBlock::Unreadable).find(L"退避") == std::wstring::npos &&
+                D810ChosenDifferenceText("record_unreadable").find(L"消さない・動かさない") != std::wstring::npos,
+            "words: an unreadable record has one instruction: do not delete or move the file");
+        check(D810PlanReasonText("plan_changed:CAM-A:changed", true).find(L"「A と同じ」の元にした CAM-A") != std::wstring::npos, "words: a changed body is not taken to be the one written");
+        check(std::wstring(kD810RecordDamagedAdvice).find(L"計画と合わない") != std::wstring::npos, "words: the damaged record is not only a line that cannot be read");
     }
 }
 // An access that throws once told to: the exception comes out of the controller call that runs on the worker.
@@ -4706,6 +4711,8 @@ void ScreenChosenWorkerFailure() {
     check(screen.PanelStale() && screen.PanelDirty() == 0 && screen.PanelEntryCount() == 0 && !screen.ChosenOffered(true), "worker failure: the panel is old and the picks are used up");
     const auto summary = screen.PanelSummaryText();
     check(summary.find(L"書き込みのあと") != std::wstring::npos && summary.find(L"まだ何も書いていません") == std::wstring::npos, "worker failure: the panel does not say that nothing was written");
+    check(summary.find(L"書き込みのあと") != std::wstring::npos && !screen.PanelCamerasWereFine(), "worker failure: and the cameras are not taken to have answered");
+    check(Shows(screen.View(), L"選んでいた変更 1 件の下書きは捨てました"), "worker failure: the picks dropped are counted");
     // A read that fails does not make the panel old: nothing was sent.
     check(screen.RequestPanelReread(true) && s.WaitIdle() && !screen.PanelStale(), "worker failure: a reread makes the panel current again");
     check(screen.PanelPick(D810Camera::B, Item::Iso, 400), "worker failure: a pick");
@@ -4767,8 +4774,64 @@ void ScreenPanelFollowAndCount() {
         auto& screen = *s.screen;
         check(OpenPanel(s) && screen.PanelPick(D810Camera::B, Item::Iso, 100) && screen.PanelEntryCount() == 1 && screen.PanelDirty() == 0, "count: an entry that changes nothing");
         check(screen.PanelPick(D810Camera::B, Item::Iso, 200) && screen.PanelPick(D810Camera::A, Item::Iso, 64) && screen.PanelEntryCount() == 2 && screen.PanelDirty() == 1, "count: two entries, one change");
+check(screen.PanelSummaryText().find(L"変更予定 1 件（") != std::wstring::npos, "count: the line under the panel counts the change, not the picks");
         check(screen.ChosenOffered(true), "count: offered with one change");
         check(screen.PanelCancelAll() == 1 && screen.PanelEntryCount() == 0, "count: cancel counts the changes");
+    }
+}
+// An access that stops opening cameras after a number of opens (an Open that gives nothing, as a camera that is gone).
+struct FailingAfterAccess final: D810SettingsCameraAccess {
+    FailingAfterAccess(D810SettingsCameraAccess& inner, std::shared_ptr<std::atomic<int>> opens_left): inner_(inner), left_(std::move(opens_left)) {}
+    D810OpenedCamera Open(D810Camera camera) override { return left_->fetch_sub(1) > 0 ? inner_.Open(camera) : D810OpenedCamera{}; }
+    bool Close(D810Camera camera) override { return inner_.Close(camera); }
+private:
+    D810SettingsCameraAccess& inner_;
+    std::shared_ptr<std::atomic<int>> left_;
+};
+// The panel's "the cameras answered" mark goes down for each way an operation with the cameras can end without them answering, and comes
+// back when a read finishes; closing the panel then does not start Live (the window's smoke checks that part).
+void ScreenPanelCamerasFlag() {
+    using Item = D810ChoiceItem;
+    const auto B = D810Camera::B;
+    {
+        // A run that was stopped before it sent anything, for a reason.
+        ScreenBench s(kChosenTable);
+        auto& screen = *s.screen;
+        check(OpenPanel(s) && screen.PanelCamerasWereFine() && screen.PanelPick(B, Item::Iso, 200) && screen.RequestChosen(true) && s.WaitIdle() && screen.ConfirmationShown(), "flag: a confirmation");
+        s.bench.b.props[0x500f].current = 400; // CAM-B changes after the confirmation: the run stops before it sends
+        check(s.Confirm() && s.bench.Writes() == 0 && !screen.PanelCamerasWereFine(), "flag: a run stopped before sending, for a reason, brings it down");
+        check(screen.RequestPanelReread(true) && s.WaitIdle() && screen.PanelCamerasWereFine(), "flag: a read that finishes brings it back");
+    }
+    {
+        // A reread that did not finish, then one that did; a reread whose second read (for the panel) did not finish.
+        ScreenBench s(kChosenTable);
+        auto& screen = *s.screen;
+        check(OpenPanel(s), "flag reread: open");
+        s.bench.access.open_fail[0] = true;
+        check(screen.RequestPanelReread(true) && s.WaitIdle() && screen.PanelOpen() && !screen.PanelCamerasWereFine(), "flag: a reread that did not finish brings it down");
+        s.bench.access.open_fail[0] = false;
+        check(screen.RequestPanelReread(true) && s.WaitIdle() && screen.PanelCamerasWereFine(), "flag: and a reread that finishes brings it back");
+        auto left = std::make_shared<std::atomic<int>>(100);
+        D810SettingsWriteScreen::Options options;
+        options.now = [] { return std::string("2000-01-01T00:00:00Z"); };
+        s.screen = std::make_unique<D810SettingsWriteScreen>(*s.bench.controller, [&s, left] { return std::make_unique<FailingAfterAccess>(s.bench.access, left); }, options);
+        auto& second = *s.screen;
+        check(OpenPanel(s) && &second == s.screen.get() && second.PanelCamerasWereFine(), "flag panel read: open");
+        left->store(2); // the reread opens both cameras, the read for the panel then finds none
+        check(second.RequestPanelReread(true) && s.WaitIdle() && !second.PanelCamerasWereFine(), "flag: the read for the panel that did not finish brings it down");
+        check(Shows(second.View(), L"設定の画面の値は読み直せていません"), "flag: and it says so");
+    }
+    {
+        // The read of a copy that did not finish, with the panel open; the read for picked values that did not finish.
+        ScreenBench s(kChosenTable);
+        auto& screen = *s.screen;
+        check(OpenPanel(s) && screen.PanelPick(B, Item::Iso, 200), "flag read: open and a pick");
+        s.bench.access.open_fail[0] = true;
+        check(screen.RequestCopy(true) && s.WaitIdle() && screen.PanelOpen() && !screen.PanelCamerasWereFine(), "flag: the read of a copy that did not finish brings it down");
+        s.bench.access.open_fail[0] = false;
+        check(screen.RequestPanelReread(true) && s.WaitIdle() && screen.PanelCamerasWereFine() && screen.PanelPick(B, Item::Iso, 200), "flag: back by a reread");
+        s.bench.access.open_fail[0] = true;
+        check(screen.RequestChosen(true) && s.WaitIdle() && !screen.PanelCamerasWereFine(), "flag: the read for picked values that did not finish brings it down");
     }
 }
 void ScreenChosenDeadline() {
@@ -5207,6 +5270,7 @@ int main() {
     run("RereadRuleIsTold", RereadRuleIsTold);
     run("ScreenRereadUsesTheRuleOfTheCheck", ScreenRereadUsesTheRuleOfTheCheck);
     run("ScreenPanelFollowAndCount", ScreenPanelFollowAndCount);
+    run("ScreenPanelCamerasFlag", ScreenPanelCamerasFlag);
     run("ScreenChosenDeadline", ScreenChosenDeadline);
     run("ScreenChosenDamagedRecord", ScreenChosenDamagedRecord);
     run("ScreenSkippedShown", ScreenSkippedShown);
