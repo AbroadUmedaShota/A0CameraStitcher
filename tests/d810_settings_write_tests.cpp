@@ -3198,6 +3198,257 @@ void JournalPlanned() {
         check(!copy_only.chosen_unresolved && copy_only.block == D810CaptureBlock::Mismatch && copy_only.malformed_lines == 0, "the record of copies reads as before");
     }
 }
+// --- Stops across the two cameras (#416) -------------------------------------------------------
+// The camera access with a fault put into the write session of one camera (its second open: the first is the check
+// before the send). A test double: it changes what the fake connection answers and nothing else.
+using Fault = std::function<void(D810OpenedCamera&)>;
+struct FaultAccess final: D810SettingsCameraAccess {
+    FakeAccess& in;
+    D810Camera target;
+    Fault fault;
+    int target_opens = 0;
+    FaultAccess(FakeAccess& access, D810Camera camera, Fault f): in(access), target(camera), fault(std::move(f)) {}
+    D810OpenedCamera Open(D810Camera camera) override {
+        auto opened = in.Open(camera);
+        if (camera == target && opened.transport && ++target_opens == 2) fault(opened);
+        return opened;
+    }
+    bool Close(D810Camera camera) override { return in.Close(camera); }
+};
+// The first request of the write session that `match` accepts is answered with `reply`; the others reach the body.
+Fault AnswerFirst(std::function<bool(const SettingsRequestShape&)> match, std::function<WpdLiveViewExchange()> reply) {
+    return [match, reply](D810OpenedCamera& opened) {
+        auto fired = std::make_shared<bool>(false);
+        auto inner = std::move(opened.transport);
+        opened.transport = [match, reply, fired, inner](IPortableDeviceValues* request) {
+            const auto shape = InspectSettingsRequest(request);
+            if (!*fired && shape && match(*shape)) { *fired = true; return reply(); }
+            return inner(request);
+        };
+    };
+}
+bool IsRead(const SettingsRequestShape& shape, std::uint32_t opcode, std::uint32_t code = 0) {
+    return shape.kind == SettingsCommandKind::ExecuteWithDataToRead && shape.opcode == opcode && shape.arguments.size() == 1 && (code == 0 || shape.arguments[0] == code);
+}
+D810WriteRun RunThrough(Bench& bench, const D810PlanResult& plan, D810SettingsCameraAccess& access) {
+    if (!plan.plan) return {};
+    check(bench.controller->Confirm(plan.plan->id) == nullptr, "confirm");
+    return bench.controller->Execute(plan.plan->id, access, bench.options);
+}
+std::size_t CountIn(const std::string& text, const std::string& what) {
+    std::size_t count = 0;
+    for (auto at = text.find(what); at != std::string::npos; at = text.find(what, at + 1)) ++count;
+    return count;
+}
+
+// CAM-B writes its one item (iso 200), then CAM-A has two (iso, then metering). One condition stops CAM-A in its first
+// item: the second item is not sent (it would be if the run went on to the next step), CAM-B keeps what it was
+// given (no write back, no second write), and capture is held, in memory and after a restart.
+void ChosenStopsOnA() {
+    using Item = D810WriteItem;
+    const auto A = D810Camera::A, B = D810Camera::B;
+    const std::vector<D810CameraChoice> picks{PickFor(B, Item::Iso, 200), PickFor(A, Item::Iso, 200), PickFor(A, Item::Metering, 4)};
+    struct Case {
+        const char* what;
+        std::string reason;              // the start of the run's reason
+        int a_sent;                      // writes that reached CAM-A
+        std::function<void(Bench&)> setup;
+        Fault fault;                     // put into CAM-A's write session
+        int journal_ok;                  // appends the record accepts (-1: all)
+    };
+    const auto ms = [](int n) { return std::chrono::milliseconds(n); };
+    const std::vector<Case> cases{
+        {"CAM-A moved after CAM-B was written", "changed_before_write", 0,
+            [](Bench& bench) { bench.b.after = [&bench](const std::string& e) { if (e == "write_end") bench.a.props[0x500f].current = 400; }; }, nullptr, -1},
+        {"live view on for the first item only", "live_view_on", 0,
+            [](Bench& bench) {
+                bench.a.after = [&bench, n = 0](const std::string& e) mutable {
+                    if (e.compare(0, 10, "1015(d1a2)") == 0 && bench.access.opens[0] >= 2) bench.a.live = (++n == 1) ? 1 : 0;
+                };
+            }, nullptr, -1},
+        {"the live state cannot be read", "live_state_unreadable", 0, [](Bench&) {},
+            AnswerFirst([](const auto& shape) { return IsRead(shape, 0x1015); }, [] { return CommandFailedReply(); }), -1},
+        {"the exposure mode description cannot be read", "desc_unreadable", 0, [](Bench&) {},
+            AnswerFirst([](const auto& shape) { return IsRead(shape, 0x1014, 0x500e); }, [] { return FinalReply(0x200a); }), -1},
+        {"the ISO auto description cannot be read", "desc_unreadable", 0, [](Bench&) {},
+            AnswerFirst([](const auto& shape) { return IsRead(shape, 0x1014, 0xd054); }, [] { return FinalReply(0x200a); }), -1},
+        {"the item's description cannot be read", "desc_unreadable", 0, [](Bench&) {},
+            AnswerFirst([](const auto& shape) { return IsRead(shape, 0x1014, 0x500f); }, [] { return FinalReply(0x200a); }), -1},
+        {"stopped by the operator before the first item", "interrupted", 0,
+            [](Bench& bench) { bench.a.after = [&bench](const std::string& e) { if (e == "90c8" && bench.access.opens[0] >= 2) bench.go = false; }; }, nullptr, -1},
+        {"stopped by the operator after the reads, before the begin", "refused_interrupted", 0,
+            [](Bench& bench) {
+                // The stop comes between the end of the reads and the begin: the second look at the time left, in CAM-A's session.
+                bench.options.remaining = [&bench, looks = 0]() mutable {
+                    if (bench.access.opens[0] >= 2 && ++looks == 2) bench.go = false;
+                    return bench.left;
+                };
+            }, nullptr, -1},
+        {"no time left for CAM-A's items (checked first)", "deadline_margin", 0,
+            [ms](Bench& bench) { bench.b.after = [&bench, ms](const std::string& e) { if (e == "write_end") bench.left = ms(9999); }; }, nullptr, -1},
+        {"no time left once CAM-A's reads are done (checked again)", "deadline_margin", 0,
+            [ms](Bench& bench) {
+                bench.a.after = [&bench, ms](const std::string& e) { if (e == "1014(500f)" && bench.access.opens[0] >= 2) bench.left = ms(9999); };
+            }, nullptr, -1},
+        {"the gate refuses the value", "refused_", 0,
+            [](Bench& bench) {
+                bench.a.after = [&bench, done = false](const std::string&) mutable {
+                    if (done || bench.access.opens[0] < 2) return;
+                    done = true;
+                    bench.a.props[0x500f].values = {64, 100}; // 200 is no longer offered
+                };
+            }, nullptr, -1},
+        {"the record cannot take the result line", "record_unwritable", 1, [](Bench&) {}, nullptr, 1 + 3 + 1},
+        {"the first item ends unknown", "result_unknown", 1, [](Bench& bench) { bench.a.end_reject[0x500f] = 0x2002; }, nullptr, -1},
+        {"the first item reads back another value", "readback_mismatch", 1, [](Bench& bench) { bench.a.apply_as[0x500f] = 100; }, nullptr, -1},
+        {"CAM-A cannot be opened for the write", "open_failed:CAM-A", 0,
+            [](Bench& bench) { bench.b.after = [&bench](const std::string& e) { if (e == "write_end") bench.access.open_fail[0] = true; }; }, nullptr, -1},
+        {"CAM-A's write session sees another version", "body_not_verified:CAM-A", 0, [](Bench&) {},
+            [](D810OpenedCamera& opened) { opened.firmware = "other-text"; }, -1},
+        {"CAM-A is not ready", "device_not_ready", 0, [](Bench&) {},
+            [](D810OpenedCamera& opened) { opened.transport = [](IPortableDeviceValues*) -> WpdLiveViewExchange { throw std::runtime_error("dead"); }; }, -1},
+    };
+    for (const auto& c : cases) {
+        const std::string n = c.what;
+        Bench bench(kChosenTable, c.journal_ok);
+        c.setup(bench);
+        const auto plan = bench.Chosen(picks);
+        check(plan.Ok() && plan.plan->steps.size() == 3, (n + ": the plan").c_str());
+        FaultAccess faulty(bench.access, A, c.fault ? c.fault : Fault([](D810OpenedCamera&) {}));
+        D810SettingsCameraAccess& access = c.fault ? static_cast<D810SettingsCameraAccess&>(faulty) : bench.access;
+        const auto run = RunThrough(bench, plan, access);
+        check(run.reason.compare(0, c.reason.size(), c.reason) == 0 && !run.reason.empty(), (n + ": the reason (" + run.reason + ")").c_str());
+        check(run.sent == 1 + c.a_sent && bench.a.write_begins == c.a_sent && bench.a.begins_by_code.count(0x500b) == 0, (n + ": the next CAM-A item is not sent").c_str());
+        check(bench.b.write_begins == 1 && bench.b.begins_by_code[0x500f] == 1 && bench.b.props[0x500f].current == 200, (n + ": CAM-B keeps its value, nothing written back").c_str());
+        check(run.block != D810CaptureBlock::None && !bench.controller->CaptureAllowed() && !bench.Restarted().CaptureAllowed(), (n + ": capture is held").c_str());
+        check(NoResend(bench.a) && NoResend(bench.b) && bench.a.forbidden + bench.b.forbidden == 0, (n + ": nothing sent twice").c_str());
+        if (c.journal_ok < 0) check(CountIn(bench.Journal(), " ev=end ") == 1, (n + ": one end line").c_str());
+    }
+}
+
+// CAM-B has two items (iso, aperture) and CAM-A one. One condition stops CAM-B; CAM-A is not opened for writing (it is
+// opened once, for the check before the send), nothing is sent to it, and a stop after something was sent holds capture.
+void ChosenStopsOnB() {
+    using Item = D810WriteItem;
+    const auto A = D810Camera::A, B = D810Camera::B;
+    const std::vector<D810CameraChoice> picks{PickFor(B, Item::Iso, 200), PickFor(B, Item::Aperture, 1100), PickFor(A, Item::Iso, 200)};
+    struct Case {
+        const char* what;
+        std::string reason;
+        int b_sent;
+        std::function<void(Bench&)> setup;
+        Fault fault;                     // put into CAM-B's write session
+    };
+    const std::vector<Case> cases{
+        {"CAM-B cannot be closed after its items", "close_failed:CAM-B", 2,
+            [](Bench& bench) { bench.b.after = [&bench](const std::string& e) { if (e.compare(0, 5, "1016(") == 0) bench.access.close_ok[1] = false; }; }, nullptr},
+        {"the gate refuses CAM-B's first item", "refused_", 0,
+            [](Bench& bench) {
+                bench.b.after = [&bench, done = false](const std::string&) mutable {
+                    if (done || bench.access.opens[1] < 2) return;
+                    done = true;
+                    bench.b.props[0x500f].values = {64, 100};
+                };
+            }, nullptr},
+        {"the gate refuses CAM-B's second item", "refused_", 1,
+            [](Bench& bench) { bench.b.after = [&bench](const std::string& e) { if (e == "write_end") bench.b.props[0x5007].values = {400, 560, 800}; }; }, nullptr},
+        {"CAM-B's write session sees another version", "body_not_verified:CAM-B", 0, [](Bench&) {},
+            [](D810OpenedCamera& opened) { opened.firmware = "other-text"; }},
+        {"CAM-B is not ready", "device_not_ready", 0, [](Bench&) {},
+            [](D810OpenedCamera& opened) { opened.transport = [](IPortableDeviceValues*) -> WpdLiveViewExchange { throw std::runtime_error("dead"); }; }},
+        {"an exception after CAM-B's first item was sent", "exception", 1,
+            [](Bench& bench) { bench.options.log = [](const std::string& line) { if (Contains(line, "settings_write code=")) throw std::runtime_error("log"); }; }, nullptr},
+        {"stopped by the operator before the first item", "interrupted", 0,
+            [](Bench& bench) { bench.b.after = [&bench](const std::string& e) { if (e == "90c8" && bench.access.opens[1] >= 2) bench.go = false; }; }, nullptr},
+    };
+    for (const auto& c : cases) {
+        const std::string n = c.what;
+        Bench bench(kChosenTable);
+        c.setup(bench);
+        const auto plan = bench.Chosen(picks);
+        check(plan.Ok() && plan.plan->steps.size() == 3, (n + ": the plan").c_str());
+        FaultAccess faulty(bench.access, B, c.fault ? c.fault : Fault([](D810OpenedCamera&) {}));
+        D810SettingsCameraAccess& access = c.fault ? static_cast<D810SettingsCameraAccess&>(faulty) : bench.access;
+        const auto run = RunThrough(bench, plan, access);
+        check(run.reason.compare(0, c.reason.size(), c.reason) == 0 && !run.reason.empty(), (n + ": the reason (" + run.reason + ")").c_str());
+        check(run.sent == c.b_sent && bench.b.write_begins == c.b_sent, (n + ": what reached CAM-B").c_str());
+        check(bench.a.write_begins == 0 && bench.access.opens[0] == 1 && bench.a.props[0x500f].current == 64, (n + ": CAM-A is not opened for writing and is not written").c_str());
+        check(NoResend(bench.b) && bench.a.forbidden + bench.b.forbidden == 0, (n + ": nothing sent twice").c_str());
+        if (c.b_sent > 0) check(run.block != D810CaptureBlock::None && !bench.controller->CaptureAllowed() && !bench.Restarted().CaptureAllowed(), (n + ": capture is held").c_str());
+        else check(run.verdict == D810WriteVerdict::NotSent && run.block == D810CaptureBlock::None && Contains(bench.Journal(), "verdict=not_sent sent=0"), (n + ": nothing was sent, no block").c_str());
+        check(CountIn(bench.Journal(), " ev=end ") == 1, (n + ": one end line").c_str());
+    }
+}
+
+// Every subset of the ten picks (two cameras, five items), in three input orders: the plan is CAM-B's steps first, then
+// CAM-A's, the item table's order inside a camera, no (camera, item) twice.
+void ChosenPlanSubsets() {
+    using Item = D810WriteItem;
+    auto a = Body(1667, 800, 64), b = Body(333, 560, 100);
+    const auto sa = Snapshot(a, "CAM-A"), sb = Snapshot(b, "CAM-B");
+    const std::vector<D810CameraChoice> all{
+        PickFor(D810Camera::A, Item::Iso, 200), PickFor(D810Camera::A, Item::ShutterSpeed, 500), PickFor(D810Camera::A, Item::Aperture, 1100), PickFor(D810Camera::A, Item::WhiteBalance, 4),
+        PickFor(D810Camera::A, Item::Metering, 4), PickFor(D810Camera::B, Item::Iso, 400), PickFor(D810Camera::B, Item::ShutterSpeed, 1000), PickFor(D810Camera::B, Item::Aperture, 1600),
+        PickFor(D810Camera::B, Item::WhiteBalance, 5), PickFor(D810Camera::B, Item::Metering, 2)};
+    std::size_t plans = 0, bad = 0;
+    for (unsigned mask = 1; mask < (1u << all.size()); ++mask)
+        for (int variant = 0; variant < 3; ++variant) {
+            std::vector<D810CameraChoice> picks;
+            for (std::size_t i = 0; i < all.size(); ++i)
+                if (mask & (1u << i)) picks.push_back(all[i]);
+            if (variant == 1) std::reverse(picks.begin(), picks.end());
+            if (variant == 2 && picks.size() > 1) std::rotate(picks.begin(), picks.begin() + 1, picks.end());
+            const auto result = BuildD810PerCameraPlan(sa, sb, {true, true}, picks, kChosenTable);
+            ++plans;
+            std::vector<std::pair<int, int>> want, got;
+            for (const auto camera : {D810Camera::B, D810Camera::A})
+                for (const auto& pick : all)
+                    if ((mask & (1u << (&pick - &all[0]))) && pick.camera == camera) want.emplace_back(static_cast<int>(camera), static_cast<int>(pick.item));
+            if (result.plan)
+                for (const auto& step : result.plan->steps) got.emplace_back(static_cast<int>(step.camera), static_cast<int>(step.item));
+            if (!result.Ok() || got != want || !D810PlanProblem(*result.plan, kChosenTable).empty()) ++bad;
+        }
+    check(plans == 3 * 1023 && bad == 0, "every subset of the ten picks, in three input orders: CAM-B first, CAM-A last, the item table's order");
+}
+
+// All ten steps (five items on each camera) through a run: the order of the sends, the record, the time margin.
+void ChosenTenItems() {
+    using Item = D810WriteItem;
+    const std::vector<D810CameraChoice> all{
+        PickFor(D810Camera::A, Item::Iso, 200), PickFor(D810Camera::A, Item::ShutterSpeed, 500), PickFor(D810Camera::A, Item::Aperture, 1100), PickFor(D810Camera::A, Item::WhiteBalance, 4),
+        PickFor(D810Camera::A, Item::Metering, 4), PickFor(D810Camera::B, Item::Iso, 400), PickFor(D810Camera::B, Item::ShutterSpeed, 1000), PickFor(D810Camera::B, Item::Aperture, 1600),
+        PickFor(D810Camera::B, Item::WhiteBalance, 5), PickFor(D810Camera::B, Item::Metering, 2)};
+    {
+        Bench bench(kChosenTable);
+        bench.TraceBegins();
+        bench.left = std::chrono::milliseconds(50000); // 5 s for each of the ten steps, exactly
+        const auto plan = bench.Chosen(all);
+        check(plan.Ok() && plan.plan->steps.size() == 10, "ten steps");
+        const auto run = bench.Run(plan);
+        check(run.verdict == D810WriteVerdict::Match && run.sent == 10 && run.reason.empty(), "all ten matched");
+        BeginOrder want;
+        for (const auto& step : plan.plan->steps) want.emplace_back(static_cast<int>(step.camera), static_cast<int>(step.code));
+        check(bench.begin_order == want, "the sends follow the plan");
+        check(std::all_of(want.begin(), want.begin() + 5, [](const auto& entry) { return entry.first == 1; }) &&
+                std::all_of(want.begin() + 5, want.end(), [](const auto& entry) { return entry.first == 0; }),
+            "the five CAM-B sends come before the five CAM-A sends");
+        check(bench.a.write_begins == 5 && bench.b.write_begins == 5 && NoResend(bench.a) && NoResend(bench.b) && !bench.access.overlap, "five on each, once each");
+        const auto journal = bench.Journal();
+        check(CountIn(journal, " ev=step ") == 10 && CountIn(journal, " ev=result ") == 10 && Contains(journal, "verdict=match sent=10"), "the record has the ten steps and their results");
+        const auto state = ParseD810Journal(journal);
+        check(state.expected.size() == 10 && state.chosen_unresolved && !state.history_damaged && state.block == D810CaptureBlock::None && bench.controller->CaptureAllowed(),
+            "ten expected values in the record, no block");
+    }
+    {
+        // One millisecond less and not a single send: 4999 ms for the first of ten steps.
+        Bench bench(kChosenTable);
+        bench.left = std::chrono::milliseconds(49999);
+        const auto run = bench.Run(bench.Chosen(all));
+        check(run.reason == "deadline_margin" && run.sent == 0 && bench.Writes() == 0 && run.verdict == D810WriteVerdict::NotSent && bench.access.opens[0] == 1,
+            "49999 ms: stopped before the first send, CAM-A never opened for writing");
+    }
+}
+
 // White balance and metering through the whole run (test table): the order, the one send, the read back, the block.
 void RevisionRuns() {
     const auto index_of = [](const FakeWriteBody& body, const std::string& entry) {
@@ -4162,6 +4413,10 @@ int main() {
     run("RereadReleases", RereadReleases);
     run("JournalStates", JournalStates);
     run("ChosenRuns", ChosenRuns);
+    run("ChosenStopsOnA", ChosenStopsOnA);
+    run("ChosenStopsOnB", ChosenStopsOnB);
+    run("ChosenPlanSubsets", ChosenPlanSubsets);
+    run("ChosenTenItems", ChosenTenItems);
     run("ChosenRelease", ChosenRelease);
     run("JournalPlanned", JournalPlanned);
     run("RevisionRuns", RevisionRuns);
