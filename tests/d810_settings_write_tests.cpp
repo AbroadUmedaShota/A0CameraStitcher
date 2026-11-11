@@ -271,13 +271,31 @@ static_assert(D810WriteTableProblem(kRevisionTable) == nullptr && D810EnabledRow
 static_assert(D810ProductTableProblem(kRevisionTable, false) != nullptr && D810ProductTableProblem(kRevisionTable, true) == nullptr, "a product table only while the revision flag is set");
 // What the product table enables, written out here and not read from the table: a row opened early, or by mistake, fails
 // ProductTable. Table order. Each stage that opens a row changes this list in the same commit.
-const std::vector<D810WriteItem> kExpectedProductItems{D810WriteItem::Iso, D810WriteItem::WhiteBalance, D810WriteItem::Metering};
+const std::vector<D810WriteItem> kExpectedProductItems{D810WriteItem::Iso, D810WriteItem::Aperture, D810WriteItem::WhiteBalance, D810WriteItem::Metering};
 // The writable items among `differing` (the items that read differently on the two bodies), in table order.
 std::vector<D810WriteItem> ExpectedProductSteps(const std::vector<D810WriteItem>& differing) {
     std::vector<D810WriteItem> out;
     for (const auto item : kExpectedProductItems)
         if (std::find(differing.begin(), differing.end(), item) != differing.end()) out.push_back(item);
     return out;
+}
+// The items a plan writes, in the plan's order, and whether every step targets CAM-B.
+std::vector<D810WriteItem> PlanStepItems(const D810PlanResult& plan) {
+    std::vector<D810WriteItem> items;
+    if (plan.Ok()) for (const auto& step : plan.plan->steps) items.push_back(step.item);
+    return items;
+}
+bool PlanStepsAllCamB(const D810PlanResult& plan) {
+    return plan.Ok() && std::all_of(plan.plan->steps.begin(), plan.plan->steps.end(), [](const auto& step) { return step.camera == D810Camera::B; });
+}
+// On the product bench (PrepareProductBench) these items read differently on the two bodies.
+const std::vector<D810WriteItem> kProductBenchDiffering{D810WriteItem::Iso, D810WriteItem::ShutterSpeed, D810WriteItem::Aperture, D810WriteItem::WhiteBalance, D810WriteItem::Metering};
+// The steps a copy makes on the product bench: the enabled items that differ, in table order, without `left_out` (items that are listed for their value instead).
+std::vector<D810WriteItem> ExpectedProductStepsWithout(const std::vector<D810WriteItem>& left_out) {
+    std::vector<D810WriteItem> differing;
+    for (const auto item : kProductBenchDiffering)
+        if (std::find(left_out.begin(), left_out.end(), item) == left_out.end()) differing.push_back(item);
+    return ExpectedProductSteps(differing);
 }
 // Everything on, for the ADR-0041 code paths. Not a valid product table.
 constexpr D810WriteTable Adr41Table() {
@@ -595,10 +613,10 @@ void ProductTable() {
     for (const auto& row : table.rows)
         if (row.enabled) enabled.insert({static_cast<int>(row.camera), static_cast<int>(row.item)});
     const int cam_b = static_cast<int>(D810Camera::B);
-    check(enabled == std::set<std::pair<int, int>>{{cam_b, static_cast<int>(D810WriteItem::Iso)}, {cam_b, static_cast<int>(D810WriteItem::WhiteBalance)},
-                         {cam_b, static_cast<int>(D810WriteItem::Metering)}},
-        "the product table enables exactly ISO, white balance and metering on CAM-B");
-    check(D810EnabledRowCount(table) == 3 && kExpectedProductItems.size() == 3, "three enabled rows");
+    check(enabled == std::set<std::pair<int, int>>{{cam_b, static_cast<int>(D810WriteItem::Iso)}, {cam_b, static_cast<int>(D810WriteItem::Aperture)},
+                         {cam_b, static_cast<int>(D810WriteItem::WhiteBalance)}, {cam_b, static_cast<int>(D810WriteItem::Metering)}},
+        "the product table enables exactly ISO, aperture, white balance and metering on CAM-B");
+    check(D810EnabledRowCount(table) == 4 && kExpectedProductItems.size() == 4, "four enabled rows");
     check(D810CopyWritableItems(table) == kExpectedProductItems, "the writable items are the expected ones, in table order");
     // The codes the table confirms: ISO auto and shutter speed on both cameras, rows disabled (shutter speed stays disabled until its stage).
     for (const auto camera : {D810Camera::A, D810Camera::B}) {
@@ -659,7 +677,7 @@ void ProductTable() {
         check(std::string(D810ProductTableProblem(cam_a)) == "cam_a_row_enabled", "a CAM-A revision row is refused whatever the flag says");
     }
     // The items the next stages open stay disabled in the product table until their own commits.
-    for (const auto item : {D810WriteItem::ExposureMode, D810WriteItem::IsoAuto, D810WriteItem::ShutterSpeed, D810WriteItem::Aperture, D810WriteItem::ExposureCompensation})
+    for (const auto item : {D810WriteItem::ExposureMode, D810WriteItem::IsoAuto, D810WriteItem::ShutterSpeed, D810WriteItem::ExposureCompensation})
         for (const auto camera : {D810Camera::A, D810Camera::B}) {
             const auto* row = table.Row(item, camera);
             check(row && !row->enabled, "the other rows are disabled");
@@ -712,16 +730,16 @@ void ControllerTables() {
     {
         // The product entry point holds the product table.
         Bench bench(kProduct);
-        check(bench.controller->Status().enabled_rows == 3, "product entry: three rows");
+        check(bench.controller->Status().enabled_rows == 4, "product entry: four rows");
         check(bench.controller->Status().write_allowed && bench.controller->Status().capture_allowed, "rows enabled, no block: copying is offered");
         auto none = kAdr38Table;
         for (auto& row : none.rows) row.enabled = false;
         Bench empty(none);
         check(empty.controller->Status().enabled_rows == 0 && !empty.controller->Status().write_allowed && empty.controller->Status().capture_allowed, "no row enabled: copying is not offered");
         const auto copy = bench.Copy();
-        check(copy.Ok() && copy.plan->steps.size() == 1 && copy.plan->steps[0].item == D810WriteItem::Iso && copy.plan->steps[0].camera == D810Camera::B && bench.Writes() == 0,
-            "product entry: only ISO on CAM-B can be planned");
-        check(bench.Restarted().Status().enabled_rows == 3, "product entry after a restart");
+        check(copy.Ok() && PlanStepItems(copy) == ExpectedProductSteps({D810WriteItem::Iso, D810WriteItem::ShutterSpeed, D810WriteItem::Aperture}) && PlanStepsAllCamB(copy) && bench.Writes() == 0,
+            "product entry: only the enabled items, on CAM-B, can be planned");
+        check(bench.Restarted().Status().enabled_rows == 4, "product entry after a restart");
     }
     {
         // The table is held by value: a temporary does not dangle.
@@ -743,11 +761,11 @@ void FilesEnableNothing() {
     }
     SetEnvironmentVariableW(L"A0_SETTINGS_WRITE_ENABLE", L"1");
     const auto copy = bench.Copy();
-    check(copy.Ok() && copy.plan->steps.size() == 1 && copy.plan->steps[0].item == D810WriteItem::Iso && copy.plan->steps[0].camera == D810Camera::B,
-        "product copy: ISO on CAM-B and nothing else, whatever the files and the variable say");
+    check(copy.Ok() && PlanStepItems(copy) == ExpectedProductSteps({D810WriteItem::Iso, D810WriteItem::ShutterSpeed, D810WriteItem::Aperture}) && PlanStepsAllCamB(copy),
+        "product copy: the enabled items on CAM-B and nothing else, whatever the files and the variable say");
     for (const auto target : {D810WriteTarget::A, D810WriteTarget::B, D810WriteTarget::Both})
         check(!bench.Chosen({{D810WriteItem::Iso, target, 200}}).Ok(), "product chosen refused");
-    check(bench.controller->Status().enabled_rows == 3, "status: three rows");
+    check(bench.controller->Status().enabled_rows == 4, "status: four rows");
     SetEnvironmentVariableW(L"A0_SETTINGS_WRITE_ENABLE", nullptr);
     check(bench.Writes() == 0 && bench.a.write_datas + bench.b.write_datas == 0 && bench.a.forbidden + bench.b.forbidden == 0, "only reads, no write");
 }
@@ -782,14 +800,16 @@ void CopyPlans() {
     { Bench bench; bench.b.props[0x5007].get_set = 0; refused(bench, "not_writable:aperture:CAM-B"); }
     { Bench bench; bench.b.props[0x5007].type = 6; refused(bench, "unreadable:aperture:CAM-B"); }
     {
-        // The product table: ISO on CAM-B is planned; every other difference is left out because its row is disabled.
+        // The product table: the enabled items are planned on CAM-B; every other difference is left out because its row is disabled.
         Bench bench(kProduct);
         const auto plan = bench.Copy();
-        check(plan.Ok() && plan.plan->steps.size() == 1 && plan.plan->steps[0].item == D810WriteItem::Iso && plan.plan->steps[0].value == 64 && plan.plan->steps[0].before == 100, "product table: one step, ISO");
+        check(plan.Ok() && PlanStepItems(plan) == ExpectedProductSteps({D810WriteItem::Iso, D810WriteItem::ShutterSpeed, D810WriteItem::Aperture}) && PlanStepsAllCamB(plan) &&
+                plan.plan->steps[0].value == 64 && plan.plan->steps[0].before == 100 && plan.plan->steps[1].value == 800 && plan.plan->steps[1].before == 560,
+            "product table: ISO and aperture, with B's value now and A's value");
         const auto skipped = [&](D810WriteItem item) {
             return plan.Ok() && std::any_of(plan.plan->skipped.begin(), plan.plan->skipped.end(), [&](const auto& s) { return s.first == item && s.second == "row_disabled"; });
         };
-        check(skipped(D810WriteItem::ShutterSpeed) && skipped(D810WriteItem::Aperture), "product table: shutter speed and aperture are left out (row disabled)");
+        check(skipped(D810WriteItem::ShutterSpeed) && !skipped(D810WriteItem::Aperture), "product table: shutter speed is left out (row disabled), aperture is not");
         check(bench.Writes() == 0, "product table: planning sends nothing");
     }
     {
@@ -1673,6 +1693,7 @@ void PrepareProductBench(Bench& bench) {
 struct ProductWrite { D810WriteItem item; std::uint16_t code; std::int64_t a_value; std::int64_t other_value; };
 const std::vector<ProductWrite> kExpectedProductWrites{
     {D810WriteItem::Iso, 0x500f, 64, 200},
+    {D810WriteItem::Aperture, 0x5007, 800, 1100},
     {D810WriteItem::WhiteBalance, 0x5005, 4, 5},
     {D810WriteItem::Metering, 0x500b, 2, 4},
 };
@@ -1685,7 +1706,7 @@ void ProductRun() {
         const auto run = bench.CopyRun();
         const auto n = kExpectedProductWrites.size();
         check(run.verdict == D810WriteVerdict::Match && run.sent == n && run.reason.empty(), "product run: matched, one write per enabled item");
-        check(bench.b.props[0x500d].current == 333 && bench.b.props[0x5007].current == 560, "product run: shutter speed and aperture are left as B has them");
+        check(bench.b.props[0x500d].current == 333 && bench.b.begins_by_code.count(0x500d) == 0, "product run: shutter speed is left as B has it");
         for (const auto& write : kExpectedProductWrites)
             check(bench.b.props[write.code].current == write.a_value && bench.b.begins_by_code[write.code] == 1, "product run: B reads A's value, written once");
         check(bench.b.write_begins == static_cast<int>(n) && bench.b.write_datas == static_cast<int>(n) && bench.b.write_ends == static_cast<int>(n) && bench.b.begins_by_code.size() == n,
@@ -1701,10 +1722,11 @@ void ProductRun() {
         check(order == expected_order, "product run: the write order is the table's");
         const auto journal = bench.Journal();
         check(Contains(journal, "ev=step i=0 alias=CAM-B item=iso code=0x500f before=0x0064 value=0x0040") &&
-                Contains(journal, "ev=step i=1 alias=CAM-B item=white_balance code=0x5005 before=0x0002 value=0x0004") &&
-                Contains(journal, "ev=step i=2 alias=CAM-B item=metering code=0x500b before=0x0003 value=0x0002"),
+                Contains(journal, "ev=step i=1 alias=CAM-B item=aperture code=0x5007 before=0x0230 value=0x0320") &&
+                Contains(journal, "ev=step i=2 alias=CAM-B item=white_balance code=0x5005 before=0x0002 value=0x0004") &&
+                Contains(journal, "ev=step i=3 alias=CAM-B item=metering code=0x500b before=0x0003 value=0x0002"),
             "product run: the record names each step");
-        check(Contains(journal, "verdict=match sent=3") && !HasIdentifierShape(journal), "product run: the record ends with a match");
+        check(Contains(journal, "verdict=match sent=4") && !HasIdentifierShape(journal), "product run: the record ends with a match");
         check(bench.controller->CaptureAllowed() && bench.Restarted().CaptureAllowed(), "product run: nothing held");
     }
     {
@@ -1759,7 +1781,7 @@ void ProductRevisionItems() {
             const auto plan = bench.Copy();
             const std::string n = "white balance " + D810Hex(static_cast<std::uint64_t>(value), 4) + " on A" + (on_b == value ? ", the same on B" : "");
             check(plan.Ok() && skipped_reason(plan, Item::WhiteBalance) == "value_content_dependent", (n + ": listed as content dependent").c_str());
-            check(steps_of(plan) == ExpectedProductSteps({Item::Iso, Item::Metering}), (n + ": the other items stay in the plan").c_str());
+            check(steps_of(plan) == ExpectedProductStepsWithout({Item::WhiteBalance}), (n + ": the other items stay in the plan").c_str());
             const auto run = bench.Run(plan);
             check(run.verdict == D810WriteVerdict::Match && bench.b.begins_by_code.count(0x5005) == 0 && bench.b.props[0x5005].current == on_b && bench.a.write_begins == 0,
                 (n + ": never written, B keeps its own value").c_str());
@@ -1772,14 +1794,14 @@ void ProductRevisionItems() {
             PrepareProductBench(bench);
             bench.a.props[0x5005].current = value;
             const auto plan = bench.Copy();
-            check(plan.Ok() && skipped_reason(plan, Item::WhiteBalance) == "value_not_listed" && steps_of(plan) == ExpectedProductSteps({Item::Iso, Item::Metering}), "white balance: a value without a name is listed, not written");
+            check(plan.Ok() && skipped_reason(plan, Item::WhiteBalance) == "value_not_listed" && steps_of(plan) == ExpectedProductStepsWithout({Item::WhiteBalance}), "white balance: a value without a name is listed, not written");
         }
         for (const std::int64_t value : {0LL, 5LL, 0x8010LL, 0xffffLL}) {
             Bench bench(kProduct);
             PrepareProductBench(bench);
             bench.a.props[0x500b].current = value;
             const auto plan = bench.Copy();
-            check(plan.Ok() && skipped_reason(plan, Item::Metering) == "value_not_listed" && steps_of(plan) == ExpectedProductSteps({Item::Iso, Item::WhiteBalance}), "metering: a mode outside 1 to 4 is listed, not written");
+            check(plan.Ok() && skipped_reason(plan, Item::Metering) == "value_not_listed" && steps_of(plan) == ExpectedProductStepsWithout({Item::Metering}), "metering: a mode outside 1 to 4 is listed, not written");
         }
     }
     {
@@ -1809,7 +1831,7 @@ void ProductRevisionItems() {
         bench.b.props[0x500b].values = {1, 3};
         const auto plan = bench.Copy();
         check(plan.Ok() && skipped_reason(plan, Item::WhiteBalance) == "value_not_advertised" && skipped_reason(plan, Item::Metering) == "value_not_advertised" &&
-                steps_of(plan) == ExpectedProductSteps({Item::Iso}),
+                steps_of(plan) == ExpectedProductStepsWithout({Item::WhiteBalance, Item::Metering}),
             "not advertised by B: left out with the reason, the plan stands");
         // B cannot write them, or answers another type, or cannot be read.
         Bench other(kProduct);
@@ -1817,7 +1839,7 @@ void ProductRevisionItems() {
         other.b.props[0x5005].get_set = 0;
         other.b.props[0x500b].type = 6;
         const auto plan2 = other.Copy();
-        check(plan2.Ok() && skipped_reason(plan2, Item::WhiteBalance) == "not_writable" && skipped_reason(plan2, Item::Metering) == "unreadable" && steps_of(plan2) == ExpectedProductSteps({Item::Iso}),
+        check(plan2.Ok() && skipped_reason(plan2, Item::WhiteBalance) == "not_writable" && skipped_reason(plan2, Item::Metering) == "unreadable" && steps_of(plan2) == ExpectedProductStepsWithout({Item::WhiteBalance, Item::Metering}),
             "not writable or another type: left out, the plan stands");
     }
     {
@@ -1826,7 +1848,7 @@ void ProductRevisionItems() {
         PrepareProductBench(bench);
         bench.b.apply_as[0x5005] = 5;
         const auto run = bench.CopyRun();
-        check(run.verdict == D810WriteVerdict::Mismatch && run.sent == 2 && bench.b.begins_by_code.count(0x500b) == 0, "release: the white balance mismatch stops the run");
+        check(run.verdict == D810WriteVerdict::Mismatch && run.sent == 3 && bench.b.begins_by_code.count(0x500b) == 0, "release: the white balance mismatch stops the run");
         // B reads A's exposure items now, white balance and metering still differ.
         bench.b.props[0x500f].current = 64;
         bench.b.props[0x500d].current = 1667;
@@ -1846,6 +1868,66 @@ void ProductRevisionItems() {
         bench.b.apply_as.clear();
         const auto preset = bench.controller->Reread(bench.access, bench.options);
         check(!preset.check.released && preset.check.differences == std::vector<std::string>{"white_balance:content_dependent"}, "release: a Preset is unknown, not a match");
+    }
+}
+// Aperture through the product table: a differing aperture is written to CAM-B's own code, and a value CAM-B does not offer
+// refuses the whole plan (as for the other exposure items), with nothing sent.
+void ProductAperture() {
+    const auto has_reason = [](const D810PlanResult& plan, const char* token) {
+        return std::find(plan.reasons.begin(), plan.reasons.end(), token) != plan.reasons.end();
+    };
+    {
+        Bench bench(kProduct);
+        PrepareProductBench(bench);
+        const auto plan = bench.Copy();
+        const auto step = plan.Ok() ? std::find_if(plan.plan->steps.begin(), plan.plan->steps.end(), [](const auto& s) { return s.item == D810WriteItem::Aperture; }) : decltype(plan.plan->steps.end()){};
+        check(plan.Ok() && step != plan.plan->steps.end() && step->camera == D810Camera::B && step->code == 0x5007 && step->before == 560 && step->value == 800, "aperture: planned on CAM-B's code, B's value now and A's value");
+    }
+    {
+        // The same aperture on both: no step, no write to the code.
+        Bench bench(kProduct);
+        PrepareProductBench(bench);
+        bench.b.props[0x5007].current = 800;
+        const auto plan = bench.Copy();
+        check(plan.Ok() && PlanStepItems(plan) == ExpectedProductStepsWithout({D810WriteItem::Aperture}), "aperture: equal on both, no step");
+        check(bench.Run(plan).verdict == D810WriteVerdict::Match && bench.b.begins_by_code.count(0x5007) == 0, "aperture: equal on both, nothing sent to the code");
+    }
+    {
+        // B does not offer A's value: refused, and nothing is sent.
+        Bench bench(kProduct);
+        PrepareProductBench(bench);
+        bench.b.props[0x5007].values = {400, 560, 1100, 1600};
+        const auto plan = bench.Copy();
+        check(!plan.Ok() && has_reason(plan, "value_not_advertised:aperture:CAM-B"), "aperture: a value B does not advertise refuses the plan");
+        check(bench.Run(plan).sent == 0 && bench.Writes() == 0 && !bench.controller->Status().plan_pending, "aperture: refused, nothing sent");
+    }
+    {
+        Bench bench(kProduct);
+        PrepareProductBench(bench);
+        bench.b.props[0x5007].get_set = 0;
+        const auto plan = bench.Copy();
+        check(!plan.Ok() && has_reason(plan, "not_writable:aperture:CAM-B") && bench.Writes() == 0, "aperture: B cannot write it, the plan is refused");
+    }
+    {
+        Bench bench(kProduct);
+        PrepareProductBench(bench);
+        bench.b.props[0x5007].type = 6;
+        const auto plan = bench.Copy();
+        check(!plan.Ok() && has_reason(plan, "unreadable:aperture:CAM-B") && bench.Writes() == 0, "aperture: B answers another type, the plan is refused");
+        Bench from_a(kProduct);
+        PrepareProductBench(from_a);
+        from_a.a.props[0x5007].type = 6;
+        const auto plan_a = from_a.Copy();
+        check(!plan_a.Ok() && has_reason(plan_a, "unreadable:aperture:CAM-A") && from_a.Writes() == 0, "aperture: A cannot be read, the plan is refused");
+    }
+    {
+        // B stops offering the value after the plan was made: nothing is sent.
+        Bench bench(kProduct);
+        PrepareProductBench(bench);
+        const auto plan = bench.Copy();
+        bench.b.props[0x5007].values = {400, 560, 1100, 1600};
+        const auto run = bench.Run(plan);
+        check(run.verdict == D810WriteVerdict::NotSent && run.reason.rfind("plan_changed:CAM-B", 0) == 0 && bench.Writes() == 0, "aperture: no longer offered after the plan, nothing sent");
     }
 }
 // The check of the body at the plan's read (not only at the send): a CAM-B that is not the model and firmware the
@@ -2714,11 +2796,11 @@ void ScreenRefusals() {
     {
         // The product table has one row: copy is offered, and the no-row reason is not the text shown.
         ScreenBench s(kProduct);
-        check(s.screen->Status().enabled_rows == 3 && s.screen->CopyOffered(true) && !s.screen->CopyOffered(false), "screen: product table, copy offered when ready");
+        check(s.screen->Status().enabled_rows == 4 && s.screen->CopyOffered(true) && !s.screen->CopyOffered(false), "screen: product table, copy offered when ready");
         const auto text = s.screen->OfferText(true);
         check(text.find(L"書ける項目がありません") == std::wstring::npos && text.find(L"番号（code）") == std::wstring::npos, "screen: product table, not the no-row reason");
         // What is read and what is written are told apart: the writable items are named from the table.
-        check(text.find(L"読みます") != std::wstring::npos && text.find(L"CAM-B に書くのは ISO感度・ホワイトバランス・測光 だけで、ほかは読むだけです") != std::wstring::npos &&
+        check(text.find(L"読みます") != std::wstring::npos && text.find(L"CAM-B に書くのは ISO感度・絞り・ホワイトバランス・測光 だけで、ほかは読むだけです") != std::wstring::npos &&
                 text.find(L"確定の前に表示します") != std::wstring::npos,
             "screen: product table, the offer names the writable items");
         check(s.screen->Status().writable_items == kExpectedProductItems, "screen: product table, writable items");
@@ -2795,18 +2877,18 @@ void ScreenProductRows() {
         PrepareProductBench(s.bench);
         check(s.Copy() && s.screen->ConfirmationShown(), "product screen: the confirmation is up");
         const auto* view = s.screen->View();
-        // Three notices, the three steps, the heading and the two items left out (shutter speed, aperture), the closing line.
+        // Three notices, the four steps, the heading and the one item left out (shutter speed), the closing line.
         check(view && view->lines.size() == 10 && view->lines.size() <= D810WriteViewMaxLines(), "product screen: ten lines, within the window's limit");
-        check(Shows(view, L"ISO感度: CAM-B の今の値 100 → 書く値 64") && Shows(view, L"ホワイトバランス: CAM-B の今の値 Automatic → 書く値 Daylight") &&
-                Shows(view, L"測光: CAM-B の今の値 Multi-pattern → 書く値 Center-weighted"),
-            "product screen: the three items with B's value now and the value to write");
-        check(count_note(view) == 1 && view && view->lines.size() > 4 && view->lines[4].find(L"ホワイトバランス:") != std::wstring::npos && view->lines[4].find(note) != std::wstring::npos,
+        check(Shows(view, L"ISO感度: CAM-B の今の値 100 → 書く値 64") && Shows(view, L"絞り: CAM-B の今の値 F5.6 → 書く値 F8") &&
+                Shows(view, L"ホワイトバランス: CAM-B の今の値 Automatic → 書く値 Daylight") && Shows(view, L"測光: CAM-B の今の値 Multi-pattern → 書く値 Center-weighted"),
+            "product screen: the four items with B's value now and the value to write");
+        check(count_note(view) == 1 && view && view->lines.size() > 5 && view->lines[5].find(L"ホワイトバランス:") != std::wstring::npos && view->lines[5].find(note) != std::wstring::npos,
             "product screen: the notice is on the white balance line, once");
-        check(Shows(view, L"シャッター速度: 表で無効の項目です") && Shows(view, L"絞り: 表で無効の項目です"), "product screen: shutter speed and aperture are left out with the table's reason");
-        check(s.Confirm() && Shows(s.screen->View(), L"一致") && s.bench.Writes() == 3 && NoResend(s.bench.b) && s.bench.a.write_begins == 0, "product screen: three items written once");
-        check(s.bench.b.props[0x5005].current == 4 && s.bench.b.props[0x500b].current == 2 && s.bench.b.props[0x500d].current == 333 && s.bench.b.props[0x5007].current == 560,
-            "product screen: B reads A's values for the three, the others as before");
-        check(s.screen->OfferText(true).find(L"CAM-B に書くのは ISO感度・ホワイトバランス・測光 だけで") != std::wstring::npos, "product screen: the offer names the three items");
+        check(Shows(view, L"シャッター速度: 表で無効の項目です") && !Shows(view, L"絞り: 表で無効の項目です"), "product screen: shutter speed is left out with the table's reason, aperture is a step");
+        check(s.Confirm() && Shows(s.screen->View(), L"一致") && s.bench.Writes() == 4 && NoResend(s.bench.b) && s.bench.a.write_begins == 0, "product screen: four items written once");
+        check(s.bench.b.props[0x5005].current == 4 && s.bench.b.props[0x500b].current == 2 && s.bench.b.props[0x5007].current == 800 && s.bench.b.props[0x500d].current == 333,
+            "product screen: B reads A's values for the four, the shutter speed as before");
+        check(s.screen->OfferText(true).find(L"CAM-B に書くのは ISO感度・絞り・ホワイトバランス・測光 だけで") != std::wstring::npos, "product screen: the offer names the four items");
     }
     {
         // A kind a copy cannot carry: no step and no notice for it, listed with what to do; the rest is confirmable.
@@ -2817,7 +2899,7 @@ void ScreenProductRows() {
         const auto* view = s.screen->View();
         check(view && view->lines.size() == 10 && count_note(view) == 0, "product screen, Preset: no white balance step, so no notice");
         check(Shows(view, L"ホワイトバランス: 本体に登録した内容") && Shows(view, L"B の本体で合わせてください") && !Shows(view, L"ホワイトバランス: CAM-B の今の値"), "product screen, Preset: listed with the reason");
-        check(s.Confirm() && s.bench.Writes() == 2 && s.bench.b.begins_by_code.count(0x5005) == 0, "product screen, Preset: written without the white balance");
+        check(s.Confirm() && s.bench.Writes() == 3 && s.bench.b.begins_by_code.count(0x5005) == 0, "product screen, Preset: written without the white balance");
     }
 }
 void ScreenSkippedShown() {
@@ -3159,6 +3241,7 @@ int main() {
     run("HappyCopy", HappyCopy);
     run("ProductRun", ProductRun);
     run("ProductRevisionItems", ProductRevisionItems);
+    run("ProductAperture", ProductAperture);
     run("PlanReadChecksTheBody", PlanReadChecksTheBody);
     run("BodyAndConfirmation", BodyAndConfirmation);
     run("RecordMustBeWrittenFirst", RecordMustBeWrittenFirst);

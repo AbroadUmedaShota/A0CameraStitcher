@@ -450,11 +450,11 @@ int RunSettingsWriteUiSmoke(){
     wchar_t caption[256]{};GetWindowTextW(window,caption,256);
     check(std::wstring(caption).find(L"設定の書き込みあり")!=std::wstring::npos); // the ON build's mark
 
-    // 1. The product table and an empty record folder: three rows are enabled (ISO, white balance and metering on CAM-B), capture is free, and copying
+    // 1. The product table and an empty record folder: four rows are enabled (ISO, aperture, white balance and metering on CAM-B), capture is free, and copying
     //    is offered once both Live sessions are joined. The smoke opens no camera (the access counts every Open).
     InitSettingsWrite(std::make_unique<D810SettingsFileJournal>(folder),factory);
     auto* screen=settings_write->screen.get();
-    check(screen->Status().enabled_rows==3 && screen->Status().write_allowed && screen->Status().capture_allowed);
+    check(screen->Status().enabled_rows==4 && screen->Status().write_allowed && screen->Status().capture_allowed);
     tick();
     check(!SettingsWriteButtonShown(settings_copy_button) && !IsWindowEnabled(settings_copy_button)); // Live runs: not shown
     stop_live();tick();
