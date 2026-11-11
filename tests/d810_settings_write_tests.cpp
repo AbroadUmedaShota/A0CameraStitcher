@@ -4507,7 +4507,7 @@ void ScreenChosenRefusals() {
     {
         // The symbols of a release by the values written, as lines; a symbol that is not known is shown as it is.
         const auto has = [](const char* symbol, const wchar_t* part) { return D810ChosenDifferenceText(symbol).find(part) != std::wstring::npos; };
-        check(has("record_unreadable", L"操作の記録を読めないので、解けません。記録のファイルは消さないでください"), "difference: record unreadable");
+        check(has("record_unreadable", L"操作の記録を読めないので、解けません。記録のファイルは消さない・動かさないで、人が確かめてください"), "difference: record unreadable");
         check(has("exposure_mode:CAM-B:not_manual", L"CAM-B の露出モードが M ではありません") && has("exposure_mode:CAM-A:unreadable", L"CAM-A の露出モードを読めませんでした"), "difference: exposure mode");
         check(has("iso_auto:CAM-A:not_off", L"CAM-A の ISO 自動が OFF ではありません") && has("iso_auto:CAM-B:unreadable", L"CAM-B の ISO 自動を読めませんでした"), "difference: ISO auto");
         check(has("iso:CAM-B:not_planned_value", L"ISO感度: CAM-B は、書いた値になっていません") && has("iso:CAM-A:unreadable", L"ISO感度: CAM-A は読めません") &&
@@ -4627,6 +4627,30 @@ void ScreenRereadUsesTheRuleOfTheCheck() {
     check(s.bench.file.Append("this is not a line of the record"), "check rule: the record is damaged behind the screen's back");
     check(screen.RequestPanelReread(true) && s.WaitIdle(), "check rule: reread");
     check(Shows(screen.View(), L"CAM-A と CAM-B で違う項目があります") && !Shows(screen.View(), L"書いた値と違う項目") && Shows(screen.View(), kD810RecordDamagedAdvice), "check rule: told by the rule the check used");
+}
+void ScreenPanelFollowAndCount() {
+    using Item = D810ChoiceItem;
+    {
+        // "Same as CAM-A" is taken away, with a note, when CAM-A is then given a value that CAM-B does not offer.
+        ScreenBench s(kChosenTable);
+        s.bench.b.props[0x500f] = {4, 1, 100, 2, {64, 100, 200}};
+        auto& screen = *s.screen;
+        check(OpenPanel(s) && screen.PanelPickSameAsA(Item::Iso) && screen.PanelShownValue(D810Camera::B, Item::Iso) == 64 && screen.PanelDirty() == 1, "follow: B follows A");
+        check(screen.PanelPick(D810Camera::A, Item::Iso, 200) && screen.PanelShownValue(D810Camera::B, Item::Iso) == 200 && screen.PanelDirty() == 2, "follow: a value B offers is followed");
+        check(screen.PanelPick(D810Camera::A, Item::Iso, 400) && !screen.PanelDraftHas(D810Camera::B, Item::Iso) && screen.PanelShownValue(D810Camera::B, Item::Iso) == 100 && screen.PanelDirty() == 1,
+            "follow: a value B does not offer takes the follow away");
+        check(screen.PanelSummaryText().find(L"CAM-B はその値を受け付けないため、「A と同じ」を外しました") != std::wstring::npos, "follow: and says so");
+        check(screen.PanelPick(D810Camera::A, Item::Iso, 100) && screen.PanelSummaryText().find(L"外しました") == std::wstring::npos, "follow: the note goes with the next pick");
+    }
+    {
+        // The number on the button counts changes, not picks: a pick of the value a camera reads is an entry and not a change.
+        ScreenBench s(kChosenTable);
+        auto& screen = *s.screen;
+        check(OpenPanel(s) && screen.PanelPick(D810Camera::B, Item::Iso, 100) && screen.PanelEntryCount() == 1 && screen.PanelDirty() == 0, "count: an entry that changes nothing");
+        check(screen.PanelPick(D810Camera::B, Item::Iso, 200) && screen.PanelPick(D810Camera::A, Item::Iso, 64) && screen.PanelEntryCount() == 2 && screen.PanelDirty() == 1, "count: two entries, one change");
+        check(screen.ChosenOffered(true), "count: offered with one change");
+        check(screen.PanelCancelAll() == 1 && screen.PanelEntryCount() == 0, "count: cancel counts the changes");
+    }
 }
 void ScreenChosenDeadline() {
     using Item = D810ChoiceItem;
@@ -5060,6 +5084,7 @@ int main() {
     run("ScreenChosenWorkerFailure", ScreenChosenWorkerFailure);
     run("RereadRuleIsTold", RereadRuleIsTold);
     run("ScreenRereadUsesTheRuleOfTheCheck", ScreenRereadUsesTheRuleOfTheCheck);
+    run("ScreenPanelFollowAndCount", ScreenPanelFollowAndCount);
     run("ScreenChosenDeadline", ScreenChosenDeadline);
     run("ScreenChosenDamagedRecord", ScreenChosenDamagedRecord);
     run("ScreenSkippedShown", ScreenSkippedShown);

@@ -1052,7 +1052,7 @@ if(BUILD_TESTING)
     set_tests_properties(d810_settings_write_contracts PROPERTIES TIMEOUT 600)
     # Values chosen per camera (#416): the pickable items, the list of pickable values built from a property
     # description, display names, panel cells and the draft of picks. Pure data and display, no WPD, no gate, no
-    # write code: the test builds in the default (OFF) tree, and nothing links the header into the preview yet.
+    # write code: the test builds in the default (OFF) tree; only the preview built with the write option includes the header.
     # Like the write test it defines A0_ENABLE_WPD_SETTINGS_WRITE, which the header requires; the product
     # preview target does not define it when the option is OFF.
     add_executable(a0_d810_settings_choice_tests tests/d810_settings_choice_tests.cpp)

@@ -154,8 +154,8 @@ private:
 //
 // `cam_a_allowed` is the key to a CAM-A session (ADR-0041), closed by default: a
 // configuration for CAM-A without it is invalid and the gate is retired at once.
-// The gate does not know the table; the run sets the key only for a chosen plan
-// under a table whose chosen-values switch is on, so a CAM-A session cannot be
+// The gate does not know the table; the run opens the key (D810CamAKeyOpen) only for a chosen plan
+// under a table whose chosen-values switch is on, that names CAM-A's firmware and enables the row of every CAM-A step, so a CAM-A session cannot be
 // built from a copy plan or from a table that does not allow it, whatever the
 // plan says. CAM-B needs no key.
 struct D810WriteGateConfig {

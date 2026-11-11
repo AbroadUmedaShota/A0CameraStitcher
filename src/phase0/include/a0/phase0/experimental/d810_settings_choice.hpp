@@ -3,7 +3,8 @@
 //
 // Pure data and pure functions only: no Windows headers, no device access, no file I/O, and nothing here can
 // send a command. It builds on the item table and the write refusals of d810_settings_write.hpp but carries no
-// gate, session, plan or journal. Nothing in this header is wired to a plan, a gate or an execution path.
+// gate, session, plan or journal. It decides nothing about a write by itself: the plan builder (d810_settings_plan_chosen.hpp)
+// checks every pick again with the same refusals, and the gate checks the value again before it sends.
 //
 // What it provides:
 //   1. The items an operator may pick a value for, and the band and the names a pickable value must satisfy.

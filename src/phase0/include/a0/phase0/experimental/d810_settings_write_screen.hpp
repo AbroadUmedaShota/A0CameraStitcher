@@ -78,7 +78,7 @@ inline std::wstring D810CaptureBlockBaseText(D810CaptureBlock block, bool chosen
                L"ライブを止めて「設定を読み直す」を押してください。";
     case D810CaptureBlock::Unreadable:
         return L"撮影を止めています: 設定の書き込みの記録を読めません。この画面からは解けません。"
-               L"記録のファイルを人が確かめ、退避してください。";
+               L"記録のファイルを人が確かめてください（消さない・動かさないでください）。";
     }
     return L"撮影を止めています。";
 }
@@ -374,7 +374,7 @@ inline D810WriteScreenView BuildD810ChosenConfirmation(const D810WritePlan& plan
 // One symbol of the difference list of a release by the values written ("<item>:<CAM-x>:<why>", "nothing_planned",
 // "record_unreadable"), as a line of the result. A symbol this screen does not know is shown as it is.
 inline std::wstring D810ChosenDifferenceText(const std::string& difference) {
-    if (difference == "record_unreadable") return L"  操作の記録を読めないので、解けません。記録のファイルは消さないでください";
+    if (difference == "record_unreadable") return L"  操作の記録を読めないので、解けません。記録のファイルは消さない・動かさないで、人が確かめてください";
     if (difference == "nothing_planned") return L"  書く予定だった値が記録に残っていません。本体で合わせてから、もう一度押してください";
     const auto first = difference.find(':');
     const auto second = first == std::string::npos ? std::string::npos : difference.find(':', first + 1);
@@ -599,15 +599,28 @@ public:
         Say("settings_write_ui_panel_closed=1 discarded=" + std::to_string(dropped) + " setting_writes=0");
         return dropped;
     }
-    // A pick from a drop-down: only the draft changes, nothing is sent.
+    // The last thing the panel did with the cameras ended: a read or a reread that did not finish, or a run that was stopped before
+    // it sent, is not followed by starting the cameras again by itself.
+    bool PanelCamerasWereFine() const { return panel_cameras_ok_; }
+    // A pick from a drop-down: only the draft changes, nothing is sent. Picking CAM-A's value takes away CAM-B's "same as CAM-A"
+    // of the item when CAM-B does not offer the new value (the note says so; CAM-B keeps what it read).
     bool PanelPick(D810Camera camera, D810ChoiceItem item, std::int64_t value) {
         if (!PanelEditable() || !draft_.Pick(*model_, camera, item, value)) return false;
+        panel_notice_.clear();
+        if (camera == D810Camera::A) {
+            const auto& follow = draft_.Get(D810Camera::B, item);
+            if (follow && follow->source == D810ChoiceSource::SameAsA && !draft_.SameAsAOffered(*model_, item)) {
+                draft_.Cancel(D810Camera::B, item);
+                panel_notice_ = std::wstring(D810ChoiceItemLabel(item)) + L": CAM-B はその値を受け付けないため、「A と同じ」を外しました。";
+            }
+        }
         ++draft_serial_;
         return true;
     }
     // CAM-B follows CAM-A in this item.
     bool PanelPickSameAsA(D810ChoiceItem item) {
         if (!PanelEditable() || !draft_.PickSameAsA(*model_, item)) return false;
+        panel_notice_.clear();
         ++draft_serial_;
         return true;
     }
@@ -615,10 +628,13 @@ public:
     std::size_t PanelCancelAll() {
         if (!PanelEditable()) return 0;
         const auto dropped = draft_.Discard(*model_);
+        panel_notice_.clear();
         ++draft_serial_;
         return dropped;
     }
     std::size_t PanelEntryCount() const { return draft_.EntryCount(); }
+    // Whether the draft holds an entry for the cell (a pick or a follow), whether or not it changes anything.
+    bool PanelDraftHas(D810Camera camera, D810ChoiceItem item) const { return draft_.Get(camera, item).has_value(); }
     // The number of changes the picks stand for ("N 件を書き込む…").
     std::size_t PanelDirty() const { return model_ ? draft_.Dirty(*model_) : 0; }
     std::vector<D810PlannedWrite> PanelPlanned() const { return model_ ? draft_.PlannedWrites(*model_) : std::vector<D810PlannedWrite>{}; }
@@ -683,8 +699,12 @@ public:
     }
     // The line under the panel: what the operator can do now.
     std::wstring PanelSummaryText() const {
+        const auto core = PanelSummaryCore();
+        return panel_notice_.empty() || core.empty() ? core : panel_notice_ + L" " + core;
+    }
+    std::wstring PanelSummaryCore() const {
         if (!panel_open_ || !model_) return {};
-        if (panel_stale_) return L"書き込みのあとです。「設定を読み直す」を押して、最新の値を読んでください。";
+        if (panel_stale_) return L"書き込みのあと、または書き込みの途中で止まったあとです。「設定を読み直す」を押して、最新の値を読んでください。";
         std::size_t editable = 0;
         for (const auto camera : {D810Camera::A, D810Camera::B})
             for (const auto item : kD810ChoiceItems) editable += model_->At(camera, item).Editable();
@@ -704,7 +724,7 @@ public:
     std::wstring ChosenOfferText(bool screen_ready) const {
         if (!panel_open_) return {};
         if (Busy() || step_ != D810WriteScreenStep::Idle) return OfferText(screen_ready);
-        if (panel_stale_) return L"書き込みのあとです。「設定を読み直す」を押して、最新の値を読んでください。";
+        if (panel_stale_) return L"書き込みのあと、または書き込みの途中で止まったあとです。「設定を読み直す」を押して、最新の値を読んでください。";
         if (close_failed_) return OfferText(screen_ready);
         if (PanelDirty() == 0) return L"変更予定がありません。値を選ぶと、書き込めるようになります。";
         if (!WriteAllowedByBlock(status_.block)) return BlockText();
@@ -864,6 +884,7 @@ private:
     void Apply(const Outcome& outcome) {
         if (!outcome.error.empty()) {
             plan_.reset();
+            panel_cameras_ok_ = false;
             std::vector<std::wstring> lines{D810WriteReasonText(outcome.error)};
             if (outcome.step == D810WriteScreenStep::Writing) {
                 // The run may have sent before it failed: no plan stays up, and the panel does not say that nothing was written.
@@ -889,6 +910,8 @@ private:
         draft_ = D810PanelDraft(generation_);
         panel_snapshots_ = read.snapshots;
         panel_stale_ = false;
+        panel_cameras_ok_ = true;
+        panel_notice_.clear();
         ++panel_serial_;
         ++draft_serial_;
         return dropped;
@@ -899,6 +922,8 @@ private:
         panel_snapshots_ = {};
         panel_open_ = false;
         panel_stale_ = false;
+        panel_cameras_ok_ = true;
+        panel_notice_.clear();
         ++panel_serial_;
         ++draft_serial_;
         return dropped;
@@ -907,10 +932,12 @@ private:
     // (this read is only its number; the flags of the bodies are the controller's own), then the confirmation.
     void ApplyChosenRead(const D810PlanRead& read) {
         if (!read.complete) {
+            panel_cameras_ok_ = false;
             Finish(L"書く前の読み取りを最後まで終えられませんでした。何も書いていません。", {D810WriteReasonText(read.reason)});
             Say("settings_write_ui_chosen_read_incomplete=1 reason=" + read.reason);
             return;
         }
+        panel_cameras_ok_ = true; // both cameras answered
         const auto result = controller_.PlanChosen(read, choices_);
         if (!result.Ok()) {
             std::vector<std::wstring> lines;
@@ -935,7 +962,7 @@ private:
     }
     void ApplyPanelRead(const D810PlanRead& read) {
         if (!read.complete) {
-            Finish(L"両台の設定を読めませんでした。設定の画面は開きません。何も書いていません。", {D810WriteReasonText(read.reason)});
+            Finish(L"両台の設定を読めませんでした。設定の画面は開きません。何も書いていません。", {D810WriteReasonText(read.reason), L"ライブは止まっています。「ライブ再開」で再開できます。"});
             Say("settings_write_ui_panel_read_incomplete=1 reason=" + read.reason);
             return;
         }
@@ -999,6 +1026,8 @@ private:
     void ApplyRun(const D810WriteRun& run) {
         plan_.reset();
         const std::size_t dropped_picks = MarkPanelOld();
+        // A run that was stopped before it sent anything for a reason (a camera that did not open, a body that changed) leaves the cameras not as they were found.
+        panel_cameras_ok_ = !(run.sent == 0 && !run.reason.empty());
         Say("settings_write_ui_result verdict=" + std::string(D810WriteVerdictToken(run.verdict)) + " sent=" + std::to_string(run.sent) +
             " reason=" + (run.reason.empty() ? std::string("none") : run.reason));
         const bool chosen = run_source_ == D810PlanSource::Chosen;
@@ -1050,6 +1079,7 @@ private:
                     panel_lines.push_back(L"書いていない変更 " + std::to_wstring(dropped) + L" 件を捨てました。設定の画面は、読み直した値になりました。");
                 }
             } else {
+                panel_cameras_ok_ = false;
                 panel_lines.push_back(L"設定の画面の値は読み直せていません（前の値のままです）。" + D810WriteReasonText(panel_read->reason));
             }
         }
@@ -1060,6 +1090,7 @@ private:
             if (dropped_picks) status_line_ += L"（書いていない変更 " + std::to_wstring(dropped_picks) + L" 件を捨てました）";
         };
         if (!reread.complete) {
+            panel_cameras_ok_ = false;
             finish(L"読み直しを最後まで終えられませんでした。撮影の止めは変えていません。", {D810WriteReasonText(reread.reason)});
             return;
         }
@@ -1118,5 +1149,10 @@ private:
     D810PlanSource run_source_{D810PlanSource::CopyAToB};
     // The picks the plan in the making is built from (a copy of the draft taken when "N 件を書き込む…" was pressed).
     std::vector<D810CameraChoice> choices_;
+    // The last thing the panel did with the cameras ended (a read or a reread that did not finish, or a run stopped before it
+    // sent, did not).
+    bool panel_cameras_ok_{true};
+    // A note on the line under the panel about the last pick (a follow that had to be removed).
+    std::wstring panel_notice_;
 };
 } // namespace a0::phase0::experimental
