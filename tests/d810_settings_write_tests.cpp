@@ -2895,6 +2895,46 @@ void ChosenRelease() {
         check(reread.check.released, "the cameras agree: released");
     }
     {
+        // Part of the record of a chosen history cannot be trusted: the planned values may miss a step that was
+        // sent, so the planned values do not release. The cameras are compared with each other, as for copies.
+        // Each record leaves one planned value that CAM-B meets (iso 400): by the planned values alone it would be
+        // released, while CAM-A reads something else.
+        const std::string op1 = "a0sw1 op=00000000000000a1 ", op2 = "a0sw1 op=00000000000000a2 ";
+        const auto plan = [](const std::string& op, const char* source, int steps) { return op + "ev=plan t=x source=" + source + " steps=" + std::to_string(steps) + "\n"; };
+        const auto step = [](const std::string& op, int i, const char* alias, const char* before, const char* value) {
+            return op + "ev=step i=" + std::to_string(i) + " alias=" + alias + " item=iso code=0x500f before=" + before + " value=" + value + "\n";
+        };
+        const auto result = [](const std::string& op, int i) { return op + "ev=result i=" + std::to_string(i) + " readback=0x0190 verdict=match\n"; };
+        const auto end = [](const std::string& op, const char* verdict, int sent) { return op + "ev=end t=x verdict=" + verdict + " sent=" + std::to_string(sent) + " reason=x\n"; };
+        const std::string b_step = step(op1, 0, "CAM-B", "0x0064", "0x0190");
+        const auto run_case = [&](const char* what, const std::string& text, bool unreadable_line) {
+            Bench bench(kChosenTable, -1, true);
+            WriteFile(bench.file.Path(), text);
+            const auto state = ParseD810Journal(bench.Journal());
+            check(state.chosen_unresolved && state.history_damaged && state.block != D810CaptureBlock::None && (state.malformed_lines > 0) == unreadable_line, what);
+            check(state.expected.size() == 1 && state.expected[0].camera == D810Camera::B && state.expected[0].value == 400, what);
+            bench.a = Body(1667, 800, 64);
+            bench.b = Body(1667, 800, 400);
+            auto reread = bench.controller->Reread(bench.access, bench.options);
+            check(reread.complete && !reread.check.released && !reread.check.differences.empty() && reread.check.differences[0] == "iso" && !bench.controller->CaptureAllowed(), what);
+            bench.a = Body(1667, 800, 400);
+            reread = bench.controller->Reread(bench.access, bench.options);
+            check(reread.check.released && bench.controller->CaptureAllowed() && bench.Restarted().CaptureAllowed(), what);
+        };
+        // A step line in the middle cannot be read; the result and end lines come after it.
+        run_case("a step line in the middle is unreadable",
+            plan(op1, "chosen", 3) + b_step + step(op1, 1, "CAM-C", "0x0064", "0x00c8") + step(op1, 2, "CAM-A", "0x0040", "0x00c8") + result(op1, 0) + result(op1, 2) + end(op1, "mismatch", 2), true);
+        // The plan line of a later operation cannot be read, so its steps and its end are not taken.
+        run_case("the plan line of a later operation is unreadable",
+            plan(op1, "chosen", 1) + b_step + end(op1, "mismatch", 1) + plan(op2, "other", 1) + step(op2, 0, "CAM-A", "0x0040", "0x00c8") + end(op2, "mismatch", 1), true);
+        // A step line is gone altogether: every line that is left can be read.
+        run_case("a step line is missing", plan(op1, "chosen", 2) + b_step + result(op1, 0) + end(op1, "mismatch", 1), false);
+        // The last line is a step line cut short; nothing was sent. The two cameras must agree on the block items.
+        run_case("the last step line is cut short", plan(op1, "chosen", 2) + b_step + "a0sw1 op=00000000000000a1 ev=step i=1 alias=CAM-A item=iso co", true);
+        // An operation without an end line is held to its plan line as well.
+        run_case("no end line and a step line is missing", plan(op1, "chosen", 2) + b_step, false);
+    }
+    {
         // The check on its own.
         auto a = Body(1667, 800, 64), b = Body(333, 560, 100);
         const D810ExpectedValue b_iso{B, Item::Iso, 0x500f, 100}, a_iso{A, Item::Iso, 0x500f, 64};
@@ -2933,7 +2973,7 @@ void JournalPlanned() {
         const auto text = plan(op1, "chosen", 3) + step(op1, 0, "CAM-B", "iso", "0x500f", "0x0064", "0x0190") + step(op1, 1, "CAM-B", "shutter_speed", "0x500d", "0x0000014d", "0x000001f4") +
             step(op1, 2, "CAM-A", "iso", "0x500f", "0x0040", "0x00c8") + end(op1, "mismatch", 2);
         const auto state = ParseD810Journal(text);
-        check(state.block == D810CaptureBlock::Mismatch && state.chosen_unresolved && state.malformed_lines == 0 && state.expected.size() == 3, "a failed chosen plan");
+        check(state.block == D810CaptureBlock::Mismatch && state.chosen_unresolved && !state.history_damaged && state.malformed_lines == 0 && state.expected.size() == 3, "a failed chosen plan");
         check(value_of(state, B, Item::Iso) == 400 && value_of(state, A, Item::Iso) == 200 && value_of(state, B, Item::ShutterSpeed) == 500, "the planned value of each camera and item");
         check(state.expected[0].code == 0x500f && state.expected[1].code == 0x500d, "with the code written");
         // A matching reread closes the history; a mismatching one does not.
@@ -3013,6 +3053,42 @@ void JournalPlanned() {
             plan(op2, "chosen", 1) + step(op2, 0, "CAM-B", "iso", "0x500f", "0x0064", "0x0190") + end(op2, "mismatch", 1) +
             plan(op3, "chosen", 1) + step(op3, 0, "CAM-A", "iso", "0x500f", "0x00c8", "0x0064") + end(op3, "unknown", 1));
         check(three.expected.size() == 2 && three.expected[0].camera == A && three.expected[0].value == 100 && three.expected[1].camera == B && three.expected[1].value == 400, "folded in place");
+    }
+    {
+        // history_damaged: set by a line that cannot be read or by steps that do not fit the plan line of an
+        // operation that may have sent; cleared by what clears the history.
+        const auto b_step = step(op1, 0, "CAM-B", "iso", "0x500f", "0x0064", "0x0190");
+        const auto a_step = step(op1, 1, "CAM-A", "iso", "0x500f", "0x0040", "0x00c8");
+        const auto damaged = [](const std::string& text) { return ParseD810Journal(text).history_damaged; };
+        check(!damaged(plan(op1, "chosen", 2) + b_step + a_step + end(op1, "mismatch", 2)), "a whole record is not damaged");
+        check(!damaged(plan(op1, "chosen", 2) + b_step + a_step + end(op1, "match", 2) + plan(op2, "copy", 0) + end(op2, "match", 0)), "operations that fit their plan lines");
+        check(!damaged(plan(op1, "chosen", 0) + end(op1, "not_sent", 0)), "no steps and none announced");
+        check(damaged(plan(op1, "chosen", 2) + b_step + end(op1, "mismatch", 1)), "a step line is missing");
+        check(damaged(plan(op1, "chosen", 1) + b_step + a_step + end(op1, "mismatch", 2)), "a step line too many");
+        check(damaged(plan(op1, "chosen", 2) + b_step + step(op1, 0, "CAM-A", "iso", "0x500f", "0x0040", "0x00c8") + end(op1, "mismatch", 2)), "a repeated number");
+        check(damaged(plan(op1, "chosen", 2) + step(op1, 1, "CAM-A", "iso", "0x500f", "0x0040", "0x00c8") + step(op1, 0, "CAM-B", "iso", "0x500f", "0x0064", "0x0190") + end(op1, "mismatch", 2)),
+            "numbers out of order");
+        check(damaged(plan(op1, "chosen", 2) + b_step + a_step + end(op1, "unknown", 2) + plan(op2, "chosen", 2) + step(op2, 0, "CAM-B", "iso", "0x500f", "0x0190", "0x0064") + end(op2, "mismatch", 1)),
+            "a later operation does not fit");
+        check(damaged(op1 + "ev=plan t=x source=chosen steps=x\n" + b_step + end(op1, "match", 1)), "the number of steps cannot be read");
+        check(damaged(op1 + "ev=plan t=x source=chosen\n" + b_step + end(op1, "match", 1)), "a plan line cut short");
+        check(damaged(plan(op1, "chosen", 1) + "garbage\n" + b_step + end(op1, "match", 1)), "a line that is not a line of the record");
+        check(damaged(plan(op1, "chosen", 2) + b_step), "no end line and a step line is missing");
+        check(damaged(plan(op1, "chosen", 1) + b_step + plan(op2, "chosen", 1)), "an operation closed by the next plan line is held to its plan line too");
+        // An operation that sent nothing is not held to its plan line: no step of it counts.
+        check(!damaged(plan(op1, "chosen", 2) + b_step + end(op1, "not_sent", 0)), "not_sent without all its step lines");
+        check(damaged(plan(op1, "chosen", 2) + b_step + end(op1, "not_sent", 1)), "not_sent that says it sent");
+        // A start of the history clears it: a matching reread, and a plan line that finds no block.
+        const auto broken = plan(op1, "chosen", 2) + b_step + end(op1, "mismatch", 1);
+        check(damaged(broken + reread_mismatch), "a mismatching reread keeps it");
+        check(!damaged(broken + reread_match), "a matching reread clears it");
+        check(!damaged(broken + reread_match + plan(op2, "chosen", 1) + step(op2, 0, "CAM-B", "iso", "0x500f", "0x0190", "0x0064") + end(op2, "mismatch", 1)), "and a later whole operation does not set it again");
+        check(damaged(broken + plan(op2, "chosen", 1) + step(op2, 0, "CAM-B", "iso", "0x500f", "0x0190", "0x0064") + end(op2, "mismatch", 1)), "a later whole operation does not clear it while the block stands");
+        check(!damaged("a0sw1 op=00000000000000a1 ev=pl\n" + reread_match), "a line cut short before the reread");
+        check(damaged("a0sw1 op=00000000000000a1 ev=pl\n" + plan(op1, "chosen", 1) + b_step + end(op1, "match", 1)), "a line cut short at the start of the file stays");
+        // Copies alone: the mark exists but nothing rests on it (chosen_unresolved is false).
+        const auto copy_only = ParseD810Journal(plan(op1, "copy", 2) + b_step + end(op1, "mismatch", 1));
+        check(!copy_only.chosen_unresolved && copy_only.block == D810CaptureBlock::Mismatch && copy_only.malformed_lines == 0, "the record of copies reads as before");
     }
 }
 // White balance and metering through the whole run (test table): the order, the one send, the read back, the block.

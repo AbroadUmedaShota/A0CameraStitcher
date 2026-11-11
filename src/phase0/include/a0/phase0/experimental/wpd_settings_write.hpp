@@ -1050,12 +1050,13 @@ private:
     static bool WriteAllowed(D810CaptureBlock block) { return block == D810CaptureBlock::None || block == D810CaptureBlock::Mismatch; }
     // Which comparison releases the block is decided by the record on disk, the authority: a history with a chosen
     // plan and planned values to check uses them; anything else (copies only, an unreadable record, a chosen
-    // history whose step lines gave no value) compares the two cameras, the stricter rule.
+    // history whose step lines gave no value, a chosen history of which part of the record is damaged) compares
+    // the two cameras, the stricter rule.
     D810ReleaseCheck ReleaseCheck(const D810SettingsSnapshot& a, const D810SettingsSnapshot& b) const {
         const auto file = journal_.Read();
         if (file.kind == D810TextFile::Kind::Read) {
             const auto state = ParseD810Journal(file.text);
-            if (state.chosen_unresolved && !state.expected.empty()) return CheckD810ReleasePlanned(a, b, state.expected);
+            if (state.chosen_unresolved && !state.history_damaged && !state.expected.empty()) return CheckD810ReleasePlanned(a, b, state.expected);
         }
         return CheckD810Release(a, b, table_);
     }
