@@ -412,6 +412,7 @@ bool DrawLevel(HDC dc,int left,int width,const Camera& c){
     drawn=(LineTo(dc,x+dx,y+dy)!=FALSE) && drawn;
     RestoreDC(dc,saved);return drawn && text_drawn;
 }
+#include "wpd_dual_preview_af_ui.hpp"
 // Camera-free rendering contract. Inspect only our own memory bitmap; never
 // read the desktop or attach to a camera. Real-frame presentation is separate.
 int RunLevelUiSmoke(){
@@ -531,6 +532,7 @@ std::array<std::uint64_t,6> Paint(HDC dc,RECT client){
         if(DrawLevel(dc,left,pane-24,c))drawn[4+i]=c.frames;
         if(!c.pixels.bytes.empty() && Clock::now()-c.last<std::chrono::seconds(2) && !stopping &&
             DrawPixels(dc,c.pixels,left,top,pane-24,client.bottom/2-top-8))drawn[i]=c.frames;
+        if(drawn[i]==c.frames && !c.pixels.bytes.empty())DrawAfOverlay(dc,c,client,i); // #426: the body's AF frame over the picture
     }
     RECT status_rect{12,client.bottom/2+4,client.right-12,client.bottom/2+48};
     DrawTextW(dc,capture_status.c_str(),-1,&status_rect,DT_LEFT|DT_WORDBREAK|DT_NOPREFIX);
@@ -945,6 +947,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM w,LPARAM l){
     case WM_DESTROY:PostQuitMessage(0);return 0;
     }return DefWindowProcW(hwnd,message,w,l);
 }
+#include "wpd_dual_preview_af_smoke.hpp"
 int RunLifecycleUiSmoke(){
     // Synthetic failed workers only. No Discover/Open/Run or hardware lease.
     Log("lifecycle_ui_synthetic=1 camera_operations=0");

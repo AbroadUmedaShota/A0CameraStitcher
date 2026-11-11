@@ -3,6 +3,7 @@
 #include "a0/phase0/experimental/wpd_live_view_transfer.hpp"
 #include "a0/phase0/experimental/preview_back_buffer.hpp"
 #include "a0/phase0/experimental/preview_focus.hpp"
+#include "a0/phase0/experimental/preview_af_point.hpp"
 #include "a0/phase0/experimental/preview_shutdown.hpp"
 #include "a0/phase0/experimental/preview_lifecycle.hpp"
 #include "a0/phase0/experimental/wpd_still_capture.hpp"
@@ -434,6 +435,8 @@ struct Camera final:WpdLiveViewCommandChannel {
     std::wstring failure_status{L"映像取得・制御に失敗しました"};
     std::array<unsigned,3> focus_success{};unsigned focus_requests{};
     DWORD focus_mode{0xffffffff};
+    PreviewAfState af; // AF frame the body reports (#426); guarded by `mutex`
+    void UpdateAfFrame(std::span<const unsigned char> payload,unsigned width,unsigned height); // wpd_dual_preview_af.hpp
     Clock::time_point first{},last{},busy_since{};std::atomic<bool> done{},failed{};
     Clock::time_point send_deadline{Clock::time_point::max()};
     bool admission_cancelled{},frame_dispatched{};
@@ -673,6 +676,7 @@ struct Camera final:WpdLiveViewCommandChannel {
                     if(stopping)break; // Transfer was drained, do not publish a stopped frame.
                     auto next=Decode(factory.Get(),D810PreviewJpeg(result.payload));
                     const auto next_level=D810PreviewLevel(result.payload);
+                    UpdateAfFrame(result.payload,next.width,next.height);
                     if(!frames){
                         // Diagnostic numeric words only, never image/header dumps.
                         std::ostringstream words;words<<alias<<" level_header_words="<<std::hex;
@@ -723,6 +727,7 @@ struct Camera final:WpdLiveViewCommandChannel {
             std::ostringstream event;event<<alias<<" transport_cancel_complete=1 hr=0x"<<std::hex<<static_cast<unsigned long>(hr);Log(event.str());}
     }
 };
+#include "wpd_dual_preview_af.hpp"
 int ReadCaptureDiagnostics(const std::array<std::wstring,2>& ids,bool inspect_events=false,bool require_live_off=false,bool extended_state=false){
     Log("capture_diagnostics=1 shutter_commands=0 setting_writes=0 live_start_commands=0");
     if(inspect_events)Log("event_diagnostics=1 polls_per_camera=4 capture_admission=not_evaluated");
@@ -911,6 +916,7 @@ int main(int argc,char** argv){
 #endif
 #endif
         if(argc==2 && std::string(argv[1])=="--level-ui-smoke")return RunLevelUiSmoke();
+        if(argc==2 && std::string(argv[1])=="--af-point-ui-smoke")return RunAfPointUiSmoke();
         if(argc==2 && std::string(argv[1])=="--lifecycle-ui-smoke")return RunLifecycleUiSmoke();
         if(argc==2 && std::string(argv[1])=="--fixed-c-ui-smoke")return RunFixedCUiSmoke();
         if(argc==2 && std::string(argv[1])=="--settings-ui-smoke")return RunSettingsUiSmoke();
