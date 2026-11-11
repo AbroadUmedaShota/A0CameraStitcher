@@ -517,7 +517,7 @@ void SettingsWriteTimer(){
     {   // The settings panel: its buttons (never together with the confirmation's), its drop-downs and the picks they show.
         const bool panel=screen.PanelOpen(),panel_shown=shown && panel;
         // Offered also while Live runs (the panel then stops it first), not while it is being stopped for the panel.
-        ShowSettingsWriteButton(settings_panel_open_button,!panel && !closing && (shown || settings_panel_open_pending || SettingsPanelLiveStoppable()),!settings_panel_open_pending && (screen.PanelOpenOffered(ready) || SettingsPanelMayStopLive()));
+        ShowSettingsWriteButton(settings_panel_open_button,!panel && !closing && !confirming && (shown || settings_panel_open_pending || SettingsPanelLiveStoppable()),!settings_panel_open_pending && (screen.PanelOpenOffered(ready) || SettingsPanelMayStopLive()));
         ShowSettingsWriteButton(settings_panel_close_button,panel_shown && !confirming,screen.PanelCloseOffered());
         ShowSettingsWriteButton(settings_panel_cancel_button,panel_shown && !confirming,screen.PanelEditable() && screen.PanelEntryCount()>0);
         // "N 件を書き込む…" is offered by the screen: a change is planned and nothing else holds the cameras.
@@ -945,6 +945,19 @@ D810WriteTable SmokeConfirmTable(){
     }
     return table;
 }
+// How many buttons (and drop-downs) that are shown overlap the window rectangle of `target`, other than `target` itself. A
+// confirmation is only safe to press when nothing else is drawn over its button; the smokes press by message and cannot see this.
+int ShownSiblingsOverlapping(HWND target){
+    RECT own{};
+    if(!target || !GetWindowRect(target,&own))return -1;
+    int count{};
+    for(HWND child=GetWindow(GetParent(target),GW_CHILD);child;child=GetWindow(child,GW_HWNDNEXT)){
+        if(child==target || !SettingsWriteButtonShown(child))continue;
+        RECT other{},common{};
+        if(GetWindowRect(child,&other) && IntersectRect(&common,&own,&other))++count;
+    }
+    return count;
+}
 // Only CAM-B's ISO row is enabled (the codes the plan reads are set): every other item is left out with the table's reason.
 D810WriteTable SmokeIsoOnlyTable(){
     auto table=SmokeConfirmTable();
@@ -1061,6 +1074,8 @@ int RunSettingsWriteConfirmSmoke(){
     // 2. Drawn whole by a present of the window: pressable.
     paint();tick();
     check(settings_write_drawn_serial==screen->ViewSerial() && confirm_enabled() && settings_write_confirm_refusals==refusals_before+1);
+    // Nothing is drawn over the confirm button: the panel's button is not shown while a confirmation is up, and no shown button overlaps it.
+    check(!SettingsWriteButtonShown(settings_panel_open_button) && ShownSiblingsOverlapping(settings_confirm_button)==0);
 
     // 3. The window gets one row too short: not pressable by the height alone; a paint there draws nothing whole and
     //    leaves the flag down, so growing the window back is not enough until it has been drawn again.
@@ -1528,6 +1543,7 @@ int RunSettingsWriteChosenSmoke(){
         screen->TakeChosenReadForTest(read);
         paint();tick();
         check(screen->ConfirmationShown() && confirm_enabled());
+        check(!shown(settings_panel_open_button) && ShownSiblingsOverlapping(settings_confirm_button)==0 && ShownSiblingsOverlapping(settings_discard_button)==0);
         // Confirmed: the run (with no camera it sends nothing), then the panel is old and the picks are used up.
         const auto refusals_now=settings_write_confirm_refusals;
         click(407,settings_confirm_button);
