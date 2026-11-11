@@ -170,6 +170,7 @@ inline const wchar_t* D810ChosenReasonText(std::string_view what) {
     static constexpr Entry kEntries[] = {
         {"chosen_values_disabled", L"この版では、選んだ値を書くことはできません"},
         {"no_choice", L"書く値が選ばれていません"},
+        {"read_not_current", L"書く前の読み取りが古いか、最後まで終わっていないため、計画を作りませんでした。もう一度「N 件を書き込む…」を押してください"},
         {"item_not_choosable", L"この項目は、選んで書く対象ではありません"},
         {"same_as_a_on_cam_a", L"CAM-A を「A と同じ」にはできません"},
         {"same_as_a_not_offered", L"CAM-A の値を、この台は受け付けると答えていません"},
@@ -548,8 +549,8 @@ public:
         ResetView();
         Say("settings_write_ui_reread_requested=1 setting_writes=0");
         reread_chosen_ = status_.chosen_history;
-        Launch(D810WriteScreenStep::Rereading);
         reread_damaged_ = status_.history_damaged;
+        Launch(D810WriteScreenStep::Rereading);
         return true;
     }
 
@@ -584,8 +585,8 @@ public:
         ResetView();
         Say("settings_write_ui_reread_requested=1 setting_writes=0");
         reread_chosen_ = status_.chosen_history;
-        Launch(D810WriteScreenStep::Rereading, true);
         reread_damaged_ = status_.history_damaged;
+        Launch(D810WriteScreenStep::Rereading, true);
         return true;
     }
     // Closes the panel. Returns the number of changes that were not written and are dropped (also said on the
@@ -767,7 +768,12 @@ public:
     // The same for the panel: a read made without a camera becomes the panel's model.
     void TakePanelReadForTest(const D810PlanRead& read) { ApplyPanelRead(read); }
     // The read made for "N 件を書き込む…" without a camera, from the picks now in the draft: the plan and its confirmation.
-    void TakeChosenReadForTest(const D810PlanRead& read) { choices_ = draft_.Choices(); ApplyChosenRead(read); }
+    void TakeChosenReadForTest(const D810PlanRead& read) {
+        auto taken = read;
+        controller_.AcceptReadForTest(taken); // the read the plan is made from is the one the controller holds
+        choices_ = draft_.Choices();
+        ApplyChosenRead(taken);
+    }
     // A finished run of a plan of `source` as the worker would hand it back.
     void TakeRunForTest(const D810WriteRun& run, D810PlanSource source) { run_source_ = source; ApplyRun(run); }
 #endif
@@ -890,15 +896,15 @@ private:
         ++draft_serial_;
         return dropped;
     }
-    // The read made for "N 件を書き込む…": the plan of the picks (`choices_`) from this read and the flags of the same
-    // read (`read.verified`: the plan refuses a camera whose body the table does not name), then the confirmation.
+    // The read made for "N 件を書き込む…": the controller makes the plan of the picks (`choices_`) from the last read it made
+    // (this read is only its number; the flags of the bodies are the controller's own), then the confirmation.
     void ApplyChosenRead(const D810PlanRead& read) {
         if (!read.complete) {
             Finish(L"書く前の読み取りを最後まで終えられませんでした。何も書いていません。", {D810WriteReasonText(read.reason)});
             Say("settings_write_ui_chosen_read_incomplete=1 reason=" + read.reason);
             return;
         }
-        const auto result = controller_.PlanChosen(read.snapshots[0], read.snapshots[1], read.verified, choices_);
+        const auto result = controller_.PlanChosen(read, choices_);
         if (!result.Ok()) {
             std::vector<std::wstring> lines;
             for (const auto& reason : result.reasons) lines.push_back(D810PlanReasonText(reason, true));
@@ -1059,6 +1065,7 @@ private:
         }
         std::vector<std::wstring> lines{L"違う項目（または読めない項目）:"};
         for (const auto& difference : reread.check.differences) {
+            if (difference == "record_unreadable") { lines.push_back(D810ChosenDifferenceText(difference)); continue; }
             const auto colon = difference.find(':');
             std::wstring line = L"  " + D810WriteItemNameLabel(difference.substr(0, colon));
             if (colon != std::string::npos) line += difference.substr(colon + 1) == "unreadable" ? L"（読めない）" : L"（本体の別の中身に頼る値で比べられない）";
@@ -1067,7 +1074,6 @@ private:
         if (reread_damaged_) lines.push_back(std::wstring(L"  ") + kD810RecordDamagedAdvice);
         const bool record_unreadable = reread.check.differences.size() == 1 && reread.check.differences[0] == "record_unreadable";
         finish(record_unreadable ? L"読み直しました: 操作の記録を読めないため、止めは解いていません。" : L"読み直しました: CAM-A と CAM-B で違う項目があります。", std::move(lines));
-            if (difference == "record_unreadable") { lines.push_back(D810ChosenDifferenceText(difference)); continue; }
     }
 
     D810SettingsWriteController& controller_;
@@ -1095,7 +1101,7 @@ private:
     std::vector<D810CameraChoice> choices_;
     // The record held a plan of picked values when the reread was asked: the reread is told in terms of the values written.
     bool reread_chosen_{};
-};
-} // namespace a0::phase0::experimental
     // Part of the record could not be read when the reread was asked: the cameras are compared, and the screen says so.
     bool reread_damaged_{};
+};
+} // namespace a0::phase0::experimental

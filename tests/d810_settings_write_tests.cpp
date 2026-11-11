@@ -455,9 +455,18 @@ struct Bench {
     D810BodyFlags Verified() const {
         return {D810BodyVerified(table, D810Camera::A, access.model[0], access.firmware[0]), D810BodyVerified(table, D810Camera::B, access.model[1], access.firmware[1])};
     }
-    D810PlanResult Chosen(const std::vector<D810CameraChoice>& choices) { return Chosen(choices, Verified()); }
+    // The way the screen plans picked values: the controller reads both bodies (ReadForPlan) and plans from that read.
+    // A body that the table does not name for CAM-B ends the read, so there is no plan then ("read_not_current").
+    D810PlanResult Chosen(const std::vector<D810CameraChoice>& choices) {
+        const auto read = controller->ReadForPlan(access, options);
+        // The read for the plan is not part of the run that follows: the counts of opens and closes start again.
+        for (int i = 0; i < 2; ++i) access.opens[i] = access.closes[i] = 0;
+        access.overlap = false;
+        return controller->PlanChosen(read, choices);
+    }
+    // The plan builder itself with flags given by the caller (what the controller keeps from a read is tested through Chosen above).
     D810PlanResult Chosen(const std::vector<D810CameraChoice>& choices, const D810BodyFlags& verified) {
-        return controller->PlanChosen(Snapshot(a, "CAM-A"), Snapshot(b, "CAM-B"), verified, choices);
+        return BuildD810PerCameraPlan(Snapshot(a, "CAM-A"), Snapshot(b, "CAM-B"), verified, choices, table);
     }
     // (camera index, code) of every write begin that reached a body, in the order they arrived. Call after the
     // bodies are set up: assigning a whole body replaces its hook.
@@ -1323,8 +1332,12 @@ void ChosenPlans() {
         check(!mixed.Ok() && HasReason(mixed, "body_not_verified:CAM-A"), "the plan with a CAM-A step is refused");
         check(bench.Chosen({PickFor(A, Item::Iso, 64)}).Ok(), "a CAM-A pick that changes nothing needs no verified CAM-A");
         bench.access.firmware[1] = "other-text";
+        // A CAM-B that is not the table's ends the read for the plan, so the controller has no read to plan from; the plan builder, given
+        // both flags false, names both bodies.
         const auto both = bench.Chosen({PickFor(B, Item::Iso, 200), PickFor(A, Item::Iso, 200)});
-        check(!both.Ok() && HasReason(both, "body_not_verified:CAM-A") && HasReason(both, "body_not_verified:CAM-B"), "both named");
+        check(!both.Ok() && HasReason(both, "read_not_current"), "CAM-B not verified: the read does not complete, no plan");
+        const auto named = bench.Chosen({PickFor(B, Item::Iso, 200), PickFor(A, Item::Iso, 200)}, bench.Verified());
+        check(!named.Ok() && HasReason(named, "body_not_verified:CAM-A") && HasReason(named, "body_not_verified:CAM-B"), "both named");
         Bench flags(kChosenTable);
         check(!flags.Chosen({PickFor(B, Item::Iso, 200)}, {true, false}).Ok() && flags.Chosen({PickFor(B, Item::Iso, 200)}, {false, true}).Ok(), "the flags are read by camera");
         check(!flags.Chosen({PickFor(A, Item::Iso, 200)}, {false, true}).Ok() && flags.Chosen({PickFor(A, Item::Iso, 200)}, {true, false}).Ok(), "the flags are read by camera, CAM-A");
@@ -2732,6 +2745,76 @@ std::vector<std::string> JournalStepOrder(const std::string& journal) {
     return out;
 }
 using BeginOrder = std::vector<std::pair<int, int>>;
+// The plan of picked values takes the controller's own last read: the read it is handed is only a number.
+void ChosenReadToken() {
+    using Item = D810WriteItem;
+    const auto A = D810Camera::A, B = D810Camera::B;
+    {
+        Bench bench(kChosenTable);
+        const auto read = bench.controller->ReadForPlan(bench.access, bench.options);
+        check(read.complete && read.id != 0 && read.verified == D810BodyFlags{true, true}, "token: a complete read has a number");
+        check(bench.controller->PlanChosen(read, {PickFor(B, Item::Iso, 200)}).Ok(), "token: the last read plans");
+        check(bench.controller->PlanChosen(read, {PickFor(B, Item::Iso, 400)}).Ok(), "token: and plans again");
+        // An older read is refused once another is made.
+        const auto newer = bench.controller->ReadForPlan(bench.access, bench.options);
+        const auto old_plan = bench.controller->PlanChosen(read, {PickFor(B, Item::Iso, 200)});
+        check(!old_plan.Ok() && HasReason(old_plan, "read_not_current") && old_plan.reasons.size() == 1, "token: an older read is refused");
+        check(!bench.controller->Status().plan_pending, "token: a refused plan leaves nothing pending");
+        check(bench.controller->PlanChosen(newer, {PickFor(B, Item::Iso, 200)}).Ok(), "token: the newer read plans");
+        // Not a read of this controller: nothing, a number made up, a read of another controller (numbers are unique over the process).
+        D810PlanRead blank;
+        blank.complete = true;
+        check(HasReason(bench.controller->PlanChosen(blank, {PickFor(B, Item::Iso, 200)}), "read_not_current"), "token: a read with no number");
+        auto made_up = newer;
+        made_up.id += 1000;
+        check(HasReason(bench.controller->PlanChosen(made_up, {PickFor(B, Item::Iso, 200)}), "read_not_current"), "token: a made-up number");
+        Bench other(kChosenTable);
+        const auto elsewhere = other.controller->ReadForPlan(other.access, other.options);
+        check(elsewhere.id != newer.id && HasReason(bench.controller->PlanChosen(elsewhere, {PickFor(B, Item::Iso, 200)}), "read_not_current"), "token: a read of another controller");
+        // A read that did not complete is not kept (CAM-B is not the table's), and it makes the earlier one old.
+        other.access.firmware[1] = "other-text";
+        const auto partial = other.controller->ReadForPlan(other.access, other.options);
+        check(!partial.complete && HasReason(other.controller->PlanChosen(partial, {PickFor(B, Item::Iso, 200)}), "read_not_current") &&
+                HasReason(other.controller->PlanChosen(elsewhere, {PickFor(B, Item::Iso, 200)}), "read_not_current"),
+            "token: an incomplete read plans nothing and replaces the last");
+        check(bench.Writes() == 0 && other.Writes() == 0, "token: nothing sent");
+    }
+    {
+        // What the caller holds is not trusted: the flags and the snapshots are the controller's. CAM-A's body is not the table's here.
+        Bench bench(kChosenTable);
+        bench.access.firmware[0] = "other-text";
+        auto read = bench.controller->ReadForPlan(bench.access, bench.options);
+        check(read.complete && read.verified == D810BodyFlags{false, true}, "forged: CAM-A is reported as not verified");
+        read.verified = {true, true};
+        const auto forged = bench.controller->PlanChosen(read, {PickFor(A, Item::Iso, 200)});
+        check(!forged.Ok() && HasReason(forged, "body_not_verified:CAM-A"), "forged: flags the caller sets are not used");
+        // Snapshots the caller sets are not used: CAM-A is made to read the value that the pick would not change.
+        read.snapshots[0] = Snapshot(bench.a, "CAM-A");
+        bench.access.firmware[0] = "1.00";
+        auto good = bench.controller->ReadForPlan(bench.access, bench.options);
+        const auto real = bench.controller->PlanChosen(good, {PickFor(A, Item::Iso, 200)});
+        check(real.Ok() && real.plan->steps.size() == 1 && real.plan->steps[0].before == 64, "forged: the plan is made from the controller's read");
+        good.snapshots[0] = Snapshot(bench.a, "CAM-A");
+        for (auto& reading : good.snapshots[0])
+            if (reading.id == D810SettingId::Iso) reading.desc.current_value = 200;
+        const auto tampered = bench.controller->PlanChosen(good, {PickFor(A, Item::Iso, 200)});
+        check(tampered.Ok() && tampered.plan->steps.size() == 1 && tampered.plan->steps[0].before == 64, "forged: snapshots the caller sets are not used");
+    }
+    {
+        // A run and a reread make a read old: the cameras changed after it.
+        Bench bench(kChosenTable);
+        const auto read = bench.controller->ReadForPlan(bench.access, bench.options);
+        const auto plan = bench.controller->PlanChosen(read, {PickFor(B, Item::Iso, 200)});
+        check(plan.Ok() && bench.Run(plan).verdict == D810WriteVerdict::Match, "stale: a run");
+        check(HasReason(bench.controller->PlanChosen(read, {PickFor(B, Item::Iso, 400)}), "read_not_current"), "stale: the read before a run is old");
+        const auto second = bench.controller->ReadForPlan(bench.access, bench.options);
+        check(bench.controller->PlanChosen(second, {PickFor(B, Item::Iso, 400)}).Ok(), "stale: a new read plans");
+        bench.controller->Reread(bench.access, bench.options);
+        check(HasReason(bench.controller->PlanChosen(second, {PickFor(B, Item::Iso, 400)}), "read_not_current"), "stale: the read before a reread is old");
+        // The copy's way in is not changed.
+        check(bench.Copy().Ok(), "stale: the copy plan still takes two snapshots");
+    }
+}
 void ChosenRuns() {
     using Item = D810WriteItem;
     const auto A = D810Camera::A, B = D810Camera::B;
@@ -2918,7 +3001,9 @@ void ChosenRelease() {
         const auto state = ParseD810Journal(bench.Journal());
         check(state.block == D810CaptureBlock::None && !state.chosen_unresolved && state.expected.empty(), "the release closed the history");
         // The release is not a plan: a new chosen plan can be made and starts afresh.
-        check(bench.Restarted().PlanChosen(Snapshot(bench.a, "CAM-A"), Snapshot(bench.b, "CAM-B"), bench.Verified(), {PickFor(B, Item::Aperture, 1100)}).Ok(), "a new plan can be made");
+        auto fresh = bench.Restarted();
+        const auto fresh_read = fresh.ReadForPlan(bench.access, bench.options);
+        check(fresh.PlanChosen(fresh_read, {PickFor(B, Item::Aperture, 1100)}).Ok(), "a new plan can be made");
     }
     {
         // A value that leans on content held in the body is never a match.
@@ -4465,6 +4550,39 @@ void ScreenChosenDeadline() {
     check(screen.RequestPanelReread(true) && s.WaitIdle() && screen.PanelEditable(), "deadline: reread");
     check(screen.PanelPick(B, Item::Iso, 100) && screen.PanelPick(B, Item::ShutterSpeed, 500) && screen.RequestChosen(true) && s.WaitIdle() && s.Confirm() && Shows(screen.View(), L"選んだ値を書きました: 一致（2 項目"), "deadline: two steps");
 }
+void ScreenChosenDamagedRecord() {
+    using Item = D810ChoiceItem;
+    const auto A = D810Camera::A, B = D810Camera::B;
+    const std::wstring advice = kD810RecordDamagedAdvice;
+    ScreenBench s(kChosenTable, true); // on disk: the record is a file that can be damaged
+    auto& screen = *s.screen;
+    s.bench.b.apply_as[0x500f] = 400; // CAM-B's write does not take: a block stands
+    check(OpenPanel(s) && screen.PanelPick(B, Item::Iso, 200) && screen.PanelPick(A, Item::Iso, 200) && screen.RequestChosen(true) && s.WaitIdle() && s.Confirm(), "damaged: a chosen run that did not take");
+    check(screen.Status().block == D810CaptureBlock::Mismatch && screen.Status().chosen_history && !screen.Status().history_damaged, "damaged: the record is whole, the history is a chosen plan's");
+    check(screen.CaptureRefusalText().find(L"書いた値が、読み戻しで確かめられていません") != std::wstring::npos && screen.CaptureRefusalText().find(advice) == std::wstring::npos, "damaged: whole record, the words of the values written");
+    // A line that cannot be read joins the record.
+    check(s.bench.file.Append("this is not a line of the record"), "damaged: the record is damaged");
+    screen.Refresh();
+    check(!screen.Status().chosen_history && screen.Status().history_damaged && !screen.Status().capture_allowed, "damaged: not a chosen history any more, damaged");
+    const auto held = screen.CaptureRefusalText();
+    check(held.find(advice) != std::wstring::npos && held.find(L"書いた値が、読み戻しで確かめられていません") == std::wstring::npos, "damaged: the block text is the comparison's and gives the advice");
+    // The reread compares the cameras (CAM-A reads 64, CAM-B 400 on the block items), item by item, and gives the advice; it does not tell the written values.
+    check(screen.RequestPanelReread(true) && s.WaitIdle(), "damaged: reread");
+    check(Shows(screen.View(), L"読み直しました: CAM-A と CAM-B で違う項目があります。") && Shows(screen.View(), L"  ISO感度") && Shows(screen.View(), advice) &&
+            !Shows(screen.View(), L"書いた値になっていません") && !Shows(screen.View(), L"書いた値と違う項目"),
+        "damaged: the reread compares the two cameras and gives the advice");
+    check(!screen.Status().capture_allowed, "damaged: not released");
+    // Both cameras the same on every block item: released, whatever was written.
+    s.bench.b.props[0x500f].current = 64;
+    s.bench.b.props[0x500d].current = s.bench.a.props[0x500d].current;
+    s.bench.b.props[0x5007].current = s.bench.a.props[0x5007].current;
+    check(screen.RequestPanelReread(true) && s.WaitIdle() && Shows(screen.View(), L"読み直しました: 止めの対象の項目は CAM-A と CAM-B で同じです。") && screen.Status().capture_allowed, "damaged: released when the cameras are the same");
+    // A record that cannot be read at all releases nothing and says so.
+    check(D810CaptureBlockText(D810CaptureBlock::Mismatch, false, true).find(advice) != std::wstring::npos && D810CaptureBlockText(D810CaptureBlock::Unconfirmed, false, true).find(advice) != std::wstring::npos &&
+            D810CaptureBlockText(D810CaptureBlock::Unreadable, false, true).find(advice) == std::wstring::npos && D810CaptureBlockText(D810CaptureBlock::None, false, true).empty() &&
+            D810CaptureBlockText(D810CaptureBlock::Mismatch, false, false).find(advice) == std::wstring::npos,
+        "damaged: the advice is for a block that the cameras' comparison releases");
+}
 void ScreenSkippedShown() {
     // A row the table does not enable is listed as left out, with the reason, before confirming.
     ScreenBench s(Adr38Only({D810WriteItem::ExposureMode, D810WriteItem::IsoAuto, D810WriteItem::ShutterSpeed, D810WriteItem::Aperture}));
@@ -4550,39 +4668,6 @@ void ScreenConfirmationOrder() {
         check(view->lines[1].find(L"項目ごとに 1 回だけです") != std::wstring::npos && view->lines[1].find(L"再送しません") != std::wstring::npos, "confirmation: the second is once, no resend");
         check(view->lines[2].find(L"項目:") == 0, "confirmation: the items follow the notices");
     }
-void ScreenChosenDamagedRecord() {
-    using Item = D810ChoiceItem;
-    const auto A = D810Camera::A, B = D810Camera::B;
-    const std::wstring advice = kD810RecordDamagedAdvice;
-    ScreenBench s(kChosenTable, true); // on disk: the record is a file that can be damaged
-    auto& screen = *s.screen;
-    s.bench.b.apply_as[0x500f] = 400; // CAM-B's write does not take: a block stands
-    check(OpenPanel(s) && screen.PanelPick(B, Item::Iso, 200) && screen.PanelPick(A, Item::Iso, 200) && screen.RequestChosen(true) && s.WaitIdle() && s.Confirm(), "damaged: a chosen run that did not take");
-    check(screen.Status().block == D810CaptureBlock::Mismatch && screen.Status().chosen_history && !screen.Status().history_damaged, "damaged: the record is whole, the history is a chosen plan's");
-    check(screen.CaptureRefusalText().find(L"書いた値が、読み戻しで確かめられていません") != std::wstring::npos && screen.CaptureRefusalText().find(advice) == std::wstring::npos, "damaged: whole record, the words of the values written");
-    // A line that cannot be read joins the record.
-    check(s.bench.file.Append("this is not a line of the record"), "damaged: the record is damaged");
-    screen.Refresh();
-    check(!screen.Status().chosen_history && screen.Status().history_damaged && !screen.Status().capture_allowed, "damaged: not a chosen history any more, damaged");
-    const auto held = screen.CaptureRefusalText();
-    check(held.find(advice) != std::wstring::npos && held.find(L"書いた値が、読み戻しで確かめられていません") == std::wstring::npos, "damaged: the block text is the comparison's and gives the advice");
-    // The reread compares the cameras (CAM-A reads 64, CAM-B 400 on the block items), item by item, and gives the advice; it does not tell the written values.
-    check(screen.RequestPanelReread(true) && s.WaitIdle(), "damaged: reread");
-    check(Shows(screen.View(), L"読み直しました: CAM-A と CAM-B で違う項目があります。") && Shows(screen.View(), L"  ISO感度") && Shows(screen.View(), advice) &&
-            !Shows(screen.View(), L"書いた値になっていません") && !Shows(screen.View(), L"書いた値と違う項目"),
-        "damaged: the reread compares the two cameras and gives the advice");
-    check(!screen.Status().capture_allowed, "damaged: not released");
-    // Both cameras the same on every block item: released, whatever was written.
-    s.bench.b.props[0x500f].current = 64;
-    s.bench.b.props[0x500d].current = s.bench.a.props[0x500d].current;
-    s.bench.b.props[0x5007].current = s.bench.a.props[0x5007].current;
-    check(screen.RequestPanelReread(true) && s.WaitIdle() && Shows(screen.View(), L"読み直しました: 止めの対象の項目は CAM-A と CAM-B で同じです。") && screen.Status().capture_allowed, "damaged: released when the cameras are the same");
-    // A record that cannot be read at all releases nothing and says so.
-    check(D810CaptureBlockText(D810CaptureBlock::Mismatch, false, true).find(advice) != std::wstring::npos && D810CaptureBlockText(D810CaptureBlock::Unconfirmed, false, true).find(advice) != std::wstring::npos &&
-            D810CaptureBlockText(D810CaptureBlock::Unreadable, false, true).find(advice) == std::wstring::npos && D810CaptureBlockText(D810CaptureBlock::None, false, true).empty() &&
-            D810CaptureBlockText(D810CaptureBlock::Mismatch, false, false).find(advice) == std::wstring::npos,
-        "damaged: the advice is for a block that the cameras' comparison releases");
-}
     check(s.screen->OfferText(true).find(L"自動では元に戻りません") != std::wstring::npos, "confirmation: the line above the buttons says it too");
     check(D810WriteViewVisibleLines(100) == 0 && D810WriteViewVisibleLines(700) == 6 && D810WriteViewVisibleLines(960) == 12, "confirmation: lines that fit");
     check(view && D810WriteViewFits(*view, 960) && !D810WriteViewFits(*view, 700), "confirmation: fits a 960 px client, not a 700 px one");
@@ -4847,6 +4932,7 @@ int main() {
     run("FailuresStopAndBlock", FailuresStopAndBlock);
     run("RereadReleases", RereadReleases);
     run("JournalStates", JournalStates);
+    run("ChosenReadToken", ChosenReadToken);
     run("ChosenRuns", ChosenRuns);
     run("ChosenStopsOnA", ChosenStopsOnA);
     run("ChosenStopsOnB", ChosenStopsOnB);
@@ -4872,6 +4958,7 @@ int main() {
     run("ScreenChosenFlow", ScreenChosenFlow);
     run("ScreenChosenRefusals", ScreenChosenRefusals);
     run("ScreenChosenDeadline", ScreenChosenDeadline);
+    run("ScreenChosenDamagedRecord", ScreenChosenDamagedRecord);
     run("ScreenSkippedShown", ScreenSkippedShown);
     run("ScreenBlockAndReread", ScreenBlockAndReread);
     run("ScreenPartialFailure", ScreenPartialFailure);
@@ -4889,4 +4976,3 @@ int main() {
     CoUninitialize();
     return failures ? 1 : 0;
 }
-    run("ScreenChosenDamagedRecord", ScreenChosenDamagedRecord);
