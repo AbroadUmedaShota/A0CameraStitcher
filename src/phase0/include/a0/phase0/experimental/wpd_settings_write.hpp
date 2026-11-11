@@ -963,12 +963,12 @@ public:
             const bool target = camera == D810Camera::B;
             auto read = ReadCamera(access, camera, options, target);
             out.verified[static_cast<std::size_t>(camera)] = read.opened && read.verified;
-            if (target && read.opened) {
-                if (options.log)
-                    options.log(std::string(D810CameraAlias(camera)) + " settings_write_body_check model_match=" + (read.body.model_match ? "1" : "0") +
-                        " firmware_match=" + (read.body.firmware_match ? "1" : "0") + " setting_writes=0");
-                if (!read.verified) { out.reason = std::string("body_not_verified:") + D810CameraAlias(camera); return out; }
-            }
+            // CAM-A's comparison is reported (booleans only) only while the table enables a CAM-A row, and never stops
+            // the read: it tells whether a plan for CAM-A would pass the check before any send.
+            if (read.opened && (target || (camera == D810Camera::A && D810AnyCamARowEnabled(table_))) && options.log)
+                options.log(std::string(D810CameraAlias(camera)) + " settings_write_body_check model_match=" + (read.body.model_match ? "1" : "0") +
+                    " firmware_match=" + (read.body.firmware_match ? "1" : "0") + " setting_writes=0");
+            if (target && read.opened && !read.verified) { out.reason = std::string("body_not_verified:") + D810CameraAlias(camera); return out; }
             if (!read.ok) { out.reason = std::string("read_incomplete:") + D810CameraAlias(camera); return out; }
             out.snapshots[static_cast<std::size_t>(camera)] = std::move(read.read.readings);
         }
@@ -1055,13 +1055,19 @@ private:
         table_(table), table_valid_(D810ControllerTableProblem(table_, kD810ControllerTestTables) == nullptr), journal_(journal), owner_(owner) {}
     static bool WriteAllowed(D810CaptureBlock block) { return block == D810CaptureBlock::None || block == D810CaptureBlock::Mismatch; }
     // Which comparison releases the block is decided by the record on disk, the authority: a history with a chosen
-    // plan and planned values to check uses them; anything else (copies only, an unreadable record, a chosen
-    // history whose step lines gave no value) compares the two cameras, the stricter rule.
+    // plan and planned values to check uses them; anything else (copies only, no record, a chosen history whose
+    // step lines gave no value, a chosen history of which part of the record is damaged) compares the two cameras,
+    // the stricter rule. A record that exists but cannot be read releases nothing: which rule applies is not known.
     D810ReleaseCheck ReleaseCheck(const D810SettingsSnapshot& a, const D810SettingsSnapshot& b) const {
         const auto file = journal_.Read();
+        if (file.kind == D810TextFile::Kind::Error) {
+            D810ReleaseCheck unreadable;
+            unreadable.differences.push_back("record_unreadable");
+            return unreadable;
+        }
         if (file.kind == D810TextFile::Kind::Read) {
             const auto state = ParseD810Journal(file.text);
-            if (state.chosen_unresolved && !state.expected.empty()) return CheckD810ReleasePlanned(a, b, state.expected);
+            if (state.chosen_unresolved && !state.history_damaged && !state.expected.empty()) return CheckD810ReleasePlanned(a, b, state.expected, table_);
         }
         return CheckD810Release(a, b, table_);
     }
@@ -1203,7 +1209,7 @@ private:
             config.iso_auto_code = plan.iso_auto_code;
             config.latch = &latch;
             // The key to a CAM-A session: only a chosen plan under a table that switches chosen values on.
-            config.cam_a_allowed = camera == D810Camera::A && plan.source == D810PlanSource::Chosen && self.table_.chosen_values;
+            config.cam_a_allowed = camera == D810Camera::A && D810CamAKeyOpen(plan, self.table_);
             for (const auto& step : plan.steps)
                 if (step.camera == camera) config.entries.push_back({step.code, step.value});
             auto opened = access.Open(camera);

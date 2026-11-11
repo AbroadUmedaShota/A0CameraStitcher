@@ -536,6 +536,22 @@ inline std::string D810PlanProblem(const D810WritePlan& plan, const D810WriteTab
     }
     return D810PlanTableRefusal(plan, table);
 }
+// The key to a CAM-A write session (D810WriteGateConfig::cam_a_allowed), an own guard apart from the plan's checks:
+// open only for a plan of picked values, under a table that switches picked values on, with a CAM-A firmware version
+// named, and when the table enables the row of every CAM-A step of the plan. A switch alone (`chosen_values`) does
+// not open it.
+inline bool D810CamAKeyOpen(const D810WritePlan& plan, const D810WriteTable& table) {
+    if (plan.source != D810PlanSource::Chosen || !table.chosen_values || !D810TextPresent(table.verified_firmware_a)) return false;
+    for (const auto& step : plan.steps)
+        if (step.camera == D810Camera::A && D810RowRefusal(table, step.item, D810Camera::A, plan.source)) return false;
+    return true;
+}
+// A CAM-A row of the table is enabled: the plan's read then reports how CAM-A's body compared (booleans only).
+constexpr bool D810AnyCamARowEnabled(const D810WriteTable& table) {
+    for (const auto& row : table.rows)
+        if (row.camera == D810Camera::A && row.enabled) return true;
+    return false;
+}
 
 // The time the write stage of a run may take. The base is the screen's provisional 60 s (ADR-0038 decision 10).
 // The run starts a step only when `step_budget` (5 s) per remaining step is left, so a long plan, which also
@@ -701,9 +717,27 @@ struct D810ExpectedValue {
 // "<item>:<CAM-x>:content_dependent" (the value leans on content held in the body, white balance Preset and the
 // like: unknown, never a match) or "<item>:<CAM-x>:not_planned_value". Nothing planned means nothing is released
 // by this check: the caller uses the comparison of the two cameras then.
-inline D810ReleaseCheck CheckD810ReleasePlanned(const D810SettingsSnapshot& a, const D810SettingsSnapshot& b, const std::vector<D810ExpectedValue>& expected) {
+//
+// A planned value is taken by the picture only with the camera in manual mode and ISO auto off (the plan was made
+// on that condition, and the copy rule compares both too): for every camera that has an expected value, the
+// exposure mode must read M and ISO auto must read Off, else "exposure_mode:<CAM-x>:not_manual" or
+// "iso_auto:<CAM-x>:not_off" (":unreadable" when it is not read). ISO auto is read at the table's confirmed code.
+inline D810ReleaseCheck CheckD810ReleasePlanned(const D810SettingsSnapshot& a, const D810SettingsSnapshot& b, const std::vector<D810ExpectedValue>& expected,
+    const D810WriteTable& table) {
     D810ReleaseCheck check;
     if (expected.empty()) { check.differences.push_back("nothing_planned"); return check; }
+    for (const auto camera : {D810Camera::A, D810Camera::B}) {
+        if (std::none_of(expected.begin(), expected.end(), [&](const auto& entry) { return entry.camera == camera; })) continue;
+        const auto& snapshot = camera == D810Camera::A ? a : b;
+        const std::string alias = D810CameraAlias(camera);
+        const auto* mode = AvailableD810Reading(snapshot, kD810ExposureModeCode);
+        if (!mode) check.differences.push_back("exposure_mode:" + alias + ":unreadable");
+        else if (mode->desc.current_value != kD810ExposureModeManual) check.differences.push_back("exposure_mode:" + alias + ":not_manual");
+        const auto iso_auto_code = table.Code(D810WriteItem::IsoAuto);
+        const auto* iso_auto = iso_auto_code ? AvailableD810Reading(snapshot, iso_auto_code) : nullptr;
+        if (!iso_auto) check.differences.push_back("iso_auto:" + alias + ":unreadable");
+        else if (iso_auto->desc.current_value != kD810IsoAutoOff) check.differences.push_back("iso_auto:" + alias + ":not_off");
+    }
     for (const auto& entry : expected) {
         const auto& spec = D810WriteItemOf(entry.item);
         const std::string label = std::string(spec.name) + ":" + D810CameraAlias(entry.camera) + ":";
@@ -890,6 +924,11 @@ struct D810JournalState {
     // The last planned value of each camera and item over that history, from the step lines. Steps of an
     // operation that sent nothing (end verdict not_sent) are not in it: nothing was written for them.
     std::vector<D810ExpectedValue> expected;
+    // Part of that history cannot be trusted: a line of it cannot be read, or an operation that may have sent holds
+    // other step lines than its plan line announced (a step line missing, repeated or out of order). The planned
+    // values then miss steps that may have been sent, so a release does not rest on them: it compares the two
+    // cameras (the rule of a history of copies), as for a history that gave no planned value.
+    bool history_damaged{};
 };
 // The capture block the record implies. Lines that cannot be read hold capture
 // as Unconfirmed until a later reread line releases it; an operation without
@@ -900,14 +939,21 @@ struct D810JournalState {
 // next operation), a reread line with verdict=match ends it, and while a block stands every operation adds its
 // planned values (a later value of the same camera and item replaces the earlier one). The record is the only
 // source: nothing is kept in memory, so a restart sees the same history.
+//
+// history_damaged is set by a line that cannot be read, anywhere from the last start of the history (a start
+// clears it, as it clears the rest of the history), and by an operation that may have sent (any end other than
+// `not_sent sent=0`, or none) whose step lines are not the steps= of its plan line, numbered i=0, 1, 2 ... in order.
 inline D810JournalState ParseD810Journal(std::string_view text) {
     D810JournalState state;
     std::optional<std::string> open_op;
     bool open_chosen = false;
     std::vector<D810ExpectedValue> op_steps;
+    std::optional<std::size_t> op_declared; // steps= of the open operation's plan line
+    bool op_in_order = true;                // its step lines came as i=0, 1, 2 ...
     const auto hold = [&](D810CaptureBlock block) { state.block = StrongerD810Block(state.block, block); };
     // The open operation's planned values join the history (it may have sent), or are dropped when it sent nothing.
     const auto commit = [&] {
+        if (!op_in_order || op_declared != op_steps.size()) state.history_damaged = true;
         if (open_chosen) state.chosen_unresolved = true;
         for (const auto& step : op_steps) {
             const auto same = std::find_if(state.expected.begin(), state.expected.end(),
@@ -917,15 +963,17 @@ inline D810JournalState ParseD810Journal(std::string_view text) {
         }
         op_steps.clear();
         open_chosen = false;
+        op_declared.reset();
+        op_in_order = true;
     };
-    const auto drop = [&] { op_steps.clear(); open_chosen = false; };
+    const auto drop = [&] { op_steps.clear(); open_chosen = false; op_declared.reset(); op_in_order = true; };
     const auto close_open = [&] { if (open_op) { hold(D810CaptureBlock::Unconfirmed); open_op.reset(); commit(); } };
     const auto hex16 = [](std::string_view text) {
         return text.size() == 16 && std::all_of(text.begin(), text.end(), [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); });
     };
     for (const auto line : SplitD810RecordLines(text)) {
         const auto fields = SplitD810Fields(line);
-        const auto malformed = [&] { ++state.malformed_lines; close_open(); hold(D810CaptureBlock::Unconfirmed); };
+        const auto malformed = [&] { ++state.malformed_lines; state.history_damaged = true; close_open(); hold(D810CaptureBlock::Unconfirmed); };
         if (fields.size() < 3 || fields[0] != kD810JournalPrefix) { malformed(); continue; }
         if (fields[1] == "ev=reread") {
             const auto verdict = fields.size() == 4 ? D810FieldValue(fields[3], "verdict") : std::nullopt;
@@ -936,6 +984,7 @@ inline D810JournalState ParseD810Journal(std::string_view text) {
             if (*verdict == "match") {
                 state.block = D810CaptureBlock::None;
                 state.chosen_unresolved = false;
+                state.history_damaged = false;
                 state.expected.clear();
             } else if (state.block != D810CaptureBlock::None) state.block = D810CaptureBlock::Mismatch;
             continue;
@@ -949,17 +998,25 @@ inline D810JournalState ParseD810Journal(std::string_view text) {
             close_open();
             if (state.block == D810CaptureBlock::None) {
                 state.chosen_unresolved = false;
+                state.history_damaged = false;
                 state.expected.clear();
             }
             open_op = std::string(*op);
             open_chosen = *source == "chosen";
             op_steps.clear();
+            op_in_order = true;
+            op_declared.reset();
+            if (const auto declared = D810FieldValue(fields[5], "steps")) {
+                if (const auto count = ParseD810Decimal(*declared, 1000)) op_declared = static_cast<std::size_t>(*count);
+            }
             ++state.operations;
         } else if (*event == "step" || *event == "result") {
             if (!open_op || *open_op != *op || fields.size() != (*event == "step" ? 9u : 6u)) { malformed(); continue; }
             if (*event == "step") {
                 const auto step = ParseD810JournalStep(fields);
                 if (!step) { malformed(); continue; }
+                const auto index = ParseD810Decimal(*D810FieldValue(fields[3], "i"), 1000);
+                if (!index || *index != op_steps.size()) op_in_order = false;
                 op_steps.push_back(*step);
             }
         } else if (*event == "end") {
