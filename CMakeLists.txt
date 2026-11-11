@@ -1220,7 +1220,10 @@ if(BUILD_TESTING)
         endif()
         add_executable(A0CameraStitcher.WpdDualPreview src/phase0/experimental/wpd_dual_preview_main.cpp)
         add_dependencies(A0CameraStitcher.WpdDualPreview A0CameraStitcher.StillReview)
-        target_link_libraries(A0CameraStitcher.WpdDualPreview PRIVATE a0_phase0_core a0_wpd_live_view_transfer a0_m2_render a0_m2_overlap_estimation a0_m2_offline_stitcher a0_m2_fixed_composite a0_m2_fixed_composite_v2 user32 gdi32 windowscodecs ole32 PortableDeviceGuids)
+        # The libraries the preview's main links; the test binary of the confirmation screen uses the same list, so a library
+        # added to the preview is added to both here.
+        set(a0_wpd_dual_preview_link_libraries a0_phase0_core a0_wpd_live_view_transfer a0_m2_render a0_m2_overlap_estimation a0_m2_offline_stitcher a0_m2_fixed_composite a0_m2_fixed_composite_v2 user32 gdi32 windowscodecs ole32 PortableDeviceGuids)
+        target_link_libraries(A0CameraStitcher.WpdDualPreview PRIVATE ${a0_wpd_dual_preview_link_libraries})
         target_compile_definitions(A0CameraStitcher.WpdDualPreview PRIVATE UNICODE _UNICODE NOMINMAX)
         add_test(NAME preview_level_ui_contracts COMMAND A0CameraStitcher.WpdDualPreview --level-ui-smoke)
         set_tests_properties(preview_level_ui_contracts PROPERTIES TIMEOUT 15)
@@ -1248,6 +1251,28 @@ if(BUILD_TESTING)
             # The screen of the write with the product table and a temporary record folder; opens no camera.
             add_test(NAME preview_settings_write_ui_contracts COMMAND A0CameraStitcher.WpdDualPreview --settings-write-ui-smoke)
             set_tests_properties(preview_settings_write_ui_contracts PROPERTIES TIMEOUT 60)
+            # The confirmation screen (#416): the preview's own window code with the controller that takes a table, so that a
+            # confirmation can be put up and drawn (the product table enables no row and the product build has no such
+            # controller). A test binary only: its main runs --settings-write-confirm-smoke and nothing else (it opens no
+            # camera, no lease), it is not installed, and it exists only in a build with the option ON.
+            add_executable(a0_preview_settings_write_confirm_tests src/phase0/experimental/wpd_dual_preview_main.cpp)
+            target_link_libraries(a0_preview_settings_write_confirm_tests PRIVATE ${a0_wpd_dual_preview_link_libraries} shell32)
+            target_compile_definitions(a0_preview_settings_write_confirm_tests PRIVATE UNICODE _UNICODE NOMINMAX A0_ENABLE_WPD_SETTINGS_WRITE=1 A0_SETTINGS_WRITE_TEST_TABLES=1)
+            if(MSVC)
+                target_compile_options(a0_preview_settings_write_confirm_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+            endif()
+            add_test(NAME preview_settings_write_confirm_contracts COMMAND a0_preview_settings_write_confirm_tests --settings-write-confirm-smoke)
+            set_tests_properties(preview_settings_write_confirm_contracts PROPERTIES TIMEOUT 60)
+            # The test binary carries its own entries (the preview itself must not: see preview_settings_write_binary_contracts).
+            add_test(NAME preview_settings_write_test_binary_contracts
+                COMMAND "${CMAKE_COMMAND}" "-DBINARY=$<TARGET_FILE:a0_preview_settings_write_confirm_tests>" "-DEXPECT=present" "-DTEST_STRINGS=present"
+                    -P "${CMAKE_SOURCE_DIR}/tests/settings_write_binary_tests.cmake")
+            set_tests_properties(preview_settings_write_test_binary_contracts PROPERTIES TIMEOUT 30)
+            # The one-shot capture reaches the shutter only through RunCaptureOnce (a call that skips it is not seen by the smokes).
+            add_test(NAME preview_settings_write_capture_once_source_contracts
+                COMMAND "${CMAKE_COMMAND}" "-DSOURCE=${CMAKE_SOURCE_DIR}/src/phase0/experimental/wpd_dual_preview_ui.hpp"
+                    -P "${CMAKE_SOURCE_DIR}/tests/settings_write_capture_once_source_tests.cmake")
+            set_tests_properties(preview_settings_write_capture_once_source_contracts PROPERTIES TIMEOUT 30)
             set(a0_settings_write_binary_expect present)
         else()
             set(a0_settings_write_binary_expect absent)

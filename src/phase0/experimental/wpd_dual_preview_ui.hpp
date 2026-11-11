@@ -518,6 +518,9 @@ void RequestSettingsRead(){
 }
 std::array<std::uint64_t,6> Paint(HDC dc,RECT client){
     std::array<std::uint64_t,6> drawn{};
+#if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
+    settings_write_paint_serial=0; // only a paint that draws a whole confirmation raises it again
+#endif
     FillRect(dc,&client,static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(240,240,240));
     if(client.right<200 || client.bottom<240)return drawn;
     for(int i=0;i<2;++i){auto& c=*cameras[i];std::lock_guard lock(c.mutex);
@@ -532,7 +535,7 @@ std::array<std::uint64_t,6> Paint(HDC dc,RECT client){
     RECT status_rect{12,client.bottom/2+4,client.right-12,client.bottom/2+48};
     DrawTextW(dc,capture_status.c_str(),-1,&status_rect,DT_LEFT|DT_WORDBREAK|DT_NOPREFIX);
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
-    if(preview_joined && settings_write && settings_write->screen->ConfirmationShown() && DrawSettingsWrite(dc,client))return drawn; // never under the review
+    if(preview_joined && settings_write && settings_write->screen->View() && DrawSettingsWrite(dc,client))return drawn; // a confirmation or a result is never under the review
 #endif
     if(review_visible && !review_pixels.bytes.empty()){
         const wchar_t* title=L"撮影JPEGの合成結果（静止画／未校正・確認用）";
@@ -728,7 +731,14 @@ void AdvanceCapture(HWND hwnd){
 }
 LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM w,LPARAM l){
     switch(message){
-    case WM_SIZE:LayoutButtons(hwnd);return 0;
+    case WM_SIZE:
+#if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
+        settings_write_drawn_serial=0; // the width of the lines is judged at paint time: a resized window has drawn nothing yet
+#endif
+        LayoutButtons(hwnd);return 0;
+#if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
+    case WM_GETMINMAXINFO:if(SettingsWriteMinTrack(reinterpret_cast<MINMAXINFO*>(l)))return 0;break;
+#endif
     case WM_COMMAND:{
         const int id=LOWORD(w),camera_index=(id-100)/10,action=(id-100)%10;
         if(id>=100 && id<=112 && camera_index<2 && action<3 && HIWORD(w)==BN_CLICKED && reinterpret_cast<HWND>(l)==focus_buttons[camera_index][action]){
@@ -803,9 +813,15 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM w,LPARAM l){
         }break;}
     case WM_PAINT:{
         PAINTSTRUCT ps{};auto dc=BeginPaint(hwnd,&ps);RECT r;GetClientRect(hwnd,&r);PreviewBackBuffer frame(dc,r.right,r.bottom);
+#if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
+        settings_write_drawn_serial=0; // no confirmation counts as drawn unless this paint presents it whole
+#endif
         if(auto offscreen=frame.DrawingContext()){
             const auto drawn=Paint(offscreen,r);
             if(frame.Present(dc)){
+#if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
+                settings_write_drawn_serial=settings_write_paint_serial;
+#endif
                 for(size_t i=0;i<2;++i){auto& c=*cameras[i];std::lock_guard lock(c.mutex);if(drawn[i]>c.paint_sequence){++c.painted;c.paint_sequence=drawn[i];}
                     if(drawn[4+i]>c.level_paint_sequence){++c.level_painted;c.level_paint_sequence=drawn[4+i];}}
                 std::lock_guard lock(merged.mutex);if(drawn[2]>merged.paint_sequence){++merged.painted;merged.paint_sequence=drawn[2];}
@@ -816,6 +832,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM w,LPARAM l){
     case WM_KEYDOWN:if(w==VK_ESCAPE)SendMessageW(hwnd,WM_CLOSE,0,0);return 0;
     case WM_CLOSE:closing=true;stopping=true;capture_stop_requested=true;capture_pending.reset();
         if(settings_stop)settings_stop->store(true); // Only set. The read ends, closes its body, then the window goes.
+#if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
+        if(SettingsWriteBusy())return 0; // the wait notice (SettingsWriteHoldsWindow) owns the title; a repeated request must not bring the first wording back
+#endif
         SetWindowTextW(hwnd,L"A0 - stopping both cameras / finishing current save...");return 0;
     case WM_TIMER:
         // Every path that sets `closing` (finite runs, failures) also stops a running settings read.
@@ -1360,9 +1379,11 @@ int RunPreviewWindow(const std::array<std::wstring,2>& ids){
     if(capture_future.valid()){auto result=capture_future.get();all_sessions_passed=all_sessions_passed && result.capture.success && result.capture.closed;}
     if(state<0)all_sessions_passed=false;
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
-    if(CaptureOnceHeld())return 1;
-#endif
+    // The hold and the shutter are one call: the hold is asked first inside RunCaptureOnce, and nothing else here reaches SaveStillOnce.
+    if(capture_once_alias && all_sessions_passed){const auto& c=*cameras[*capture_once_alias];return RunCaptureOnce([&]{auto result=SaveStillOnce(c.id,c.alias,true);return result.success && result.closed?0:1;});}
+#else
     if(capture_once_alias && all_sessions_passed){const auto& c=*cameras[*capture_once_alias];auto result=SaveStillOnce(c.id,c.alias,true);return result.success && result.closed?0:1;}
+#endif
     if(!cleanup_only){std::lock_guard lock(merged.mutex);
         // A C that is not drawn because the fixed condition cannot be applied is the shown behaviour, not a missing picture (#401).
         all_sessions_passed=all_sessions_passed && (merged.painted>=5 || merged.mode==PreviewCMode::unavailable);

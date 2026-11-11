@@ -900,7 +900,15 @@ int main(int argc,char** argv){
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
         // A build that contains the settings write path says so first (#416 stage B). The smoke opens no camera.
         Log("settings_write_build=1 development_only=1 enabled_rows="+std::to_string(D810EnabledRowCount(kD810ProductWriteTable)));
+#if defined(A0_SETTINGS_WRITE_TEST_TABLES)
+        // The confirmation test build (the only one with a table-taking controller): its one camera-free smoke, and
+        // nothing else. No other argument reaches a camera, a lease or the window.
+        if(argc==2 && std::string(argv[1])=="--settings-write-confirm-smoke")return RunSettingsWriteConfirmSmoke();
+        Log("settings_write_test_build=1 only --settings-write-confirm-smoke runs here; nothing was opened");
+        return 2;
+#else
         if(argc==2 && std::string(argv[1])=="--settings-write-ui-smoke")return RunSettingsWriteUiSmoke();
+#endif
 #endif
         if(argc==2 && std::string(argv[1])=="--level-ui-smoke")return RunLevelUiSmoke();
         if(argc==2 && std::string(argv[1])=="--lifecycle-ui-smoke")return RunLifecycleUiSmoke();

@@ -841,6 +841,40 @@ struct D810WriteStatus {
     std::size_t enabled_rows{};
 };
 
+// --- What the write path reads --------------------------------------------------------
+// The write path reads only the codes of the fixed table of read settings (`in_table`), not the two candidate codes
+// (0xD16A, 0xD100) that the stage A listing also reads. On a real body 0xD16A was answered with a failed begin and an
+// END refused with 0x200A (the size of 0 is an inference), which stops the read session; 0xD100 has not been read on a
+// body yet (unconfirmed). Neither is read here, so a plan, the check before a send and the reread cannot be stopped
+// by them. The stage A read (gate and session) is untouched and still reads all of its entries.
+constexpr std::size_t D810WriteReadSpecCount() {
+    std::size_t count = 0;
+    for (const auto& spec : kD810SettingSpecs)
+        if (spec.in_table) ++count;
+    return count;
+}
+inline constexpr std::array<D810SettingSpec, D810WriteReadSpecCount()> kD810WriteReadSpecs = [] {
+    std::array<D810SettingSpec, D810WriteReadSpecCount()> out{};
+    std::size_t next = 0;
+    for (const auto& spec : kD810SettingSpecs)
+        if (spec.in_table) out[next++] = spec;
+    return out;
+}();
+constexpr bool D810WriteReadSetHas(std::uint32_t code) {
+    for (const auto& spec : kD810WriteReadSpecs)
+        if (spec.code == code) return true;
+    return false;
+}
+// Every code a table confirms is in the read set (otherwise a plan on that code could not be read back).
+constexpr bool D810WriteReadSetCovers(const D810WriteTable& table) {
+    for (const auto& row : table.rows)
+        if (row.code != 0 && !D810WriteReadSetHas(row.code)) return false;
+    return true;
+}
+static_assert(D810WriteReadSpecCount() == 10 && !D810WriteReadSetHas(0xd16a) && !D810WriteReadSetHas(0xd100),
+    "the write path reads the table's ten codes and not the two candidate codes");
+static_assert(D810WriteReadSetCovers(kD810ProductWriteTable), "every code the product table confirms is read by the write path");
+
 // Which tables a controller may be built with. Only the contract test target
 // defines A0_SETTINGS_WRITE_TEST_TABLES; there the controller also accepts the
 // tables the tests build (the ADR-0041 code paths included). Everywhere else
@@ -1032,8 +1066,9 @@ private:
             };
             WpdSettingsReadSession session(std::move(transport), [&options, cancelled] { return !D810CancelRaised(cancelled) && options.may_continue(); },
                 [&options, cancelled] { return !D810CancelRaised(cancelled) && options.may_cleanup(); });
-            out.read = session.ReadAll(D810CameraAlias(camera), options.log);
-            complete = out.read.Complete();
+            out.read = session.ReadAll(D810CameraAlias(camera), options.log, std::span<const D810SettingSpec>(kD810WriteReadSpecs));
+            // A stop on the very last row leaves no row to report as not read: the spent session says it.
+            complete = out.read.Complete() && !session.Poisoned();
         } catch (...) {}
         const bool closed = access.Close(camera);
         out.ok = complete && closed && !D810CancelRaised(cancelled);
