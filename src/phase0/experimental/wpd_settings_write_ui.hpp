@@ -823,8 +823,8 @@ int RunSettingsWriteConfirmSmoke(){
     const int opens_after=opens->load();
     check(wait_idle() && opens->load()==opens_after);
 
-    // 9. Only CAM-B's ISO row is enabled while CAM-A's white balance is on Preset and its metering differs: the shape of a
-    //    first write. The window is its smallest size. White balance and metering are left out with the table's short
+    // 9. One row is enabled (CAM-B's ISO) while CAM-A's white balance is a kind a copy cannot carry and the metering modes
+    //    differ. The window is its smallest size. White balance and metering are left out with the table's short
     //    reason (not the long one about the content held in the body), and the confirmation is drawn whole and pressable.
     settings_write.reset();std::filesystem::remove_all(folder,ignored);capture_status.clear();
     InitSettingsWriteWithTable(SmokeIsoOnlyTable(),std::make_unique<D810SettingsFileJournal>(folder),[opens]{return std::make_unique<NoCameraSettingsAccess>(opens);});
