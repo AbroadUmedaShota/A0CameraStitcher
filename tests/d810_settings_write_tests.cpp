@@ -302,10 +302,32 @@ constexpr D810WriteTable Adr41Table() {
     auto table = Adr38Table();
     for (auto& row : table.rows) row.enabled = true;
     table.chosen_values = true;
+    table.verified_firmware_a = "1.00";
     return table;
 }
 constexpr D810WriteTable kAdr41Table = Adr41Table();
 static_assert(D810WriteTableProblem(kAdr41Table) == nullptr && D810ProductTableProblem(kAdr41Table) != nullptr, "ADR-0041 table");
+// The table of the per-camera tests: chosen values on and the rows of the five items an operator may pick enabled on both
+// cameras, with the firmware version of each camera. What a product table could hold once ADR-0041 is accepted (a test
+// table here, because the flag is not set).
+constexpr D810WriteTable ChosenTable() {
+    auto table = Adr38Table();
+    for (auto& row : table.rows) {
+        row.enabled = row.item == D810WriteItem::Iso || row.item == D810WriteItem::ShutterSpeed || row.item == D810WriteItem::Aperture ||
+            row.item == D810WriteItem::WhiteBalance || row.item == D810WriteItem::Metering;
+    }
+    table.chosen_values = true;
+    table.verified_firmware_a = "1.00";
+    return table;
+}
+constexpr D810WriteTable kChosenTable = ChosenTable();
+static_assert(D810WriteTableProblem(kChosenTable) == nullptr, "the per-camera test table is consistent");
+static_assert(D810ProductTableProblem(kChosenTable) != nullptr, "it is not a product table while ADR-0041 is not accepted");
+static_assert(D810ProductTableProblem(kChosenTable, true, true) == nullptr, "it would be one if ADR-0041 were accepted");
+static_assert(D810EnabledRowCount(kChosenTable) == 10, "five items on two cameras");
+// A pick of a value, and "same as CAM-A", as the panel draft hands them to the plan.
+D810CameraChoice PickFor(D810Camera camera, D810WriteItem item, std::int64_t value) { return {item, camera, D810ChoiceSource::Picked, value}; }
+D810CameraChoice FollowA(D810WriteItem item) { return {item, D810Camera::B, D810ChoiceSource::SameAsA, 0}; }
 // The ADR-0038 table with only some of CAM-B's rows enabled.
 D810WriteTable Adr38Only(std::initializer_list<D810WriteItem> items) {
     auto table = kAdr38Table;
@@ -429,7 +451,23 @@ struct Bench {
     D810PlanResult Copy(const std::optional<std::vector<D810WriteItem>>& only = std::nullopt) {
         return controller->PlanCopy(Snapshot(a, "CAM-A"), Snapshot(b, "CAM-B"), only);
     }
-    D810PlanResult Chosen(const std::vector<D810WriteChoice>& choices) { return controller->PlanChosen(Snapshot(a, "CAM-A"), Snapshot(b, "CAM-B"), choices); }
+    // Which bodies match what the table names for them, as the plan read would report from the fake access.
+    D810BodyFlags Verified() const {
+        return {D810BodyVerified(table, D810Camera::A, access.model[0], access.firmware[0]), D810BodyVerified(table, D810Camera::B, access.model[1], access.firmware[1])};
+    }
+    D810PlanResult Chosen(const std::vector<D810CameraChoice>& choices) { return Chosen(choices, Verified()); }
+    D810PlanResult Chosen(const std::vector<D810CameraChoice>& choices, const D810BodyFlags& verified) {
+        return controller->PlanChosen(Snapshot(a, "CAM-A"), Snapshot(b, "CAM-B"), verified, choices);
+    }
+    // (camera index, code) of every write begin that reached a body, in the order they arrived. Call after the
+    // bodies are set up: assigning a whole body replaces its hook.
+    std::vector<std::pair<int, int>> begin_order;
+    void TraceBegins() {
+        for (int i = 0; i < 2; ++i)
+            access.bodies[i]->after = [this, i](const std::string& entry) {
+                if (entry.size() == 10 && entry.compare(0, 5, "1016(") == 0) begin_order.emplace_back(i, static_cast<int>(std::stoul(entry.substr(5, 4), nullptr, 16)));
+            };
+    }
     D810WriteRun Run(const D810PlanResult& plan) {
         if (!plan.plan) return {};
         check(controller->Confirm(plan.plan->id) == nullptr, "confirm");
@@ -628,25 +666,25 @@ void ProductTable() {
     check(table.Code(D810WriteItem::IsoAuto) == 0xd054 && table.Code(D810WriteItem::ShutterSpeed) == 0x500d, "confirmed codes");
     check(table.copy_a_to_b && !table.chosen_values, "copy only");
     check(std::string(table.verified_model) == "D810" && table.verified_firmware != nullptr && table.verified_firmware[0] != '\0', "model and firmware named");
-    check(D810BodyVerified(table, "D810", table.verified_firmware), "a body that reports the named model and firmware is verified");
-    check(!D810BodyVerified(table, "D810", "") && !D810BodyVerified(table, "D810", "1.00") && !D810BodyVerified(table, "D850", table.verified_firmware) &&
-        !D810BodyVerified(table, "", table.verified_firmware), "any other model or firmware is not");
+    check(D810BodyVerified(table, D810Camera::B, "D810", table.verified_firmware), "a body that reports the named model and firmware is verified");
+    check(!D810BodyVerified(table, D810Camera::B, "D810", "") && !D810BodyVerified(table, D810Camera::B, "D810", "1.00") && !D810BodyVerified(table, D810Camera::B, "D850", table.verified_firmware) &&
+        !D810BodyVerified(table, D810Camera::B, "", table.verified_firmware), "any other model or firmware is not");
     {
         // The two comparisons are reported apart, and an empty text matches nothing on either side.
-        const auto both = D810CheckBody(table, table.verified_model, table.verified_firmware);
-        const auto model_only = D810CheckBody(table, table.verified_model, "x");
-        const auto firmware_only = D810CheckBody(table, "x", table.verified_firmware);
+        const auto both = D810CheckBody(table, D810Camera::B, table.verified_model, table.verified_firmware);
+        const auto model_only = D810CheckBody(table, D810Camera::B, table.verified_model, "x");
+        const auto firmware_only = D810CheckBody(table, D810Camera::B, "x", table.verified_firmware);
         check(both.model_match && both.firmware_match && model_only.model_match && !model_only.firmware_match && !firmware_only.model_match && firmware_only.firmware_match,
             "the comparisons are apart");
         auto blank = table;
         blank.verified_model = "";
-        check(!D810BodyVerified(blank, "", table.verified_firmware) && !D810BodyVerified(blank, table.verified_model, table.verified_firmware), "an empty model in the table verifies no body");
+        check(!D810BodyVerified(blank, D810Camera::B, "", table.verified_firmware) && !D810BodyVerified(blank, D810Camera::B, table.verified_model, table.verified_firmware), "an empty model in the table verifies no body");
         blank = table;
         blank.verified_firmware = "";
-        check(!D810BodyVerified(blank, table.verified_model, "") && !D810BodyVerified(blank, table.verified_model, table.verified_firmware), "an empty version in the table verifies no body");
+        check(!D810BodyVerified(blank, D810Camera::B, table.verified_model, "") && !D810BodyVerified(blank, D810Camera::B, table.verified_model, table.verified_firmware), "an empty version in the table verifies no body");
         blank.verified_model = nullptr;
         blank.verified_firmware = nullptr;
-        check(!D810BodyVerified(blank, "", "") && !D810BodyVerified(blank, table.verified_model, "x") && !D810CheckBody(D810DisabledWriteTable(), "", "").Verified(), "no entry in the table verifies no body");
+        check(!D810BodyVerified(blank, D810Camera::B, "", "") && !D810BodyVerified(blank, D810Camera::B, table.verified_model, "x") && !D810CheckBody(D810DisabledWriteTable(), D810Camera::B, "", "").Verified(), "no entry in the table verifies no body");
     }
     // What the product table may ever hold: CAM-B and the five items, no chosen values.
     std::size_t allowed = 0;
@@ -674,6 +712,8 @@ void ProductTable() {
         check(D810WriteTableProblem(probe) == nullptr, "revision row valid in a test table");
         auto cam_a = Adr38Table();
         for (auto& row : cam_a.rows) if (row.camera == D810Camera::A && row.item == item) row.enabled = true;
+        check(std::string(D810ProductTableProblem(cam_a)) == "cam_a_version_unconfirmed", "a CAM-A row needs CAM-A's firmware version in the table");
+        cam_a.verified_firmware_a = "1.00";
         check(std::string(D810ProductTableProblem(cam_a)) == "cam_a_row_enabled", "a CAM-A revision row is refused whatever the flag says");
     }
     // The items the next stages open stay disabled in the product table until their own commits.
@@ -718,6 +758,7 @@ void ControllerTables() {
     check(std::string(D810ControllerTableProblem(kAdr41Table, false)) == "chosen_values_before_adr0041", "product rules: chosen values refused");
     auto cam_a = kAdr38Table;
     for (auto& row : cam_a.rows) if (row.camera == D810Camera::A && row.item == D810WriteItem::Iso) row.enabled = true;
+    cam_a.verified_firmware_a = "1.00";
     check(std::string(D810ControllerTableProblem(cam_a, false)) == "cam_a_row_enabled", "product rules: a CAM-A row refused");
     auto extra = kAdr38Table;
     for (auto& row : extra.rows) if (row.camera == D810Camera::B && row.item == D810WriteItem::ExposureCompensation) row.enabled = true;
@@ -763,8 +804,11 @@ void FilesEnableNothing() {
     const auto copy = bench.Copy();
     check(copy.Ok() && PlanStepItems(copy) == ExpectedProductSteps({D810WriteItem::Iso, D810WriteItem::ShutterSpeed, D810WriteItem::Aperture}) && PlanStepsAllCamB(copy),
         "product copy: the enabled items on CAM-B and nothing else, whatever the files and the variable say");
-    for (const auto target : {D810WriteTarget::A, D810WriteTarget::B, D810WriteTarget::Both})
-        check(!bench.Chosen({{D810WriteItem::Iso, target, 200}}).Ok(), "product chosen refused");
+    for (const auto camera : {D810Camera::A, D810Camera::B}) {
+        check(!bench.Chosen({PickFor(camera, D810WriteItem::Iso, 200)}).Ok(), "product chosen refused");
+        check(!bench.Chosen({PickFor(camera, D810WriteItem::Iso, 200)}, {true, true}).Ok(), "product chosen refused whatever the body check says");
+    }
+    check(!bench.Chosen({FollowA(D810WriteItem::Iso)}, {true, true}).Ok(), "product chosen: same as CAM-A refused");
     check(bench.controller->Status().enabled_rows == 5, "status: five rows");
     SetEnvironmentVariableW(L"A0_SETTINGS_WRITE_ENABLE", nullptr);
     check(bench.Writes() == 0 && bench.a.write_datas + bench.b.write_datas == 0 && bench.a.forbidden + bench.b.forbidden == 0, "only reads, no write");
@@ -1059,44 +1103,301 @@ void RevisionCopyPlans() {
             "the product table: the release compares seven items (the five and white balance and metering)");
     }
 }
+// --- Plans of the values picked for each camera (ADR-0041) -------------------------------------------------------
+bool HasReason(const D810PlanResult& plan, const std::string& reason) {
+    return std::find(plan.reasons.begin(), plan.reasons.end(), reason) != plan.reasons.end();
+}
+// The steps of a plan as "CAM-x item value", in the plan's order.
+std::vector<std::string> StepTexts(const D810PlanResult& plan) {
+    std::vector<std::string> out;
+    if (plan.Ok())
+        for (const auto& step : plan.plan->steps)
+            out.push_back(std::string(D810CameraAlias(step.camera)) + " " + D810WriteItemOf(step.item).name + " " + std::to_string(step.value));
+    return out;
+}
+bool Observed(const D810PlanResult& plan, D810Camera camera, std::uint16_t code, std::int64_t value) {
+    if (!plan.Ok()) return false;
+    return std::any_of(plan.plan->observed.begin(), plan.plan->observed.end(),
+        [&](const auto& seen) { return seen.camera == camera && seen.code == code && seen.value == value; });
+}
+bool ObservedCode(const D810PlanResult& plan, D810Camera camera, std::uint16_t code) {
+    if (!plan.Ok()) return false;
+    return std::any_of(plan.plan->observed.begin(), plan.plan->observed.end(), [&](const auto& seen) { return seen.camera == camera && seen.code == code; });
+}
 void ChosenPlans() {
+    using Item = D810WriteItem;
+    const auto A = D810Camera::A, B = D810Camera::B;
     {
-        // The ADR-0038 table: no chosen plan for any item, target or value.
-        Bench bench;
-        for (const auto& spec : kD810WriteItems)
-            for (const auto target : {D810WriteTarget::A, D810WriteTarget::B, D810WriteTarget::Both})
-                for (const auto value : {0LL, 1LL, 64LL, 800LL, 1667LL, 4LL}) {
-                    const auto plan = bench.Chosen({{spec.item, target, value}});
-                    check(!plan.Ok() && plan.reasons.size() == 1 && plan.reasons[0] == "chosen_values_disabled", "chosen disabled");
-                }
-        check(bench.Writes() == 0, "nothing sent");
+        // A table with chosen values off, the product table included: no plan for any item, camera, source or value,
+        // whatever the body check says.
+        const auto sweep = [](Bench& bench) {
+            for (const auto& spec : kD810WriteItems)
+                for (const auto camera : {D810Camera::A, D810Camera::B})
+                    for (const auto value : {0LL, 1LL, 64LL, 800LL, 1667LL, 4LL})
+                        for (const auto& flags : {D810BodyFlags{false, false}, D810BodyFlags{true, true}}) {
+                            const auto plan = bench.Chosen({PickFor(camera, spec.item, value)}, flags);
+                            check(!plan.Ok() && plan.reasons.size() == 1 && plan.reasons[0] == "chosen_values_disabled", "chosen disabled");
+                        }
+            const auto follow = bench.Chosen({FollowA(Item::Iso)}, {true, true});
+            check(!follow.Ok() && follow.reasons.size() == 1 && follow.reasons[0] == "chosen_values_disabled", "same as CAM-A: chosen disabled");
+            check(bench.Writes() == 0, "nothing sent");
+        };
+        Bench adr38;
+        sweep(adr38);
+        Bench product(kProduct);
+        sweep(product);
+        // The product table, by the rules a product table must keep.
+        check(!kD810Adr41Accepted && !kD810ProductWriteTable.chosen_values && !D810TextPresent(kD810ProductWriteTable.verified_firmware_a), "product table: ADR-0041 is not accepted, no chosen values, no CAM-A version");
+        for (const auto& row : kD810ProductWriteTable.rows) check(!row.enabled || row.camera == B, "product table: no CAM-A row is enabled");
     }
     {
-        // Even with chosen values on, CAM-A rows and extra items stay refused unless enabled.
-        auto table = Adr38Table();
-        table.chosen_values = true;
+        // Order: every CAM-B step first, every CAM-A step last, the item table's order within a camera, whatever order the
+        // picks arrive in.
+        Bench bench(kChosenTable);
+        const std::vector<D810CameraChoice> picks{PickFor(A, Item::Iso, 200), PickFor(B, Item::Aperture, 1100), PickFor(A, Item::Metering, 4),
+            PickFor(B, Item::Iso, 200), PickFor(B, Item::WhiteBalance, 4)};
+        const std::vector<std::string> expected{"CAM-B iso 200", "CAM-B aperture 1100", "CAM-B white_balance 4", "CAM-A iso 200", "CAM-A metering 4"};
+        const auto plan = bench.Chosen(picks);
+        check(plan.Ok() && StepTexts(plan) == expected, "B first, A last, item order within a camera");
+        auto reversed = picks;
+        std::reverse(reversed.begin(), reversed.end());
+        check(StepTexts(bench.Chosen(reversed)) == expected, "the order of the picks does not matter");
+        if (plan.Ok()) {
+            const auto& steps = plan.plan->steps;
+            check(plan.plan->source == D810PlanSource::Chosen && plan.plan->Cameras() == std::vector<D810Camera>{B, A}, "Cameras() is CAM-B then CAM-A");
+            check(steps[0].before == 100 && steps[0].code == 0x500f && steps[1].before == 560 && steps[1].code == 0x5007 && steps[2].before == 2 && steps[2].code == 0x5005 &&
+                steps[3].before == 64 && steps[3].code == 0x500f && steps[4].before == 3 && steps[4].code == 0x500b, "each step carries its own camera's value before and code");
+            check(D810PlanProblem(*plan.plan, kChosenTable).empty(), "the plan is well formed");
+            // What the plan relies on: the values it changes, and manual mode and ISO auto off, per camera with a step.
+            check(Observed(plan, B, 0x500f, 100) && Observed(plan, B, 0x5007, 560) && Observed(plan, B, 0x5005, 2) && Observed(plan, A, 0x500f, 64) && Observed(plan, A, 0x500b, 3),
+                "the values to change are observed on their own camera");
+            check(Observed(plan, A, 0x500e, 1) && Observed(plan, A, 0xd054, 0) && Observed(plan, B, 0x500e, 1) && Observed(plan, B, 0xd054, 0), "manual mode and ISO auto are observed");
+            check(!ObservedCode(plan, B, 0x500b) && !ObservedCode(plan, A, 0x5007) && !ObservedCode(plan, A, 0x5005), "nothing else is observed");
+        }
+        check(bench.Writes() == 0, "planning sends nothing");
+    }
+    {
+        // Different values on the two cameras: each step carries its own camera's value.
+        Bench bench(kChosenTable);
+        const auto plan = bench.Chosen({PickFor(A, Item::Iso, 200), PickFor(B, Item::Iso, 400)});
+        check(plan.Ok() && StepTexts(plan) == std::vector<std::string>{"CAM-B iso 400", "CAM-A iso 200"}, "A=200 and B=400");
+        check(plan.Ok() && plan.plan->steps[0].before == 100 && plan.plan->steps[1].before == 64, "before: B reads 100, A reads 64");
+        const auto only_a = bench.Chosen({PickFor(A, Item::Iso, 400)});
+        check(only_a.Ok() && StepTexts(only_a) == std::vector<std::string>{"CAM-A iso 400"} && only_a.plan->Cameras() == std::vector<D810Camera>{A}, "CAM-A alone");
+        check(!ObservedCode(only_a, B, 0x500f) && !ObservedCode(only_a, B, 0x500e), "CAM-B is not relied on by a CAM-A-only plan");
+        const auto only_b = bench.Chosen({PickFor(B, Item::Iso, 400)});
+        check(only_b.Ok() && only_b.plan->Cameras() == std::vector<D810Camera>{B} && !ObservedCode(only_b, A, 0x500f) && !ObservedCode(only_b, A, 0x500e), "CAM-B alone");
+    }
+    {
+        // A pick equal to what the camera reads now is not a step. It still has to be a valid pick.
+        Bench bench(kChosenTable);
+        const auto same = bench.Chosen({PickFor(B, Item::Iso, 100), PickFor(A, Item::Iso, 64)});
+        check(same.Ok() && same.plan->steps.empty(), "picks equal to the current values: a plan without steps");
+        if (same.Ok()) check(std::string(bench.controller->Confirm(same.plan->id)) == "nothing_to_write", "nothing to write cannot be confirmed");
+        const auto mixed = bench.Chosen({PickFor(B, Item::Iso, 100), PickFor(B, Item::Aperture, 1100)});
+        check(mixed.Ok() && StepTexts(mixed) == std::vector<std::string>{"CAM-B aperture 1100"}, "only the differing pick is a step");
+        bench.b.props[0x500f].values = {64, 200, 400};
+        const auto invalid = bench.Chosen({PickFor(B, Item::Iso, 100), PickFor(B, Item::Aperture, 1100)});
+        check(!invalid.Ok() && HasReason(invalid, "value_not_advertised:iso:CAM-B"), "a no-op pick is checked too, and the whole plan is refused");
+    }
+    {
+        // "Same as CAM-A" is resolved here, from the read made for the plan.
+        Bench bench(kChosenTable);
+        bench.a.props[0x500f].current = 200;
+        const auto follow = bench.Chosen({FollowA(Item::Iso)});
+        check(follow.Ok() && StepTexts(follow) == std::vector<std::string>{"CAM-B iso 200"} && follow.plan->Cameras() == std::vector<D810Camera>{B}, "B follows what A reads");
+        check(Observed(follow, A, 0x500f, 200), "the value of CAM-A it came from is an observation, although CAM-A gets no step");
+        bench.a.props[0x500f].current = 400;
+        check(StepTexts(bench.Chosen({FollowA(Item::Iso)})) == std::vector<std::string>{"CAM-B iso 400"}, "a new read gives the new value");
+        // CAM-A's pick wins over what CAM-A reads.
+        bench.a.props[0x500f].current = 64;
+        const auto picked = bench.Chosen({FollowA(Item::Iso), PickFor(A, Item::Iso, 200)});
+        check(picked.Ok() && StepTexts(picked) == std::vector<std::string>{"CAM-B iso 200", "CAM-A iso 200"}, "B follows CAM-A's pick, then CAM-A is set");
+        // CAM-A's pick is the value it already reads: B follows it, A gets no step.
+        bench.a.props[0x500f].current = 200;
+        const auto kept = bench.Chosen({PickFor(A, Item::Iso, 200), FollowA(Item::Iso)});
+        check(kept.Ok() && StepTexts(kept) == std::vector<std::string>{"CAM-B iso 200"} && Observed(kept, A, 0x500f, 200), "A keeps its value and B follows");
+        // Equal already: no step.
+        bench.b.props[0x500f].current = 200;
+        const auto equal = bench.Chosen({FollowA(Item::Iso)});
+        check(equal.Ok() && equal.plan->steps.empty(), "B reads what A reads: nothing to do");
+        // B does not offer A's value.
+        Bench other(kChosenTable);
+        other.a.props[0x5007].current = 1600;
+        other.b.props[0x5007].values = {400, 560, 800, 1100};
+        const auto not_offered = other.Chosen({FollowA(Item::Aperture)});
+        check(!not_offered.Ok() && HasReason(not_offered, "same_as_a_not_offered:aperture:CAM-B"), "B does not offer A's value");
+        // A reads a white balance this application never writes.
+        other.a.props[0x5005].current = 0x8013;
+        const auto preset = other.Chosen({FollowA(Item::WhiteBalance)});
+        check(!preset.Ok() && HasReason(preset, "same_as_a_not_offered:white_balance:CAM-B"), "A on Preset: B cannot follow");
+        // "Same as CAM-A" for CAM-A, and CAM-A unreadable.
+        const auto on_a = other.Chosen({D810CameraChoice{Item::Iso, A, D810ChoiceSource::SameAsA, 0}});
+        check(!on_a.Ok() && HasReason(on_a, "same_as_a_on_cam_a:iso:CAM-A"), "no 'same as CAM-A' for CAM-A");
+        other.a.props.erase(0x500f);
+        const auto unreadable = other.Chosen({FollowA(Item::Iso)});
+        check(!unreadable.Ok() && HasReason(unreadable, "unreadable:iso:CAM-A"), "A's value cannot be read");
+        check(bench.Writes() == 0 && other.Writes() == 0, "nothing sent");
+    }
+    {
+        // Values and items that are refused, each with its reason; any one refuses the whole plan. The two bodies
+        // advertise more than the application writes, so that the application's rules are what refuse.
+        Bench bench(kChosenTable);
+        for (auto* body : {&bench.a, &bench.b}) {
+            body->props[0x500f].values = {32, 64, 100, 200, 25600};
+            body->props[0x5005].values = {1, 2, 3, 4, 5, 6, 7, 0x8010, 0x8011, 0x8012, 0x8013};
+            body->props[0x500b].values = {1, 2, 3, 4, 5};
+        }
+        struct Case { Item item; std::int64_t value; const char* reason; };
+        const std::vector<Case> cases{
+            {Item::Iso, 320, "value_not_advertised"},     {Item::Iso, 25600, "value_out_of_band"},         {Item::Iso, 32, "value_out_of_band"},
+            {Item::Metering, 1, "value_not_named"},       {Item::Metering, 5, "value_not_listed"},          {Item::WhiteBalance, 1, "value_content_dependent"},
+            {Item::WhiteBalance, 3, "value_content_dependent"}, {Item::WhiteBalance, 0x8012, "value_content_dependent"}, {Item::WhiteBalance, 0x8013, "value_content_dependent"},
+            {Item::WhiteBalance, 8, "value_not_listed"},  {Item::ShutterSpeed, 0xffffffffLL, "bulb_or_time"}, {Item::ShutterSpeed, 0xfffffffdLL, "bulb_or_time"},
+            {Item::ShutterSpeed, 20000, "exposure_too_long"}, {Item::ShutterSpeed, 0, "exposure_zero"},    {Item::ShutterSpeed, 400, "value_not_advertised"},
+            {Item::Aperture, 700, "value_not_advertised"}, {Item::Aperture, 0, "value_not_advertised"},    {Item::ExposureMode, 1, "item_not_choosable"},
+            {Item::ExposureMode, 3, "item_not_choosable"}, {Item::IsoAuto, 0, "item_not_choosable"},       {Item::IsoAuto, 1, "item_not_choosable"},
+            {Item::ExposureCompensation, 0, "item_not_choosable"}, {Item::ExposureCompensation, -500, "item_not_choosable"},
+        };
+        for (const auto camera : {A, B})
+            for (const auto& c : cases) {
+                const auto plan = bench.Chosen({PickFor(camera, c.item, c.value)});
+                const std::string reason = std::string(c.reason) + ":" + D810WriteItemOf(c.item).name + ":" + D810CameraAlias(camera);
+                check(!plan.Ok() && HasReason(plan, reason), "refused with its reason");
+                // One valid pick next to it does not save the plan.
+                const auto companion = c.item == Item::Aperture && camera == B ? PickFor(B, Item::Iso, 200) : PickFor(B, Item::Aperture, 1100);
+                const auto both = bench.Chosen({companion, PickFor(camera, c.item, c.value)});
+                check(!both.Ok() && HasReason(both, reason), "the whole plan is refused");
+            }
+        // Values that pass every rule are accepted on either camera.
+        for (const auto camera : {A, B}) {
+            check(bench.Chosen({PickFor(camera, Item::Iso, 200)}).Ok() && bench.Chosen({PickFor(camera, Item::WhiteBalance, 0x8010)}).Ok() &&
+                bench.Chosen({PickFor(camera, Item::Metering, 4)}).Ok() && bench.Chosen({PickFor(camera, Item::ShutterSpeed, 500)}).Ok(), "values that pass every rule");
+        }
+        // The state of the body.
+        Bench body(kChosenTable);
+        body.b.props[0x500f].get_set = 0;
+        check(HasReason(body.Chosen({PickFor(B, Item::Iso, 200)}), "not_writable:iso:CAM-B"), "GetSet 0");
+        body.b.props.erase(0x5007);
+        check(HasReason(body.Chosen({PickFor(B, Item::Aperture, 1100)}), "unreadable:aperture:CAM-B"), "not readable");
+        check(!body.Chosen({}).Ok() && HasReason(body.Chosen({}), "no_choice"), "no pick");
+        const auto twice = body.Chosen({PickFor(B, Item::Iso, 200), PickFor(B, Item::Iso, 400)});
+        check(!twice.Ok() && HasReason(twice, "duplicate_choice:iso:CAM-B"), "one pick per camera and item");
+        check(bench.Writes() == 0 && body.Writes() == 0, "nothing sent");
+    }
+    {
+        // Rows: the table lets a pick through only where the row is enabled.
+        auto table = kChosenTable;
+        for (auto& row : table.rows) if (row.camera == A) row.enabled = false;
         Bench bench(table);
-        check(!bench.Chosen({{D810WriteItem::Iso, D810WriteTarget::Both, 200}}).Ok(), "CAM-A row disabled");
-        check(!bench.Chosen({{D810WriteItem::WhiteBalance, D810WriteTarget::Both, 4}}).Ok(), "extra row disabled");
+        const auto plan = bench.Chosen({PickFor(A, Item::Iso, 200)});
+        check(!plan.Ok() && HasReason(plan, "row_disabled:iso:CAM-A"), "CAM-A row disabled");
+        check(bench.Chosen({PickFor(B, Item::Iso, 200)}).Ok(), "CAM-B row enabled");
+        table = kChosenTable;
+        for (auto& row : table.rows) if (row.camera == B && row.item == Item::WhiteBalance) row.enabled = false;
+        Bench second(table);
+        check(HasReason(second.Chosen({PickFor(B, Item::WhiteBalance, 4)}), "row_disabled:white_balance:CAM-B"), "CAM-B white balance row disabled");
+        // A row that is enabled while its code is not confirmed (such a table is not accepted by a controller; the plan checks anyway).
+        auto unconfirmed = kChosenTable;
+        for (auto& row : unconfirmed.rows) if (row.item == Item::ShutterSpeed) row.code = 0;
+        auto a = Body(1667, 800, 64), b = Body(333, 560, 100);
+        const auto direct = BuildD810PerCameraPlan(Snapshot(a, "CAM-A"), Snapshot(b, "CAM-B"), {true, true}, {PickFor(B, Item::ShutterSpeed, 500)}, unconfirmed);
+        check(!direct.Ok() && HasReason(direct, "code_unconfirmed:shutter_speed:CAM-B"), "code not confirmed");
+        // Picks outside the item and camera enumerations are refused, not indexed.
+        const auto wild = BuildD810PerCameraPlan(Snapshot(a, "CAM-A"), Snapshot(b, "CAM-B"), {true, true},
+            {D810CameraChoice{static_cast<D810WriteItem>(99), B, D810ChoiceSource::Picked, 1}}, kChosenTable);
+        check(!wild.Ok() && HasReason(wild, "item_not_choosable"), "an item outside the table");
+        const auto wild_camera = BuildD810PerCameraPlan(Snapshot(a, "CAM-A"), Snapshot(b, "CAM-B"), {true, true},
+            {D810CameraChoice{Item::Iso, static_cast<D810Camera>(5), D810ChoiceSource::Picked, 200}}, kChosenTable);
+        check(!wild_camera.Ok(), "a camera outside A and B");
     }
     {
-        Bench bench(kAdr41Table);
-        check(!bench.Chosen({{D810WriteItem::Iso, D810WriteTarget::B, 200}}).Ok(), "one camera only: refused (both cameras, same value)");
-        check(!bench.Chosen({{D810WriteItem::Iso, D810WriteTarget::A, 200}}).Ok(), "CAM-A only: refused");
-        check(!bench.Chosen({{D810WriteItem::Iso, D810WriteTarget::Both, 320}}).Ok(), "value not advertised");
-        bench.a.props[0x500f].values = {64, 100, 200, 400, 800};
-        check(!bench.Chosen({{D810WriteItem::Iso, D810WriteTarget::Both, 800}}).Ok(), "both: B does not advertise");
-        const auto both = bench.Chosen({{D810WriteItem::Iso, D810WriteTarget::Both, 200}});
-        check(both.Ok() && both.plan->steps.size() == 2 && both.plan->steps[0].camera == D810Camera::A && both.plan->steps[1].camera == D810Camera::B, "A then B");
-        check(!bench.Chosen({{D810WriteItem::ExposureMode, D810WriteTarget::Both, 3}}).Ok(), "M only");
-        check(!bench.Chosen({{D810WriteItem::IsoAuto, D810WriteTarget::Both, 1}}).Ok(), "ISO auto OFF only");
-        check(!bench.Chosen({{D810WriteItem::ShutterSpeed, D810WriteTarget::Both, 0xffffffffLL}}).Ok(), "no Bulb");
-        check(!bench.Chosen({{D810WriteItem::WhiteBalance, D810WriteTarget::Both, 0x8013}}).Ok(), "no Preset");
-        check(!bench.Chosen({{D810WriteItem::Iso, D810WriteTarget::Both, 200}, {D810WriteItem::Iso, D810WriteTarget::Both, 200}}).Ok(), "duplicate choice");
-        check(bench.Chosen({{D810WriteItem::WhiteBalance, D810WriteTarget::Both, 4}, {D810WriteItem::ExposureCompensation, D810WriteTarget::Both, -500}}).Ok(), "extra items");
-        check(!bench.Chosen({{D810WriteItem::ExposureCompensation, D810WriteTarget::Both, -400}}).Ok(), "off the range step");
-        check(!bench.Chosen({}).Ok(), "no choice");
-        check(bench.Writes() == 0, "nothing sent");
+        // The body check is per camera and covers only the cameras that get a step.
+        Bench bench(kChosenTable);
+        bench.access.firmware[0] = "other-text";
+        check(bench.Verified() == D810BodyFlags{false, true}, "the fake CAM-A reports another version");
+        const auto a_step = bench.Chosen({PickFor(A, Item::Iso, 200)});
+        check(!a_step.Ok() && HasReason(a_step, "body_not_verified:CAM-A") && !HasReason(a_step, "body_not_verified:CAM-B"), "CAM-A is not verified");
+        check(bench.Chosen({PickFor(B, Item::Iso, 200)}).Ok(), "a CAM-B-only plan does not depend on CAM-A's body");
+        const auto mixed = bench.Chosen({PickFor(B, Item::Iso, 200), PickFor(A, Item::Iso, 200)});
+        check(!mixed.Ok() && HasReason(mixed, "body_not_verified:CAM-A"), "the plan with a CAM-A step is refused");
+        check(bench.Chosen({PickFor(A, Item::Iso, 64)}).Ok(), "a CAM-A pick that changes nothing needs no verified CAM-A");
+        bench.access.firmware[1] = "other-text";
+        const auto both = bench.Chosen({PickFor(B, Item::Iso, 200), PickFor(A, Item::Iso, 200)});
+        check(!both.Ok() && HasReason(both, "body_not_verified:CAM-A") && HasReason(both, "body_not_verified:CAM-B"), "both named");
+        Bench flags(kChosenTable);
+        check(!flags.Chosen({PickFor(B, Item::Iso, 200)}, {true, false}).Ok() && flags.Chosen({PickFor(B, Item::Iso, 200)}, {false, true}).Ok(), "the flags are read by camera");
+        check(!flags.Chosen({PickFor(A, Item::Iso, 200)}, {false, true}).Ok() && flags.Chosen({PickFor(A, Item::Iso, 200)}, {true, false}).Ok(), "the flags are read by camera, CAM-A");
+        check(bench.Writes() == 0 && flags.Writes() == 0, "nothing sent");
+    }
+    {
+        // The table names a firmware per camera, and a body is checked against its own camera's.
+        auto table = kChosenTable;
+        table.verified_firmware = "B-version";
+        table.verified_firmware_a = "A-version";
+        check(D810BodyVerified(table, A, "D810", "A-version") && !D810BodyVerified(table, B, "D810", "A-version") &&
+            D810BodyVerified(table, B, "D810", "B-version") && !D810BodyVerified(table, A, "D810", "B-version"), "each camera has its own version");
+        check(D810CheckBody(table, A, "D810", "B-version").model_match && !D810CheckBody(table, A, "D810", "B-version").firmware_match, "the two comparisons are apart, per camera");
+        for (const char* none : {static_cast<const char*>(nullptr), ""}) {
+            table.verified_firmware_a = none;
+            check(!D810BodyVerified(table, A, "D810", "") && !D810BodyVerified(table, A, "D810", "A-version") && !D810BodyVerified(table, A, "D810", "B-version"), "no version for CAM-A: no CAM-A body is verified");
+            check(D810BodyVerified(table, B, "D810", "B-version"), "CAM-B is unaffected");
+            check(std::string(D810WriteTableProblem(table)) == "cam_a_version_unconfirmed", "a CAM-A row needs CAM-A's version in the table");
+            auto without_a_rows = table;
+            for (auto& row : without_a_rows.rows) if (row.camera == A) row.enabled = false;
+            check(D810WriteTableProblem(without_a_rows) == nullptr, "no CAM-A row, no CAM-A version needed");
+        }
+        // The product table: no body is verified as CAM-A, whatever it reports.
+        const auto& product = kD810ProductWriteTable;
+        check(!D810BodyVerified(product, A, product.verified_model, product.verified_firmware) && !D810BodyVerified(product, A, product.verified_model, "") &&
+            D810BodyVerified(product, B, product.verified_model, product.verified_firmware), "product table: CAM-A cannot be verified");
+        // Product-table rules once ADR-0041 would be accepted: CAM-A rows need the chosen values, never the exposure mode or ISO auto.
+        check(D810ProductTableProblem(kChosenTable, true, true) == nullptr, "an accepted ADR-0041 would allow this table");
+        auto a_without_chosen = kChosenTable;
+        a_without_chosen.chosen_values = false;
+        check(std::string(D810ProductTableProblem(a_without_chosen, true, true)) == "cam_a_row_enabled", "a CAM-A row without chosen values");
+        auto a_mode = kChosenTable;
+        for (auto& row : a_mode.rows) if (row.camera == A && row.item == Item::ExposureMode) row.enabled = true;
+        check(std::string(D810ProductTableProblem(a_mode, true, true)) == "cam_a_row_not_choosable", "never the exposure mode on CAM-A");
+        check(std::string(D810ProductTableProblem(kChosenTable, true, false)) == "chosen_values_before_adr0041", "chosen values need ADR-0041");
+    }
+    {
+        // Manual mode and ISO auto off are needed on the cameras that get a step, and only on those.
+        Bench bench(kChosenTable);
+        bench.b.props[0x500e].current = 3;
+        const auto b_step = bench.Chosen({PickFor(B, Item::Iso, 200)});
+        check(!b_step.Ok() && HasReason(b_step, "exposure_mode_not_manual_set_on_body:CAM-B"), "B is not in M");
+        check(bench.Chosen({PickFor(A, Item::Iso, 200)}).Ok(), "B's mode does not matter to a CAM-A-only plan");
+        bench.b.props[0x500e].current = 1;
+        bench.a.props[0xd054].current = 1;
+        const auto a_step = bench.Chosen({PickFor(A, Item::Iso, 200), PickFor(B, Item::Iso, 200)});
+        check(!a_step.Ok() && HasReason(a_step, "iso_auto_not_off:CAM-A") && !HasReason(a_step, "iso_auto_not_off:CAM-B"), "A's ISO auto is on");
+        check(bench.Chosen({PickFor(B, Item::Iso, 200)}).Ok(), "A's ISO auto does not matter to a CAM-B-only plan");
+    }
+    {
+        // The shape check, on plans built by hand.
+        D810WritePlan plan;
+        plan.source = D810PlanSource::Chosen;
+        plan.iso_auto_code = 0xd054;
+        const D810WriteStep b_iso{B, Item::Iso, 0x500f, 100, 200}, b_aperture{B, Item::Aperture, 0x5007, 560, 1100}, a_iso{A, Item::Iso, 0x500f, 64, 200};
+        plan.steps = {b_iso, b_aperture, a_iso};
+        check(D810PlanProblem(plan, kChosenTable).empty(), "CAM-B steps, then CAM-A steps");
+        for (const auto& steps : std::vector<std::vector<D810WriteStep>>{{a_iso, b_iso}, {b_aperture, b_iso}, {b_iso, b_iso}, {b_iso, a_iso, b_aperture}, {a_iso, a_iso}}) {
+            plan.steps = steps;
+            check(D810PlanProblem(plan, kChosenTable) == "plan_order", "CAM-A before CAM-B, an item out of order, or an item twice");
+        }
+        plan.steps = {D810WriteStep{B, Item::Iso, 0x5007, 100, 200}};
+        check(D810PlanProblem(plan, kChosenTable) == "plan_step_code", "a code that is not the item's");
+        plan.steps = {a_iso};
+        plan.source = D810PlanSource::CopyAToB;
+        check(D810PlanProblem(plan, kChosenTable) == "copy_targets_cam_b_only", "a copy plan never has a CAM-A step");
+        plan.source = D810PlanSource::Chosen;
+        plan.iso_auto_code = 0;
+        check(D810PlanProblem(plan, kChosenTable) == "code_changed:iso_auto", "the table's codes again");
+        auto no_a = kChosenTable;
+        for (auto& row : no_a.rows) if (row.camera == A) row.enabled = false;
+        plan.iso_auto_code = 0xd054;
+        check(D810PlanProblem(plan, no_a) == "row_disabled", "the table's rows again");
     }
 }
 
@@ -2000,6 +2301,8 @@ void ProductShutter() {
         }
         auto a_row = kD810ProductWriteTable;
         for (auto& row : a_row.rows) if (row.item == D810WriteItem::ShutterSpeed && row.camera == D810Camera::A) row.enabled = true;
+        check(std::string(D810ProductTableProblem(a_row)) == "cam_a_version_unconfirmed", "shutter speed: CAM-A's row needs CAM-A's version in the table");
+        a_row.verified_firmware_a = "1.00";
         check(std::string(D810ProductTableProblem(a_row)) == "cam_a_row_enabled", "shutter speed: CAM-A's row cannot be enabled");
     }
 }
@@ -2324,41 +2627,120 @@ void JournalStates() {
         check(run.sent == 1 && run.verdict == D810WriteVerdict::Unknown && bench.b.begins_by_code.count(0x500d) == 0, "result line unwritable");
     }
 }
+// The step lines of a journal, in order, as "CAM-x item".
+std::vector<std::string> JournalStepOrder(const std::string& journal) {
+    std::vector<std::string> out;
+    for (const auto line : SplitD810RecordLines(journal)) {
+        const auto fields = SplitD810Fields(line);
+        if (fields.size() == 9 && fields[2] == "ev=step") out.push_back(std::string(fields[4].substr(6)) + " " + std::string(fields[5].substr(5)));
+    }
+    return out;
+}
+using BeginOrder = std::vector<std::pair<int, int>>;
 void ChosenRuns() {
+    using Item = D810WriteItem;
+    const auto A = D810Camera::A, B = D810Camera::B;
     {
-        Bench bench(kAdr41Table);
-        const auto run = bench.Run(bench.Chosen({{D810WriteItem::Iso, D810WriteTarget::Both, 200}, {D810WriteItem::WhiteBalance, D810WriteTarget::Both, 4}}));
-        check(run.verdict == D810WriteVerdict::Match && run.sent == 4, "both matched");
-        check(bench.a.props[0x500f].current == 200 && bench.b.props[0x500f].current == 200 && bench.a.props[0x5005].current == 4 && bench.b.props[0x5005].current == 4, "values");
-        check(!bench.access.overlap && NoResend(bench.a) && NoResend(bench.b), "one at a time, once");
+        // Both cameras, different values: every CAM-B item first, CAM-A last, once each, on its own body.
+        Bench bench(kChosenTable);
+        bench.TraceBegins();
+        const auto plan = bench.Chosen({PickFor(A, Item::Iso, 200), PickFor(B, Item::Iso, 400), PickFor(B, Item::WhiteBalance, 4), PickFor(A, Item::Metering, 4), PickFor(B, Item::Aperture, 1100)});
+        check(plan.Ok() && plan.plan->steps.size() == 5, "five steps");
+        const auto run = bench.Run(plan);
+        check(run.verdict == D810WriteVerdict::Match && run.sent == 5 && run.reason.empty(), "all matched");
+        check(bench.begin_order == BeginOrder{{1, 0x500f}, {1, 0x5007}, {1, 0x5005}, {0, 0x500f}, {0, 0x500b}}, "the writes reached CAM-B's three items first, then CAM-A's two");
+        check(bench.a.props[0x500f].current == 200 && bench.b.props[0x500f].current == 400, "each body got its own ISO");
+        check(bench.b.props[0x5007].current == 1100 && bench.b.props[0x5005].current == 4 && bench.a.props[0x500b].current == 4, "and its own other items");
+        check(bench.a.props[0x5007].current == 800 && bench.a.props[0x5005].current == 2 && bench.b.props[0x500b].current == 3 && bench.a.props[0x500d].current == 1667 && bench.b.props[0x500d].current == 333,
+            "nothing else changed");
+        check(!bench.access.overlap && NoResend(bench.a) && NoResend(bench.b) && bench.a.forbidden == 0 && bench.b.forbidden == 0, "one at a time, once, nothing else");
+        check(bench.a.write_begins == 2 && bench.b.write_begins == 3 && bench.a.write_datas == 2 && bench.b.write_datas == 3 && bench.a.write_ends == 2 && bench.b.write_ends == 3,
+            "a begin, data and END per step");
+        check(bench.access.opens[0] == 2 && bench.access.opens[1] == 2, "each camera: one verification read and one write session");
+        const auto journal = bench.Journal();
+        check(JournalStepOrder(journal) == std::vector<std::string>{"CAM-B iso", "CAM-B aperture", "CAM-B white_balance", "CAM-A iso", "CAM-A metering"}, "the record lists the steps in the write order");
+        check(Contains(journal, " source=chosen steps=5\n"), "the record says the plan was chosen");
+        const auto state = ParseD810Journal(journal);
+        check(state.block == D810CaptureBlock::None && state.operations == 1 && state.malformed_lines == 0, "the record reads clean");
+        check(bench.controller->CaptureAllowed() && bench.Restarted().CaptureAllowed(), "CAM-A and CAM-B differ and capture is allowed: the cameras are not compared");
     }
     {
-        // A fails: B gets nothing.
-        Bench bench(kAdr41Table);
+        // "Same as CAM-A": CAM-B takes CAM-A's pick; B is written, then A.
+        Bench bench(kChosenTable);
+        bench.TraceBegins();
+        const auto run = bench.Run(bench.Chosen({PickFor(A, Item::Iso, 200), FollowA(Item::Iso)}));
+        check(run.verdict == D810WriteVerdict::Match && run.sent == 2, "matched");
+        check(bench.a.props[0x500f].current == 200 && bench.b.props[0x500f].current == 200, "both bodies read 200");
+        check(bench.begin_order == BeginOrder{{1, 0x500f}, {0, 0x500f}}, "B first");
+    }
+    {
+        // CAM-A alone and CAM-B alone: the other camera is not even read.
+        Bench bench(kChosenTable);
+        const auto run = bench.Run(bench.Chosen({PickFor(A, Item::Iso, 200)}));
+        check(run.verdict == D810WriteVerdict::Match && run.sent == 1 && bench.a.write_begins == 1 && bench.b.write_begins == 0, "CAM-A alone");
+        check(bench.access.opens[1] == 0, "CAM-B was not opened");
+        Bench second(kChosenTable);
+        const auto only_b = second.Run(second.Chosen({PickFor(B, Item::Iso, 200)}));
+        check(only_b.verdict == D810WriteVerdict::Match && only_b.sent == 1 && second.b.write_begins == 1 && second.a.write_begins == 0 && second.access.opens[0] == 0, "CAM-B alone, CAM-A not opened");
+    }
+    {
+        // A CAM-B item fails (the body keeps the old value): the rest of CAM-B and all of CAM-A get nothing.
+        Bench bench(kChosenTable);
+        bench.TraceBegins();
+        bench.b.apply_as[0x5007] = 560;
+        const auto run = bench.Run(bench.Chosen({PickFor(B, Item::Iso, 200), PickFor(B, Item::Aperture, 1100), PickFor(B, Item::WhiteBalance, 4), PickFor(A, Item::Iso, 200)}));
+        check(run.verdict == D810WriteVerdict::Mismatch && run.reason == "readback_mismatch" && run.sent == 2, "mismatch on CAM-B's second item");
+        check(bench.begin_order == BeginOrder{{1, 0x500f}, {1, 0x5007}}, "nothing after the failed item");
+        check(bench.b.begins_by_code.count(0x5005) == 0 && bench.a.write_begins == 0 && bench.access.opens[0] == 1, "CAM-A was only read, before the first send");
+        check(NoResend(bench.b) && bench.b.write_begins == 2, "no resend, no write back");
+        check(bench.b.props[0x500f].current == 200, "the first item stays written");
+        check(!bench.controller->CaptureAllowed() && bench.controller->Block() == D810CaptureBlock::Mismatch && bench.Restarted().Block() == D810CaptureBlock::Mismatch, "capture is held, also after a restart");
+    }
+    {
+        // A CAM-B item ends unknown: nothing more to either camera.
+        Bench bench(kChosenTable);
+        bench.b.end_reject[0x5007] = 0x2002;
+        const auto run = bench.Run(bench.Chosen({PickFor(B, Item::Iso, 200), PickFor(B, Item::Aperture, 1100), PickFor(A, Item::Iso, 200)}));
+        check(run.verdict == D810WriteVerdict::Unknown && run.sent == 2 && run.reason == "result_unknown", "unknown on CAM-B");
+        check(bench.a.write_begins == 0 && bench.access.opens[0] == 1 && bench.b.write_begins == 2, "CAM-A gets nothing");
+        check(bench.controller->Block() == D810CaptureBlock::Unknown, "capture is held");
+    }
+    {
+        // CAM-B is written and matches, CAM-A's first item fails: CAM-A's rest gets nothing and CAM-B is not written back.
+        Bench bench(kChosenTable);
+        bench.TraceBegins();
         bench.a.apply_as[0x500f] = 400;
-        const auto run = bench.Run(bench.Chosen({{D810WriteItem::Iso, D810WriteTarget::Both, 200}}));
-        check(run.verdict == D810WriteVerdict::Mismatch && bench.b.write_begins == 0 && bench.access.opens[1] == 1, "A failed: B read once before, never opened for writing");
-        check(!bench.controller->CaptureAllowed(), "blocked");
+        const auto run = bench.Run(bench.Chosen({PickFor(B, Item::Iso, 200), PickFor(B, Item::Aperture, 1100), PickFor(A, Item::Iso, 200), PickFor(A, Item::Metering, 4)}));
+        check(run.verdict == D810WriteVerdict::Mismatch && run.sent == 3 && run.reason == "readback_mismatch", "mismatch on CAM-A's first item");
+        check(bench.begin_order == BeginOrder{{1, 0x500f}, {1, 0x5007}, {0, 0x500f}}, "CAM-A's second item was not sent");
+        check(bench.b.props[0x500f].current == 200 && bench.b.props[0x5007].current == 1100 && bench.b.write_begins == 2, "CAM-B keeps what it was given, no write back");
+        check(NoResend(bench.a) && NoResend(bench.b) && bench.a.write_begins == 1, "no resend");
+        check(bench.controller->Block() == D810CaptureBlock::Mismatch && bench.Restarted().Block() == D810CaptureBlock::Mismatch, "capture is held, also after a restart");
     }
     {
-        // A matches, B fails: only one camera changed, capture blocked.
-        Bench bench(kAdr41Table);
-        bench.b.end_reject[0x500f] = 0x2002;
-        const auto run = bench.Run(bench.Chosen({{D810WriteItem::Iso, D810WriteTarget::Both, 200}}));
-        check(run.verdict == D810WriteVerdict::Unknown && bench.a.props[0x500f].current == 200 && run.steps[0].verdict == D810WriteVerdict::Match, "one side only");
-        check(!bench.controller->CaptureAllowed() && bench.Restarted().Block() == D810CaptureBlock::Unknown, "blocked across restart");
-        // The release needs every block item equal on both, the approved extra items included.
-        bench.b.props[0x500f].current = 200;
-        bench.b.props[0x5005].current = 5;
-        bench.b.props[0x500d].current = 1667;
-        bench.b.props[0x5007].current = 800;
-        const auto reread = bench.controller->Reread(bench.access, bench.options);
-        check(!reread.check.released && reread.check.differences == std::vector<std::string>{"white_balance"}, "extra item in the release check");
-        // Both on Preset: equal numbers, but the content is not compared, so not released.
-        bench.a.props[0x5005].current = 0x8013;
-        bench.b.props[0x5005].current = 0x8013;
-        const auto preset = bench.controller->Reread(bench.access, bench.options);
-        check(!preset.check.released && preset.check.differences == std::vector<std::string>{"white_balance:content_dependent"}, "Preset is unknown, not a match");
+        // CAM-A's version stops being the table's between the plan and the run: nothing is sent, CAM-B included.
+        Bench bench(kChosenTable);
+        const auto plan = bench.Chosen({PickFor(B, Item::Iso, 200), PickFor(A, Item::Iso, 200)});
+        check(plan.Ok(), "a plan while both bodies match");
+        bench.access.firmware[0] = "other-text";
+        const auto run = bench.Run(plan);
+        check(run.sent == 0 && run.reason == "body_not_verified:CAM-A" && bench.Writes() == 0, "stopped before the first send");
+    }
+    {
+        // CAM-A changes after the plan, and CAM-A only supplied a value for "same as CAM-A": the run stops before a send.
+        Bench bench(kChosenTable);
+        bench.a.props[0x500f].current = 200;
+        const auto plan = bench.Chosen({FollowA(Item::Iso)});
+        check(plan.Ok() && StepTexts(plan) == std::vector<std::string>{"CAM-B iso 200"}, "B follows A");
+        bench.a.props[0x500f].current = 400;
+        const auto run = bench.Run(plan);
+        check(run.sent == 0 && run.reason == "plan_changed:CAM-A:changed:0x500f" && bench.Writes() == 0, "the value B followed changed");
+    }
+    {
+        // The operation record is written first; when it cannot be, nothing is sent (CAM-A's steps included).
+        Bench bench(kChosenTable, 2);
+        const auto run = bench.Run(bench.Chosen({PickFor(B, Item::Iso, 200), PickFor(A, Item::Iso, 200)}));
+        check(run.sent == 0 && run.reason == "record_unwritable" && bench.Writes() == 0, "the plan line and the first step line are written, the second step line is not");
     }
 }
 // White balance and metering through the whole run (test table): the order, the one send, the read back, the block.
@@ -2669,16 +3051,16 @@ void ZeroByteReadsInTheWriteSession() {
         check(!bench.controller->CaptureAllowed() && bench.Restarted().Block() == D810CaptureBlock::Unknown, "zero read back: capture held");
     }
     {
-        // The operation latch drops: CAM-A's read before its first write fails,
-        // so CAM-B is never opened for writing (an ADR-0041 table, both cameras).
-        Bench bench(kAdr41Table);
-        bench.a.zero_at[0x500f] = 3; // 1: the plan's read, 2: the verification read, 3: the read before the write
-        const auto plan = bench.Chosen({{D810WriteItem::Iso, D810WriteTarget::Both, 200}});
-        check(plan.Ok() && plan.plan->Cameras().size() == 2, "a plan for both");
+        // The operation latch drops: CAM-B's read before its first write fails (CAM-B is written first),
+        // so CAM-A is never opened for writing (a table with both cameras' rows).
+        Bench bench(kChosenTable);
+        bench.b.zero_at[0x500f] = 3; // 1: the plan's read, 2: the verification read, 3: the read before the write
+        const auto plan = bench.Chosen({PickFor(D810Camera::B, D810WriteItem::Iso, 200), PickFor(D810Camera::A, D810WriteItem::Iso, 200)});
+        check(plan.Ok() && plan.plan->Cameras() == std::vector<D810Camera>{D810Camera::B, D810Camera::A}, "a plan for both");
         const auto run = bench.Run(plan);
-        check(bench.a.reads_of[0x500f] == 3, "zero read on A happened");
-        check(run.sent == 0 && run.verdict == D810WriteVerdict::NotSent && bench.Writes() == 0, "zero read on A: not sent");
-        check(bench.access.opens[1] == 1 && bench.b.write_begins == 0, "the latch is down: B opened for the verification read only");
+        check(bench.b.reads_of[0x500f] == 3, "zero read on B happened");
+        check(run.sent == 0 && run.verdict == D810WriteVerdict::NotSent && bench.Writes() == 0, "zero read on B: not sent");
+        check(bench.access.opens[0] == 1 && bench.a.write_begins == 0, "the latch is down: A opened for the verification read only");
     }
 }
 // A read-only session (the read for a plan, the verification read of a run, the reread) does not trust its

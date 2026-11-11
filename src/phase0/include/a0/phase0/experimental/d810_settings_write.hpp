@@ -1,7 +1,8 @@
 #pragma once
 // Camera settings write: item table, the fixed write table, write plans and the
-// operation record format (#416 stage B, ADR-0038; the ADR-0041 extension is
-// present as code but disabled by the fixed table).
+// operation record format (#416 stage B, ADR-0038; the ADR-0041 extension, values
+// chosen per camera and CAM-A rows, is present as code but disabled by the fixed
+// table and by kD810Adr41Accepted).
 //
 // Pure functions only: no Windows headers, no device access, no file I/O. The
 // gate, the session and the files are in wpd_settings_write.hpp.
@@ -23,6 +24,7 @@
 #include "a0/phase0/experimental/d810_settings.hpp"
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <optional>
@@ -48,6 +50,11 @@ enum class D810ItemScope : std::uint8_t { Adr38, Adr38Revision, Adr41 };
 // Set by the reviewed commit that enables the white balance and metering rows. While it is false the
 // product table cannot hold an enabled row for an Adr38Revision item (D810ProductTableProblem).
 inline constexpr bool kD810Adr38RevisionAccepted = true;
+// ADR-0041 (values chosen per camera, CAM-A rows). While it is false the product table can neither hold a
+// chosen-values flag nor an enabled CAM-A row (D810ProductTableProblem), so nothing can be written to CAM-A and
+// no chosen plan can be made. It is set only by a reviewed commit after the owner accepts ADR-0041.
+inline constexpr bool kD810Adr41Accepted = false;
+static_assert(!kD810Adr41Accepted, "ADR-0041 is not accepted: the commit that sets this flag replaces this assertion with the set of enabled rows");
 // What the target body must read, in the same session and generation, before
 // the item may be armed (ADR-0038 decision 4, M-3).
 enum class D810WritePrecondition : std::uint8_t { LiveOff, ManualMode, ManualModeIsoAutoOff };
@@ -198,6 +205,7 @@ inline const char* D810WriteValueRefusal(const D810WriteItemSpec& spec, const D8
 }
 
 // --- The fixed write table ----------------------------------------------------------
+constexpr bool D810TextPresent(const char* text) { return text != nullptr && text[0] != '\0'; }
 struct D810WriteRow {
     D810WriteItem item;
     D810Camera camera;
@@ -214,8 +222,12 @@ struct D810WriteTable {
     bool chosen_values;
     // The camera model and firmware version the rows were confirmed on. A body
     // that reports anything else is not written; nullptr means none confirmed.
+    // The model is the same for both cameras; the version is per camera:
+    // `verified_firmware` is CAM-B's, `verified_firmware_a` is CAM-A's. While CAM-A's
+    // is empty no CAM-A body passes the check, so CAM-A is not written.
     const char* verified_model;
     const char* verified_firmware;
+    const char* verified_firmware_a;
     constexpr const D810WriteRow* Row(D810WriteItem item, D810Camera camera) const {
         for (const auto& row : rows)
             if (row.item == item && row.camera == camera) return &row;
@@ -240,6 +252,7 @@ constexpr D810WriteTable D810DisabledWriteTable() {
     table.chosen_values = false;
     table.verified_model = nullptr;
     table.verified_firmware = nullptr;
+    table.verified_firmware_a = nullptr;
     return table;
 }
 // Consistency of any table (also the ones the tests build).
@@ -257,6 +270,8 @@ constexpr const char* D810WriteTableProblem(const D810WriteTable& table) {
         if (row.enabled) {
             if (row.code == 0) return "enabled_without_code";
             if (spec.precondition == D810WritePrecondition::ManualModeIsoAutoOff && table.Code(D810WriteItem::IsoAuto) == 0) return "iso_auto_code_unconfirmed";
+            // A CAM-A row is enabled only together with the firmware version CAM-A was confirmed on.
+            if (row.camera == D810Camera::A && !D810TextPresent(table.verified_firmware_a)) return "cam_a_version_unconfirmed";
         }
     }
     for (const auto camera : {D810Camera::A, D810Camera::B})
@@ -268,12 +283,21 @@ constexpr const char* D810WriteTableProblem(const D810WriteTable& table) {
 // and the accepted items only (the five of ADR-0038, plus white balance and
 // metering once the ADR-0038 revision is accepted), no chosen values. ADR-0038
 // invariant 2 (CAM-A is never written) holds at compile time.
-constexpr const char* D810ProductTableProblem(const D810WriteTable& table, bool revision_accepted = kD810Adr38RevisionAccepted) {
+//
+// ADR-0041 (`adr41_accepted`: the constant by default, the tests pass the other value to keep the refusals under
+// test): the chosen-values flag and CAM-A rows need it. A CAM-A row is allowed only together with the chosen-values flag
+// (a CAM-A row is written by a chosen plan only, never by a copy) and only for the items a chosen plan can write
+// (never the exposure mode or ISO auto control).
+constexpr const char* D810ProductTableProblem(const D810WriteTable& table, bool revision_accepted = kD810Adr38RevisionAccepted,
+    bool adr41_accepted = kD810Adr41Accepted) {
     if (const auto problem = D810WriteTableProblem(table)) return problem;
-    if (table.chosen_values) return "chosen_values_before_adr0041";
+    if (table.chosen_values && !adr41_accepted) return "chosen_values_before_adr0041";
     for (const auto& row : table.rows) {
         if (!row.enabled) continue;
-        if (row.camera == D810Camera::A) return "cam_a_row_enabled";
+        if (row.camera == D810Camera::A) {
+            if (!(adr41_accepted && table.chosen_values)) return "cam_a_row_enabled";
+            if (row.item == D810WriteItem::ExposureMode || row.item == D810WriteItem::IsoAuto) return "cam_a_row_not_choosable";
+        }
         if (!D810ItemInProductScope(D810WriteItemOf(row.item), revision_accepted)) return "extra_item_enabled";
     }
     return nullptr;
@@ -335,7 +359,6 @@ constexpr bool D810ProductTableEnablesOnly(const D810WriteTable& table, std::uin
     }
     return enabled == camera_b_items;
 }
-constexpr bool D810TextPresent(const char* text) { return text != nullptr && text[0] != '\0'; }
 static_assert(D810ProductTableProblem(kD810ProductWriteTable) == nullptr, "the product write table is outside ADR-0038");
 static_assert(D810ProductTableEnablesOnly(kD810ProductWriteTable,
         D810ItemBit(D810WriteItem::Iso) | D810ItemBit(D810WriteItem::ShutterSpeed) | D810ItemBit(D810WriteItem::Aperture) | D810ItemBit(D810WriteItem::WhiteBalance) |
@@ -343,6 +366,8 @@ static_assert(D810ProductTableEnablesOnly(kD810ProductWriteTable,
     "the product table enables exactly ISO, shutter speed, aperture, white balance and metering on CAM-B and confirms ISO auto 0xD054 and shutter speed 0x500D");
 static_assert(D810TextPresent(kD810ProductWriteTable.verified_model), "the product table names the camera model it was confirmed on");
 static_assert(D810TextPresent(kD810ProductWriteTable.verified_firmware), "the product table names the firmware version it was confirmed on");
+static_assert(!D810TextPresent(kD810ProductWriteTable.verified_firmware_a) && !kD810ProductWriteTable.chosen_values,
+    "the product table names no firmware version for CAM-A and has no chosen values: CAM-A is not written (ADR-0041 is not accepted)");
 static_assert(kD810Adr38RevisionAccepted, "the product table enables white balance and metering, which needs the ADR-0038 revision flag");
 
 enum class D810PlanSource : std::uint8_t { CopyAToB, Chosen };
@@ -368,16 +393,23 @@ struct D810BodyCheck {
     bool firmware_match{};
     bool Verified() const { return model_match && firmware_match; }
 };
-inline D810BodyCheck D810CheckBody(const D810WriteTable& table, std::string_view model, std::string_view firmware) {
+// The firmware version the table names for `camera`: CAM-B's `verified_firmware`, CAM-A's `verified_firmware_a`.
+constexpr const char* D810VerifiedFirmware(const D810WriteTable& table, D810Camera camera) {
+    return camera == D810Camera::A ? table.verified_firmware_a : table.verified_firmware;
+}
+inline D810BodyCheck D810CheckBody(const D810WriteTable& table, D810Camera camera, std::string_view model, std::string_view firmware) {
     D810BodyCheck check;
+    const char* named = D810VerifiedFirmware(table, camera);
     check.model_match = D810TextPresent(table.verified_model) && !model.empty() && model == table.verified_model;
-    check.firmware_match = D810TextPresent(table.verified_firmware) && !firmware.empty() && firmware == table.verified_firmware;
+    check.firmware_match = D810TextPresent(named) && !firmware.empty() && firmware == named;
     return check;
 }
-// A body may be written only when it reports the model and firmware the table names.
-inline bool D810BodyVerified(const D810WriteTable& table, std::string_view model, std::string_view firmware) {
-    return D810CheckBody(table, model, firmware).Verified();
+// A body may be written only when it reports the model and the firmware the table names for that camera.
+inline bool D810BodyVerified(const D810WriteTable& table, D810Camera camera, std::string_view model, std::string_view firmware) {
+    return D810CheckBody(table, camera, model, firmware).Verified();
 }
+// Which of the two bodies (indexed by camera: CAM-A, CAM-B) matched the model and firmware the table names for it.
+using D810BodyFlags = std::array<bool, 2>;
 // Items whose equality on both cameras releases a capture block: the five of
 // ADR-0038, and every additional item with an enabled row (white balance and
 // metering join once their rows are enabled, never before).
@@ -428,10 +460,12 @@ struct D810WritePlan {
     // Items that differ but are not written, with the reason (copy only).
     std::vector<std::pair<D810WriteItem, std::string>> skipped;
     std::uint16_t iso_auto_code{};
-    // Cameras with steps, CAM-A first.
+    // Cameras with steps, CAM-B first and CAM-A last: CAM-A is the reference body of the stitch and calibration, so
+    // it is changed last, after everything planned for CAM-B has been written and read back. The run opens the
+    // cameras in this order.
     std::vector<D810Camera> Cameras() const {
         std::vector<D810Camera> cameras;
-        for (const auto camera : {D810Camera::A, D810Camera::B})
+        for (const auto camera : {D810Camera::B, D810Camera::A})
             if (std::any_of(steps.begin(), steps.end(), [&](const auto& step) { return step.camera == camera; })) cameras.push_back(camera);
         return cameras;
     }
@@ -441,12 +475,6 @@ struct D810PlanResult {
     // ASCII tokens: why no plan was made. Empty when `plan` is set.
     std::vector<std::string> reasons;
     bool Ok() const { return plan.has_value(); }
-};
-enum class D810WriteTarget : std::uint8_t { A, B, Both };
-struct D810WriteChoice {
-    D810WriteItem item{};
-    D810WriteTarget target{};
-    std::int64_t value{};
 };
 
 namespace d810_plan_detail {
@@ -480,6 +508,34 @@ inline void CheckPreconditions(const D810WritePlan& plan, D810Camera camera, con
         reasons.push_back("iso_auto_not_off:" + alias);
 }
 } // namespace d810_plan_detail
+
+// The table still lets every step through (checked again before the run).
+inline std::string D810PlanTableRefusal(const D810WritePlan& plan, const D810WriteTable& table) {
+    if (table.Code(D810WriteItem::IsoAuto) != plan.iso_auto_code) return "code_changed:iso_auto";
+    for (const auto& step : plan.steps) {
+        if (const auto refusal = D810RowRefusal(table, step.item, step.camera, plan.source)) return refusal;
+        if (table.Code(step.item) != step.code) return "code_changed";
+    }
+    return {};
+}
+// The shape of a plan, for every kind of plan: the steps of CAM-B come first and those of CAM-A last, the steps of
+// one camera follow the item table's order (so no item appears twice for a camera), every step's code is a code of
+// its item, and the table still lets every step through. Checked at the end of both plan builders and again at the
+// start of a run (the run's time margin counts the steps still to do and relies on this order). Empty when the plan
+// is well formed, else an ASCII token.
+inline std::string D810PlanProblem(const D810WritePlan& plan, const D810WriteTable& table) {
+    const D810WriteStep* previous = nullptr;
+    for (const auto& step : plan.steps) {
+        const auto* spec = FindD810WriteItemByCode(step.code);
+        if (!spec || spec->item != step.item) return "plan_step_code";
+        if (previous) {
+            if (previous->camera == D810Camera::A && step.camera == D810Camera::B) return "plan_order";
+            if (previous->camera == step.camera && static_cast<unsigned>(previous->item) >= static_cast<unsigned>(step.item)) return "plan_order";
+        }
+        previous = &step;
+    }
+    return D810PlanTableRefusal(plan, table);
+}
 
 // ADR-0038: copy CAM-A's five exposure items to CAM-B, and (ADR-0038 revision, decided by the owner)
 // white balance and metering. CAM-A must be in M with ISO auto off and
@@ -560,54 +616,7 @@ inline D810PlanResult BuildD810CopyPlan(const D810SettingsSnapshot& a, const D81
         plan.steps.push_back({D810Camera::B, spec.item, code, to->desc.current_value, value});
     }
     CheckPreconditions(plan, D810Camera::B, b, reasons);
-    if (!reasons.empty()) return result;
-    result.plan = std::move(plan);
-    return result;
-}
-
-// ADR-0041 (Proposed, disabled in the product table): values chosen by the
-// operator. The first version writes the same value to both cameras only
-// (target Both); the value must be offered by both bodies. Any invalid choice
-// refuses the whole plan.
-inline D810PlanResult BuildD810ChosenPlan(const D810SettingsSnapshot& a, const D810SettingsSnapshot& b,
-    const std::vector<D810WriteChoice>& choices, const D810WriteTable& table) {
-    using namespace d810_plan_detail;
-    D810PlanResult result;
-    auto& reasons = result.reasons;
-    if (!table.chosen_values) { reasons.push_back("chosen_values_disabled"); return result; }
-    if (choices.empty()) { reasons.push_back("no_choice"); return result; }
-    const auto iso_auto_code = table.Code(D810WriteItem::IsoAuto);
-    if (!iso_auto_code) { reasons.push_back("code_unconfirmed:iso_auto"); return result; }
-    D810WritePlan plan;
-    plan.source = D810PlanSource::Chosen;
-    plan.iso_auto_code = iso_auto_code;
-    for (std::size_t i = 0; i < choices.size(); ++i) {
-        const auto& spec = D810WriteItemOf(choices[i].item);
-        if (choices[i].target != D810WriteTarget::Both) reasons.push_back(Reason("both_cameras_only", spec, D810Camera::A));
-        for (std::size_t j = 0; j < i; ++j)
-            if (choices[j].item == choices[i].item) reasons.push_back(Reason("duplicate_choice", spec, D810Camera::A));
-    }
-    if (!reasons.empty()) return result;
-    for (const auto camera : {D810Camera::A, D810Camera::B}) {
-        const auto& snapshot = camera == D810Camera::A ? a : b;
-        for (const auto& spec : kD810WriteItems) {
-            const auto choice = std::find_if(choices.begin(), choices.end(), [&](const auto& c) { return c.item == spec.item; });
-            if (choice == choices.end()) continue;
-            if (const auto refusal = D810RowRefusal(table, spec.item, camera, plan.source)) { reasons.push_back(Reason(refusal, spec, camera)); continue; }
-            const auto code = table.Code(spec.item);
-            const auto* reading = AvailableD810Reading(snapshot, code);
-            if (!reading) { reasons.push_back(Reason("unreadable", spec, camera)); continue; }
-            Observe(plan.observed, camera, code, reading->desc.current_value);
-            if (const auto refusal = D810WriteValueRefusal(spec, reading->desc, choice->value)) { reasons.push_back(Reason(refusal, spec, camera)); continue; }
-            if (reading->desc.current_value != choice->value) plan.steps.push_back({camera, spec.item, code, reading->desc.current_value, choice->value});
-        }
-    }
-    for (const auto camera : {D810Camera::A, D810Camera::B}) {
-        const auto& snapshot = camera == D810Camera::A ? a : b;
-        for (const auto code : {kD810ExposureModeCode, iso_auto_code})
-            if (const auto* reading = AvailableD810Reading(snapshot, code)) Observe(plan.observed, camera, code, reading->desc.current_value);
-        CheckPreconditions(plan, camera, snapshot, reasons);
-    }
+    if (const auto problem = D810PlanProblem(plan, table); !problem.empty()) reasons.push_back(problem);
     if (!reasons.empty()) return result;
     result.plan = std::move(plan);
     return result;
@@ -629,15 +638,6 @@ inline std::string D810PlanChange(const D810WritePlan& plan, D810Camera camera, 
         if (!reading) return "unreadable:" + D810Hex(step.code, 4);
         if (const auto refusal = D810WriteValueRefusal(D810WriteItemOf(step.item), reading->desc, step.value))
             return std::string(refusal) + ":" + D810Hex(step.code, 4);
-    }
-    return {};
-}
-// The table still lets every step through (checked again before the run).
-inline std::string D810PlanTableRefusal(const D810WritePlan& plan, const D810WriteTable& table) {
-    if (table.Code(D810WriteItem::IsoAuto) != plan.iso_auto_code) return "code_changed:iso_auto";
-    for (const auto& step : plan.steps) {
-        if (const auto refusal = D810RowRefusal(table, step.item, step.camera, plan.source)) return refusal;
-        if (table.Code(step.item) != step.code) return "code_changed";
     }
     return {};
 }

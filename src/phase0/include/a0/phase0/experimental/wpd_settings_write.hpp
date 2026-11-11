@@ -27,6 +27,7 @@
 #if !defined(A0_ENABLE_WPD_SETTINGS_WRITE)
 #error "wpd_settings_write.hpp is only for targets built with A0_BUILD_WPD_SETTINGS_WRITE"
 #endif
+#include "a0/phase0/experimental/d810_settings_plan_chosen.hpp"
 #include "a0/phase0/experimental/d810_settings_write.hpp"
 #include "a0/phase0/experimental/wpd_settings_read.hpp"
 #include <ShlObj.h>
@@ -827,6 +828,10 @@ struct D810RereadResult {
 struct D810PlanRead {
     bool complete{};
     std::array<D810SettingsSnapshot, 2> snapshots; // CAM-A, CAM-B
+    // Which body reported the model and firmware the table names for it (indexed like `snapshots`; booleans only).
+    // CAM-B's is always true in a complete read (a CAM-B that does not match ends the read); CAM-A's is what a plan
+    // that writes CAM-A needs, and stays false while the table names no firmware for CAM-A.
+    D810BodyFlags verified{};
     std::string reason;
 };
 struct D810WriteStatus {
@@ -942,6 +947,7 @@ public:
             // plan is made and nothing is shown to confirm. CAM-A is only read, so its version does not matter.
             const bool target = camera == D810Camera::B;
             auto read = ReadCamera(access, camera, options, target);
+            out.verified[static_cast<std::size_t>(camera)] = read.opened && read.verified;
             if (target && read.opened) {
                 if (options.log)
                     options.log(std::string(D810CameraAlias(camera)) + " settings_write_body_check model_match=" + (read.body.model_match ? "1" : "0") +
@@ -961,9 +967,13 @@ public:
         if (const auto refusal = PlanRefusal()) return Keep(Refused(refusal));
         return Keep(BuildD810CopyPlan(a, b, table_, only));
     }
-    D810PlanResult PlanChosen(const D810SettingsSnapshot& a, const D810SettingsSnapshot& b, const std::vector<D810WriteChoice>& choices) {
+    // Build a plan of the values picked for each camera (D810PanelDraft::Choices()) from two fresh reads and the
+    // `verified` flags of the same read (D810PlanRead::verified). Refused whole while the table's chosen-values
+    // switch is off (the product table). It replaces any plan not yet run.
+    D810PlanResult PlanChosen(const D810SettingsSnapshot& a, const D810SettingsSnapshot& b, const D810BodyFlags& verified,
+        const std::vector<D810CameraChoice>& choices) {
         if (const auto refusal = PlanRefusal()) return Keep(Refused(refusal));
-        return Keep(BuildD810ChosenPlan(a, b, choices, table_));
+        return Keep(BuildD810PerCameraPlan(a, b, verified, choices, table_));
     }
     // The operator confirmed the plan shown. Returns the refusal, or nullptr.
     const char* Confirm(std::uint64_t plan_id) {
@@ -986,7 +996,9 @@ public:
             return run;
         }
         if (const auto refusal = PlanRefusal()) { run.reason = refusal; return run; }
-        if (const auto refusal = D810PlanTableRefusal(plan, table_); !refusal.empty()) { run.reason = refusal; return run; }
+        // The order of the steps (CAM-B first, CAM-A last, no item twice), and the table again: this run's time
+        // margin and its latch rely on that order.
+        if (const auto problem = D810PlanProblem(plan, table_); !problem.empty()) { run.reason = problem; return run; }
         if (!owner_.TryAcquire(D810CameraUse::Settings)) { run.reason = "cameras_busy"; return run; }
         struct Release { D810CameraOwnership& owner; ~Release() { owner.Release(D810CameraUse::Settings); } } release{owner_};
         D810OperationLatch latch;
@@ -1073,7 +1085,7 @@ private:
         auto opened = access.Open(camera);
         if (!opened.transport) return out;
         out.opened = true;
-        out.body = D810CheckBody(table_, opened.model, opened.firmware);
+        out.body = D810CheckBody(table_, camera, opened.model, opened.firmware);
         out.verified = out.body.Verified();
         if (only_if_verified && !out.verified) {
             access.Close(camera);
@@ -1165,7 +1177,7 @@ private:
             auto opened = access.Open(camera);
             if (!opened.transport) return std::string("open_failed:") + D810CameraAlias(camera);
             std::string stop;
-            if (!D810BodyVerified(self.table_, opened.model, opened.firmware)) stop = std::string("body_not_verified:") + D810CameraAlias(camera);
+            if (!D810BodyVerified(self.table_, camera, opened.model, opened.firmware)) stop = std::string("body_not_verified:") + D810CameraAlias(camera);
             else {
                 try {
                     WpdSettingsWriteSession session(std::move(opened.transport), options.may_continue, options.may_cleanup, std::move(config), opened.cancelled);

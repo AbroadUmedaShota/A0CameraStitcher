@@ -337,6 +337,7 @@ D810WriteTable OpenTable() {
     table.chosen_values = true;
     table.verified_model = "D810";
     table.verified_firmware = "V0";
+    table.verified_firmware_a = "V0";
     return table;
 }
 std::string Locked(const D810PanelCell& cell) { return Refusal(cell.locked_reason); }
