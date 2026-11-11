@@ -4,7 +4,7 @@
 // D810SettingsWriteScreen; this file opens the cameras, draws and hooks the buttons and the capture admission.
 //
 // The controller comes from the product entry point only: this build has no constructor that takes a
-// table, and the fixed product table decides every row (0 rows enabled until a reviewed commit).
+// table, and the fixed product table decides every row (one row enabled: ISO on CAM-B).
 #if defined(A0_SETTINGS_WRITE_TEST_TABLES)
 // The confirmation test build (CMake: a0_preview_settings_write_confirm_tests): the one executable that has the
 // table-taking constructor. Its main runs the camera-free confirmation smoke and nothing else.
@@ -450,20 +450,22 @@ int RunSettingsWriteUiSmoke(){
     wchar_t caption[256]{};GetWindowTextW(window,caption,256);
     check(std::wstring(caption).find(L"設定の書き込みあり")!=std::wstring::npos); // the ON build's mark
 
-    // 1. The product table and an empty record folder: nothing is enabled, capture is free.
+    // 1. The product table and an empty record folder: one row is enabled (ISO on CAM-B), capture is free, and copying
+    //    is offered once both Live sessions are joined. The smoke opens no camera (the access counts every Open).
     InitSettingsWrite(std::make_unique<D810SettingsFileJournal>(folder),factory);
     auto* screen=settings_write->screen.get();
-    check(screen->Status().enabled_rows==0 && !screen->Status().write_allowed && screen->Status().capture_allowed);
+    check(screen->Status().enabled_rows==1 && screen->Status().write_allowed && screen->Status().capture_allowed);
     tick();
     check(!SettingsWriteButtonShown(settings_copy_button) && !IsWindowEnabled(settings_copy_button)); // Live runs: not shown
     stop_live();tick();
-    check(CanReadSettings() && SettingsWriteButtonShown(settings_copy_button) && !IsWindowEnabled(settings_copy_button));
+    check(CanReadSettings() && SettingsWriteButtonShown(settings_copy_button) && IsWindowEnabled(settings_copy_button)!=FALSE); // one row: copying is offered
     check(IsWindowEnabled(settings_reread_button)!=FALSE && !SettingsWriteButtonShown(settings_confirm_button) && !SettingsWriteButtonShown(settings_discard_button));
     const auto offer=screen->OfferText(true);
-    check(offer.find(L"押せません")!=std::wstring::npos && offer.find(L"番号（code）")!=std::wstring::npos && offer.find(L"確かめていない")!=std::wstring::npos);
-    click(406,settings_copy_button);click(407,settings_confirm_button); // a direct command does nothing either
+    // The "no row" text belongs to a table with no enabled row; the product table does not reach it.
+    check(offer.find(L"書ける項目がありません")==std::wstring::npos && offer.find(L"番号（code）")==std::wstring::npos && offer.find(L"確定の前に表示します")!=std::wstring::npos);
+    click(407,settings_confirm_button); // a confirm with no plan up does nothing (copy itself is not pressed: it would start a read)
     check(!SettingsWriteBusy() && opens->load()==0 && screen->Step()==D810WriteScreenStep::Idle && !screen->Status().plan_pending && !screen->Status().plan_confirmed);
-    check(capture_status.find(L"押せません")!=std::wstring::npos);
+    check(capture_status==offer);
     check(drawn_in(960-80,960-44)>50); // the reason line above the buttons
     // Capture is admitted while nothing is held.
     run_live();tick();

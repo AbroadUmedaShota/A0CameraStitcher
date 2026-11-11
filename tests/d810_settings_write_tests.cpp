@@ -243,9 +243,8 @@ D810SettingsSnapshot WritePathSnapshot(FakeWriteBody& body, const char* alias) {
 }
 
 // --- Tables ----------------------------------------------------------------------------
-// The product table with the codes confirmed, CAM-B's five rows enabled and a
-// verified firmware: the most ADR-0038 allows. It is what a reviewed commit
-// after the real read would make the product table look like.
+// The product table with CAM-B's five rows enabled and a synthetic firmware
+// version: the most ADR-0038 allows. The product table itself enables one row.
 constexpr D810WriteTable Adr38Table() {
     auto table = kD810ProductWriteTable;
     for (auto& row : table.rows) {
@@ -581,15 +580,25 @@ void DescriptionRules() {
 void ProductTable() {
     const auto& table = kD810ProductWriteTable;
     check(D810ProductTableProblem(table) == nullptr, "product table valid");
-    // The enabled set is exactly this (empty until the codes are confirmed on a
-    // body). Changing the product table makes this check fail on purpose.
+    // The enabled set is exactly this: ISO on CAM-B. Changing the product table makes this check fail on purpose.
     std::set<std::pair<int, int>> enabled;
     for (const auto& row : table.rows)
         if (row.enabled) enabled.insert({static_cast<int>(row.camera), static_cast<int>(row.item)});
-    check(enabled.empty(), "no row enabled in the product table");
-    check(table.Code(D810WriteItem::IsoAuto) == 0 && table.Code(D810WriteItem::ShutterSpeed) == 0, "ISO auto and shutter codes not confirmed");
-    check(table.copy_a_to_b && !table.chosen_values && table.verified_firmware == nullptr, "copy only, no firmware verified");
-    check(!D810BodyVerified(table, "D810", "1.00") && !D810BodyVerified(table, "D810", ""), "no body is verified");
+    check(enabled == std::set<std::pair<int, int>>{{static_cast<int>(D810Camera::B), static_cast<int>(D810WriteItem::Iso)}}, "the product table enables exactly ISO on CAM-B");
+    check(D810EnabledRowCount(table) == 1, "one enabled row");
+    // The codes the table confirms: ISO auto and shutter speed on both cameras, rows disabled.
+    for (const auto camera : {D810Camera::A, D810Camera::B}) {
+        const auto* iso_auto = table.Row(D810WriteItem::IsoAuto, camera);
+        const auto* shutter = table.Row(D810WriteItem::ShutterSpeed, camera);
+        check(iso_auto && !iso_auto->enabled && iso_auto->code == 0xd054, "ISO auto: code 0xD054, disabled");
+        check(shutter && !shutter->enabled && shutter->code == 0x500d, "shutter speed: code 0x500D, disabled");
+    }
+    check(table.Code(D810WriteItem::IsoAuto) == 0xd054 && table.Code(D810WriteItem::ShutterSpeed) == 0x500d, "confirmed codes");
+    check(table.copy_a_to_b && !table.chosen_values, "copy only");
+    check(std::string(table.verified_model) == "D810" && table.verified_firmware != nullptr && table.verified_firmware[0] != '\0', "model and firmware named");
+    check(D810BodyVerified(table, "D810", table.verified_firmware), "a body that reports the named model and firmware is verified");
+    check(!D810BodyVerified(table, "D810", "") && !D810BodyVerified(table, "D810", "1.00") && !D810BodyVerified(table, "D850", table.verified_firmware) &&
+        !D810BodyVerified(table, "", table.verified_firmware), "any other model or firmware is not");
     // What the product table may ever hold: CAM-B and the five items, no chosen values.
     std::size_t allowed = 0;
     for (std::size_t i = 0; i < table.rows.size(); ++i) {
@@ -630,9 +639,12 @@ void ProductTable() {
     bad = Adr38Table();
     for (auto& row : bad.rows) if (row.item == D810WriteItem::IsoAuto) row.code = 0;
     check(std::string(D810WriteTableProblem(bad)) == "enabled_without_code", "enabled needs a code");
-    bad = kD810ProductWriteTable;
+    bad = D810DisabledWriteTable();
     for (auto& row : bad.rows) if (row.item == D810WriteItem::Iso && row.camera == D810Camera::B) row.enabled = true;
     check(std::string(D810WriteTableProblem(bad)) == "iso_auto_code_unconfirmed", "ISO needs the ISO auto code");
+    bad = kD810ProductWriteTable;
+    for (auto& row : bad.rows) if (row.item == D810WriteItem::IsoAuto) row.code = 0;
+    check(std::string(D810WriteTableProblem(bad)) == "iso_auto_code_unconfirmed", "the product table's ISO row needs the ISO auto code");
     bad = Adr38Table();
     bad.rows[3] = bad.rows[2];
     check(D810WriteTableProblem(bad) != nullptr, "duplicate or missing row");
@@ -657,13 +669,16 @@ void ControllerTables() {
     {
         // The product entry point holds the product table.
         Bench bench(kProduct);
-        check(bench.controller->Status().enabled_rows == 0, "product entry: no row");
-        check(!bench.controller->Status().write_allowed && bench.controller->Status().capture_allowed, "no row enabled: copying is not offered");
-        Bench enabled;
-        check(enabled.controller->Status().write_allowed, "rows enabled, no block: copying is offered");
+        check(bench.controller->Status().enabled_rows == 1, "product entry: one row");
+        check(bench.controller->Status().write_allowed && bench.controller->Status().capture_allowed, "one row enabled, no block: copying is offered");
+        auto none = kAdr38Table;
+        for (auto& row : none.rows) row.enabled = false;
+        Bench empty(none);
+        check(empty.controller->Status().enabled_rows == 0 && !empty.controller->Status().write_allowed && empty.controller->Status().capture_allowed, "no row enabled: copying is not offered");
         const auto copy = bench.Copy();
-        check(!copy.Ok() && copy.reasons[0] == "code_unconfirmed:iso_auto" && bench.Writes() == 0, "product entry: nothing can be planned");
-        check(bench.Restarted().Status().enabled_rows == 0, "product entry after a restart");
+        check(copy.Ok() && copy.plan->steps.size() == 1 && copy.plan->steps[0].item == D810WriteItem::Iso && copy.plan->steps[0].camera == D810Camera::B && bench.Writes() == 0,
+            "product entry: only ISO on CAM-B can be planned");
+        check(bench.Restarted().Status().enabled_rows == 1, "product entry after a restart");
     }
     {
         // The table is held by value: a temporary does not dangle.
@@ -685,10 +700,11 @@ void FilesEnableNothing() {
     }
     SetEnvironmentVariableW(L"A0_SETTINGS_WRITE_ENABLE", L"1");
     const auto copy = bench.Copy();
-    check(!copy.Ok() && copy.reasons.size() == 2 && copy.reasons[0] == "code_unconfirmed:iso_auto", "product copy refused");
+    check(copy.Ok() && copy.plan->steps.size() == 1 && copy.plan->steps[0].item == D810WriteItem::Iso && copy.plan->steps[0].camera == D810Camera::B,
+        "product copy: ISO on CAM-B and nothing else, whatever the files and the variable say");
     for (const auto target : {D810WriteTarget::A, D810WriteTarget::B, D810WriteTarget::Both})
         check(!bench.Chosen({{D810WriteItem::Iso, target, 200}}).Ok(), "product chosen refused");
-    check(bench.controller->Status().enabled_rows == 0, "status: no row");
+    check(bench.controller->Status().enabled_rows == 1, "status: one row");
     SetEnvironmentVariableW(L"A0_SETTINGS_WRITE_ENABLE", nullptr);
     check(bench.Writes() == 0 && bench.a.write_datas + bench.b.write_datas == 0 && bench.a.forbidden + bench.b.forbidden == 0, "only reads, no write");
 }
@@ -722,7 +738,17 @@ void CopyPlans() {
     { Bench bench; bench.b.props[0x5007].form = 0; bench.b.props[0x5007].values.clear(); refused(bench, "not_writable:aperture:CAM-B"); }
     { Bench bench; bench.b.props[0x5007].get_set = 0; refused(bench, "not_writable:aperture:CAM-B"); }
     { Bench bench; bench.b.props[0x5007].type = 6; refused(bench, "unreadable:aperture:CAM-B"); }
-    { Bench bench(kProduct); refused(bench, "code_unconfirmed:iso_auto"); }
+    {
+        // The product table: ISO on CAM-B is planned; every other difference is left out because its row is disabled.
+        Bench bench(kProduct);
+        const auto plan = bench.Copy();
+        check(plan.Ok() && plan.plan->steps.size() == 1 && plan.plan->steps[0].item == D810WriteItem::Iso && plan.plan->steps[0].value == 64 && plan.plan->steps[0].before == 100, "product table: one step, ISO");
+        const auto skipped = [&](D810WriteItem item) {
+            return plan.Ok() && std::any_of(plan.plan->skipped.begin(), plan.plan->skipped.end(), [&](const auto& s) { return s.first == item && s.second == "row_disabled"; });
+        };
+        check(skipped(D810WriteItem::ShutterSpeed) && skipped(D810WriteItem::Aperture), "product table: shutter speed and aperture are left out (row disabled)");
+        check(bench.Writes() == 0, "product table: planning sends nothing");
+    }
     {
         // A row disabled: listed as skipped, the rest still planned.
         Bench bench(Adr38Only({D810WriteItem::ExposureMode, D810WriteItem::IsoAuto, D810WriteItem::ShutterSpeed, D810WriteItem::Aperture}));
@@ -1590,6 +1616,24 @@ void HappyCopy() {
     // The plan was consumed.
     check(bench.controller->Execute(0, bench.access, bench.options).reason == "plan_not_confirmed", "plan consumed");
 }
+// The product table end to end on the fakes: one begin, data and END, all on CAM-B's ISO code; the other items are not touched.
+void ProductRun() {
+    {
+        Bench bench(kProduct);
+        bench.access.firmware[1] = kD810ProductWriteTable.verified_firmware;
+        const auto run = bench.CopyRun();
+        check(run.verdict == D810WriteVerdict::Match && run.sent == 1 && run.reason.empty(), "product run: matched with one write");
+        check(bench.b.props[0x500f].current == 64 && bench.b.props[0x500d].current == 333 && bench.b.props[0x5007].current == 560, "product run: only ISO changed on B");
+        check(bench.b.write_begins == 1 && bench.b.write_datas == 1 && bench.b.write_ends == 1 && bench.b.begins_by_code.size() == 1 && bench.b.begins_by_code.count(0x500f) == 1, "product run: one write, to the ISO code");
+        check(bench.a.write_begins == 0 && bench.a.write_datas == 0 && bench.a.write_ends == 0 && bench.a.forbidden == 0 && bench.b.forbidden == 0, "product run: A is only read");
+    }
+    {
+        // A body that reports any other firmware version is not written.
+        Bench bench(kProduct);
+        const auto run = bench.CopyRun();
+        check(run.sent == 0 && run.reason == "body_not_verified:CAM-B" && bench.Writes() == 0, "product run: another firmware, nothing sent");
+    }
+}
 void BodyAndConfirmation() {
     {
         // A target body that is not the verified model or firmware: nothing sent.
@@ -2377,13 +2421,24 @@ void ScreenRefusals() {
         check(!s.screen->RequestCopy(false) && !s.screen->RequestReread(false) && s.bench.access.opens[0] + s.bench.access.opens[1] == 0, "screen: not ready");
     }
     {
-        // The product table: no row, so copy cannot be pressed, and the reason says why.
-        ScreenBench s(kProduct);
-        check(s.screen->Status().enabled_rows == 0 && !s.screen->CopyOffered(true) && !s.screen->RequestCopy(true), "screen: product table, no copy");
+        // A table with no enabled row: copy cannot be pressed, and the reason says why. The product table has a row, so
+        // this text is not reached by it (next block).
+        auto none = kAdr38Table;
+        for (auto& row : none.rows) row.enabled = false;
+        ScreenBench s(none);
+        check(s.screen->Status().enabled_rows == 0 && !s.screen->CopyOffered(true) && !s.screen->RequestCopy(true), "screen: no enabled row, no copy");
         const auto text = s.screen->OfferText(true);
         check(text.find(L"押せません") != std::wstring::npos && text.find(L"番号（code）") != std::wstring::npos && text.find(L"確かめていない") != std::wstring::npos,
             "screen: the reason names the unconfirmed codes and body");
-        check(s.bench.access.opens[0] + s.bench.access.opens[1] == 0 && s.bench.Writes() == 0, "screen: product table, nothing opened");
+        check(s.bench.access.opens[0] + s.bench.access.opens[1] == 0 && s.bench.Writes() == 0, "screen: no enabled row, nothing opened");
+    }
+    {
+        // The product table has one row: copy is offered, and the no-row reason is not the text shown.
+        ScreenBench s(kProduct);
+        check(s.screen->Status().enabled_rows == 1 && s.screen->CopyOffered(true) && !s.screen->CopyOffered(false), "screen: product table, copy offered when ready");
+        const auto text = s.screen->OfferText(true);
+        check(text.find(L"書ける項目がありません") == std::wstring::npos && text.find(L"番号（code）") == std::wstring::npos, "screen: product table, not the no-row reason");
+        check(s.bench.access.opens[0] + s.bench.access.opens[1] == 0 && s.bench.Writes() == 0, "screen: product table, nothing opened by looking");
     }
     {
         // Discard: nothing written, the plan gone.
@@ -2756,6 +2811,7 @@ int main() {
     run("GateFailureShapes", GateFailureShapes);
     run("OtherGatesStillRefuseWrites", OtherGatesStillRefuseWrites);
     run("HappyCopy", HappyCopy);
+    run("ProductRun", ProductRun);
     run("BodyAndConfirmation", BodyAndConfirmation);
     run("RecordMustBeWrittenFirst", RecordMustBeWrittenFirst);
     run("PlanChangedAfterConfirm", PlanChangedAfterConfirm);

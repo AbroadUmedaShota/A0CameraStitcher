@@ -282,19 +282,43 @@ constexpr std::size_t D810EnabledRowCount(const D810WriteTable& table) {
     for (const auto& row : table.rows) count += row.enabled;
     return count;
 }
-// The product table. ISO auto (0xD054 or 0xD16A) and shutter speed (0x500D or
-// 0xD100) are not confirmed on a body yet, so every row is disabled and the
-// default build writes nothing. Enabling rows, confirming codes and naming the
-// verified firmware is a reviewed commit to this table after the stage A read
-// on the real bodies.
+// The product table. The stage A read on the real bodies confirmed ISO auto at
+// 0xD054 (not 0xD16A) and shutter speed at 0x500D (not 0xD100). Both are
+// recorded here with their rows disabled: the plan reads them for its
+// preconditions and its refusals, but nothing writes them. ISO on CAM-B
+// is the one enabled row, and the firmware version is the one the stage A read
+// reported for CAM-B. Enabling another row is a reviewed commit to this table.
 inline constexpr D810WriteTable kD810ProductWriteTable = [] {
     auto table = D810DisabledWriteTable();
+    for (auto& row : table.rows) {
+        if (row.item == D810WriteItem::IsoAuto) row.code = 0xd054;
+        if (row.item == D810WriteItem::ShutterSpeed) row.code = 0x500d;
+        if (row.item == D810WriteItem::Iso && row.camera == D810Camera::B) row.enabled = true;
+    }
     table.copy_a_to_b = true;
     table.verified_model = "D810";
+    table.verified_firmware = "V1.14";
     return table;
 }();
+// The enabled set of the product table and the codes it confirms, written out so that a change to either is a
+// compile error here and a reviewed edit of this block.
+constexpr bool D810ProductTableIsIsoOnCamB(const D810WriteTable& table) {
+    std::size_t enabled = 0;
+    for (const auto& row : table.rows) {
+        if (row.enabled) {
+            if (row.item != D810WriteItem::Iso || row.camera != D810Camera::B) return false;
+            ++enabled;
+        }
+        if (row.item == D810WriteItem::IsoAuto && row.code != 0xd054) return false;
+        if (row.item == D810WriteItem::ShutterSpeed && row.code != 0x500d) return false;
+    }
+    return enabled == 1;
+}
+constexpr bool D810TextPresent(const char* text) { return text != nullptr && text[0] != '\0'; }
 static_assert(D810ProductTableProblem(kD810ProductWriteTable) == nullptr, "the product write table is outside ADR-0038");
-static_assert(D810EnabledRowCount(kD810ProductWriteTable) == 0, "no row is enabled before the codes are confirmed on a body");
+static_assert(D810ProductTableIsIsoOnCamB(kD810ProductWriteTable), "the product table enables exactly ISO on CAM-B and confirms ISO auto 0xD054 and shutter speed 0x500D");
+static_assert(D810TextPresent(kD810ProductWriteTable.verified_firmware), "the product table names the firmware version it was confirmed on");
+static_assert(!kD810Adr38RevisionAccepted, "white balance and metering stay disabled until the ADR-0038 revision is accepted");
 
 enum class D810PlanSource : std::uint8_t { CopyAToB, Chosen };
 inline const char* D810PlanSourceToken(D810PlanSource source) { return source == D810PlanSource::CopyAToB ? "copy" : "chosen"; }
