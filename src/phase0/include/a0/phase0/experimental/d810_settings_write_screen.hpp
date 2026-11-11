@@ -412,7 +412,8 @@ private:
         auto stop = std::make_shared<std::atomic<bool>>(false);
         stop_ = stop;
         auto access = std::make_unique<D810TrackedCameraAccess>(access_ ? access_() : nullptr);
-        const auto limit = step == D810WriteScreenStep::Writing ? options_.write_deadline : options_.read_deadline;
+        const auto write_limit = plan_ ? D810WriteDeadlineFor(*plan_, options_.write_deadline) : options_.write_deadline;
+        const auto limit = step == D810WriteScreenStep::Writing ? write_limit : options_.read_deadline;
         worker_ = std::async(std::launch::async,
             [&controller = controller_, access = std::move(access), stop, limit, step, plan_id = plan_id_, log = options_.log, now = options_.now]() mutable {
                 Outcome outcome;

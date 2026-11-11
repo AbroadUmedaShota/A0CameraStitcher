@@ -151,11 +151,19 @@ private:
 // What one camera's session may write: the destination, the confirmed plan's
 // steps for that camera, and the confirmed ISO auto code (read for the
 // precondition).
+//
+// `cam_a_allowed` is the key to a CAM-A session (ADR-0041), closed by default: a
+// configuration for CAM-A without it is invalid and the gate is retired at once.
+// The gate does not know the table; the run sets the key only for a chosen plan
+// under a table whose chosen-values switch is on, so a CAM-A session cannot be
+// built from a copy plan or from a table that does not allow it, whatever the
+// plan says. CAM-B needs no key.
 struct D810WriteGateConfig {
     D810Camera camera{D810Camera::B};
     std::vector<D810WriteGateEntry> entries;
     std::uint16_t iso_auto_code{};
     D810OperationLatch* latch{};
+    bool cam_a_allowed{};
 };
 // States. In the words of ADR-0038 decision 9: ReadBegun, ReadOpen and
 // ReadEnding are "ReadOpen"; WriteBegun and WriteOpen are "WriteBegun";
@@ -308,6 +316,7 @@ private:
     struct SeenLive { std::uint64_t generation; unsigned value; };
     bool ValidConfig() const {
         std::set<std::uint16_t> codes;
+        if (config_.camera == D810Camera::A && !config_.cam_a_allowed) return false;
         if (!D810WriteItemHasCode(D810WriteItemOf(D810WriteItem::IsoAuto), config_.iso_auto_code)) return false;
         for (const auto& entry : config_.entries) {
             const auto* spec = FindD810WriteItemByCode(entry.code);
@@ -1007,8 +1016,12 @@ public:
         memory_block_ = StrongerD810Block(memory_block_, run.block);
         return run;
     }
-    // Read both cameras with the read-only session and release a block when
-    // every block item reads the same on both. Sends no write.
+    // Read both cameras with the read-only session and release a block. For a
+    // history of copies only, when every block item reads the same on both; for a
+    // history that holds a chosen plan (read from the record, so also after a
+    // restart), when every item the unfinished operations planned reads its
+    // planned value on its own camera, with no comparison of the two cameras.
+    // Sends no write.
     D810RereadResult Reread(D810SettingsCameraAccess& access, const D810WriteRunOptions& options) {
         D810RereadResult result;
         if (!options.may_continue || !options.may_cleanup) { result.reason = "invalid_options"; result.block = Block(); return result; }
@@ -1018,7 +1031,7 @@ public:
         const auto b = ReadCamera(access, D810Camera::B, options);
         result.complete = a.ok && b.ok;
         if (!result.complete) { result.reason = "reread_incomplete"; result.block = Block(); return result; }
-        result.check = CheckD810Release(a.read.readings, b.read.readings, table_);
+        result.check = ReleaseCheck(a.read.readings, b.read.readings);
         if (!journal_.Append(FormatD810JournalReread(Now(options), result.check.released))) {
             result.reason = "record_unwritable";
             result.block = Block();
@@ -1035,6 +1048,17 @@ private:
     D810SettingsWriteController(AnyTable, const D810WriteTable& table, D810SettingsJournal& journal, D810CameraOwnership& owner):
         table_(table), table_valid_(D810ControllerTableProblem(table_, kD810ControllerTestTables) == nullptr), journal_(journal), owner_(owner) {}
     static bool WriteAllowed(D810CaptureBlock block) { return block == D810CaptureBlock::None || block == D810CaptureBlock::Mismatch; }
+    // Which comparison releases the block is decided by the record on disk, the authority: a history with a chosen
+    // plan and planned values to check uses them; anything else (copies only, an unreadable record, a chosen
+    // history whose step lines gave no value) compares the two cameras, the stricter rule.
+    D810ReleaseCheck ReleaseCheck(const D810SettingsSnapshot& a, const D810SettingsSnapshot& b) const {
+        const auto file = journal_.Read();
+        if (file.kind == D810TextFile::Kind::Read) {
+            const auto state = ParseD810Journal(file.text);
+            if (state.chosen_unresolved && !state.expected.empty()) return CheckD810ReleasePlanned(a, b, state.expected);
+        }
+        return CheckD810Release(a, b, table_);
+    }
     const char* PlanRefusal() const {
         if (!table_valid_) return "invalid_table";
         if (!WriteAllowed(Block())) return "reread_first";
@@ -1172,6 +1196,8 @@ private:
             config.camera = camera;
             config.iso_auto_code = plan.iso_auto_code;
             config.latch = &latch;
+            // The key to a CAM-A session: only a chosen plan under a table that switches chosen values on.
+            config.cam_a_allowed = camera == D810Camera::A && plan.source == D810PlanSource::Chosen && self.table_.chosen_values;
             for (const auto& step : plan.steps)
                 if (step.camera == camera) config.entries.push_back({step.code, step.value});
             auto opened = access.Open(camera);

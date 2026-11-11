@@ -1399,6 +1399,22 @@ void ChosenPlans() {
         plan.iso_auto_code = 0xd054;
         check(D810PlanProblem(plan, no_a) == "row_disabled", "the table's rows again");
     }
+    {
+        // The write stage's time: 60 s as the base, 120 s for a chosen plan of six steps or more, a copy keeps the base.
+        D810WritePlan plan;
+        plan.source = D810PlanSource::Chosen;
+        const std::chrono::milliseconds base{60000};
+        plan.steps.resize(5);
+        check(D810WriteDeadlineFor(plan, base) == base, "five steps: the base");
+        plan.steps.resize(6);
+        check(D810WriteDeadlineFor(plan, base) == std::chrono::milliseconds(120000) && D810WriteDeadlineFor(plan, std::chrono::milliseconds(200000)) == std::chrono::milliseconds(200000),
+            "six steps: 120 s, never less than the base");
+        plan.steps.resize(10);
+        check(D810WriteDeadlineFor(plan, base) == std::chrono::milliseconds(120000), "ten steps: 120 s");
+        plan.source = D810PlanSource::CopyAToB;
+        plan.steps.resize(7);
+        check(D810WriteDeadlineFor(plan, base) == base, "a copy keeps the base");
+    }
 }
 
 // --- The gate ----------------------------------------------------------------------------------
@@ -1556,6 +1572,61 @@ void GateSweep() {
     bad_iso.iso_auto_code = 0x500f;
     check(D810SettingsWriteGate(bad_iso).Retired(), "ISO auto code must be a candidate");
 }
+// The key to a CAM-A session (ADR-0041): closed by default, and a CAM-A gate arms only the planned (camera, code, value).
+void GateCamA() {
+    {
+        // Closed by default: a CAM-A configuration without the key retires the gate before it can do anything.
+        auto config = Config();
+        config.camera = D810Camera::A;
+        D810SettingsWriteGate gate(config);
+        check(gate.Retired() && std::string(gate.LastRefusal()) == "invalid_config", "a CAM-A gate without the key is retired");
+        check(std::string(gate.Arm(D810Camera::A, 0x500f, 64)) == "retired", "it arms nothing");
+        check(!gate.Admit(Make(SettingsCommandKind::ExecuteWithDataToWrite, 0x1016, {0x500f}).Get()) && gate.WritesSent() == 0, "it admits no write");
+        check(!D810WriteGateConfig{}.cam_a_allowed, "the key is closed by default");
+        config.cam_a_allowed = true;
+        D810SettingsWriteGate open(config);
+        check(!open.Retired(), "with the key the gate is built");
+        Prepare(open);
+        check(open.Arm(D810Camera::A, 0x500f, 64) == nullptr, "and arms the planned write");
+        // The key opens nothing else.
+        auto b_config = Config();
+        b_config.cam_a_allowed = true;
+        D810SettingsWriteGate b_gate(b_config);
+        Prepare(b_gate);
+        check(std::string(b_gate.Arm(D810Camera::A, 0x500f, 64)) == "other_destination" && b_gate.Arm(D810Camera::B, 0x500f, 64) == nullptr, "a CAM-B gate stays a CAM-B gate");
+        // A CAM-A gate still checks the same things as any gate.
+        D810SettingsWriteGate a_live(config);
+        Prepare(a_live, 1);
+        check(std::string(a_live.Arm(D810Camera::A, 0x500f, 64)) == "live_not_confirmed_off", "live view on");
+        D810SettingsWriteGate a_mode(config);
+        Prepare(a_mode, 0, 3);
+        check(std::string(a_mode.Arm(D810Camera::A, 0x500f, 64)) == "mode_not_confirmed_manual", "not in M");
+        D810SettingsWriteGate a_value(config);
+        Prepare(a_value);
+        check(std::string(a_value.Arm(D810Camera::A, 0x500f, 100)) == "not_in_plan", "a value that is not planned");
+    }
+    {
+        // Every (camera, code, value) with a gate of each camera: only the planned pair on the gate's own camera arms.
+        const std::vector<std::uint16_t> codes{0x500e, 0xd054, 0x500f, 0x500d, 0x5007, 0x5005, 0x500b, 0x5010, 0xd16a, 0xd100};
+        const std::vector<std::int64_t> values{0, 1, 2, 64, 100, 200, 560, 800, 1667};
+        for (const auto gate_camera : {D810Camera::A, D810Camera::B}) {
+            auto config = Config();
+            config.camera = gate_camera;
+            config.cam_a_allowed = true;
+            std::size_t armed = 0;
+            for (const auto camera : {D810Camera::A, D810Camera::B})
+                for (const auto code : codes)
+                    for (const auto value : values) {
+                        D810SettingsWriteGate gate(config);
+                        Prepare(gate);
+                        const bool ok = gate.Arm(camera, code, value) == nullptr;
+                        armed += ok;
+                        check(ok == (camera == gate_camera && ((code == 0x500f && value == 64) || (code == 0x5007 && value == 800))), "only the planned pair on the gate's own camera");
+                    }
+            check(armed == 2, "two planned pairs, each on its own camera");
+        }
+    }
+}
 void GateArmConditions() {
     {
         D810SettingsWriteGate gate(Config());
@@ -1569,6 +1640,7 @@ void GateArmConditions() {
         check(gate.Arm(D810Camera::B, 0x500f, 64) == nullptr, "own destination");
         auto config = Config();
         config.camera = D810Camera::A;
+        config.cam_a_allowed = true;
         D810SettingsWriteGate a_gate(config);
         Prepare(a_gate);
         check(std::string(a_gate.Arm(D810Camera::B, 0x500f, 64)) == "other_destination", "a CAM-A gate refuses CAM-B");
@@ -2662,6 +2734,7 @@ void ChosenRuns() {
         check(Contains(journal, " source=chosen steps=5\n"), "the record says the plan was chosen");
         const auto state = ParseD810Journal(journal);
         check(state.block == D810CaptureBlock::None && state.operations == 1 && state.malformed_lines == 0, "the record reads clean");
+        check(state.expected.size() == 5 && state.chosen_unresolved, "the record keeps what was planned");
         check(bench.controller->CaptureAllowed() && bench.Restarted().CaptureAllowed(), "CAM-A and CAM-B differ and capture is allowed: the cameras are not compared");
     }
     {
@@ -2741,6 +2814,205 @@ void ChosenRuns() {
         Bench bench(kChosenTable, 2);
         const auto run = bench.Run(bench.Chosen({PickFor(B, Item::Iso, 200), PickFor(A, Item::Iso, 200)}));
         check(run.sent == 0 && run.reason == "record_unwritable" && bench.Writes() == 0, "the plan line and the first step line are written, the second step line is not");
+    }
+}
+
+// Releasing a capture block after a chosen plan (ADR-0041 decision 1-7): by the planned values, not by comparing the cameras.
+void ChosenRelease() {
+    using Item = D810WriteItem;
+    const auto A = D810Camera::A, B = D810Camera::B;
+    const auto differences = [](const D810RereadResult& result) { return result.check.differences; };
+    {
+        // CAM-B reaches its value, CAM-A's write does not take.
+        Bench bench(kChosenTable, -1, true); // on disk: the history must come from the record
+        bench.a.apply_as[0x500f] = 64;
+        const auto run = bench.Run(bench.Chosen({PickFor(B, Item::Iso, 400), PickFor(A, Item::Iso, 200)}));
+        check(run.verdict == D810WriteVerdict::Mismatch && run.sent == 2 && bench.b.props[0x500f].current == 400 && bench.a.props[0x500f].current == 64, "B written, A did not take");
+        const int writes = bench.Writes();
+        // 1. Neither camera has its planned value on A.
+        auto reread = bench.controller->Reread(bench.access, bench.options);
+        check(reread.complete && !reread.check.released && differences(reread) == std::vector<std::string>{"iso:CAM-A:not_planned_value"} && reread.block == D810CaptureBlock::Mismatch, "CAM-A is not at its planned value");
+        // 2. CAM-A and CAM-B read the same, but not the planned values: not released (the cameras are not compared).
+        bench.a.props[0x500f].current = 400;
+        reread = bench.controller->Reread(bench.access, bench.options);
+        check(!reread.check.released && differences(reread) == std::vector<std::string>{"iso:CAM-A:not_planned_value"} && !bench.controller->CaptureAllowed(), "equal on both cameras is not enough");
+        // 3. CAM-B left its planned value.
+        bench.a.props[0x500f].current = 200;
+        bench.b.props[0x500f].current = 100;
+        reread = bench.controller->Reread(bench.access, bench.options);
+        check(!reread.check.released && differences(reread) == std::vector<std::string>{"iso:CAM-B:not_planned_value"}, "CAM-B is not at its planned value");
+        // 4. After a restart, with CAM-A and CAM-B at their planned values (different from each other): released, from the record alone.
+        bench.b.props[0x500f].current = 400;
+        bench.a.props[0x5005].current = 4; // something nobody planned differs between the cameras
+        auto restarted = bench.Restarted();
+        check(restarted.Block() == D810CaptureBlock::Mismatch && !restarted.CaptureAllowed(), "the restart still blocks");
+        reread = restarted.Reread(bench.access, bench.options);
+        check(reread.complete && reread.check.released && reread.block == D810CaptureBlock::None && restarted.CaptureAllowed(), "released by the planned values");
+        check(bench.Restarted().CaptureAllowed() && bench.Writes() == writes, "the release survives a restart and sent nothing");
+        const auto state = ParseD810Journal(bench.Journal());
+        check(state.block == D810CaptureBlock::None && !state.chosen_unresolved && state.expected.empty(), "the release closed the history");
+        // The release is not a plan: a new chosen plan can be made and starts afresh.
+        check(bench.Restarted().PlanChosen(Snapshot(bench.a, "CAM-A"), Snapshot(bench.b, "CAM-B"), bench.Verified(), {PickFor(B, Item::Aperture, 1100)}).Ok(), "a new plan can be made");
+    }
+    {
+        // A value that leans on content held in the body is never a match.
+        Bench bench(kChosenTable, -1, true);
+        bench.b.apply_as[0x5005] = 2;
+        const auto run = bench.Run(bench.Chosen({PickFor(B, Item::WhiteBalance, 4)}));
+        check(run.verdict == D810WriteVerdict::Mismatch, "white balance did not take");
+        bench.b.props[0x5005].current = 0x8013;
+        auto reread = bench.controller->Reread(bench.access, bench.options);
+        check(!reread.check.released && differences(reread) == std::vector<std::string>{"white_balance:CAM-B:content_dependent"}, "Preset is unknown, not a match");
+        bench.b.props[0x5005].current = 4;
+        reread = bench.controller->Reread(bench.access, bench.options);
+        check(reread.check.released && bench.controller->CaptureAllowed(), "the planned kind: released");
+    }
+    {
+        // A history that has copies only keeps the old rule: every block item the same on both cameras.
+        Bench bench(kChosenTable, -1, true);
+        bench.b.apply_as[0x500f] = 200;
+        check(bench.CopyRun().verdict == D810WriteVerdict::Mismatch, "a copy that did not take");
+        const auto state = ParseD810Journal(bench.Journal());
+        check(!state.chosen_unresolved && state.block == D810CaptureBlock::Mismatch, "the history is a copy history");
+        auto reread = bench.controller->Reread(bench.access, bench.options);
+        check(!reread.check.released && !reread.check.differences.empty() && reread.check.differences[0] == "iso", "the cameras differ");
+        bench.b = Body(1667, 800, 64);
+        reread = bench.controller->Reread(bench.access, bench.options);
+        check(reread.check.released && bench.controller->CaptureAllowed(), "the same on both: released");
+    }
+    {
+        // A chosen plan whose step lines cannot be read gives no value to check: the strict rule (the cameras equal) applies.
+        Bench bench(kChosenTable, -1, true);
+        const std::string op = "a0sw1 op=00000000000000aa ";
+        WriteFile(bench.file.Path(), op + "ev=plan t=x source=chosen steps=1\n" + op + "ev=step i=0 alias=CAM-C item=iso code=0x500f before=0x0064 value=0x0040\n");
+        const auto state = ParseD810Journal(bench.Journal());
+        check(state.chosen_unresolved && state.expected.empty() && state.block == D810CaptureBlock::Unconfirmed && state.malformed_lines == 1, "nothing planned could be read");
+        bench.b = Body(1667, 800, 100);
+        auto reread = bench.controller->Reread(bench.access, bench.options);
+        check(!reread.check.released && !reread.check.differences.empty() && reread.check.differences[0] == "iso", "the cameras differ: not released");
+        bench.b = Body(1667, 800, 64);
+        reread = bench.controller->Reread(bench.access, bench.options);
+        check(reread.check.released, "the cameras agree: released");
+    }
+    {
+        // The check on its own.
+        auto a = Body(1667, 800, 64), b = Body(333, 560, 100);
+        const D810ExpectedValue b_iso{B, Item::Iso, 0x500f, 100}, a_iso{A, Item::Iso, 0x500f, 64};
+        check(CheckD810ReleasePlanned(Snapshot(a, "CAM-A"), Snapshot(b, "CAM-B"), {b_iso, a_iso}).released, "both at their values");
+        check(CheckD810ReleasePlanned(Snapshot(a, "CAM-A"), Snapshot(b, "CAM-B"), {D810ExpectedValue{B, Item::Iso, 0x500f, 64}}).differences == std::vector<std::string>{"iso:CAM-B:not_planned_value"},
+            "a camera is compared with its own value, not the other camera's");
+        const auto none = CheckD810ReleasePlanned(Snapshot(a, "CAM-A"), Snapshot(b, "CAM-B"), {});
+        check(!none.released && none.differences == std::vector<std::string>{"nothing_planned"}, "nothing planned releases nothing");
+        a.props.erase(0x500f);
+        check(CheckD810ReleasePlanned(Snapshot(a, "CAM-A"), Snapshot(b, "CAM-B"), {a_iso}).differences == std::vector<std::string>{"iso:CAM-A:unreadable"}, "unreadable");
+        auto c = Body(1667, 800, 64);
+        c.props[0x5005].current = 0x8013;
+        check(CheckD810ReleasePlanned(Snapshot(c, "CAM-A"), Snapshot(b, "CAM-B"), {D810ExpectedValue{A, Item::WhiteBalance, 0x5005, 0x8013}}).differences == std::vector<std::string>{"white_balance:CAM-A:content_dependent"},
+            "Preset on both sides of the comparison is unknown");
+    }
+}
+
+// The history a record gives: the planned values, in text.
+void JournalPlanned() {
+    using Item = D810WriteItem;
+    const auto A = D810Camera::A, B = D810Camera::B;
+    const std::string op1 = "a0sw1 op=00000000000000a1 ", op2 = "a0sw1 op=00000000000000a2 ", op3 = "a0sw1 op=00000000000000a3 ";
+    const auto plan = [](const std::string& op, const char* source, int steps) { return op + "ev=plan t=x source=" + source + " steps=" + std::to_string(steps) + "\n"; };
+    const auto step = [](const std::string& op, int i, const char* alias, const char* item, const char* code, const char* before, const char* value) {
+        return op + "ev=step i=" + std::to_string(i) + " alias=" + alias + " item=" + item + " code=" + code + " before=" + before + " value=" + value + "\n";
+    };
+    const auto end = [](const std::string& op, const char* verdict, int sent) { return op + "ev=end t=x verdict=" + verdict + " sent=" + std::to_string(sent) + " reason=x\n"; };
+    const std::string reread_match = "a0sw1 ev=reread t=x verdict=match\n", reread_mismatch = "a0sw1 ev=reread t=x verdict=mismatch\n";
+    const auto value_of = [](const D810JournalState& state, D810Camera camera, Item item) -> std::optional<std::int64_t> {
+        for (const auto& entry : state.expected)
+            if (entry.camera == camera && entry.item == item) return entry.value;
+        return std::nullopt;
+    };
+    {
+        // What a failed chosen plan leaves: every planned value, per camera.
+        const auto text = plan(op1, "chosen", 3) + step(op1, 0, "CAM-B", "iso", "0x500f", "0x0064", "0x0190") + step(op1, 1, "CAM-B", "shutter_speed", "0x500d", "0x0000014d", "0x000001f4") +
+            step(op1, 2, "CAM-A", "iso", "0x500f", "0x0040", "0x00c8") + end(op1, "mismatch", 2);
+        const auto state = ParseD810Journal(text);
+        check(state.block == D810CaptureBlock::Mismatch && state.chosen_unresolved && state.malformed_lines == 0 && state.expected.size() == 3, "a failed chosen plan");
+        check(value_of(state, B, Item::Iso) == 400 && value_of(state, A, Item::Iso) == 200 && value_of(state, B, Item::ShutterSpeed) == 500, "the planned value of each camera and item");
+        check(state.expected[0].code == 0x500f && state.expected[1].code == 0x500d, "with the code written");
+        // A matching reread closes the history; a mismatching one does not.
+        const auto mismatch = ParseD810Journal(text + reread_mismatch);
+        check(mismatch.block == D810CaptureBlock::Mismatch && mismatch.chosen_unresolved && mismatch.expected.size() == 3, "a mismatching reread keeps it");
+        const auto cleared = ParseD810Journal(text + reread_match);
+        check(cleared.block == D810CaptureBlock::None && !cleared.chosen_unresolved && cleared.expected.empty(), "a matching reread closes it");
+    }
+    {
+        // A plan that finds no block starts afresh: an earlier operation's values do not stay for the next one.
+        const auto first = plan(op1, "chosen", 1) + step(op1, 0, "CAM-B", "iso", "0x500f", "0x0064", "0x0190") + end(op1, "match", 1);
+        const auto after_match = ParseD810Journal(first);
+        check(after_match.block == D810CaptureBlock::None && after_match.chosen_unresolved && after_match.expected.size() == 1, "a matched chosen plan leaves its values, with no block");
+        const auto next = ParseD810Journal(first + plan(op2, "copy", 1) + step(op2, 0, "CAM-B", "aperture", "0x5007", "0x0230", "0x0320") + end(op2, "mismatch", 1));
+        check(next.block == D810CaptureBlock::Mismatch && !next.chosen_unresolved && next.expected.size() == 1 && value_of(next, B, Item::Aperture) == 800 && !value_of(next, B, Item::Iso),
+            "the next operation starts afresh: a copy history, only its own values");
+        const auto chosen_next = ParseD810Journal(first + plan(op2, "chosen", 1) + step(op2, 0, "CAM-A", "iso", "0x500f", "0x0040", "0x00c8") + end(op2, "unknown", 1));
+        check(chosen_next.block == D810CaptureBlock::Unknown && chosen_next.expected.size() == 1 && value_of(chosen_next, A, Item::Iso) == 200 && !value_of(chosen_next, B, Item::Iso), "and a chosen one: only its own values");
+    }
+    {
+        // While a block stands, later operations add to the history, and the last value of a camera and item wins.
+        const auto first = plan(op1, "chosen", 2) + step(op1, 0, "CAM-B", "iso", "0x500f", "0x0064", "0x0190") + step(op1, 1, "CAM-A", "iso", "0x500f", "0x0040", "0x00c8") + end(op1, "mismatch", 1);
+        const auto second = plan(op2, "chosen", 2) + step(op2, 0, "CAM-B", "iso", "0x500f", "0x0190", "0x0064") + step(op2, 1, "CAM-B", "aperture", "0x5007", "0x0230", "0x0320") + end(op2, "match", 2);
+        const auto state = ParseD810Journal(first + second);
+        check(state.block == D810CaptureBlock::Mismatch && state.expected.size() == 3, "the history keeps growing while a block stands");
+        check(value_of(state, B, Item::Iso) == 100 && value_of(state, A, Item::Iso) == 200 && value_of(state, B, Item::Aperture) == 800, "the last planned value of each camera and item");
+        // A copy joins the history of a chosen plan; the history stays a chosen one.
+        const auto mixed = ParseD810Journal(first + plan(op2, "copy", 1) + step(op2, 0, "CAM-B", "metering", "0x500b", "0x0003", "0x0002") + end(op2, "match", 1));
+        check(mixed.chosen_unresolved && mixed.expected.size() == 3 && value_of(mixed, B, Item::Metering) == 2, "a copy after a failed chosen plan");
+    }
+    {
+        // An operation that sent nothing planned nothing that counts.
+        const auto first = plan(op1, "chosen", 1) + step(op1, 0, "CAM-B", "iso", "0x500f", "0x0064", "0x0190") + end(op1, "mismatch", 1);
+        const auto state = ParseD810Journal(first + plan(op2, "chosen", 1) + step(op2, 0, "CAM-B", "iso", "0x500f", "0x0190", "0x00c8") + end(op2, "not_sent", 0));
+        check(state.block == D810CaptureBlock::Mismatch && state.expected.size() == 1 && value_of(state, B, Item::Iso) == 400, "a not_sent operation leaves the earlier value");
+        const auto alone = ParseD810Journal(plan(op1, "chosen", 1) + step(op1, 0, "CAM-B", "iso", "0x500f", "0x0064", "0x0190") + end(op1, "not_sent", 0));
+        check(alone.block == D810CaptureBlock::None && !alone.chosen_unresolved && alone.expected.empty(), "a chosen plan that sent nothing leaves no history");
+    }
+    {
+        // An operation without its end line may have sent: its values count, and capture is held.
+        const auto state = ParseD810Journal(plan(op1, "chosen", 1) + step(op1, 0, "CAM-A", "iso", "0x500f", "0x0040", "0x00c8"));
+        check(state.block == D810CaptureBlock::Unconfirmed && state.chosen_unresolved && value_of(state, A, Item::Iso) == 200, "a crash during a write");
+        const auto later = ParseD810Journal(plan(op1, "chosen", 1) + step(op1, 0, "CAM-A", "iso", "0x500f", "0x0040", "0x00c8") + plan(op2, "copy", 0) + end(op2, "not_sent", 0));
+        check(later.block == D810CaptureBlock::Unconfirmed && later.expected.size() == 1 && later.chosen_unresolved, "the next plan line closes it as unconfirmed and keeps it");
+    }
+    {
+        // Values by type: the signed type is sign-extended, the unsigned types are not.
+        const auto state = ParseD810Journal(plan(op1, "chosen", 3) + step(op1, 0, "CAM-B", "exposure_compensation", "0x5010", "0x0000", "0xfe0c") +
+            step(op1, 1, "CAM-B", "iso_auto", "0xd054", "0x01", "0x00") + step(op1, 2, "CAM-B", "shutter_speed", "0x500d", "0x00000001", "0xfffffffd") + end(op1, "mismatch", 1));
+        check(value_of(state, B, Item::ExposureCompensation) == -500 && value_of(state, B, Item::IsoAuto) == 0 && value_of(state, B, Item::ShutterSpeed) == 0xfffffffdLL, "signed and unsigned values");
+    }
+    {
+        // A line that cannot be read holds capture; its values are not taken.
+        const std::vector<std::string> bad{
+            step(op1, 0, "CAM-C", "iso", "0x500f", "0x0064", "0x0190"),     step(op1, 0, "CAM-B", "isoo", "0x500f", "0x0064", "0x0190"),
+            step(op1, 0, "CAM-B", "iso", "0x5007", "0x0064", "0x0190"),     step(op1, 0, "CAM-B", "iso", "0x500f", "0x0064", "0x190"),
+            step(op1, 0, "CAM-B", "iso", "0x500f", "0x64", "0x0190"),       step(op1, 0, "CAM-B", "iso", "0x500f", "0x0064", "0x01G0"),
+            step(op1, 0, "CAM-B", "iso", "0x500f", "0x0064", "0x01C0"),     step(op1, 0, "CAM-B", "iso", "0X500f", "0x0064", "0x0190"),
+            step(op1, 0, "CAM-B", "iso", "0x500f", "0x0064", "0x00000190"), step(op1, 0, "CAM-B", "shutter_speed", "0x500d", "0x0001", "0x00000001"),
+            op1 + "ev=step i=x alias=CAM-B item=iso code=0x500f before=0x0064 value=0x0190\n",
+            op1 + "ev=step i=0 alias=CAM-B item=iso code=0x500f before=0x0064\n",
+            op1 + "ev=step i=0 alias=CAM-B item=iso code=0x500f before=0x0064 value=0x0190 x=1\n",
+        };
+        for (const auto& line : bad) {
+            const auto state = ParseD810Journal(plan(op1, "chosen", 1) + line + end(op1, "match", 1));
+            check(state.block == D810CaptureBlock::Unconfirmed && state.malformed_lines >= 1 && state.expected.empty(), "an unreadable step line");
+        }
+        const auto source = ParseD810Journal(plan(op1, "other", 1) + end(op1, "not_sent", 0));
+        check(source.block == D810CaptureBlock::Unconfirmed && source.malformed_lines >= 1, "an unknown source");
+        const auto torn = ParseD810Journal(plan(op1, "chosen", 1) + "a0sw1 op=00000000000000a1 ev=step i=0 alias=CAM-B item=iso co");
+        check(torn.block == D810CaptureBlock::Unconfirmed && torn.expected.empty(), "a torn step line");
+        // An operation's lines of another operation, and a step before any plan, are not read as steps.
+        const auto stray = ParseD810Journal(step(op1, 0, "CAM-B", "iso", "0x500f", "0x0064", "0x0190") + plan(op2, "copy", 0) + end(op2, "not_sent", 0));
+        check(stray.block == D810CaptureBlock::Unconfirmed && stray.expected.empty(), "a step with no plan");
+        // The three steps of the operations of one record are all kept, in the order first seen.
+        const auto three = ParseD810Journal(plan(op1, "chosen", 1) + step(op1, 0, "CAM-A", "iso", "0x500f", "0x0040", "0x00c8") + end(op1, "mismatch", 1) +
+            plan(op2, "chosen", 1) + step(op2, 0, "CAM-B", "iso", "0x500f", "0x0064", "0x0190") + end(op2, "mismatch", 1) +
+            plan(op3, "chosen", 1) + step(op3, 0, "CAM-A", "iso", "0x500f", "0x00c8", "0x0064") + end(op3, "unknown", 1));
+        check(three.expected.size() == 2 && three.expected[0].camera == A && three.expected[0].value == 100 && three.expected[1].camera == B && three.expected[1].value == 400, "folded in place");
     }
 }
 // White balance and metering through the whole run (test table): the order, the one send, the read back, the block.
@@ -3687,6 +3959,7 @@ int main() {
     run("RevisionCopyPlans", RevisionCopyPlans);
     run("ChosenPlans", ChosenPlans);
     run("GateSweep", GateSweep);
+    run("GateCamA", GateCamA);
     run("GateArmConditions", GateArmConditions);
     run("RevisionGate", RevisionGate);
     run("GateWriteOrder", GateWriteOrder);
@@ -3706,6 +3979,8 @@ int main() {
     run("RereadReleases", RereadReleases);
     run("JournalStates", JournalStates);
     run("ChosenRuns", ChosenRuns);
+    run("ChosenRelease", ChosenRelease);
+    run("JournalPlanned", JournalPlanned);
     run("RevisionRuns", RevisionRuns);
     run("StopsBeforeSending", StopsBeforeSending);
     run("WatchdogCancel", WatchdogCancel);

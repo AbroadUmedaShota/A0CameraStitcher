@@ -537,6 +537,19 @@ inline std::string D810PlanProblem(const D810WritePlan& plan, const D810WriteTab
     return D810PlanTableRefusal(plan, table);
 }
 
+// The time the write stage of a run may take. The base is the screen's provisional 60 s (ADR-0038 decision 10).
+// The run starts a step only when `step_budget` (5 s) per remaining step is left, so a long plan, which also
+// spends time on the check before the first send, does not fit in 60 s: a chosen plan with six or more steps
+// gets 120 s. Both numbers are provisional (※仮, to be confirmed with the security review like the 60 s); a plan
+// that still does not fit stops before sending ("deadline_margin"), which is the safe side. A copy plan keeps the
+// base: the product table enables at most five items.
+inline constexpr std::size_t kD810LongPlanSteps = 6;
+inline constexpr std::chrono::milliseconds kD810LongPlanDeadline{120000};
+inline std::chrono::milliseconds D810WriteDeadlineFor(const D810WritePlan& plan, std::chrono::milliseconds base) {
+    if (plan.source == D810PlanSource::Chosen && plan.steps.size() >= kD810LongPlanSteps) return std::max(base, kD810LongPlanDeadline);
+    return base;
+}
+
 // ADR-0038: copy CAM-A's five exposure items to CAM-B, and (ADR-0038 revision, decided by the owner)
 // white balance and metering. CAM-A must be in M with ISO auto off and
 // a finite, short shutter time. Only items that differ are written. A differing
@@ -675,6 +688,33 @@ inline D810ReleaseCheck CheckD810Release(const D810SettingsSnapshot& a, const D8
     check.released = check.differences.empty();
     return check;
 }
+// A value an unfinished operation of the record planned for one item of one camera (the `value` of a step line).
+struct D810ExpectedValue {
+    D810Camera camera{};
+    D810WriteItem item{};
+    std::uint16_t code{};
+    std::int64_t value{};
+};
+// Release by the record (ADR-0041 decision 1-7), for a history that holds a chosen plan: every item the unfinished
+// operations planned (the last planned value of each camera and item, from the record) reads that value on its own
+// camera. CAM-A and CAM-B are not compared with each other. Differences: "<item>:<CAM-x>:unreadable" (not read),
+// "<item>:<CAM-x>:content_dependent" (the value leans on content held in the body, white balance Preset and the
+// like: unknown, never a match) or "<item>:<CAM-x>:not_planned_value". Nothing planned means nothing is released
+// by this check: the caller uses the comparison of the two cameras then.
+inline D810ReleaseCheck CheckD810ReleasePlanned(const D810SettingsSnapshot& a, const D810SettingsSnapshot& b, const std::vector<D810ExpectedValue>& expected) {
+    D810ReleaseCheck check;
+    if (expected.empty()) { check.differences.push_back("nothing_planned"); return check; }
+    for (const auto& entry : expected) {
+        const auto& spec = D810WriteItemOf(entry.item);
+        const std::string label = std::string(spec.name) + ":" + D810CameraAlias(entry.camera) + ":";
+        const auto* reading = AvailableD810Reading(entry.camera == D810Camera::A ? a : b, entry.code);
+        if (!reading) check.differences.push_back(label + "unreadable");
+        else if (D810WriteValueExcluded(spec, reading->desc.current_value) || D810WriteValueExcluded(spec, entry.value)) check.differences.push_back(label + "content_dependent");
+        else if (reading->desc.current_value != entry.value) check.differences.push_back(label + "not_planned_value");
+    }
+    check.released = check.differences.empty();
+    return check;
+}
 
 // --- Operation record (journal) ---------------------------------------------------------
 // One line per event, appended and flushed before the next step:
@@ -788,20 +828,98 @@ inline std::optional<std::uint32_t> ParseD810Decimal(std::string_view text, std:
     if (value > max_value) return {};
     return value;
 }
+// `0x` and exactly `digits` lower-case hexadecimal digits (as D810Hex writes them), nothing otherwise.
+inline std::optional<std::uint64_t> ParseD810HexField(std::string_view text, std::size_t digits) {
+    if (digits == 0 || digits > 8 || text.size() != 2 + digits || text[0] != '0' || text[1] != 'x') return {};
+    std::uint64_t value = 0;
+    for (const char c : text.substr(2)) {
+        unsigned digit = 0;
+        if (c >= '0' && c <= '9') digit = static_cast<unsigned>(c - '0');
+        else if (c >= 'a' && c <= 'f') digit = static_cast<unsigned>(c - 'a') + 10;
+        else return {};
+        value = (value << 4) | digit;
+    }
+    return value;
+}
+// The value of a field written by D810ValueField, as the body reads it (sign-extended for the signed types).
+inline std::int64_t D810ValueFromField(D810ValueType type, std::uint64_t raw) {
+    switch (type) {
+    case D810ValueType::Int8: return static_cast<std::int8_t>(raw);
+    case D810ValueType::Int16: return static_cast<std::int16_t>(raw);
+    case D810ValueType::Int32: return static_cast<std::int32_t>(raw);
+    default: return static_cast<std::int64_t>(raw);
+    }
+}
+// A step line: ev=step i=<n> alias=<CAM-x> item=<name> code=0x.... before=0x... value=0x... Nothing when a field
+// cannot be read: an unknown camera or item, a code the item does not have, or a value of the wrong width.
+inline std::optional<D810ExpectedValue> ParseD810JournalStep(const std::vector<std::string_view>& fields) {
+    if (fields.size() != 9) return {};
+    const auto index = D810FieldValue(fields[3], "i");
+    const auto alias = D810FieldValue(fields[4], "alias");
+    const auto item = D810FieldValue(fields[5], "item");
+    const auto code = D810FieldValue(fields[6], "code");
+    const auto before = D810FieldValue(fields[7], "before");
+    const auto value = D810FieldValue(fields[8], "value");
+    if (!index || !ParseD810Decimal(*index, 1000) || !alias || !item || !code || !before || !value) return {};
+    D810ExpectedValue out;
+    if (*alias == "CAM-A") out.camera = D810Camera::A;
+    else if (*alias == "CAM-B") out.camera = D810Camera::B;
+    else return {};
+    const D810WriteItemSpec* spec = nullptr;
+    for (const auto& candidate : kD810WriteItems)
+        if (*item == candidate.name) spec = &candidate;
+    if (!spec) return {};
+    const auto code_value = ParseD810HexField(*code, 4);
+    if (!code_value || !D810WriteItemHasCode(*spec, static_cast<std::uint32_t>(*code_value))) return {};
+    const auto digits = 2 * D810ValueBytes(spec->type);
+    const auto before_value = ParseD810HexField(*before, digits);
+    const auto raw = ParseD810HexField(*value, digits);
+    if (!before_value || !raw) return {};
+    out.item = spec->item;
+    out.code = static_cast<std::uint16_t>(*code_value);
+    out.value = D810ValueFromField(spec->type, *raw);
+    return out;
+}
 struct D810JournalState {
     D810CaptureBlock block{D810CaptureBlock::None};
     std::size_t operations{};
     std::size_t malformed_lines{};
+    // The history since the capture was last free of a block holds a chosen plan (a plan of values the operator
+    // picked, not a copy), so that a block is released by the planned values and not by comparing the two cameras.
+    bool chosen_unresolved{};
+    // The last planned value of each camera and item over that history, from the step lines. Steps of an
+    // operation that sent nothing (end verdict not_sent) are not in it: nothing was written for them.
+    std::vector<D810ExpectedValue> expected;
 };
 // The capture block the record implies. Lines that cannot be read hold capture
 // as Unconfirmed until a later reread line releases it; an operation without
 // its end line does the same. A later match never releases an earlier block;
 // only a reread line with verdict=match does.
+//
+// The history for a release: a plan line that finds no block starts it afresh (no old expectation stays for the
+// next operation), a reread line with verdict=match ends it, and while a block stands every operation adds its
+// planned values (a later value of the same camera and item replaces the earlier one). The record is the only
+// source: nothing is kept in memory, so a restart sees the same history.
 inline D810JournalState ParseD810Journal(std::string_view text) {
     D810JournalState state;
     std::optional<std::string> open_op;
+    bool open_chosen = false;
+    std::vector<D810ExpectedValue> op_steps;
     const auto hold = [&](D810CaptureBlock block) { state.block = StrongerD810Block(state.block, block); };
-    const auto close_open = [&] { if (open_op) { hold(D810CaptureBlock::Unconfirmed); open_op.reset(); } };
+    // The open operation's planned values join the history (it may have sent), or are dropped when it sent nothing.
+    const auto commit = [&] {
+        if (open_chosen) state.chosen_unresolved = true;
+        for (const auto& step : op_steps) {
+            const auto same = std::find_if(state.expected.begin(), state.expected.end(),
+                [&](const auto& seen) { return seen.camera == step.camera && seen.item == step.item; });
+            if (same != state.expected.end()) *same = step;
+            else state.expected.push_back(step);
+        }
+        op_steps.clear();
+        open_chosen = false;
+    };
+    const auto drop = [&] { op_steps.clear(); open_chosen = false; };
+    const auto close_open = [&] { if (open_op) { hold(D810CaptureBlock::Unconfirmed); open_op.reset(); commit(); } };
     const auto hex16 = [](std::string_view text) {
         return text.size() == 16 && std::all_of(text.begin(), text.end(), [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); });
     };
@@ -815,30 +933,48 @@ inline D810JournalState ParseD810Journal(std::string_view text) {
             // An operation without its end line counts as unconfirmed first, so
             // a mismatching reread leaves a mismatch, never no block.
             close_open();
-            if (*verdict == "match") state.block = D810CaptureBlock::None;
-            else if (state.block != D810CaptureBlock::None) state.block = D810CaptureBlock::Mismatch;
+            if (*verdict == "match") {
+                state.block = D810CaptureBlock::None;
+                state.chosen_unresolved = false;
+                state.expected.clear();
+            } else if (state.block != D810CaptureBlock::None) state.block = D810CaptureBlock::Mismatch;
             continue;
         }
         const auto op = D810FieldValue(fields[1], "op");
         const auto event = D810FieldValue(fields[2], "ev");
         if (!op || !hex16(*op) || !event) { malformed(); continue; }
         if (*event == "plan") {
-            if (fields.size() != 6) { malformed(); continue; }
+            const auto source = fields.size() == 6 ? D810FieldValue(fields[4], "source") : std::nullopt;
+            if (!source || (*source != "copy" && *source != "chosen")) { malformed(); continue; }
             close_open();
+            if (state.block == D810CaptureBlock::None) {
+                state.chosen_unresolved = false;
+                state.expected.clear();
+            }
             open_op = std::string(*op);
+            open_chosen = *source == "chosen";
+            op_steps.clear();
             ++state.operations;
         } else if (*event == "step" || *event == "result") {
             if (!open_op || *open_op != *op || fields.size() != (*event == "step" ? 9u : 6u)) { malformed(); continue; }
+            if (*event == "step") {
+                const auto step = ParseD810JournalStep(fields);
+                if (!step) { malformed(); continue; }
+                op_steps.push_back(*step);
+            }
         } else if (*event == "end") {
             const auto verdict = fields.size() == 7 ? D810FieldValue(fields[4], "verdict") : std::nullopt;
             const auto sent = fields.size() == 7 ? D810FieldValue(fields[5], "sent") : std::nullopt;
             const auto count = sent ? ParseD810Decimal(*sent, 1000) : std::nullopt;
             if (!open_op || *open_op != *op || !verdict || !count) { malformed(); continue; }
             open_op.reset();
-            if (*verdict == "mismatch") hold(D810CaptureBlock::Mismatch);
-            else if (*verdict == "unknown") hold(D810CaptureBlock::Unknown);
-            else if (*verdict == "not_sent") { if (*count != 0) malformed(); }
-            else if (*verdict != "match") malformed();
+            if (*verdict == "mismatch") { hold(D810CaptureBlock::Mismatch); commit(); }
+            else if (*verdict == "unknown") { hold(D810CaptureBlock::Unknown); commit(); }
+            else if (*verdict == "not_sent") {
+                if (*count != 0) { malformed(); commit(); }
+                else drop();
+            } else if (*verdict == "match") commit();
+            else { malformed(); commit(); }
         } else malformed();
     }
     close_open();
