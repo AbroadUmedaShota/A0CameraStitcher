@@ -1243,8 +1243,8 @@ if(BUILD_TESTING)
         option(A0_BUILD_WPD_SETTINGS_WRITE "Build the camera settings write path into the development preview (#416 stage B)" OFF)
         if(A0_BUILD_WPD_SETTINGS_WRITE)
             message(WARNING "A0_BUILD_WPD_SETTINGS_WRITE=ON: the development preview carries the camera settings write path "
-                "(#416 stage B, ADR-0038; its window title and first log line say so). The fixed product table enables no row, "
-                "so it writes nothing until a reviewed table commit. Keep this OFF in any build used on the real bodies until "
+                "(#416 stage B, ADR-0038; its window title and first log line say so). The fixed product table enables one row (ISO on CAM-B), "
+                "so it can write that one setting, after a confirmation on the screen. Keep this OFF in any build used on the real bodies until "
                 "the AGENTS.md exception is in place.")
             target_compile_definitions(A0CameraStitcher.WpdDualPreview PRIVATE A0_ENABLE_WPD_SETTINGS_WRITE=1)
             target_link_libraries(A0CameraStitcher.WpdDualPreview PRIVATE shell32)
@@ -1252,7 +1252,7 @@ if(BUILD_TESTING)
             add_test(NAME preview_settings_write_ui_contracts COMMAND A0CameraStitcher.WpdDualPreview --settings-write-ui-smoke)
             set_tests_properties(preview_settings_write_ui_contracts PROPERTIES TIMEOUT 60)
             # The confirmation screen (#416): the preview's own window code with the controller that takes a table, so that a
-            # confirmation can be put up and drawn (the product table enables no row and the product build has no such
+            # confirmation can be put up and drawn (the product table enables one row only and the product build has no such
             # controller). A test binary only: its main runs --settings-write-confirm-smoke and nothing else (it opens no
             # camera, no lease), it is not installed, and it exists only in a build with the option ON.
             add_executable(a0_preview_settings_write_confirm_tests src/phase0/experimental/wpd_dual_preview_main.cpp)
