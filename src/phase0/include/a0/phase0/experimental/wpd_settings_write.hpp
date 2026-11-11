@@ -857,6 +857,8 @@ struct D810WriteStatus {
     std::size_t enabled_rows{};
     // The items a copy may write to CAM-B with this table, in table order (the screen names them).
     std::vector<D810WriteItem> writable_items;
+    // Part of the record since then cannot be read (a damaged line, or steps that do not match their plan line).
+    bool history_damaged{};
 };
 
 // --- What the write path reads --------------------------------------------------------
@@ -944,8 +946,15 @@ public:
         status.write_allowed = table_valid_ && status.enabled_rows > 0 && WriteAllowed(status.block) && owner_.Current() == D810CameraUse::None;
         status.plan_pending = pending_.has_value();
         status.plan_confirmed = confirmed_.has_value();
-        // The record shows a plan of picked values not yet read back: the capture block is then told in terms of the values written.
-        if (const auto file = journal_.Read(); file.kind == D810TextFile::Kind::Read) status.chosen_history = ParseD810Journal(file.text).chosen_unresolved;
+        // What the record says about the history since the capture was last free of a block. The block is told in terms of
+        // the values written only when the controller would release it by them (a plan of picked values with planned values
+        // to check, and no part of the record damaged); a damaged part of the record sends it back to the comparison of the
+        // two cameras, and the screen then says that the record is damaged.
+        if (const auto file = journal_.Read(); file.kind == D810TextFile::Kind::Read) {
+            const auto state = ParseD810Journal(file.text);
+            status.history_damaged = state.history_damaged;
+            status.chosen_history = state.chosen_unresolved && !state.history_damaged && !state.expected.empty();
+        }
         return status;
     }
     // The read step of a copy (ADR-0038 decision 5): CAM-A, then CAM-B, each

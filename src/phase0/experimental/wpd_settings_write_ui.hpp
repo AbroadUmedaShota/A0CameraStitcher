@@ -185,7 +185,7 @@ void InstallSettingsWriteHost(std::unique_ptr<SettingsWriteHost> host,D810Settin
     Log("settings_write_screen=1 enabled_rows="+std::to_string(status.enabled_rows)+" capture_block="+D810CaptureBlockToken(status.block)+
         " capture_allowed="+std::to_string(status.capture_allowed)+" setting_writes=0");
     // A block left by an earlier run (not confirmed, mismatch, unknown) holds capture from the start.
-    if(!status.capture_allowed)capture_status=D810CaptureBlockText(status.block,status.chosen_history);
+    if(!status.capture_allowed)capture_status=D810CaptureBlockText(status.block,status.chosen_history,status.history_damaged);
     settings_write=std::move(host);
 }
 void InitSettingsWrite(std::unique_ptr<D810SettingsJournal> journal,D810SettingsWriteScreen::AccessFactory access){

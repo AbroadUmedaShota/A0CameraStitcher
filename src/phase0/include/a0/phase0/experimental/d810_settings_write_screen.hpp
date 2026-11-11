@@ -61,9 +61,7 @@ inline const wchar_t* D810WriteVerdictText(D810WriteVerdict verdict) {
     }
     return L"不明";
 }
-// Why capture is held, in the words of docs/WPD_DUAL_PREVIEW.md. Empty when it is not. `chosen_history`: the record holds
-// a plan of picked values, for which a mismatch is a written value that was not read back, not a difference of the two cameras.
-inline std::wstring D810CaptureBlockText(D810CaptureBlock block, bool chosen_history = false) {
+inline std::wstring D810CaptureBlockBaseText(D810CaptureBlock block, bool chosen_history) {
     switch (block) {
     case D810CaptureBlock::None: return {};
     case D810CaptureBlock::Mismatch:
@@ -83,6 +81,16 @@ inline std::wstring D810CaptureBlockText(D810CaptureBlock block, bool chosen_his
                L"記録のファイルを人が確かめ、退避してください。";
     }
     return L"撮影を止めています。";
+}
+// What to do when part of the record cannot be read: the cameras are compared (the rule of a copy) whatever the history holds.
+inline constexpr const wchar_t* kD810RecordDamagedAdvice = L"操作の記録の一部を読めないので、両台の止めの対象の項目を本体で同じにしてから読み直してください。";
+// Why capture is held, in the words of docs/WPD_DUAL_PREVIEW.md. Empty when it is not. `chosen_history`: the record holds
+// a plan of picked values that is read back against the values written (not a difference of the two cameras).
+// `history_damaged`: part of the record cannot be read; the cameras are then compared as for a copy, and the advice says so.
+inline std::wstring D810CaptureBlockText(D810CaptureBlock block, bool chosen_history = false, bool history_damaged = false) {
+    auto text = D810CaptureBlockBaseText(block, chosen_history);
+    if (history_damaged && !text.empty() && block != D810CaptureBlock::Unreadable) text += std::wstring(L" ") + kD810RecordDamagedAdvice;
+    return text;
 }
 // Operator text for one ASCII token of a plan, a run or a reread. The token is
 // kept in brackets for the log reader; tokens hold fixed words, item names and
@@ -541,6 +549,7 @@ public:
         Say("settings_write_ui_reread_requested=1 setting_writes=0");
         reread_chosen_ = status_.chosen_history;
         Launch(D810WriteScreenStep::Rereading);
+        reread_damaged_ = status_.history_damaged;
         return true;
     }
 
@@ -576,6 +585,7 @@ public:
         Say("settings_write_ui_reread_requested=1 setting_writes=0");
         reread_chosen_ = status_.chosen_history;
         Launch(D810WriteScreenStep::Rereading, true);
+        reread_damaged_ = status_.history_damaged;
         return true;
     }
     // Closes the panel. Returns the number of changes that were not written and are dropped (also said on the
@@ -779,7 +789,7 @@ private:
         bool close_failed{};
         std::string error;
     };
-    std::wstring BlockText() const { return D810CaptureBlockText(status_.block, status_.chosen_history); }
+    std::wstring BlockText() const { return D810CaptureBlockText(status_.block, status_.chosen_history, status_.history_damaged); }
     static bool WriteAllowedByBlock(D810CaptureBlock block) { return block == D810CaptureBlock::None || block == D810CaptureBlock::Mismatch; }
     void Say(const std::string& line) const { if (options_.log) options_.log(line); }
     void ResetView() { view_.reset(); ++view_serial_; }
@@ -1039,11 +1049,9 @@ private:
         }
         if (reread_chosen_) {
             // The record holds a plan of picked values: the cameras are not compared; each is checked against what was written
-            // (D810ChosenDifferenceText tells each symbol of the check).
-            //
-            // TODO after the merge with the branch that adds the damaged-history flag of the record (history_damaged): this branch
-            // is to be taken only when the history holds a plan of picked values and the record is not damaged; a damaged record is
-            // compared camera against camera as for a copy. Here the switch is the history alone (chosen_unresolved).
+            // (D810ChosenDifferenceText tells each symbol of the check.) The controller takes this rule only for a history that holds a
+            // plan of picked values and no damaged part of the record (chosen_unresolved and not history_damaged); anything else is
+            // compared camera against camera, below.
             std::vector<std::wstring> lines{L"書いた値と違う項目（または読めない項目）:"};
             for (const auto& difference : reread.check.differences) lines.push_back(D810ChosenDifferenceText(difference));
             finish(L"読み直しました: 書いた値と違う項目があります。", std::move(lines));
@@ -1056,7 +1064,10 @@ private:
             if (colon != std::string::npos) line += difference.substr(colon + 1) == "unreadable" ? L"（読めない）" : L"（本体の別の中身に頼る値で比べられない）";
             lines.push_back(std::move(line));
         }
-        finish(L"読み直しました: CAM-A と CAM-B で違う項目があります。", std::move(lines));
+        if (reread_damaged_) lines.push_back(std::wstring(L"  ") + kD810RecordDamagedAdvice);
+        const bool record_unreadable = reread.check.differences.size() == 1 && reread.check.differences[0] == "record_unreadable";
+        finish(record_unreadable ? L"読み直しました: 操作の記録を読めないため、止めは解いていません。" : L"読み直しました: CAM-A と CAM-B で違う項目があります。", std::move(lines));
+            if (difference == "record_unreadable") { lines.push_back(D810ChosenDifferenceText(difference)); continue; }
     }
 
     D810SettingsWriteController& controller_;
@@ -1086,3 +1097,5 @@ private:
     bool reread_chosen_{};
 };
 } // namespace a0::phase0::experimental
+    // Part of the record could not be read when the reread was asked: the cameras are compared, and the screen says so.
+    bool reread_damaged_{};

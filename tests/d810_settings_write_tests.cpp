@@ -4550,6 +4550,39 @@ void ScreenConfirmationOrder() {
         check(view->lines[1].find(L"項目ごとに 1 回だけです") != std::wstring::npos && view->lines[1].find(L"再送しません") != std::wstring::npos, "confirmation: the second is once, no resend");
         check(view->lines[2].find(L"項目:") == 0, "confirmation: the items follow the notices");
     }
+void ScreenChosenDamagedRecord() {
+    using Item = D810ChoiceItem;
+    const auto A = D810Camera::A, B = D810Camera::B;
+    const std::wstring advice = kD810RecordDamagedAdvice;
+    ScreenBench s(kChosenTable, true); // on disk: the record is a file that can be damaged
+    auto& screen = *s.screen;
+    s.bench.b.apply_as[0x500f] = 400; // CAM-B's write does not take: a block stands
+    check(OpenPanel(s) && screen.PanelPick(B, Item::Iso, 200) && screen.PanelPick(A, Item::Iso, 200) && screen.RequestChosen(true) && s.WaitIdle() && s.Confirm(), "damaged: a chosen run that did not take");
+    check(screen.Status().block == D810CaptureBlock::Mismatch && screen.Status().chosen_history && !screen.Status().history_damaged, "damaged: the record is whole, the history is a chosen plan's");
+    check(screen.CaptureRefusalText().find(L"書いた値が、読み戻しで確かめられていません") != std::wstring::npos && screen.CaptureRefusalText().find(advice) == std::wstring::npos, "damaged: whole record, the words of the values written");
+    // A line that cannot be read joins the record.
+    check(s.bench.file.Append("this is not a line of the record"), "damaged: the record is damaged");
+    screen.Refresh();
+    check(!screen.Status().chosen_history && screen.Status().history_damaged && !screen.Status().capture_allowed, "damaged: not a chosen history any more, damaged");
+    const auto held = screen.CaptureRefusalText();
+    check(held.find(advice) != std::wstring::npos && held.find(L"書いた値が、読み戻しで確かめられていません") == std::wstring::npos, "damaged: the block text is the comparison's and gives the advice");
+    // The reread compares the cameras (CAM-A reads 64, CAM-B 400 on the block items), item by item, and gives the advice; it does not tell the written values.
+    check(screen.RequestPanelReread(true) && s.WaitIdle(), "damaged: reread");
+    check(Shows(screen.View(), L"読み直しました: CAM-A と CAM-B で違う項目があります。") && Shows(screen.View(), L"  ISO感度") && Shows(screen.View(), advice) &&
+            !Shows(screen.View(), L"書いた値になっていません") && !Shows(screen.View(), L"書いた値と違う項目"),
+        "damaged: the reread compares the two cameras and gives the advice");
+    check(!screen.Status().capture_allowed, "damaged: not released");
+    // Both cameras the same on every block item: released, whatever was written.
+    s.bench.b.props[0x500f].current = 64;
+    s.bench.b.props[0x500d].current = s.bench.a.props[0x500d].current;
+    s.bench.b.props[0x5007].current = s.bench.a.props[0x5007].current;
+    check(screen.RequestPanelReread(true) && s.WaitIdle() && Shows(screen.View(), L"読み直しました: 止めの対象の項目は CAM-A と CAM-B で同じです。") && screen.Status().capture_allowed, "damaged: released when the cameras are the same");
+    // A record that cannot be read at all releases nothing and says so.
+    check(D810CaptureBlockText(D810CaptureBlock::Mismatch, false, true).find(advice) != std::wstring::npos && D810CaptureBlockText(D810CaptureBlock::Unconfirmed, false, true).find(advice) != std::wstring::npos &&
+            D810CaptureBlockText(D810CaptureBlock::Unreadable, false, true).find(advice) == std::wstring::npos && D810CaptureBlockText(D810CaptureBlock::None, false, true).empty() &&
+            D810CaptureBlockText(D810CaptureBlock::Mismatch, false, false).find(advice) == std::wstring::npos,
+        "damaged: the advice is for a block that the cameras' comparison releases");
+}
     check(s.screen->OfferText(true).find(L"自動では元に戻りません") != std::wstring::npos, "confirmation: the line above the buttons says it too");
     check(D810WriteViewVisibleLines(100) == 0 && D810WriteViewVisibleLines(700) == 6 && D810WriteViewVisibleLines(960) == 12, "confirmation: lines that fit");
     check(view && D810WriteViewFits(*view, 960) && !D810WriteViewFits(*view, 700), "confirmation: fits a 960 px client, not a 700 px one");
@@ -4856,3 +4889,4 @@ int main() {
     CoUninitialize();
     return failures ? 1 : 0;
 }
+    run("ScreenChosenDamagedRecord", ScreenChosenDamagedRecord);
