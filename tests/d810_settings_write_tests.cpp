@@ -3726,6 +3726,7 @@ void ScreenPanelDiscards() {
         check(screen.RequestPanelReread(true) && screen.Busy() && !screen.PanelEditable(), "discard: the reread runs");
         check(s.WaitIdle(), "discard: the reread ended");
         check(Shows(screen.View(), L"書いていない変更 2 件を捨てました") && screen.PanelOpen() && screen.PanelDirty() == 0 && screen.PanelEntryCount() == 0, "discard: the count is said and the picks are gone");
+        check(screen.StatusLine().find(L"書いていない変更 2 件を捨てました") != std::wstring::npos, "discard: the status line says the count");
         check(screen.Panel()->read_generation != before && screen.Panel()->At(D810Camera::B, D810ChoiceItem::Iso).current == 400, "discard: the new model holds the new read");
         // The panel was read once, the reread read each camera once, and the panel was read once more.
         check(screen.PanelEditable() && s.bench.Writes() == 0 && s.bench.access.opens[0] == 3 && s.bench.access.opens[1] == 3 && !s.bench.access.overlap, "discard: read again, one body at a time, nothing written");
@@ -3975,6 +3976,17 @@ void ScreenChosenRefusals() {
         check(Shows(screen.View(), L"選んだ値を書きました: 一致（10 項目") && screen.View()->lines.size() == 7 && screen.View()->lines.size() <= D810WriteViewMaxLines(), "most: the result in seven lines");
     }
     {
+        // The symbols of a release by the values written, as lines; a symbol that is not known is shown as it is.
+        const auto has = [](const char* symbol, const wchar_t* part) { return D810ChosenDifferenceText(symbol).find(part) != std::wstring::npos; };
+        check(has("record_unreadable", L"操作の記録を読めないので、解けません。記録のファイルは消さないでください"), "difference: record unreadable");
+        check(has("exposure_mode:CAM-B:not_manual", L"CAM-B の露出モードが M ではありません") && has("exposure_mode:CAM-A:unreadable", L"CAM-A の露出モードを読めませんでした"), "difference: exposure mode");
+        check(has("iso_auto:CAM-A:not_off", L"CAM-A の ISO 自動が OFF ではありません") && has("iso_auto:CAM-B:unreadable", L"CAM-B の ISO 自動を読めませんでした"), "difference: ISO auto");
+        check(has("iso:CAM-B:not_planned_value", L"ISO感度: CAM-B は、書いた値になっていません") && has("iso:CAM-A:unreadable", L"ISO感度: CAM-A は読めません") &&
+                has("white_balance:CAM-B:content_dependent", L"ホワイトバランス: CAM-B の値は、本体の別の中身に頼るため確かめられません") && has("nothing_planned", L"書く予定だった値が記録に残っていません"),
+            "difference: the symbols of the planned values");
+        check(has("iso:CAM-B:something_new", L"差の符号: iso:CAM-B:something_new") && has("something_new", L"差の符号: something_new") && has("iso", L"差の符号: iso"), "difference: an unknown symbol is shown as it is");
+    }
+    {
         // Words that are not about CAM-B alone, and the block text of a copy stay as they were.
         check(D810PlanReasonText("exposure_mode_not_manual_set_on_body:CAM-B").find(L"CAM-B が M ではなく、露出モードは書けません。B の本体で M にしてください") != std::wstring::npos, "words: the copy's reason");
         check(D810PlanReasonText("value_not_advertised:iso:CAM-A", true).find(L"この台が、その値を受け付けると答えていません") != std::wstring::npos &&
@@ -3986,6 +3998,28 @@ void ScreenChosenRefusals() {
                 D810CaptureBlockText(D810CaptureBlock::Unknown, true) == D810CaptureBlockText(D810CaptureBlock::Unknown),
             "words: only a mismatch of picked values is told differently");
     }
+}
+void ScreenChosenDeadline() {
+    using Item = D810ChoiceItem;
+    const auto A = D810Camera::A, B = D810Camera::B;
+    // The write time of the screen is shortened to 30 s: ten steps need 5 s each in hand, so they would not be started with it. A plan of picks
+    // with six steps or more gets 120 s (D810WriteDeadlineFor), so it runs; with the screen's own write time it would stop before sending.
+    ScreenBench s(kChosenTable);
+    D810SettingsWriteScreen::Options options;
+    options.write_deadline = std::chrono::milliseconds(30000);
+    options.log = [&s](const std::string& line) { s.log.push_back(line); };
+    options.now = [] { return std::string("2000-01-01T00:00:00Z"); };
+    s.screen = std::make_unique<D810SettingsWriteScreen>(*s.bench.controller, [&s] { return std::make_unique<BorrowedAccess>(s.bench.access); }, options);
+    auto& screen = *s.screen;
+    check(OpenPanel(s), "deadline: open");
+    const std::vector<std::tuple<D810Camera, Item, std::int64_t>> picks{{B, Item::Iso, 400}, {B, Item::ShutterSpeed, 1000}, {B, Item::Aperture, 800}, {B, Item::WhiteBalance, 4}, {B, Item::Metering, 2},
+        {A, Item::Iso, 200}, {A, Item::ShutterSpeed, 333}, {A, Item::Aperture, 560}, {A, Item::WhiteBalance, 5}, {A, Item::Metering, 2}};
+    for (const auto& [camera, item, value] : picks) check(screen.PanelPick(camera, item, value), "deadline: pick");
+    check(screen.RequestChosen(true) && s.WaitIdle() && screen.ConfirmationShown() && s.Confirm(), "deadline: run");
+    check(s.bench.Writes() == 10 && Shows(screen.View(), L"選んだ値を書きました: 一致（10 項目"), "deadline: ten steps run in the longer time");
+    // Five steps are within the screen's own 30 s.
+    check(screen.RequestPanelReread(true) && s.WaitIdle() && screen.PanelEditable(), "deadline: reread");
+    check(screen.PanelPick(B, Item::Iso, 100) && screen.PanelPick(B, Item::ShutterSpeed, 500) && screen.RequestChosen(true) && s.WaitIdle() && s.Confirm() && Shows(screen.View(), L"選んだ値を書きました: 一致（2 項目"), "deadline: two steps");
 }
 void ScreenSkippedShown() {
     // A row the table does not enable is listed as left out, with the reason, before confirming.
@@ -4356,6 +4390,7 @@ int main() {
     run("ScreenPanelLocksAndFailures", ScreenPanelLocksAndFailures);
     run("ScreenChosenFlow", ScreenChosenFlow);
     run("ScreenChosenRefusals", ScreenChosenRefusals);
+    run("ScreenChosenDeadline", ScreenChosenDeadline);
     run("ScreenSkippedShown", ScreenSkippedShown);
     run("ScreenBlockAndReread", ScreenBlockAndReread);
     run("ScreenPartialFailure", ScreenPartialFailure);

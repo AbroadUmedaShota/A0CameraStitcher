@@ -361,6 +361,27 @@ inline D810WriteScreenView BuildD810ChosenConfirmation(const D810WritePlan& plan
     view.lines.push_back(L"よければ「書き込む（1回だけ）」、やめる時は「やめる」を押してください。");
     return view;
 }
+// One symbol of the difference list of a release by the values written ("<item>:<CAM-x>:<why>", "nothing_planned",
+// "record_unreadable"), as a line of the result. A symbol this screen does not know is shown as it is.
+inline std::wstring D810ChosenDifferenceText(const std::string& difference) {
+    if (difference == "record_unreadable") return L"  操作の記録を読めないので、解けません。記録のファイルは消さないでください";
+    if (difference == "nothing_planned") return L"  書く予定だった値が記録に残っていません。本体で合わせてから、もう一度押してください";
+    const auto first = difference.find(':');
+    const auto second = first == std::string::npos ? std::string::npos : difference.find(':', first + 1);
+    if (second == std::string::npos) return L"  差の符号: " + D810WidenAscii(difference);
+    const auto item = difference.substr(0, first);
+    const auto camera = D810WidenAscii(difference.substr(first + 1, second - first - 1));
+    const auto why = difference.substr(second + 1);
+    if (item == "exposure_mode" && why == "not_manual") return L"  " + camera + L" の露出モードが M ではありません";
+    if (item == "exposure_mode" && why == "unreadable") return L"  " + camera + L" の露出モードを読めませんでした";
+    if (item == "iso_auto" && why == "not_off") return L"  " + camera + L" の ISO 自動が OFF ではありません";
+    if (item == "iso_auto" && why == "unreadable") return L"  " + camera + L" の ISO 自動を読めませんでした";
+    const auto head = L"  " + D810WriteItemNameLabel(item) + L": " + camera;
+    if (why == "unreadable") return head + L" は読めません";
+    if (why == "content_dependent") return head + L" の値は、本体の別の中身に頼るため確かめられません";
+    if (why == "not_planned_value") return head + L" は、書いた値になっていません";
+    return L"  差の符号: " + D810WidenAscii(difference);
+}
 // The result of a run of picked values: one line per item, each camera's outcome.
 inline std::vector<std::wstring> D810ChosenRunLines(const D810WriteRun& run) {
     std::vector<std::wstring> lines;
@@ -987,10 +1008,13 @@ private:
             " reason=" + (reread.reason.empty() ? std::string("none") : reread.reason));
         // What the panel did on the way, said under the result.
         std::vector<std::wstring> panel_lines;
+        std::size_t dropped_picks = 0;
         if (panel_read) {
             if (panel_read->complete) {
-                if (const auto dropped = ReplaceModel(*panel_read))
+                if (const auto dropped = ReplaceModel(*panel_read)) {
+                    dropped_picks = dropped;
                     panel_lines.push_back(L"書いていない変更 " + std::to_wstring(dropped) + L" 件を捨てました。設定の画面は、読み直した値になりました。");
+                }
             } else {
                 panel_lines.push_back(L"設定の画面の値は読み直せていません（前の値のままです）。" + D810WriteReasonText(panel_read->reason));
             }
@@ -998,6 +1022,8 @@ private:
         const auto finish = [&](std::wstring title, std::vector<std::wstring> lines) {
             for (const auto& line : panel_lines) lines.push_back(line);
             Finish(std::move(title), std::move(lines));
+            // The status line says how many picks the new read dropped.
+            if (dropped_picks) status_line_ += L"（書いていない変更 " + std::to_wstring(dropped_picks) + L" 件を捨てました）";
         };
         if (!reread.complete) {
             finish(L"読み直しを最後まで終えられませんでした。撮影の止めは変えていません。", {D810WriteReasonText(reread.reason)});
@@ -1013,20 +1039,13 @@ private:
         }
         if (reread_chosen_) {
             // The record holds a plan of picked values: the cameras are not compared; each is checked against what was written
-            // ("<item>:<CAM-x>:<why>", or "nothing_planned").
+            // (D810ChosenDifferenceText tells each symbol of the check).
+            //
+            // TODO after the merge with the branch that adds the damaged-history flag of the record (history_damaged): this branch
+            // is to be taken only when the history holds a plan of picked values and the record is not damaged; a damaged record is
+            // compared camera against camera as for a copy. Here the switch is the history alone (chosen_unresolved).
             std::vector<std::wstring> lines{L"書いた値と違う項目（または読めない項目）:"};
-            for (const auto& difference : reread.check.differences) {
-                const auto first = difference.find(':');
-                const auto second = first == std::string::npos ? std::string::npos : difference.find(':', first + 1);
-                if (second == std::string::npos) {
-                    lines.push_back(L"  書く予定だった値が記録に残っていません。本体で合わせてから、もう一度押してください");
-                    continue;
-                }
-                const auto why = difference.substr(second + 1);
-                std::wstring line = L"  " + D810WriteItemNameLabel(difference.substr(0, first)) + L": " + D810WidenAscii(difference.substr(first + 1, second - first - 1));
-                line += why == "unreadable" ? L" は読めません" : why == "content_dependent" ? L" の値は、本体の別の中身に頼るため確かめられません" : L" は、書いた値になっていません";
-                lines.push_back(std::move(line));
-            }
+            for (const auto& difference : reread.check.differences) lines.push_back(D810ChosenDifferenceText(difference));
             finish(L"読み直しました: 書いた値と違う項目があります。", std::move(lines));
             return;
         }
