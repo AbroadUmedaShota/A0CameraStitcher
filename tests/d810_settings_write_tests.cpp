@@ -2764,6 +2764,16 @@ void ChosenRuns() {
         auto copy = plan;
         copy.source = D810PlanSource::CopyAToB;
         check(!D810CamAKeyOpen(copy, kChosenTable), "no key for a copy");
+        // The two conditions on their own: a plan with no CAM-A step has no row to be refused by, so only the plan's
+        // kind and the switch can close the key for it.
+        Bench second(kChosenTable); // a plan made on the first bench would replace the one to be run below
+        const auto b_only = second.Chosen({PickFor(B, Item::Iso, 400)});
+        check(b_only.Ok() && D810CamAKeyOpen(*b_only.plan, kChosenTable), "a plan with no CAM-A step: the key follows the kind, the switch and the version");
+        auto b_copy = *b_only.plan;
+        b_copy.source = D810PlanSource::CopyAToB;
+        check(!D810CamAKeyOpen(b_copy, kChosenTable), "no key for a copy, whatever its steps");
+        check(!D810CamAKeyOpen(*b_only.plan, no_switch), "no key without the switch, whatever the steps");
+        check(!D810CamAKeyOpen(*b_only.plan, no_version), "no key without a CAM-A version, whatever the steps");
         // And in a run: the CAM-A steps go out with the key.
         const auto run = bench.Run(made);
         check(run.verdict == D810WriteVerdict::Match && run.sent == 3 && bench.a.write_begins == 2, "the run sends the CAM-A steps");
