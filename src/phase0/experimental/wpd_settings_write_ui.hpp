@@ -4,7 +4,7 @@
 // D810SettingsWriteScreen; this file opens the cameras, draws and hooks the buttons and the capture admission.
 //
 // The controller comes from the product entry point only: this build has no constructor that takes a
-// table, and the fixed product table decides every row (one row enabled: ISO on CAM-B).
+// table, and the fixed product table decides every row (CAM-B rows only; the count is checked below).
 #if defined(A0_SETTINGS_WRITE_TEST_TABLES)
 // The confirmation test build (CMake: a0_preview_settings_write_confirm_tests): the one executable that has the
 // table-taking constructor. Its main runs the camera-free confirmation smoke and nothing else.
@@ -450,15 +450,15 @@ int RunSettingsWriteUiSmoke(){
     wchar_t caption[256]{};GetWindowTextW(window,caption,256);
     check(std::wstring(caption).find(L"設定の書き込みあり")!=std::wstring::npos); // the ON build's mark
 
-    // 1. The product table and an empty record folder: one row is enabled (ISO on CAM-B), capture is free, and copying
+    // 1. The product table and an empty record folder: three rows are enabled (ISO, white balance and metering on CAM-B), capture is free, and copying
     //    is offered once both Live sessions are joined. The smoke opens no camera (the access counts every Open).
     InitSettingsWrite(std::make_unique<D810SettingsFileJournal>(folder),factory);
     auto* screen=settings_write->screen.get();
-    check(screen->Status().enabled_rows==1 && screen->Status().write_allowed && screen->Status().capture_allowed);
+    check(screen->Status().enabled_rows==3 && screen->Status().write_allowed && screen->Status().capture_allowed);
     tick();
     check(!SettingsWriteButtonShown(settings_copy_button) && !IsWindowEnabled(settings_copy_button)); // Live runs: not shown
     stop_live();tick();
-    check(CanReadSettings() && SettingsWriteButtonShown(settings_copy_button) && IsWindowEnabled(settings_copy_button)!=FALSE); // one row: copying is offered
+    check(CanReadSettings() && SettingsWriteButtonShown(settings_copy_button) && IsWindowEnabled(settings_copy_button)!=FALSE); // rows enabled: copying is offered
     check(IsWindowEnabled(settings_reread_button)!=FALSE && !SettingsWriteButtonShown(settings_confirm_button) && !SettingsWriteButtonShown(settings_discard_button));
     const auto offer=screen->OfferText(true);
     // The "no row" text belongs to a table with no enabled row; the product table does not reach it.
