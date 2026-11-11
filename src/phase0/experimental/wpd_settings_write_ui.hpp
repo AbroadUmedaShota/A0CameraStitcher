@@ -5,10 +5,16 @@
 //
 // The controller comes from the product entry point only: this build has no constructor that takes a
 // table, and the fixed product table decides every row (0 rows enabled until a reviewed commit).
+#if defined(A0_SETTINGS_WRITE_TEST_TABLES)
+// The confirmation test build (CMake: a0_preview_settings_write_confirm_tests): the one executable that has the
+// table-taking constructor. Its main runs the camera-free confirmation smoke and nothing else.
+static_assert(kD810ControllerTestTables, "the confirmation test build has the table-taking constructor");
+#else
 static_assert(!kD810ControllerTestTables, "the preview never builds the contract tests' table constructor");
 static_assert(std::is_constructible_v<D810SettingsWriteController, D810SettingsJournal&, D810CameraOwnership&>, "the product entry point");
 static_assert(!std::is_constructible_v<D810SettingsWriteController, const D810WriteTable&, D810SettingsJournal&, D810CameraOwnership&>,
     "the preview cannot hand the controller a table");
+#endif
 
 // --- Opening a camera for the settings channel ---------------------------------------------------------------
 // The model and firmware version strings of the device object, read with the identity (no other Content,
@@ -119,31 +125,60 @@ bool settings_write_required=false;
 unsigned settings_write_refresh_ticks{};
 HWND settings_copy_button{},settings_reread_button{},settings_confirm_button{},settings_discard_button{};
 bool SettingsWriteBusy(){return settings_write && settings_write->screen->Busy();}
-// A confirmation is offered only when every one of its lines is drawn in the window as it is now (fail closed:
-// no client area, no confirm button).
-bool SettingsWriteViewFits(HWND window){
-    const auto* view=settings_write?settings_write->screen->View():nullptr;
-    if(!view || !view->confirmation)return true;
+// The confirm button may be pressed only when the confirmation has been drawn whole by the last present of the window
+// (settings_write_drawn_serial = the serial of that view, set in WM_PAINT after the present succeeded, 0 for any other
+// paint), every line fits the window as it is now and the button lies inside it (D810ConfirmPressable). The button
+// state and the button's handler both ask this one function; with no client area it is false (fail closed).
+std::uint64_t settings_write_paint_serial{},settings_write_drawn_serial{};
+unsigned settings_write_confirm_refusals{};
+bool SettingsWriteConfirmPressable(HWND window){
+    if(!settings_write || !window)return false;
     RECT rect{};
-    return window && GetClientRect(window,&rect) && D810WriteViewFits(*view,rect.bottom);
+    if(!GetClientRect(window,&rect))return false;
+    const auto& screen=*settings_write->screen;
+    return D810ConfirmPressable(screen.View(),screen.ViewSerial(),settings_write_drawn_serial,rect.right,rect.bottom);
 }
-bool settings_write_wait_shown=false;
+// The window never gets smaller than the one that holds the longest confirmation (kD810WriteMinClientHeight) and the
+// button row (kD810WriteMinClientWidth), but never more than the work area of the screen it is on. A screen too
+// small for it cannot confirm: the button stays disabled (no row of the confirmation is cut and confirmed).
+bool settings_write_min_size_enabled=true;
+bool SettingsWriteMinTrack(MINMAXINFO* info){
+    if(!info || !settings_write_min_size_enabled)return false;
+    RECT frame{0,0,kD810WriteMinClientWidth,kD810WriteMinClientHeight};
+    if(!AdjustWindowRectEx(&frame,WS_OVERLAPPEDWINDOW,FALSE,0))return false;
+    int width=frame.right-frame.left,height=frame.bottom-frame.top;
+    RECT work{};
+    if(SystemParametersInfoW(SPI_GETWORKAREA,0,&work,0)){width=std::min<int>(width,work.right-work.left);height=std::min<int>(height,work.bottom-work.top);}
+    info->ptMinTrackSize.x=width;info->ptMinTrackSize.y=height;return true;
+}
+bool settings_write_wait_shown=false,settings_write_stuck_shown=false;
+Clock::time_point settings_write_wait_since{};
+// How long the closing window waits for a worker that does not end before it says what to do (longer than the write's
+// 60 s deadline plus the watchdog's 12 s). There is no button that closes the window sooner: the lease would then
+// go before the worker's camera.
+std::chrono::milliseconds settings_write_stuck_limit{90000};
+unsigned settings_write_stuck_notices{};
 // The window was asked to close while a write or reread still runs: it stays until the worker has closed its camera
-// (the operator must not unplug or switch off the body meanwhile), and says so.
+// (the operator must not unplug or switch off the body meanwhile), and says so. Past the limit it says what to do.
 bool SettingsWriteHoldsWindow(HWND window){
     if(!SettingsWriteBusy())return false;
+    const auto now=Clock::now();
     if(!settings_write_wait_shown){
-        settings_write_wait_shown=true;
+        settings_write_wait_shown=true;settings_write_wait_since=now;
         capture_status=L"設定の書き込み・読み直しの終わりを待っています。終わるまで USB を抜かず、本体の電源を切らないでください。";
         SetWindowTextW(window,L"A0 - 設定の書き込みの終わりを待っています（USB を抜かないでください）");
+    }else if(!settings_write_stuck_shown && now-settings_write_wait_since>=settings_write_stuck_limit){
+        settings_write_stuck_shown=true;++settings_write_stuck_notices;
+        capture_status=L"応答がありません。タスクマネージャーでこのプログラムを終わらせてから、本体の電源を入れ直してください。"
+            L"次の起動では撮影が止まったまま始まる事があります。読み直して一致を確かめるまでは撮らないでください。";
+        SetWindowTextW(window,L"A0 - 応答がありません（設定の書き込み・読み直しが終わりません）");
+        Log("settings_write_window_stuck=1 waited_seconds="+std::to_string(std::chrono::duration_cast<std::chrono::seconds>(now-settings_write_wait_since).count())+" forced_close=0");
     }
     return true;
 }
 void DiscardSettingsWriteView(){if(settings_write)settings_write->screen->ClearView();}
-void InitSettingsWrite(std::unique_ptr<D810SettingsJournal> journal,D810SettingsWriteScreen::AccessFactory access){
-    auto host=std::make_unique<SettingsWriteHost>();
-    host->journal=journal?std::move(journal):std::make_unique<UnavailableSettingsWriteJournal>();
-    host->controller=std::make_unique<D810SettingsWriteController>(*host->journal,host->owner);
+// The host with its controller made: the screen on top of it, the first status line, the capture hold.
+void InstallSettingsWriteHost(std::unique_ptr<SettingsWriteHost> host,D810SettingsWriteScreen::AccessFactory access){
     D810SettingsWriteScreen::Options options;options.log=[](const std::string& line){Log(line);};
     host->screen=std::make_unique<D810SettingsWriteScreen>(*host->controller,std::move(access),std::move(options));
     const auto& status=host->screen->Status();
@@ -153,6 +188,21 @@ void InitSettingsWrite(std::unique_ptr<D810SettingsJournal> journal,D810Settings
     if(!status.capture_allowed)capture_status=D810CaptureBlockText(status.block);
     settings_write=std::move(host);
 }
+void InitSettingsWrite(std::unique_ptr<D810SettingsJournal> journal,D810SettingsWriteScreen::AccessFactory access){
+    auto host=std::make_unique<SettingsWriteHost>();
+    host->journal=journal?std::move(journal):std::make_unique<UnavailableSettingsWriteJournal>();
+    host->controller=std::make_unique<D810SettingsWriteController>(*host->journal,host->owner);
+    InstallSettingsWriteHost(std::move(host),std::move(access));
+}
+#if defined(A0_SETTINGS_WRITE_TEST_TABLES)
+// The confirmation test build only: a table of the test's own.
+void InitSettingsWriteWithTable(const D810WriteTable& table,std::unique_ptr<D810SettingsJournal> journal,D810SettingsWriteScreen::AccessFactory access){
+    auto host=std::make_unique<SettingsWriteHost>();
+    host->journal=journal?std::move(journal):std::make_unique<UnavailableSettingsWriteJournal>();
+    host->controller=std::make_unique<D810SettingsWriteController>(table,*host->journal,host->owner);
+    InstallSettingsWriteHost(std::move(host),std::move(access));
+}
+#endif
 void InitProductSettingsWrite(){
     settings_write_required=true;
     InitSettingsWrite(OpenProductD810SettingsJournal(),[]{return std::make_unique<WpdSettingsWriteCameraAccess>(registered_ids);});
@@ -172,10 +222,10 @@ void CreateSettingsWriteControls(HWND window,HINSTANCE instance){
     SetWindowTextW(window,(title+L" ／ 設定の書き込みあり（開発用・#416 段B）").c_str());
 }
 void LayoutSettingsWriteButtons(const RECT& rect){
-    const int y=std::max(0L,rect.bottom-40);
+    const int y=std::max(0L,rect.bottom-kD810ButtonRowGap);
     if(settings_copy_button)MoveWindow(settings_copy_button,12,y,230,28,TRUE);
     if(settings_reread_button)MoveWindow(settings_reread_button,252,y,170,28,TRUE);
-    if(settings_confirm_button)MoveWindow(settings_confirm_button,432,y,200,28,TRUE);
+    if(settings_confirm_button)MoveWindow(settings_confirm_button,kD810ConfirmButtonLeft,y,kD810ConfirmButtonWidth,kD810ConfirmButtonHeight,TRUE);
     if(settings_discard_button)MoveWindow(settings_discard_button,642,y,110,28,TRUE);
 }
 // The button's own WS_VISIBLE (IsWindowVisible also depends on the parent, which a smoke never shows).
@@ -199,6 +249,12 @@ bool SettingsWriteAdmitsCapture(){
 }
 // The one-shot capture of --capture-a / --capture-b, after the window ended: held while the record holds capture.
 bool CaptureOnceHeld(){return capture_once_alias && all_sessions_passed && !SettingsWriteAdmitsCapture();}
+// The one-shot capture as a whole: the hold is asked first, and the shutter is reached only through this call (the
+// preview's caller passes the capture as `shutter`; a caller that skips this call takes no picture). 1 when held.
+template<class Shutter>int RunCaptureOnce(Shutter&& shutter){
+    if(CaptureOnceHeld())return 1;
+    return shutter();
+}
 // The buttons. Each handler checks the conditions again (the button state is not trusted).
 bool HandleSettingsWriteCommand(int id,WORD code,HWND control){
     if(!settings_write || code!=BN_CLICKED)return false;
@@ -211,7 +267,13 @@ bool HandleSettingsWriteCommand(int id,WORD code,HWND control){
     }
     // The confirm button is the only caller of the controller's Confirm.
     if(id==407 && control==settings_confirm_button){
-        if(!SettingsWriteViewFits(GetParent(control))){capture_status=L"確認の内容が窓に入りません。窓を大きくしてください。何も書いていません。";return true;}
+        if(!SettingsWriteConfirmPressable(GetParent(control))){
+            ++settings_write_confirm_refusals;Log("settings_write_ui_confirm_refused=1 reason=not_shown setting_writes=0");
+            // A confirmation is up but not drawn whole: say so. With none up, the usual reason.
+            capture_status=screen.ConfirmationShown()?L"確認の内容を窓に描けていません。窓を大きくしてください。何も書いていません。":
+                (screen.StatusLine().empty()?screen.OfferText(ready):screen.StatusLine());
+            return true;
+        }
         if(screen.ConfirmShownPlan(ready))capture_status=L"CAM-B に書いています（項目ごとに1回だけ）…";
         else capture_status=screen.StatusLine().empty()?screen.OfferText(ready):screen.StatusLine();
         return true;
@@ -238,16 +300,26 @@ void SettingsWriteTimer(){
     const bool confirming=screen.Step()==D810WriteScreenStep::Confirming;
     ShowSettingsWriteButton(settings_copy_button,shown,screen.CopyOffered(ready));
     ShowSettingsWriteButton(settings_reread_button,shown,screen.RereadOffered(ready));
-    ShowSettingsWriteButton(settings_confirm_button,shown && confirming,screen.ConfirmOffered(ready) && SettingsWriteViewFits(GetParent(settings_confirm_button)));
+    ShowSettingsWriteButton(settings_confirm_button,shown && confirming,screen.ConfirmOffered(ready) && SettingsWriteConfirmPressable(GetParent(settings_confirm_button)));
     ShowSettingsWriteButton(settings_discard_button,shown && confirming,confirming && !screen.Busy());
+    if(review_button && screen.View())EnableWindow(review_button,FALSE); // the view (confirmation or result) is drawn before a picture
     if(screen.Busy() || !screen.Status().capture_allowed){
         for(auto button:capture_buttons)if(button)EnableWindow(button,FALSE);
         if(pair_button)EnableWindow(pair_button,FALSE);
     }
 }
+// True when `text` laid out with `flags` in `area` needs no more room than `area` has: nothing of it is cut.
+bool SettingsWriteTextFits(HDC dc,const std::wstring& text,const RECT& area,UINT flags){
+    RECT need=area;
+    if(!DrawTextW(dc,text.c_str(),-1,&need,flags|DT_CALCRECT))return false;
+    return need.right-need.left<=area.right-area.left && need.bottom-need.top<=area.bottom-area.top;
+}
 // Drawn while both Live sessions are stopped and joined: the line above the buttons, and the confirmation or
-// the last result in place of C (it takes the place of the read-only table while it is shown).
+// the last result in place of C (it takes the place of the read-only table while it is shown). A confirmation
+// that is drawn whole (the line above the buttons, the title and every line, none cut at the right edge or the
+// bottom) leaves its serial in settings_write_paint_serial; the window's present makes it the drawn one.
 bool DrawSettingsWrite(HDC dc,RECT client){
+    settings_write_paint_serial=0;
     if(!settings_write)return false;
     auto& screen=*settings_write->screen;
     auto offer=screen.OfferText(CanReadSettings());
@@ -259,15 +331,19 @@ bool DrawSettingsWrite(HDC dc,RECT client){
     DrawTextW(dc,offer.c_str(),-1,&offer_rect,DT_LEFT|DT_WORDBREAK|DT_NOPREFIX|DT_END_ELLIPSIS);
     SetTextColor(dc,RGB(240,240,240));
     if(!view)return false;
+    bool whole=view->confirmation && SettingsWriteTextFits(dc,offer,offer_rect,DT_LEFT|DT_WORDBREAK|DT_NOPREFIX);
     const int top=client.bottom/2+88;
     SetTextColor(dc,view->confirmation?RGB(255,200,90):RGB(240,240,240));
     TextOutW(dc,12,top,view->title.c_str(),static_cast<int>(view->title.size()));
+    whole=whole && SettingsWriteTextFits(dc,view->title,RECT{12,top,client.right-12,top+30},DT_LEFT|DT_SINGLELINE|DT_NOPREFIX);
     SetTextColor(dc,RGB(240,240,240));
     int y=top+30;
     const auto visible=std::min(view->lines.size(),D810WriteViewVisibleLines(client.bottom));
     for(std::size_t i=0;i<visible;++i){
         RECT area{12,y,client.right-12,y+22};DrawTextW(dc,view->lines[i].c_str(),-1,&area,DT_LEFT|DT_SINGLELINE|DT_NOPREFIX|DT_END_ELLIPSIS);y+=22;
+        whole=whole && SettingsWriteTextFits(dc,view->lines[i],area,DT_LEFT|DT_SINGLELINE|DT_NOPREFIX);
     }
+    if(whole && visible==view->lines.size())settings_write_paint_serial=screen.ViewSerial();
     return true;
 }
 // After the message loop: the stop flag, the worker's end (its camera closed), then the lease may go.
@@ -309,6 +385,50 @@ public:
 private:
     std::shared_ptr<Gate> gate_;
 };
+// The preview's window procedure on a window nobody sees, with the buttons the screen reaches and two synthetic Live
+// sessions (no camera, no lease). Null when anything could not be made.
+HWND CreateSettingsWriteSmokeWindow(const wchar_t* class_name,HINSTANCE& instance){
+    for(int i=0;i<2;++i){cameras[i]=std::make_unique<Camera>();auto& c=*cameras[i];
+        c.alias=i==0?"CAM-A":"CAM-B";c.opened=true;c.start_attempted=true;c.started=true;
+        c.frames=25;c.painted=15;c.first=Clock::now()-std::chrono::seconds(3);c.last=Clock::now();}
+    stopping=false;run_seconds=0;run_start=Clock::now();preview_joined=false;
+    instance=GetModuleHandleW(nullptr);WNDCLASSW wc{};wc.lpfnWndProc=WindowProc;wc.hInstance=instance;wc.lpszClassName=class_name;
+    if(!RegisterClassW(&wc))return nullptr;
+    HWND window=CreateWindowExW(0,wc.lpszClassName,L"synthetic settings write test",WS_OVERLAPPEDWINDOW,0,0,1400,960,nullptr,nullptr,instance,nullptr);
+    if(!window)return nullptr;
+    session_button=CreateWindowExW(0,L"BUTTON",L"x",WS_CHILD,0,0,200,28,window,reinterpret_cast<HMENU>(403),instance,nullptr);
+    settings_button=CreateWindowExW(0,L"BUTTON",L"x",WS_CHILD,0,0,200,28,window,reinterpret_cast<HMENU>(405),instance,nullptr);
+    for(int i=0;i<2;++i)capture_buttons[i]=CreateWindowExW(0,L"BUTTON",L"x",WS_CHILD,0,0,200,28,window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(200+i)),instance,nullptr);
+    pair_button=CreateWindowExW(0,L"BUTTON",L"x",WS_CHILD,0,0,200,28,window,reinterpret_cast<HMENU>(400),instance,nullptr);
+    if(!session_button || !settings_button || !capture_buttons[0] || !capture_buttons[1] || !pair_button){DestroyWindow(window);return nullptr;}
+    try{CreateSettingsWriteControls(window,instance);}catch(const std::exception&){DestroyWindow(window);return nullptr;}
+    return window;
+}
+// The window's own Paint into a memory bitmap, and the pixels it left (no window, no present).
+struct SettingsWriteSmokeFrame {
+    int width{},height{};HDC dc{};HBITMAP bitmap{};HGDIOBJ old{};const std::uint32_t* bits{};std::array<std::uint64_t,6> drawn{};
+    SettingsWriteSmokeFrame(int w,int h):width(w),height(h){
+        dc=CreateCompatibleDC(nullptr);BITMAPINFO info{};info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);info.bmiHeader.biWidth=w;info.bmiHeader.biHeight=-h;
+        info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;void* raw{};
+        if(dc)bitmap=CreateDIBSection(dc,&info,DIB_RGB_COLORS,&raw,nullptr,0);
+        if(dc && bitmap && raw){old=SelectObject(dc,bitmap);bits=static_cast<const std::uint32_t*>(raw);drawn=Paint(dc,RECT{0,0,w,h});GdiFlush();}
+    }
+    ~SettingsWriteSmokeFrame(){if(old)SelectObject(dc,old);if(bitmap)DeleteObject(bitmap);if(dc)DeleteDC(dc);}
+    SettingsWriteSmokeFrame(const SettingsWriteSmokeFrame&)=delete;
+    SettingsWriteSmokeFrame& operator=(const SettingsWriteSmokeFrame&)=delete;
+    // Pixels in the rows [top,bottom) of the columns [12,1000) that are not black.
+    unsigned Lit(int top,int bottom)const{
+        unsigned lit{};
+        if(bits)for(int y=std::max(0,top);y<std::min(height,bottom);++y)for(int x=12;x<std::min(width,1000);++x)if((bits[static_cast<std::size_t>(y)*width+x]&0xffffffu)!=0)++lit;
+        return lit;
+    }
+    // Pixels of exactly `color` in the rows [top,bottom) of the whole width.
+    unsigned Count(int top,int bottom,COLORREF color)const{
+        unsigned count{};const std::uint32_t want=(GetRValue(color)<<16)|(GetGValue(color)<<8)|GetBValue(color);
+        if(bits)for(int y=std::max(0,top);y<std::min(height,bottom);++y)for(int x=0;x<width;++x)if((bits[static_cast<std::size_t>(y)*width+x]&0xffffffu)==want)++count;
+        return count;
+    }
+};
 int RunSettingsWriteUiSmoke(){
     Log("settings_write_ui_synthetic=1 camera_operations=0");
     unsigned checks{},failures{};const auto check=[&](bool ok){++checks;if(!ok){++failures;Log("settings_write_ui_failed_check="+std::to_string(checks));}};
@@ -316,20 +436,9 @@ int RunSettingsWriteUiSmoke(){
     const auto folder=std::filesystem::path(temp)/(L"a0-settings-write-ui-smoke-"+std::to_wstring(GetCurrentProcessId()));
     std::error_code ignored;std::filesystem::remove_all(folder,ignored);
     if(const auto product=ProductD810SettingsWriteFolder())check(folder.parent_path()!=product->parent_path() && folder!=*product); // not the product's record
-    for(int i=0;i<2;++i){cameras[i]=std::make_unique<Camera>();auto& c=*cameras[i];
-        c.alias=i==0?"CAM-A":"CAM-B";c.opened=true;c.start_attempted=true;c.started=true;
-        c.frames=25;c.painted=15;c.first=Clock::now()-std::chrono::seconds(3);c.last=Clock::now();}
-    stopping=false;run_seconds=0;run_start=Clock::now();preview_joined=false;
-    auto instance=GetModuleHandleW(nullptr);WNDCLASSW wc{};wc.lpfnWndProc=WindowProc;wc.hInstance=instance;wc.lpszClassName=L"A0SettingsWriteUiSmoke";
-    if(!RegisterClassW(&wc))return 2;
-    HWND window=CreateWindowExW(0,wc.lpszClassName,L"synthetic settings write test",WS_OVERLAPPEDWINDOW,0,0,1400,960,nullptr,nullptr,instance,nullptr);
+    HINSTANCE instance{};
+    HWND window=CreateSettingsWriteSmokeWindow(L"A0SettingsWriteUiSmoke",instance);
     if(!window)return 2;
-    session_button=CreateWindowExW(0,L"BUTTON",L"x",WS_CHILD,0,0,200,28,window,reinterpret_cast<HMENU>(403),instance,nullptr);
-    settings_button=CreateWindowExW(0,L"BUTTON",L"x",WS_CHILD,0,0,200,28,window,reinterpret_cast<HMENU>(405),instance,nullptr);
-    for(int i=0;i<2;++i)capture_buttons[i]=CreateWindowExW(0,L"BUTTON",L"x",WS_CHILD,0,0,200,28,window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(200+i)),instance,nullptr);
-    pair_button=CreateWindowExW(0,L"BUTTON",L"x",WS_CHILD,0,0,200,28,window,reinterpret_cast<HMENU>(400),instance,nullptr);
-    if(!session_button || !settings_button || !capture_buttons[0] || !capture_buttons[1] || !pair_button){DestroyWindow(window);return 2;}
-    try{CreateSettingsWriteControls(window,instance);}catch(const std::exception&){DestroyWindow(window);return 2;}
     auto opens=std::make_shared<std::atomic<int>>(0);
     const auto factory=[opens]{return std::make_unique<NoCameraSettingsAccess>(opens);};
     const auto tick=[&]{SendMessageW(window,WM_TIMER,1,0);};
@@ -337,14 +446,7 @@ int RunSettingsWriteUiSmoke(){
     const auto stop_live=[&]{for(auto& camera:cameras){camera->done=true;camera->stopped=true;camera->closed=true;}preview_joined=true;stopping=true;};
     const auto run_live=[&]{stopping=false;preview_joined=false;for(auto& camera:cameras){camera->done=false;camera->stopped=false;camera->closed=false;camera->last=Clock::now();}};
     const auto wait_idle=[&]{for(int i=0;i<400;++i){tick();if(!SettingsWriteBusy())return true;std::this_thread::sleep_for(std::chrono::milliseconds(5));}return false;};
-    const auto drawn_in=[&](int top,int bottom){
-        HDC dc=CreateCompatibleDC(nullptr);BITMAPINFO info{};info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);info.bmiHeader.biWidth=1400;info.bmiHeader.biHeight=-960;
-        info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;void* bits{};auto bitmap=CreateDIBSection(dc,&info,DIB_RGB_COLORS,&bits,nullptr,0);
-        unsigned lit{};
-        if(dc && bitmap){auto old=SelectObject(dc,bitmap);Paint(dc,RECT{0,0,1400,960});GdiFlush();
-            for(int y=top;y<bottom;++y)for(int x=12;x<1000;++x)if(GetPixel(dc,x,y)!=RGB(0,0,0))++lit;SelectObject(dc,old);}
-        if(bitmap)DeleteObject(bitmap);if(dc)DeleteDC(dc);return lit;
-    };
+    const auto drawn_in=[&](int top,int bottom){return SettingsWriteSmokeFrame(1400,960).Lit(top,bottom);};
     wchar_t caption[256]{};GetWindowTextW(window,caption,256);
     check(std::wstring(caption).find(L"設定の書き込みあり")!=std::wstring::npos); // the ON build's mark
 
@@ -371,9 +473,19 @@ int RunSettingsWriteUiSmoke(){
     capture_pending.reset();stopping=false;
     // The one-shot capture (--capture-a / --capture-b) is held only by the record, and only when it was asked for.
     const bool passed_before=all_sessions_passed;
+    int shutters{};const auto count_shutter=[&]{++shutters;return 7;};
     capture_once_alias=0;check(!CaptureOnceHeld());
+    check(RunCaptureOnce(count_shutter)==7 && shutters==1); // nothing holds: the shutter is reached once and its result returned
     all_sessions_passed=false;check(!CaptureOnceHeld());
     all_sessions_passed=passed_before;capture_once_alias.reset();
+    {   // The window's minimum size: the longest confirmation and the button row, within the screen's work area.
+        MINMAXINFO limits{};SendMessageW(window,WM_GETMINMAXINFO,0,reinterpret_cast<LPARAM>(&limits));
+        RECT need{0,0,kD810WriteMinClientWidth,kD810WriteMinClientHeight};AdjustWindowRectEx(&need,WS_OVERLAPPEDWINDOW,FALSE,0);
+        RECT work{};SystemParametersInfoW(SPI_GETWORKAREA,0,&work,0);
+        check(limits.ptMinTrackSize.x==std::min<int>(need.right-need.left,work.right-work.left) && limits.ptMinTrackSize.y==std::min<int>(need.bottom-need.top,work.bottom-work.top));
+        RECT client{};GetClientRect(window,&client);
+        check(need.bottom-need.top>work.bottom-work.top || client.bottom>=kD810WriteMinClientHeight); // the window was made at least that large
+    }
 
     // 2. A restart after a write that never wrote its end line: capture is held from the start.
     settings_write.reset();
@@ -388,6 +500,7 @@ int RunSettingsWriteUiSmoke(){
     check(screen->Status().block==D810CaptureBlock::Unconfirmed && !screen->Status().capture_allowed);
     check(capture_status.find(L"未確認")!=std::wstring::npos);
     capture_once_alias=1;check(CaptureOnceHeld());                    // --capture-b: held by the record
+    shutters=0;check(RunCaptureOnce(count_shutter)==1 && shutters==0); // held: 1 returned, the shutter never reached
     all_sessions_passed=false;check(!CaptureOnceHeld());              // a run that already failed does not reach it
     all_sessions_passed=passed_before;capture_once_alias.reset();check(!CaptureOnceHeld());
     run_live();tick();
@@ -450,7 +563,14 @@ int RunSettingsWriteUiSmoke(){
     release_gate();
     check(wait_idle());
     check(!review_visible && screen->View() && drawn_in(960/2+88,960/2+130)>50); // the result is shown, not the picture
-    review_pixels={};
+    {   // A picture asked for while a result is up is drawn behind it, not over it (a green picture shows no green).
+        review_pixels={8,8,std::vector<BYTE>(8*8*4)};
+        for(std::size_t i=0;i<review_pixels.bytes.size();i+=4){review_pixels.bytes[i+1]=255;review_pixels.bytes[i+3]=255;}
+        review_visible=true;
+        SettingsWriteSmokeFrame frame(1400,960);
+        check(frame.drawn[3]==0 && frame.Count(960/2+80,960,RGB(0,255,0))==0 && frame.Lit(960/2+88,960/2+130)>50);
+    }
+    review_visible=false;review_pixels={};
 
     // 5. The window is asked to close while a reread runs: it stays until the worker has closed its camera.
     gate->release.store(false);gate->entered.store(0);
@@ -463,6 +583,18 @@ int RunSettingsWriteUiSmoke(){
     GetWindowTextW(window,caption,256);
     check(closing && IsWindow(window) && SettingsWriteBusy() && std::wstring(caption).find(L"終わりを待っています")!=std::wstring::npos);
     check(capture_status.find(L"USB を抜かず")!=std::wstring::npos);
+    SendMessageW(window,WM_CLOSE,0,0);tick();   // a repeated request keeps the wait wording (it used to bring the first wording back)
+    GetWindowTextW(window,caption,256);
+    check(std::wstring(caption).find(L"終わりを待っています")!=std::wstring::npos && settings_write_stuck_notices==0 && !settings_write_stuck_shown);
+    settings_write_stuck_limit=std::chrono::milliseconds(1);   // the limit passes while the worker does not end
+    for(int i=0;i<10;++i){tick();std::this_thread::sleep_for(std::chrono::milliseconds(5));}
+    GetWindowTextW(window,caption,256);
+    check(IsWindow(window) && SettingsWriteBusy() && settings_write_stuck_shown && settings_write_stuck_notices==1);
+    check(std::wstring(caption).find(L"応答がありません")!=std::wstring::npos && capture_status.find(L"タスクマネージャー")!=std::wstring::npos &&
+        capture_status.find(L"撮影が止まったまま")!=std::wstring::npos && capture_status.find(L"読み直して一致を確かめるまでは")!=std::wstring::npos);
+    SendMessageW(window,WM_CLOSE,0,0);tick();   // another request: the notice stays, once, and the window still waits for the worker
+    GetWindowTextW(window,caption,256);
+    check(IsWindow(window) && SettingsWriteBusy() && settings_write_stuck_notices==1 && std::wstring(caption).find(L"応答がありません")!=std::wstring::npos);
     release_gate();
     bool window_gone=false;
     for(int i=0;i<400 && !window_gone;++i){tick();window_gone=!IsWindow(window);if(!window_gone)std::this_thread::sleep_for(std::chrono::milliseconds(5));}
@@ -477,3 +609,278 @@ int RunSettingsWriteUiSmoke(){
     Log("settings_write_ui_checks="+std::to_string(checks)+" failures="+std::to_string(failures)+" camera_operations=0 camera_opens_attempted="+std::to_string(opens->load()));
     return failures?1:0;
 }
+#if defined(A0_SETTINGS_WRITE_TEST_TABLES)
+// --- Camera-free contract of the confirmation screen (#416 stage B): the window's own code draws a confirmation ---
+// Only the confirmation test build (CMake a0_preview_settings_write_confirm_tests) has a controller that takes a table,
+// so only here can a confirmation be put up. The table enables CAM-B's rows; the bodies are two synthetic snapshots (no
+// transport exists: the camera access opens nothing); the plan is taken as the worker's result would be. Everything after
+// that is the preview's: Paint, the present in WM_PAINT, the timer's button state and the button's handler.
+D810SettingReading SmokeReading(std::uint16_t code,std::int64_t current,std::vector<std::int64_t> values){
+    const auto* spec=FindD810Setting(code);
+    D810SettingReading reading;reading.id=spec->id;reading.available=true;
+    reading.desc.code=code;reading.desc.data_type=static_cast<std::uint16_t>(spec->type);reading.desc.get_set=1;reading.desc.form_flag=2;
+    reading.desc.default_value=current;reading.desc.current_value=current;reading.desc.values=std::move(values);return reading;
+}
+D810SettingsSnapshot SmokeBody(std::int64_t shutter,std::int64_t aperture,std::int64_t iso,std::int64_t white_balance,std::int64_t metering){
+    return {SmokeReading(0x500e,1,{1,2,3,4}),SmokeReading(0xd054,0,{0,1}),SmokeReading(0x500d,shutter,{125,250,500,1000}),
+        SmokeReading(0x5007,aperture,{400,560,800,1100}),SmokeReading(0x500f,iso,{100,200,400}),
+        SmokeReading(0x5005,white_balance,{2,4,5,6,7}),SmokeReading(0x500b,metering,{1,2,3,4})};
+}
+D810WriteTable SmokeConfirmTable(){
+    auto table=kD810ProductWriteTable;
+    for(auto& row:table.rows){
+        if(row.item==D810WriteItem::IsoAuto)row.code=0xd054;
+        if(row.item==D810WriteItem::ShutterSpeed)row.code=0x500d;
+        row.enabled=row.camera==D810Camera::B && D810WriteItemOf(row.item).scope!=D810ItemScope::Adr41;
+    }
+    return table;
+}
+// Only CAM-B's ISO row is enabled (the codes the plan reads are set): every other item is left out with the table's reason.
+D810WriteTable SmokeIsoOnlyTable(){
+    auto table=SmokeConfirmTable();
+    for(auto& row:table.rows)row.enabled=row.camera==D810Camera::B && row.item==D810WriteItem::Iso;
+    return table;
+}
+// The widest line, measured as the window measures it (DT_CALCRECT, one line, the default font), that any confirmation can
+// show: the title and the lines of `view` (the fixed notices, the headings and the closing line come from a real one), the
+// step line of every item with the widest values it can name, and the line of every item with every reason a plan
+// carries. `which` receives the text of the widest.
+int WidestPossibleConfirmationLine(HDC dc,const D810WriteScreenView& view,std::wstring& which){
+    int widest=0;
+    const auto width_of=[&](const std::wstring& text){RECT r{0,0,0,0};DrawTextW(dc,text.c_str(),-1,&r,DT_CALCRECT|DT_LEFT|DT_SINGLELINE|DT_NOPREFIX);return static_cast<int>(r.right);};
+    const auto measure=[&](const std::wstring& text){const int w=width_of(text);if(w>widest){widest=w;which=text;}};
+    measure(view.title);
+    for(const auto& line:view.lines)measure(line);
+    static constexpr const char* reasons[]={"unreadable","value_content_dependent","value_not_listed","left_out_by_operator","row_disabled","copy_disabled",
+        "copy_targets_cam_b_only","copy_item_out_of_scope","code_unconfirmed","type_mismatch","not_writable","value_out_of_type","value_not_advertised"};
+    for(const auto& spec:kD810WriteItems){
+        if(spec.scope==D810ItemScope::Adr41)continue;
+        for(const char* reason:reasons)measure(D810WriteSkippedLine(spec.item,reason)); // already indented as the view has it
+        // The value on CAM-B can be anything its type holds (and the shutter's special values); the value written is
+        // from the item's closed list, or anything of the type when it has none.
+        const std::int64_t top=spec.type==D810ValueType::Uint8?0xff:0xffff;
+        std::vector<std::int64_t> before,after;
+        for(std::int64_t v=0;v<=top;++v)before.push_back(v);
+        if(spec.type==D810ValueType::Uint32){before.push_back(0xfffffffdLL);before.push_back(0xffffffffLL);}
+        if(spec.allowed_count)after.assign(spec.allowed.begin(),spec.allowed.begin()+static_cast<std::ptrdiff_t>(spec.allowed_count));
+        else for(std::int64_t v=0;v<=top;++v)after.push_back(v);
+        const auto widest_value=[&](const std::vector<std::int64_t>& values){
+            // Only the longest texts (by characters) are measured: a text two characters shorter is never wider here.
+            std::size_t longest=0;
+            std::vector<std::pair<std::int64_t,std::wstring>> texts;
+            for(const auto v:values){auto text=D810WriteValueText(spec.codes[0],v);longest=std::max(longest,text.size());texts.emplace_back(v,std::move(text));}
+            std::int64_t best=values.front();int best_width=-1;
+            for(const auto& [v,text]:texts){
+                if(text.size()+2<longest)continue;
+                const int w=width_of(text);if(w>best_width){best_width=w;best=v;}
+            }
+            return best;
+        };
+        D810WriteStep step;step.camera=D810Camera::B;step.item=spec.item;step.code=spec.codes[0];
+        step.before=widest_value(before);step.value=widest_value(after);
+        measure(L"  "+D810WriteStepLine(step));
+    }
+    return widest;
+}
+int RunSettingsWriteConfirmSmoke(){
+    Log("settings_write_confirm_smoke=1 camera_operations=0 test_table=1");
+    unsigned checks{},failures{};const auto check=[&](bool ok){++checks;if(!ok){++failures;Log("settings_write_confirm_failed_check="+std::to_string(checks));}};
+    wchar_t temp[MAX_PATH]{};if(!GetTempPathW(MAX_PATH,temp))return 2;
+    const auto folder=std::filesystem::path(temp)/(L"a0-settings-write-confirm-smoke-"+std::to_wstring(GetCurrentProcessId()));
+    std::error_code ignored;std::filesystem::remove_all(folder,ignored);
+    settings_write_min_size_enabled=false; // the windows below are made smaller than the real window may be
+    HINSTANCE instance{};
+    HWND window=CreateSettingsWriteSmokeWindow(L"A0SettingsWriteConfirmSmoke",instance);
+    if(!window)return 2;
+    review_button=CreateWindowExW(0,L"BUTTON",L"x",WS_CHILD,0,0,200,28,window,reinterpret_cast<HMENU>(401),instance,nullptr);
+    auto opens=std::make_shared<std::atomic<int>>(0);
+    InitSettingsWriteWithTable(SmokeConfirmTable(),std::make_unique<D810SettingsFileJournal>(folder),[opens]{return std::make_unique<NoCameraSettingsAccess>(opens);});
+    auto* screen=settings_write->screen.get();
+    check(screen->Status().enabled_rows==7 && screen->Status().write_allowed && screen->Status().capture_allowed);
+    const auto tick=[&]{SendMessageW(window,WM_TIMER,1,0);};
+    const auto click=[&](int id,HWND button){SendMessageW(window,WM_COMMAND,MAKEWPARAM(id,BN_CLICKED),reinterpret_cast<LPARAM>(button));};
+    const auto paint=[&]{SendMessageW(window,WM_PAINT,0,0);};
+    const auto wait_idle=[&]{for(int i=0;i<400;++i){tick();if(!SettingsWriteBusy())return true;std::this_thread::sleep_for(std::chrono::milliseconds(5));}return false;};
+    const auto resize=[&](int client_width,int client_height){
+        RECT frame{0,0,client_width,client_height};AdjustWindowRectEx(&frame,WS_OVERLAPPEDWINDOW,FALSE,0);
+        SetWindowPos(window,nullptr,0,0,frame.right-frame.left,frame.bottom-frame.top,SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);
+        RECT client{};GetClientRect(window,&client);return client.right==client_width && client.bottom==client_height;
+    };
+    // Five steps (iso, shutter, aperture, white balance, metering), or four when `more_alike` (the aperture reads the same).
+    const auto put_up_plan=[&](bool more_alike){
+        D810PlanRead read;read.complete=true;
+        read.snapshots[0]=SmokeBody(250,800,200,4,3);
+        read.snapshots[1]=more_alike?SmokeBody(125,800,400,2,2):SmokeBody(500,560,100,2,2);
+        screen->TakePlanReadForTest(read);
+    };
+    const auto confirm_enabled=[&]{return SettingsWriteButtonShown(settings_confirm_button) && IsWindowEnabled(settings_confirm_button)!=FALSE;};
+    // The width at which every line (and the title) of the view is not cut, measured as the window draws them.
+    const auto widest=[&]{
+        int widest_text=0;HDC dc=CreateCompatibleDC(nullptr);
+        const auto* view=screen->View();
+        if(dc && view){
+            const auto measure=[&](const std::wstring& text){RECT r{0,0,0,0};DrawTextW(dc,text.c_str(),-1,&r,DT_CALCRECT|DT_LEFT|DT_SINGLELINE|DT_NOPREFIX);widest_text=std::max<int>(widest_text,r.right);};
+            measure(view->title);for(const auto& line:view->lines)measure(line);
+        }
+        if(dc)DeleteDC(dc);return widest_text;
+    };
+    const auto green_picture=[&]{
+        review_pixels={8,8,std::vector<BYTE>(8*8*4)};
+        for(std::size_t i=0;i<review_pixels.bytes.size();i+=4){review_pixels.bytes[i+1]=255;review_pixels.bytes[i+3]=255;}
+    };
+    for(auto& camera:cameras){camera->done=true;camera->stopped=true;camera->closed=true;}preview_joined=true;stopping=true; // both Live sessions joined
+    check(resize(1400,1000));
+    tick();
+    check(CanReadSettings() && !screen->View() && SettingsWriteButtonShown(settings_copy_button));
+
+    // 1. A confirmation is up and has not been drawn: the button is shown but not pressable, and the handler refuses.
+    put_up_plan(false);
+    const auto* view=screen->View();
+    const int needed=view?D810WriteViewMinClientBottom(view->lines.size()):0;
+    check(screen->ConfirmationShown() && view && view->confirmation && view->lines.size()==9 && screen->ViewSerial()!=0);
+    tick();
+    check(SettingsWriteButtonShown(settings_confirm_button) && !IsWindowEnabled(settings_confirm_button));
+    const auto refusals_before=settings_write_confirm_refusals;
+    click(407,settings_confirm_button);
+    check(settings_write_confirm_refusals==refusals_before+1 && opens->load()==0 && screen->Step()==D810WriteScreenStep::Confirming &&
+        !screen->Status().plan_confirmed && capture_status.find(L"何も書いていません")!=std::wstring::npos);
+
+    // 2. Drawn whole by a present of the window: pressable.
+    paint();tick();
+    check(settings_write_drawn_serial==screen->ViewSerial() && confirm_enabled() && settings_write_confirm_refusals==refusals_before+1);
+
+    // 3. The window gets one row too short: not pressable by the height alone; a paint there draws nothing whole and
+    //    leaves the flag down, so growing the window back is not enough until it has been drawn again.
+    check(resize(1400,needed-1));tick();
+    check(!confirm_enabled());
+    paint();
+    check(settings_write_drawn_serial==0);
+    check(resize(1400,needed));tick();
+    check(!confirm_enabled());
+    paint();tick();
+    check(settings_write_drawn_serial==screen->ViewSerial() && confirm_enabled());
+
+    // 4. The window gets too narrow for the longest line (cut with an ellipsis): the same.
+    const int line_width=widest();
+    check(line_width+24>kD810ConfirmButtonLeft+kD810ConfirmButtonWidth); // the lines, not the button, decide the width here
+    check(resize(1400,1000));
+    check(resize(line_width+24-2,1000));paint();tick();
+    check(settings_write_drawn_serial==0 && !confirm_enabled());
+    click(407,settings_confirm_button);
+    check(settings_write_confirm_refusals==refusals_before+2 && opens->load()==0 && screen->Step()==D810WriteScreenStep::Confirming);
+    check(resize(line_width+24,1000));paint();tick();
+    check(settings_write_drawn_serial==screen->ViewSerial() && confirm_enabled());
+
+    // 5. Too small for Paint to draw anything: the flag is down after that paint, whatever the window grows to.
+    check(resize(150,150));paint();
+    check(settings_write_drawn_serial==0);
+    check(resize(1400,1000));tick();
+    check(!confirm_enabled());
+    paint();tick();
+    check(confirm_enabled());
+
+    // 6. The view is replaced (the plan discarded, another put up) and not drawn yet: the earlier drawing does not count.
+    const auto drawn_before=settings_write_drawn_serial;
+    screen->DiscardPlan();put_up_plan(true);
+    check(screen->ConfirmationShown() && screen->View()->lines.size()==8 && screen->ViewSerial()!=drawn_before && settings_write_drawn_serial==drawn_before);
+    tick();
+    check(!confirm_enabled());
+    click(407,settings_confirm_button);
+    check(opens->load()==0 && screen->Step()==D810WriteScreenStep::Confirming);
+    paint();tick();
+    check(settings_write_drawn_serial==screen->ViewSerial() && confirm_enabled());
+
+    // 7. A picture asked for during a confirmation is drawn behind it: the confirmation is first (Paint's order), and
+    //    the picture's button is off while a view is up.
+    green_picture();review_visible=true;
+    {
+        SettingsWriteSmokeFrame frame(1400,960);
+        check(frame.drawn[3]==0 && frame.Count(960/2+80,960,RGB(0,255,0))==0 && frame.Lit(960/2+88,960/2+150)>50);
+    }
+    paint();tick();
+    check(settings_write_drawn_serial==screen->ViewSerial() && confirm_enabled() && !IsWindowEnabled(review_button));
+    review_visible=false;
+    // The same for a result view (a discarded plan, a reread that did not end): a picture does not cover it.
+    screen->DiscardPlan();
+    check(screen->View() && !screen->View()->confirmation && screen->View()->title.find(L"写すのをやめました")!=std::wstring::npos);
+    review_visible=true;
+    {
+        SettingsWriteSmokeFrame frame(1400,960);
+        check(frame.drawn[3]==0 && frame.Count(960/2+80,960,RGB(0,255,0))==0 && frame.Lit(960/2+88,960/2+130)>50);
+    }
+    tick();
+    check(!IsWindowEnabled(review_button) && !SettingsWriteButtonShown(settings_confirm_button));
+    review_visible=false;review_pixels={};
+
+    // 8. Drawn whole and pressed: the handler lets it through, once (the worker opens nothing, so nothing is written).
+    put_up_plan(false);
+    paint();tick();
+    check(confirm_enabled());
+    const auto refusals_now=settings_write_confirm_refusals;
+    click(407,settings_confirm_button);
+    check(wait_idle() && settings_write_confirm_refusals==refusals_now && opens->load()>=1 && screen->Step()==D810WriteScreenStep::Idle);
+    click(407,settings_confirm_button);   // the plan was used: a second press does not run it again
+    const int opens_after=opens->load();
+    check(wait_idle() && opens->load()==opens_after);
+
+    // 9. Only CAM-B's ISO row is enabled while CAM-A's white balance is on Preset and its metering differs: the shape of a
+    //    first write. The window is its smallest size. White balance and metering are left out with the table's short
+    //    reason (not the long one about the content held in the body), and the confirmation is drawn whole and pressable.
+    settings_write.reset();std::filesystem::remove_all(folder,ignored);capture_status.clear();
+    InitSettingsWriteWithTable(SmokeIsoOnlyTable(),std::make_unique<D810SettingsFileJournal>(folder),[opens]{return std::make_unique<NoCameraSettingsAccess>(opens);});
+    screen=settings_write->screen.get();
+    check(screen->Status().enabled_rows==1 && screen->Status().write_allowed && screen->Status().capture_allowed);
+    {
+        D810PlanRead read;read.complete=true;
+        read.snapshots[0]=SmokeBody(250,800,200,0x8013,3);
+        read.snapshots[1]=SmokeBody(250,800,100,2,2);
+        screen->TakePlanReadForTest(read);
+    }
+    check(resize(kD810WriteMinClientWidth,kD810WriteMinClientHeight));
+    tick();
+    const auto* first_view=screen->View();
+    check(screen->ConfirmationShown() && first_view && first_view->lines.size()==8); // 3 notices, the ISO step, the heading, 2 left out, the closing line
+    const auto line_with=[&](const wchar_t* needle){
+        if(!screen->View())return false;
+        for(const auto& line:screen->View()->lines)if(line.find(needle)!=std::wstring::npos)return true;
+        return false;
+    };
+    check(line_with(L"ホワイトバランス: 表で無効の項目です") && line_with(L"測光: 表で無効の項目です") && !line_with(L"value_content_dependent") && !line_with(L"B の本体で合わせてください"));
+    paint();tick();
+    check(settings_write_drawn_serial==screen->ViewSerial() && confirm_enabled());
+    // The widest line any confirmation can show fits the smallest window (none of them is cut at its width).
+    {
+        std::wstring which;int widest_possible=0;
+        HDC dc=CreateCompatibleDC(nullptr);
+        if(dc && first_view){widest_possible=WidestPossibleConfirmationLine(dc,*first_view,which);DeleteDC(dc);}
+        std::string which_utf8;
+        if(!which.empty()){
+            const int bytes=WideCharToMultiByte(CP_UTF8,0,which.c_str(),static_cast<int>(which.size()),nullptr,0,nullptr,nullptr);
+            if(bytes>0){which_utf8.assign(static_cast<std::size_t>(bytes),'\0');WideCharToMultiByte(CP_UTF8,0,which.c_str(),static_cast<int>(which.size()),which_utf8.data(),bytes,nullptr,nullptr);}
+        }
+        Log("settings_write_confirm_widest_possible_line_px="+std::to_string(widest_possible)+" window_line_px="+std::to_string(kD810WriteMinClientWidth-24)+
+            " widest_chars="+std::to_string(which.size())+" widest_text="+which_utf8);
+        check(widest_possible>0 && widest_possible<=kD810WriteMinClientWidth-24);
+    }
+    // The window gets narrower than the longest line and no paint has happened yet: not pressable (the drawing is gone).
+    {
+        const int own_width=widest();
+        check(own_width+24>kD810ConfirmButtonLeft+kD810ConfirmButtonWidth);
+        check(resize(own_width+24-2,kD810WriteMinClientHeight));
+        tick();
+        check(settings_write_drawn_serial==0 && !confirm_enabled());
+        click(407,settings_confirm_button);
+        check(opens->load()==opens_after && screen->Step()==D810WriteScreenStep::Confirming);
+        check(resize(kD810WriteMinClientWidth,kD810WriteMinClientHeight));paint();tick();
+        check(settings_write_drawn_serial==screen->ViewSerial() && confirm_enabled());
+    }
+
+    FinishSettingsWrite();
+    if(IsWindow(window))DestroyWindow(window);
+    settings_write.reset();
+    std::filesystem::remove_all(folder,ignored);
+    stopping=true;
+    Log("settings_write_confirm_checks="+std::to_string(checks)+" failures="+std::to_string(failures)+" camera_operations=0 camera_opens_attempted="+std::to_string(opens->load()));
+    return failures?1:0;
+}
+#endif

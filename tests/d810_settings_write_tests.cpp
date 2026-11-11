@@ -33,6 +33,9 @@ void check(bool value, const char* what = "") {
         std::cerr << "FAILED check " << checks << " " << what << "\n";
     }
 }
+// A refusal token as text; "(none)" when there is no refusal, so that a missing refusal fails a check instead of
+// reading a null pointer.
+std::string Refusal(const char* token) { return token ? std::string(token) : std::string("(none)"); }
 using Bytes = std::vector<unsigned char>;
 void Put(Bytes& out, std::int64_t value, std::size_t size) {
     for (std::size_t i = 0; i < size; ++i) out.push_back(static_cast<unsigned char>((static_cast<std::uint64_t>(value) >> (8 * i)) & 0xff));
@@ -233,6 +236,11 @@ D810SettingsSnapshot Snapshot(FakeWriteBody& body, const char* alias) {
     WpdSettingsReadSession session([&](IPortableDeviceValues* request) { return body(request); }, [] { return true; }, [] { return true; });
     return session.ReadAll(alias, nullptr).readings;
 }
+// The same read as the write path makes (the table's codes only, as ReadCamera does).
+D810SettingsSnapshot WritePathSnapshot(FakeWriteBody& body, const char* alias) {
+    WpdSettingsReadSession session([&](IPortableDeviceValues* request) { return body(request); }, [] { return true; }, [] { return true; });
+    return session.ReadAll(alias, nullptr, std::span<const D810SettingSpec>(kD810WriteReadSpecs)).readings;
+}
 
 // --- Tables ----------------------------------------------------------------------------
 // The product table with the codes confirmed, CAM-B's five rows enabled and a
@@ -243,7 +251,7 @@ constexpr D810WriteTable Adr38Table() {
     for (auto& row : table.rows) {
         if (row.item == D810WriteItem::IsoAuto) row.code = 0xd054;
         if (row.item == D810WriteItem::ShutterSpeed) row.code = 0x500d;
-        row.enabled = row.camera == D810Camera::B && D810WriteItemOf(row.item).accepted_scope;
+        row.enabled = row.camera == D810Camera::B && D810WriteItemOf(row.item).scope == D810ItemScope::Adr38;
     }
     table.verified_firmware = "1.00";
     return table;
@@ -251,6 +259,17 @@ constexpr D810WriteTable Adr38Table() {
 constexpr D810WriteTable kAdr38Table = Adr38Table();
 static_assert(D810ProductTableProblem(kAdr38Table) == nullptr, "the ADR-0038 test table is a valid product table");
 static_assert(D810EnabledRowCount(kAdr38Table) == 5, "five rows");
+// The ADR-0038 revision (Proposed): CAM-B's rows for white balance and metering on top of the five. A valid
+// table for the contract tests, but not a product table while the revision is not accepted.
+constexpr D810WriteTable RevisionTable() {
+    auto table = Adr38Table();
+    for (auto& row : table.rows)
+        if (row.camera == D810Camera::B && D810WriteItemOf(row.item).scope == D810ItemScope::Adr38Revision) row.enabled = true;
+    return table;
+}
+constexpr D810WriteTable kRevisionTable = RevisionTable();
+static_assert(D810WriteTableProblem(kRevisionTable) == nullptr && D810EnabledRowCount(kRevisionTable) == 7, "seven rows, a valid table");
+static_assert(!kD810Adr38RevisionAccepted && D810ProductTableProblem(kRevisionTable) != nullptr, "not a product table until the owner accepts the revision");
 // Everything on, for the ADR-0041 code paths. Not a valid product table.
 constexpr D810WriteTable Adr41Table() {
     auto table = Adr38Table();
@@ -423,20 +442,20 @@ void ValuesAndTable() {
     D810PropDesc shutter;
     shutter.data_type = 6; shutter.get_set = 1; shutter.form_flag = 2; shutter.values = kShutters;
     const auto& shutter_spec = D810WriteItemOf(D810WriteItem::ShutterSpeed);
-    check(std::string(D810WriteValueRefusal(shutter_spec, shutter, 0xffffffffLL)) == "bulb_or_time", "bulb refused although advertised");
-    check(std::string(D810WriteValueRefusal(shutter_spec, shutter, 0xfffffffdLL)) == "bulb_or_time", "time refused although advertised");
-    check(std::string(D810WriteValueRefusal(shutter_spec, shutter, 20000)) == "exposure_too_long", "long exposure refused although advertised");
+    check(Refusal(D810WriteValueRefusal(shutter_spec, shutter, 0xffffffffLL)) == "bulb_or_time", "bulb refused although advertised");
+    check(Refusal(D810WriteValueRefusal(shutter_spec, shutter, 0xfffffffdLL)) == "bulb_or_time", "time refused although advertised");
+    check(Refusal(D810WriteValueRefusal(shutter_spec, shutter, 20000)) == "exposure_too_long", "long exposure refused although advertised");
     check(D810WriteValueRefusal(shutter_spec, shutter, 1667) == nullptr, "advertised shutter");
     shutter.get_set = 0;
-    check(std::string(D810WriteValueRefusal(shutter_spec, shutter, 1667)) == "not_writable", "getset 0");
+    check(Refusal(D810WriteValueRefusal(shutter_spec, shutter, 1667)) == "not_writable", "getset 0");
     D810PropDesc mode;
     mode.data_type = 4; mode.get_set = 1; mode.form_flag = 2; mode.values = {1, 2, 3, 4};
-    check(std::string(D810WriteValueRefusal(D810WriteItemOf(D810WriteItem::ExposureMode), mode, 2)) == "value_not_fixed", "exposure mode is M only");
+    check(Refusal(D810WriteValueRefusal(D810WriteItemOf(D810WriteItem::ExposureMode), mode, 2)) == "value_not_fixed", "exposure mode is M only");
     D810PropDesc iso_auto;
     iso_auto.data_type = 2; iso_auto.get_set = 1; iso_auto.form_flag = 2; iso_auto.values = {0, 1};
-    check(std::string(D810WriteValueRefusal(D810WriteItemOf(D810WriteItem::IsoAuto), iso_auto, 1)) == "value_not_fixed", "ISO auto is OFF only");
+    check(Refusal(D810WriteValueRefusal(D810WriteItemOf(D810WriteItem::IsoAuto), iso_auto, 1)) == "value_not_fixed", "ISO auto is OFF only");
     iso_auto.data_type = 4;
-    check(std::string(D810WriteValueRefusal(D810WriteItemOf(D810WriteItem::IsoAuto), iso_auto, 0)) == "type_mismatch", "type");
+    check(Refusal(D810WriteValueRefusal(D810WriteItemOf(D810WriteItem::IsoAuto), iso_auto, 0)) == "type_mismatch", "type");
     // The table: exactly these codes, nothing else in 0..0xFFFF.
     const std::set<std::uint32_t> expected{0x500e, 0xd054, 0xd16a, 0x500f, 0x500d, 0xd100, 0x5007, 0x5005, 0x500b, 0x5010};
     std::size_t found = 0;
@@ -455,12 +474,52 @@ void ValuesAndTable() {
     check(D810WriteItemOf(D810WriteItem::ExposureMode).fixed && D810WriteItemOf(D810WriteItem::IsoAuto).fixed, "fixed items");
 }
 
+// The write path reads the table's ten codes and not the two candidate codes (0xD16A, 0xD100). The bodies answer
+// those two. A real body answered 0xD16A with a failed begin and an END refused with 0x200A (the size of 0 is an
+// inference), which stops a read session; 0xD100 has not been read on a body (unconfirmed). The fake body below answers
+// both like that. The plan's read, the check before a send and the reread must complete anyway, and never ask for them.
+void WritePathReadSet() {
+    static_assert(!D810WriteReadSetHas(0xd16a) && !D810WriteReadSetHas(0xd100) && D810WriteReadSetHas(0xd054) && D810WriteReadSetHas(0x500d), "the read set");
+    check(D810WriteReadSetCovers(kD810ProductWriteTable) && D810WriteReadSetCovers(kAdr38Table) && D810WriteReadSetCovers(kRevisionTable) && D810WriteReadSetCovers(kAdr41Table),
+        "every code a table confirms is in the read set");
+    auto bad = kAdr38Table;
+    for (auto& row : bad.rows) if (row.item == D810WriteItem::IsoAuto) row.code = 0xd16a;
+    check(!D810WriteReadSetCovers(bad), "a table that confirms a code outside the read set is seen");
+    const auto unsupported = [](Bench& bench) {
+        for (auto* body : {&bench.a, &bench.b}) {
+            body->props[0xd16a] = {2, 1, 0, 2, {0, 1}};
+            body->props[0xd100] = {6, 1, 125, 2, kShutters};
+            body->zero_at[0xd16a] = 1;
+            body->zero_at[0xd100] = 1;
+        }
+    };
+    const auto asked = [](const Bench& bench) {
+        return bench.a.Count("1014(d16a)") + bench.a.Count("1014(d100)") + bench.b.Count("1014(d16a)") + bench.b.Count("1014(d100)");
+    };
+    Bench bench;
+    unsupported(bench);
+    const auto read = bench.controller->ReadForPlan(bench.access, bench.options);
+    check(read.complete && read.reason.empty(), "plan read: complete although 0xD16A and 0xD100 answer as unsupported");
+    check(bench.a.Count("1014(500e)") == 1 && bench.a.Count("1014(d054)") == 1 && bench.a.Count("1014(500d)") == 1 && bench.b.Count("1014(5007)") == 1, "plan read: the table's codes are read");
+    check(asked(bench) == 0, "plan read: 0xD16A and 0xD100 are not asked for");
+    const auto plan = bench.controller->PlanCopy(read.snapshots[0], read.snapshots[1]);
+    check(plan.Ok() && plan.plan->steps.size() == 3, "plan read: a plan is made from it");
+    if (!plan.Ok()) return;
+    check(bench.controller->Confirm(plan.plan->id) == nullptr, "confirm");
+    const auto run = bench.controller->Execute(plan.plan->id, bench.access, bench.options);
+    check(run.verdict == D810WriteVerdict::Match && run.sent == 3 && run.reason.empty() && bench.Writes() == 3, "check before the send and the read back: complete, matched");
+    check(asked(bench) == 0 && bench.a.forbidden + bench.b.forbidden == 0, "run: 0xD16A and 0xD100 are not asked for");
+    const auto reread = bench.controller->Reread(bench.access, bench.options);
+    check(reread.complete && reread.reason.empty(), "reread: complete");
+    check(asked(bench) == 0, "reread: 0xD16A and 0xD100 are not asked for");
+}
+
 // FormFlag None, Range step 0 and the excluded white balance values are never written.
 void DescriptionRules() {
     D810PropDesc none;
     none.data_type = 4; none.get_set = 1; none.form_flag = 0; none.current_value = 100;
     check(none.Writable() && !D810DescWritable(none), "the stage A Writable() accepts a form of None; the write rule does not");
-    check(std::string(D810WriteValueRefusal(D810WriteItemOf(D810WriteItem::Iso), none, 100)) == "not_writable", "FormFlag None refused");
+    check(Refusal(D810WriteValueRefusal(D810WriteItemOf(D810WriteItem::Iso), none, 100)) == "not_writable", "FormFlag None refused");
     D810PropDesc range;
     range.data_type = 3; range.get_set = 1; range.form_flag = 1; range.range_min = -3000; range.range_max = 3000; range.range_step = 0;
     check(!D810DescWritable(range), "step 0");
@@ -475,11 +534,47 @@ void DescriptionRules() {
     const auto parsed = ParseD810PropDesc(Desc(0x5010, 3, 1, -500, 1, {-3000, 3000, 500}), *FindD810Setting(0x5010));
     check(parsed.Ok() && parsed.desc.current_value == -500 && parsed.desc.range_min == -3000, "INT16 parsed signed");
     D810PropDesc wb;
-    wb.data_type = 4; wb.get_set = 1; wb.form_flag = 2; wb.values = {1, 2, 4, 0x8012, 0x8013};
+    wb.data_type = 4; wb.get_set = 1; wb.form_flag = 2; wb.values = {1, 2, 3, 4, 5, 6, 7, 0x8010, 0x8011, 0x8012, 0x8013, 0x8014, 0x8016};
     const auto& white_balance = D810WriteItemOf(D810WriteItem::WhiteBalance);
-    for (const auto value : {1LL, 0x8012LL, 0x8013LL})
-        check(std::string(D810WriteValueRefusal(white_balance, wb, value)) == "value_content_dependent", "content-dependent white balance");
-    check(D810WriteValueRefusal(white_balance, wb, 4) == nullptr, "daylight");
+    for (const auto value : {1LL, 3LL, 0x8012LL, 0x8013LL})
+        check(Refusal(D810WriteValueRefusal(white_balance, wb, value)) == "value_content_dependent", "content-dependent white balance");
+    // The kinds whose meaning is named in the public table; the others the body may offer are not written.
+    for (const auto value : {2LL, 4LL, 5LL, 6LL, 7LL, 0x8010LL, 0x8011LL})
+        check(D810WriteValueRefusal(white_balance, wb, value) == nullptr, "named white balance kind");
+    for (const auto value : {0x8014LL, 0x8016LL})
+        check(Refusal(D810WriteValueRefusal(white_balance, wb, value)) == "value_not_listed", "advertised but not named");
+    wb.values = {2, 4};
+    check(Refusal(D810WriteValueRefusal(white_balance, wb, 5)) == "value_not_advertised", "a named kind the body does not offer");
+    wb.data_type = 6;
+    check(Refusal(D810WriteValueRefusal(white_balance, wb, 4)) == "type_mismatch", "white balance type");
+    D810PropDesc metering;
+    metering.data_type = 4; metering.get_set = 1; metering.form_flag = 2; metering.values = {1, 2, 3, 4, 5, 0x8001};
+    const auto& metering_spec = D810WriteItemOf(D810WriteItem::Metering);
+    for (const auto value : {1LL, 2LL, 3LL, 4LL})
+        check(D810WriteValueRefusal(metering_spec, metering, value) == nullptr, "named metering mode");
+    for (const auto value : {5LL, 0x8001LL})
+        check(Refusal(D810WriteValueRefusal(metering_spec, metering, value)) == "value_not_listed", "metering mode not named");
+    metering.get_set = 0;
+    check(Refusal(D810WriteValueRefusal(metering_spec, metering, 2)) == "not_writable", "metering GetSet 0");
+    // The copy asks about CAM-A's value before CAM-B: a value no copy can carry.
+    check(Refusal(D810CopyValueRefusal(white_balance, 0x8013)) == "value_content_dependent" && Refusal(D810CopyValueRefusal(white_balance, 0x9999)) == "value_not_listed" &&
+        D810CopyValueRefusal(white_balance, 4) == nullptr && D810CopyValueRefusal(D810WriteItemOf(D810WriteItem::Iso), 12345) == nullptr, "copy value rules");
+    {
+        // The closed lists, pinned over every 16-bit value: adding a value to either list (or to the excluded kinds) fails here.
+        std::set<std::int64_t> white_passes, white_content, metering_passes;
+        std::size_t other_refused = 0;
+        for (std::int64_t value = 0; value <= 0xffff; ++value) {
+            if (D810CopyValueRefusal(white_balance, value) == nullptr) white_passes.insert(value);
+            else if (Refusal(D810CopyValueRefusal(white_balance, value)) == "value_content_dependent") white_content.insert(value);
+            if (D810CopyValueRefusal(metering_spec, value) == nullptr) metering_passes.insert(value);
+            for (const auto item : {D810WriteItem::ExposureMode, D810WriteItem::IsoAuto, D810WriteItem::Iso, D810WriteItem::ShutterSpeed, D810WriteItem::Aperture})
+                if (D810CopyValueRefusal(D810WriteItemOf(item), value) != nullptr) ++other_refused;
+        }
+        check(white_passes == std::set<std::int64_t>{2, 4, 5, 6, 7, 0x8010, 0x8011}, "white balance: the copy passes exactly the named kinds");
+        check(white_content == std::set<std::int64_t>{1, 3, 0x8012, 0x8013}, "white balance: the content-dependent kinds are exactly these");
+        check(metering_passes == std::set<std::int64_t>{1, 2, 3, 4}, "metering: the copy passes exactly the listed modes");
+        check(other_refused == 0, "the five exposure items have no value rule");
+    }
 }
 
 // --- The fixed table ----------------------------------------------------------------------------
@@ -502,9 +597,23 @@ void ProductTable() {
         probe.rows[i].enabled = true;
         const bool ok = D810ProductTableProblem(probe) == nullptr;
         allowed += ok;
-        check(ok == (probe.rows[i].camera == D810Camera::B && D810WriteItemOf(probe.rows[i].item).accepted_scope), "allowed rows");
+        check(ok == (probe.rows[i].camera == D810Camera::B && D810ItemInProductScope(D810WriteItemOf(probe.rows[i].item))), "allowed rows");
     }
     check(allowed == 5, "CAM-B x five");
+    // White balance and metering (ADR-0038 revision, Proposed): the rows are in the table, disabled, with their codes; the
+    // product table cannot enable one until the owner accepts the revision and a reviewed commit sets the constant.
+    check(!kD810Adr38RevisionAccepted, "the ADR-0038 revision is not accepted");
+    for (const auto item : {D810WriteItem::WhiteBalance, D810WriteItem::Metering}) {
+        for (const auto camera : {D810Camera::A, D810Camera::B}) {
+            const auto* row = table.Row(item, camera);
+            check(row && !row->enabled && row->code == (item == D810WriteItem::WhiteBalance ? 0x5005 : 0x500b), "revision rows: present, disabled, code from the public table");
+        }
+        auto probe = Adr38Table();
+        for (auto& row : probe.rows) if (row.camera == D810Camera::B && row.item == item) row.enabled = true;
+        check(std::string(D810ProductTableProblem(probe)) == "extra_item_enabled", "revision row refused in the product table");
+        check(D810WriteTableProblem(probe) == nullptr, "revision row valid in a test table");
+    }
+    check(!D810ItemInProductScope(D810WriteItemOf(D810WriteItem::ExposureCompensation)) && D810WriteItemOf(D810WriteItem::ExposureCompensation).scope == D810ItemScope::Adr41, "compensation stays ADR-0041");
     auto chosen = Adr38Table();
     chosen.chosen_values = true;
     check(std::string(D810ProductTableProblem(chosen)) == "chosen_values_before_adr0041", "chosen values not allowed");
@@ -644,6 +753,219 @@ void CopyPlans() {
         const auto plan = bench.Copy();
         check(plan.Ok() && plan.plan->steps.empty(), "no difference, nothing to write");
         check(std::string(bench.controller->Confirm(plan.plan->id)) == "nothing_to_write", "empty plan cannot be confirmed");
+    }
+}
+// --- White balance and metering (ADR-0038 revision, Proposed): the tables here are test tables only ------------------
+// The step items of a plan, in order.
+std::vector<D810WriteItem> StepItems(const D810PlanResult& plan) {
+    std::vector<D810WriteItem> items;
+    if (plan.plan) for (const auto& step : plan.plan->steps) items.push_back(step.item);
+    return items;
+}
+const std::pair<D810WriteItem, std::string>* SkippedOf(const D810PlanResult& plan, D810WriteItem item) {
+    if (!plan.plan) return nullptr;
+    for (const auto& entry : plan.plan->skipped)
+        if (entry.first == item) return &entry;
+    return nullptr;
+}
+void RevisionCopyPlans() {
+    using Item = D810WriteItem;
+    {
+        // Both differ: they join the plan after the exposure items, in the table's order, with A's values.
+        Bench bench(kRevisionTable);
+        bench.a.props[0x5005].current = 4;
+        bench.a.props[0x500b].current = 2;
+        const auto plan = bench.Copy();
+        check(plan.Ok() && StepItems(plan) == std::vector<Item>{Item::Iso, Item::ShutterSpeed, Item::Aperture, Item::WhiteBalance, Item::Metering}, "revision: five steps in the table's order");
+        if (plan.Ok()) {
+            const auto& steps = plan.plan->steps;
+            check(steps[3].code == 0x5005 && steps[3].before == 2 && steps[3].value == 4 && steps[4].code == 0x500b && steps[4].before == 3 && steps[4].value == 2, "revision: A's values, B's values before");
+            check(std::all_of(steps.begin(), steps.end(), [](const auto& s) { return s.camera == D810Camera::B; }), "revision: B only");
+            check(plan.plan->skipped.empty(), "revision: nothing left out");
+            const auto seen = [&](D810Camera camera, std::uint16_t code, std::int64_t value) {
+                return std::any_of(plan.plan->observed.begin(), plan.plan->observed.end(), [&](const auto& o) { return o.camera == camera && o.code == code && o.value == value; });
+            };
+            check(seen(D810Camera::A, 0x5005, 4) && seen(D810Camera::B, 0x5005, 2) && seen(D810Camera::A, 0x500b, 2) && seen(D810Camera::B, 0x500b, 3), "revision: both bodies' values are observed");
+        }
+        check(bench.Writes() == 0, "revision: planning sends nothing");
+    }
+    {
+        // Seven steps: B in A mode with ISO auto on, every item differs.
+        Bench bench(kRevisionTable);
+        bench.a.props[0x5005].current = 4;
+        bench.a.props[0x500b].current = 2;
+        bench.b.props[0x500e].current = 3;
+        bench.b.props[0xd054].current = 1;
+        const auto plan = bench.Copy();
+        check(plan.Ok() && StepItems(plan) == std::vector<Item>{Item::ExposureMode, Item::IsoAuto, Item::Iso, Item::ShutterSpeed, Item::Aperture, Item::WhiteBalance, Item::Metering},
+            "revision: seven steps, the mode and ISO auto first");
+    }
+    {
+        // Only the two differ.
+        Bench bench(kRevisionTable);
+        bench.b = Body(1667, 800, 64);
+        bench.a.props[0x5005].current = 6;
+        const auto plan = bench.Copy();
+        check(plan.Ok() && StepItems(plan) == std::vector<Item>{Item::WhiteBalance}, "revision: white balance alone");
+        bench.a.props[0x500b].current = 4;
+        check(bench.Copy().Ok() && StepItems(bench.Copy()) == std::vector<Item>{Item::WhiteBalance, Item::Metering}, "revision: both alone");
+        bench.a.props[0x5005].current = 2;
+        check(StepItems(bench.Copy()) == std::vector<Item>{Item::Metering}, "revision: metering alone");
+    }
+    {
+        // No difference: nothing for them, and nothing is left out.
+        Bench bench(kRevisionTable);
+        const auto plan = bench.Copy();
+        check(plan.Ok() && StepItems(plan).size() == 3 && plan.plan->skipped.empty(), "revision: no difference, no step, nothing left out");
+    }
+    {
+        // The product-shaped table (their rows disabled): listed as left out with the table's reason, the five still planned.
+        Bench bench(kAdr38Table);
+        bench.a.props[0x5005].current = 4;
+        bench.a.props[0x500b].current = 2;
+        const auto plan = bench.Copy();
+        check(plan.Ok() && StepItems(plan).size() == 3, "disabled rows: the five are planned");
+        const auto* wb = SkippedOf(plan, Item::WhiteBalance);
+        const auto* metering = SkippedOf(plan, Item::Metering);
+        check(wb && wb->second == "row_disabled" && metering && metering->second == "row_disabled", "disabled rows: left out with the reason");
+        check(bench.Writes() == 0 && std::none_of(plan.plan->steps.begin(), plan.plan->steps.end(), [](const auto& s) { return s.item == Item::WhiteBalance || s.item == Item::Metering; }), "disabled rows: no step");
+    }
+    {
+        // A disabled row is told by the short table reason even when A holds a kind a copy cannot carry; the
+        // value-based reason belongs to enabled rows only (the table's own rule is unchanged: see below).
+        for (const std::int64_t value : {1LL, 3LL, 0x8012LL, 0x8013LL, 0x9999LL}) {
+            Bench bench(kAdr38Table);
+            bench.a.props[0x5005].current = value;
+            bench.a.props[0x500b].current = 2;
+            const auto plan = bench.Copy();
+            const auto* wb = SkippedOf(plan, Item::WhiteBalance);
+            check(plan.Ok() && wb && wb->second == "row_disabled", "disabled row, A on a kind a copy cannot carry: the table reason");
+            check(plan.Ok() && StepItems(plan).size() == 3, "disabled row, A on such a kind: the five are still planned");
+        }
+        {
+            // Preset on both bodies and a disabled row: equal numbers, so nothing is listed (as for the five).
+            Bench bench(kAdr38Table);
+            bench.b = Body(1667, 800, 64);
+            bench.a.props[0x5005].current = 0x8013;
+            bench.b.props[0x5005].current = 0x8013;
+            const auto plan = bench.Copy();
+            check(plan.Ok() && SkippedOf(plan, Item::WhiteBalance) == nullptr, "disabled row, equal numbers: not listed");
+        }
+        {
+            // The enabled-row table keeps the value-based reason for the same input.
+            Bench bench(kRevisionTable);
+            bench.a.props[0x5005].current = 0x8013;
+            const auto plan = bench.Copy();
+            const auto* wb = SkippedOf(plan, Item::WhiteBalance);
+            check(plan.Ok() && wb && wb->second == "value_content_dependent", "enabled row, same input: the value-based reason");
+        }
+    }
+    {
+        // A value a copy cannot carry is left out whatever B reads; the rest of the plan stands and B's value is untouched.
+        for (const std::int64_t value : {1LL, 3LL, 0x8012LL, 0x8013LL}) {
+            Bench bench(kRevisionTable);
+            bench.a.props[0x5005].current = value;
+            bench.a.props[0x500b].current = 2;
+            const auto plan = bench.Copy();
+            const auto* wb = SkippedOf(plan, Item::WhiteBalance);
+            check(plan.Ok() && wb && wb->second == "value_content_dependent", "content-dependent white balance is left out");
+            check(plan.Ok() && StepItems(plan) == std::vector<Item>{Item::Iso, Item::ShutterSpeed, Item::Aperture, Item::Metering}, "the other items are still planned");
+            const auto run = bench.Run(plan);
+            check(run.verdict == D810WriteVerdict::Match && run.sent == 4 && bench.b.begins_by_code.count(0x5005) == 0 && bench.b.props[0x5005].current == 2, "B's white balance is not written");
+            check(bench.controller->CaptureAllowed(), "a left-out white balance holds nothing");
+        }
+        {
+            // Both on Preset: equal numbers, but the white is not compared, so it is listed.
+            Bench bench(kRevisionTable);
+            bench.b = Body(1667, 800, 64);
+            bench.a.props[0x5005].current = 0x8013;
+            bench.b.props[0x5005].current = 0x8013;
+            const auto plan = bench.Copy();
+            const auto* wb = SkippedOf(plan, Item::WhiteBalance);
+            check(plan.Ok() && plan.plan->steps.empty() && wb && wb->second == "value_content_dependent", "Preset on both: no step, still listed");
+        }
+        {
+            // B on Preset, A on a named kind: the kind is written over it.
+            Bench bench(kRevisionTable);
+            bench.b = Body(1667, 800, 64);
+            bench.a.props[0x5005].current = 4;
+            bench.b.props[0x5005].current = 0x8013;
+            const auto plan = bench.Copy();
+            check(plan.Ok() && StepItems(plan) == std::vector<Item>{Item::WhiteBalance} && plan.plan->steps[0].before == 0x8013 && plan.plan->steps[0].value == 4, "B on Preset gets A's named kind");
+        }
+        {
+            // A value the item does not name (a vendor value of another body, a metering mode of another maker).
+            Bench bench(kRevisionTable);
+            bench.a.props[0x5005].current = 0x8014;
+            bench.a.props[0x500b].current = 0x8001;
+            const auto plan = bench.Copy();
+            const auto* wb = SkippedOf(plan, Item::WhiteBalance);
+            const auto* metering = SkippedOf(plan, Item::Metering);
+            check(plan.Ok() && wb && wb->second == "value_not_listed" && metering && metering->second == "value_not_listed" && StepItems(plan).size() == 3, "values not named are left out");
+        }
+    }
+    {
+        // They never refuse the plan: B does not offer A's value, cannot write, answers another type or cannot be read.
+        const auto left_out = [](const char* what, const std::function<void(Bench&)>& inject, const char* reason) {
+            Bench bench(kRevisionTable);
+            bench.a.props[0x5005].current = 4;
+            inject(bench);
+            const auto plan = bench.Copy();
+            const auto* wb = SkippedOf(plan, D810WriteItem::WhiteBalance);
+            check(plan.Ok() && wb && wb->second == reason && StepItems(plan).size() == 3 && bench.Writes() == 0, what);
+        };
+        left_out("not offered", [](Bench& b) { b.b.props[0x5005].values = {2, 5}; }, "value_not_advertised");
+        left_out("GetSet 0", [](Bench& b) { b.b.props[0x5005].get_set = 0; }, "not_writable");
+        left_out("no form", [](Bench& b) { b.b.props[0x5005].form = 0; b.b.props[0x5005].values.clear(); }, "not_writable");
+        left_out("another type", [](Bench& b) { b.b.props[0x5005].type = 6; }, "unreadable");
+        left_out("unreadable on B", [](Bench& b) { b.b.props.erase(0x5005); }, "unreadable");
+        left_out("unreadable on A", [](Bench& b) { b.a.props.erase(0x5005); }, "unreadable");
+        Bench bench(kRevisionTable);
+        bench.a.props[0x500b].current = 2;
+        bench.b.props[0x500b].values = {1, 3};
+        const auto plan = bench.Copy();
+        const auto* metering = SkippedOf(plan, D810WriteItem::Metering);
+        check(plan.Ok() && metering && metering->second == "value_not_advertised" && StepItems(plan).size() == 3, "metering not offered by B");
+    }
+    {
+        // The operator keeps only white balance.
+        Bench bench(kRevisionTable);
+        bench.a.props[0x5005].current = 4;
+        bench.a.props[0x500b].current = 2;
+        const auto plan = bench.Copy(std::vector<D810WriteItem>{D810WriteItem::WhiteBalance});
+        check(plan.Ok() && StepItems(plan) == std::vector<Item>{Item::WhiteBalance} && plan.plan->skipped.size() == 4, "revision: one item kept, the others left out");
+        const auto* metering = SkippedOf(plan, Item::Metering);
+        check(metering && metering->second == "left_out_by_operator", "revision: left out by the operator");
+    }
+    {
+        // The five keep their rules: A not in M still refuses the whole plan; B's missing value refuses it too.
+        Bench bench(kRevisionTable);
+        bench.a.props[0x500e].current = 3;
+        const auto plan = bench.Copy();
+        check(!plan.Ok() && std::find(plan.reasons.begin(), plan.reasons.end(), "a_not_manual") != plan.reasons.end(), "revision: A not in M refuses");
+        Bench other(kRevisionTable);
+        other.b.props[0x5007].values = {400, 560, 1100};
+        check(!other.Copy().Ok(), "revision: an exposure item B does not offer still refuses");
+    }
+    {
+        // Compensation is not a copy item, whatever the table enables.
+        Bench bench(kAdr41Table);
+        bench.b = Body(1667, 800, 64);
+        bench.a.props[0x5010].current = 500;
+        const auto plan = bench.Copy();
+        check(plan.Ok() && plan.plan->steps.empty() && plan.plan->skipped.empty(), "compensation is not copied");
+        check(Refusal(D810RowRefusal(kAdr41Table, Item::ExposureCompensation, D810Camera::B, D810PlanSource::CopyAToB)) == "copy_item_out_of_scope", "compensation: out of the copy's scope");
+        check(D810RowRefusal(kRevisionTable, Item::WhiteBalance, D810Camera::B, D810PlanSource::CopyAToB) == nullptr && D810RowRefusal(kRevisionTable, Item::Metering, D810Camera::B, D810PlanSource::CopyAToB) == nullptr, "white balance and metering: in the copy's scope");
+        check(Refusal(D810RowRefusal(kAdr38Table, Item::WhiteBalance, D810Camera::B, D810PlanSource::CopyAToB)) == "row_disabled", "white balance with a disabled row");
+        check(Refusal(D810RowRefusal(kRevisionTable, Item::WhiteBalance, D810Camera::A, D810PlanSource::CopyAToB)) == "copy_targets_cam_b_only", "never CAM-A");
+    }
+    {
+        // The items that join a capture block's release.
+        check(D810BlockItems(kAdr38Table).size() == 5, "five block items");
+        const auto seven = D810BlockItems(kRevisionTable);
+        check(seven.size() == 7 && std::find(seven.begin(), seven.end(), Item::WhiteBalance) != seven.end() && std::find(seven.begin(), seven.end(), Item::Metering) != seven.end() &&
+            std::find(seven.begin(), seven.end(), Item::ExposureCompensation) == seven.end(), "seven block items once the rows are enabled");
+        check(D810BlockItems(kD810ProductWriteTable).size() == 5, "the product table: five block items");
     }
 }
 void ChosenPlans() {
@@ -912,6 +1234,67 @@ void GateArmConditions() {
         D810SettingsWriteGate gate(Config());
         check(!FeedRead(gate, BuildSettingsPropDesc(0x500f), Desc(0x500f, 4, 1, 100, 2, {64, 100}), 0x2002) && gate.Retired(), "refused END of a read retires");
         check(gate.Arm(D810Camera::B, 0x500f, 64) != nullptr, "retired gate cannot arm");
+    }
+}
+// White balance and metering at the gate: the values of the closed lists only, and the same reads first as the other items.
+void RevisionGate() {
+    const auto config = [](std::int64_t white_balance, std::int64_t metering) {
+        D810WriteGateConfig c;
+        c.iso_auto_code = 0xd054;
+        c.entries = {{0x5005, white_balance}, {0x500b, metering}};
+        return c;
+    };
+    const auto prepare = [](D810SettingsWriteGate& gate, std::int64_t mode = 1) {
+        check(FeedRead(gate, BuildSettingsLiveState(), Bytes{0}), "live read");
+        check(FeedRead(gate, BuildSettingsPropDesc(0x500e), Desc(0x500e, 4, 1, mode, 2, {1, 2, 3, 4})), "mode read");
+        check(FeedRead(gate, BuildSettingsPropDesc(0xd054), Desc(0xd054, 2, 1, 0, 2, {0, 1})), "iso auto read");
+        check(FeedRead(gate, BuildSettingsPropDesc(0x5005), Desc(0x5005, 4, 1, 2, 2, {2, 4, 0x8010, 0x8012, 0x8013, 0x8014})), "white balance read");
+        check(FeedRead(gate, BuildSettingsPropDesc(0x500b), Desc(0x500b, 4, 1, 3, 2, {1, 2, 3, 4, 5})), "metering read");
+    };
+    {
+        D810SettingsWriteGate gate(config(4, 2));
+        check(!gate.Retired(), "white balance and metering are valid entries");
+        check(std::string(gate.Arm(D810Camera::B, 0x5005, 4)) == "live_not_confirmed_off", "no reads, no arm");
+        prepare(gate);
+        check(gate.Arm(D810Camera::B, 0x5005, 4) == nullptr, "named kind armed");
+        check(gate.Admit(Make(SettingsCommandKind::ExecuteWithDataToWrite, 0x1016, {0x5005}).Get()) && gate.WritesSent() == 1, "the armed begin goes through");
+    }
+    {
+        D810SettingsWriteGate gate(config(4, 2));
+        prepare(gate);
+        check(gate.Arm(D810Camera::B, 0x500b, 2) == nullptr, "named metering mode armed");
+        check(!gate.Admit(Make(SettingsCommandKind::ExecuteWithDataToWrite, 0x1016, {0x5005}).Get()) && gate.WritesSent() == 0, "another code than the armed one is refused");
+    }
+    {
+        // Every code and several values: only the two planned pairs arm.
+        D810SettingsWriteGate gate(config(4, 2));
+        prepare(gate);
+        std::size_t arms = 0;
+        for (std::uint32_t code = 0; code <= 0xffff; ++code)
+            for (const std::int64_t value : {2LL, 4LL, 5LL, 0x8013LL}) {
+                D810SettingsWriteGate copy = gate;
+                const bool ok = copy.Arm(D810Camera::B, static_cast<std::uint16_t>(code), value) == nullptr;
+                arms += ok;
+                if (ok != ((code == 0x5005 && value == 4) || (code == 0x500b && value == 2))) { check(false, "revision arm sweep"); code = 0x10000; break; }
+            }
+        check(arms == 2, "revision: two pairs can be armed");
+    }
+    for (const std::int64_t value : {1LL, 3LL, 0x8012LL, 0x8013LL}) {
+        D810SettingsWriteGate gate(config(value, 2));
+        prepare(gate);
+        check(std::string(gate.Arm(D810Camera::B, 0x5005, value)) == "value_content_dependent", "content-dependent kinds are never armed, although the body offers them");
+    }
+    {
+        D810SettingsWriteGate gate(config(0x8014, 5));
+        prepare(gate);
+        check(std::string(gate.Arm(D810Camera::B, 0x5005, 0x8014)) == "value_not_listed", "an offered but unnamed white balance is never armed");
+        check(std::string(gate.Arm(D810Camera::B, 0x500b, 5)) == "value_not_listed", "an offered but unnamed metering mode is never armed");
+    }
+    {
+        // Same reads first as the other non-mode items: M and ISO auto off.
+        D810SettingsWriteGate gate(config(4, 2));
+        prepare(gate, 3);
+        check(std::string(gate.Arm(D810Camera::B, 0x5005, 4)) == "mode_not_confirmed_manual", "not M: no white balance");
     }
 }
 // Steps of one write in the gate, and what each failure does.
@@ -1500,6 +1883,114 @@ void ChosenRuns() {
         check(!preset.check.released && preset.check.differences == std::vector<std::string>{"white_balance:content_dependent"}, "Preset is unknown, not a match");
     }
 }
+// White balance and metering through the whole run (test table): the order, the one send, the read back, the block.
+void RevisionRuns() {
+    const auto index_of = [](const FakeWriteBody& body, const std::string& entry) {
+        const auto found = std::find(body.trace.begin(), body.trace.end(), entry);
+        return found == body.trace.end() ? -1 : static_cast<int>(found - body.trace.begin());
+    };
+    {
+        Bench bench(kRevisionTable, -1, true);
+        bench.a.props[0x5005].current = 4;
+        bench.a.props[0x500b].current = 2;
+        const auto run = bench.CopyRun();
+        check(run.verdict == D810WriteVerdict::Match && run.sent == 5 && run.reason.empty(), "revision run: five items matched");
+        check(bench.b.props[0x5005].current == 4 && bench.b.props[0x500b].current == 2 && bench.b.props[0x500f].current == 64, "revision run: B now reads A's values");
+        check(bench.a.write_begins == 0 && bench.a.write_datas == 0 && bench.a.write_ends == 0, "revision run: A received no write");
+        check(bench.b.write_begins == 5 && bench.b.write_datas == 5 && bench.b.write_ends == 5 && NoResend(bench.b) && bench.a.forbidden + bench.b.forbidden == 0, "revision run: one begin, data, END per item");
+        const int iso = index_of(bench.b, "1016(500f)"), shutter = index_of(bench.b, "1016(500d)"), aperture = index_of(bench.b, "1016(5007)");
+        const int wb = index_of(bench.b, "1016(5005)"), metering = index_of(bench.b, "1016(500b)");
+        check(iso >= 0 && iso < shutter && shutter < aperture && aperture < wb && wb < metering, "revision run: the table's order");
+        check(bench.b.trace.size() > static_cast<std::size_t>(wb) + 6 &&
+            std::vector<std::string>(bench.b.trace.begin() + wb, bench.b.trace.begin() + wb + 6) == std::vector<std::string>{"1016(5005)", "write_data", "write_end", "1014(5005)", "read", "end"},
+            "revision run: write, then read back");
+        const auto journal = bench.Journal();
+        check(Contains(journal, "ev=step i=3 alias=CAM-B item=white_balance code=0x5005 before=0x0002 value=0x0004") &&
+            Contains(journal, "ev=step i=4 alias=CAM-B item=metering code=0x500b before=0x0003 value=0x0002"), "revision run: journal steps");
+        check(Contains(journal, "ev=result i=3 readback=0x0004 verdict=match") && Contains(journal, "verdict=match sent=5") && !HasIdentifierShape(journal), "revision run: journal results");
+        check(bench.controller->CaptureAllowed(), "revision run: capture allowed");
+        check(bench.Restarted().CaptureAllowed(), "revision run: nothing held after a restart");
+    }
+    {
+        Bench bench(kRevisionTable);
+        bench.b = Body(1667, 800, 64);
+        bench.a.props[0x5005].current = 0x8010;
+        bench.a.props[0x500b].current = 1;
+        const auto run = bench.CopyRun();
+        check(run.verdict == D810WriteVerdict::Match && run.sent == 2 && bench.Writes() == 2 && bench.b.props[0x5005].current == 0x8010 && bench.b.props[0x500b].current == 1, "revision run: the two alone");
+    }
+    {
+        // The readback of the white balance differs: the rest is never sent, capture is held across a restart.
+        Bench bench(kRevisionTable, -1, true);
+        bench.a.props[0x5005].current = 4;
+        bench.a.props[0x500b].current = 2;
+        bench.b.apply_as[0x5005] = 5;
+        const auto run = bench.CopyRun();
+        check(run.verdict == D810WriteVerdict::Mismatch && run.sent == 4, "white balance mismatch: stops after it");
+        check(bench.b.begins_by_code.count(0x500b) == 0 && NoResend(bench.b), "white balance mismatch: metering never sent, nothing resent");
+        check(!bench.controller->CaptureAllowed() && bench.controller->Block() == D810CaptureBlock::Mismatch && bench.Restarted().Block() == D810CaptureBlock::Mismatch, "white balance mismatch: capture held");
+        check(Contains(bench.Journal(), "ev=result i=3 readback=0x0005 verdict=mismatch"), "white balance mismatch: recorded");
+        // The reread compares seven items; it releases only when all read the same.
+        const auto reread = bench.controller->Reread(bench.access, bench.options);
+        check(!reread.check.released && reread.check.differences == std::vector<std::string>{"white_balance", "metering"}, "reread: white balance and metering differ");
+        bench.b.props[0x5005].current = 4;
+        bench.b.props[0x500b].current = 2;
+        const auto again = bench.controller->Reread(bench.access, bench.options);
+        check(again.check.released && bench.controller->CaptureAllowed() && bench.Restarted().CaptureAllowed(), "reread: seven items equal, released");
+    }
+    {
+        // Metering refused at its END: unknown, held.
+        Bench bench(kRevisionTable);
+        bench.a.props[0x500b].current = 2;
+        bench.b.end_reject[0x500b] = 0x2005;
+        const auto run = bench.CopyRun();
+        check(run.verdict == D810WriteVerdict::Unknown && run.sent == 4 && bench.controller->Block() == D810CaptureBlock::Unknown, "metering END refused: unknown, held");
+    }
+    {
+        // The write of the white balance is refused at its begin: unknown, metering never sent.
+        Bench bench(kRevisionTable);
+        bench.a.props[0x5005].current = 4;
+        bench.a.props[0x500b].current = 2;
+        bench.b.begin_reject.insert(0x5005);
+        const auto run = bench.CopyRun();
+        check(run.verdict == D810WriteVerdict::Unknown && run.sent == 4 && bench.b.begins_by_code.count(0x500b) == 0 && !bench.controller->CaptureAllowed(), "white balance begin refused: unknown, stops");
+    }
+    {
+        // The body changes A's white balance to a content-dependent kind after the plan: nothing is sent.
+        Bench bench(kRevisionTable);
+        bench.a.props[0x5005].current = 4;
+        const auto plan = bench.Copy();
+        bench.a.props[0x5005].current = 0x8013;
+        const auto run = bench.Run(plan);
+        check(run.verdict == D810WriteVerdict::NotSent && run.reason.rfind("plan_changed:CAM-A", 0) == 0 && bench.Writes() == 0, "A's white balance changed after the plan: nothing sent");
+    }
+    {
+        // The product-shaped table: a white balance difference does not hold capture, and a Preset on A does not hold a release.
+        Bench bench(kAdr38Table);
+        bench.a.props[0x5005].current = 0x8013;
+        bench.a.props[0x500b].current = 4;
+        bench.b.apply_as[0x5007] = 1100;
+        check(bench.CopyRun().verdict == D810WriteVerdict::Mismatch, "disabled rows: a mismatch on the aperture");
+        bench.b.apply_as.clear();
+        bench.b.props[0x5007].current = 800;
+        bench.b.props[0x500f].current = 64;
+        bench.b.props[0x500d].current = 1667;
+        const auto reread = bench.controller->Reread(bench.access, bench.options);
+        check(reread.check.released && bench.controller->CaptureAllowed(), "disabled rows: Preset on A and a metering difference do not hold the release");
+    }
+    {
+        // Enabled rows, both on Preset after a failure: equal numbers are not equal whites, so the release stays held.
+        // ※ Owner decision pending (ADR-0038 revision): this pins the fail-closed behavior that exists today.
+        Bench bench(kRevisionTable);
+        bench.b.end_throw.insert(0x500f);
+        check(bench.CopyRun().verdict == D810WriteVerdict::Unknown, "preset release: unknown first");
+        bench.b = Body(1667, 800, 64);
+        bench.a.props[0x5005].current = 0x8013;
+        bench.b.props[0x5005].current = 0x8013;
+        const auto reread = bench.controller->Reread(bench.access, bench.options);
+        check(!reread.check.released && reread.check.differences == std::vector<std::string>{"white_balance:content_dependent"} && !bench.controller->CaptureAllowed(), "preset release: held, not a match");
+    }
+}
 void StopsBeforeSending() {
     {
         // Live turned on after the verification read: the in-session read stops the write.
@@ -1670,6 +2161,18 @@ void WatchdogCancel() {
 // accepted, 0 bytes, END refused with 0x200A.
 void ZeroByteReadsInTheWriteSession() {
     {
+        // The stop falls on the last row of the read set: no row is left to report "not read", yet the session is
+        // spent, so the read is not complete and no plan is made from it.
+        Bench bench;
+        const auto without = bench.controller->ReadForPlan(bench.access, bench.options);
+        check(without.complete, "last row control: a read of a healthy body is complete");
+        Bench stopped;
+        stopped.b.zero_at[0xd14e] = 1;
+        const auto read = stopped.controller->ReadForPlan(stopped.access, stopped.options);
+        check(stopped.b.reads_of[0xd14e] == 1 && !read.complete && read.reason == "read_incomplete:CAM-B", "last row: stopped there, the read is not complete");
+        check(stopped.Writes() == 0 && stopped.controller->CaptureAllowed(), "last row: nothing written, no block");
+    }
+    {
         // Before the first write: not sent, nothing written, no block.
         Bench bench;
         bench.b.zero_at[0x500f] = 3; // 1: the plan's read, 2: the verification read, 3: the read before the write
@@ -1704,7 +2207,7 @@ void ZeroByteReadsInTheWriteSession() {
 // answers once the watchdog's flag is up, even when the flag comes with the very last answer.
 void ReadOnlySessionsAfterCancel() {
     FakeWriteBody probe = Body(333, 560, 100);
-    Snapshot(probe, "CAM-B");
+    WritePathSnapshot(probe, "CAM-B"); // what the write path's reads send, request by request
     check(!probe.trace.empty(), "probe: a read sends requests");
     const std::string last = probe.trace.back();
     const int per_read = static_cast<int>(probe.Count(last));
@@ -2010,6 +2513,138 @@ void ScreenConfirmationOrder() {
     check(!s.screen->ConfirmationShown(), "confirmation: gone after the plan is discarded");
     check(s.Copy() && s.Confirm() && !s.screen->ConfirmationShown(), "confirmation: gone after the run");
 }
+// The smallest client height (px) at which every line of `view` fits, scanning the geometry that D810WriteViewVisibleLines documents:
+// the lines start 30 px under the title (the middle of the window plus 88 px) and end 84 px above the bottom, 22 px each.
+int SmallestClientThatFits(const D810WriteScreenView& view) {
+    for (int bottom = 0; bottom <= 4000; ++bottom)
+        if (D810WriteViewFits(view, bottom)) {
+            for (int more = bottom; more <= 4000; ++more)
+                if (!D810WriteViewFits(view, more)) return -1; // must stay true above the boundary
+            return bottom;
+        }
+    return -1;
+}
+// A line count n fits when (client - 84) - (client / 2 + 118) >= 22 n.
+int ExpectedSmallestClient(std::size_t lines) {
+    for (int bottom = 0; bottom <= 4000; ++bottom)
+        if ((bottom - 84) - (bottom / 2 + 118) >= 22 * static_cast<int>(lines)) return bottom;
+    return -1;
+}
+// Whether the confirm button may be pressed (D810ConfirmPressable): a confirmation is presented, the last present drew
+// this one whole, every line fits the height and the button is inside the window. Anything else is not pressable.
+void ScreenConfirmPressable() {
+    ScreenBench s;
+    const auto& screen = *s.screen;
+    check(!D810ConfirmPressable(screen.View(), screen.ViewSerial(), screen.ViewSerial(), 1400, 960), "pressable: no view presented");
+    check(!D810ConfirmPressable(nullptr, 1, 1, 1400, 960), "pressable: no view");
+    check(s.Copy() && screen.ConfirmationShown(), "pressable: a confirmation is up");
+    const auto* view = screen.View();
+    const auto serial = screen.ViewSerial();
+    check(view && serial != 0, "pressable: the view has a serial");
+    if (!view) return;
+    // Presented, drawn whole, fits, button inside: pressable.
+    check(D810ConfirmPressable(view, serial, serial, 1400, 960), "pressable: presented, drawn, fits");
+    // Presented and fits but not drawn: a serial of nothing, of an earlier view, or of a later one.
+    check(!D810ConfirmPressable(view, serial, 0, 1400, 960), "not drawn: serial 0 (a paint that drew nothing, a failed present)");
+    check(!D810ConfirmPressable(view, serial, serial - 1, 1400, 960) && !D810ConfirmPressable(view, serial, serial + 1, 1400, 960), "not drawn: another view's serial");
+    check(!D810ConfirmPressable(view, 0, 0, 1400, 960), "serial 0 never counts as drawn");
+    // Drawn but no longer fitting the height of the window as it is now.
+    const int need = ExpectedSmallestClient(view->lines.size());
+    check(need > 0 && D810ConfirmPressable(view, serial, serial, 1400, need) && !D810ConfirmPressable(view, serial, serial, 1400, need - 1), "does not fit: one pixel short");
+    check(!D810ConfirmPressable(view, serial, serial, 1400, 0) && !D810ConfirmPressable(view, serial, serial, 0, 0), "does not fit: no client area");
+    // The confirm button must lie inside the window.
+    check(kD810ConfirmButtonLeft + kD810ConfirmButtonWidth == 632 && D810ConfirmButtonInside(632, 960) && !D810ConfirmButtonInside(631, 960), "button inside: the right edge");
+    check(D810ConfirmButtonInside(1400, kD810ButtonRowGap) && !D810ConfirmButtonInside(1400, kD810ButtonRowGap - 1), "button inside: the bottom row");
+    check(!D810ConfirmPressable(view, serial, serial, 631, 960), "button outside: not pressable");
+    // A result is not a confirmation, drawn or not.
+    s.screen->DiscardPlan();
+    check(screen.View() && !screen.View()->confirmation && screen.ViewSerial() != serial, "pressable: a result replaces the confirmation with a new serial");
+    check(!D810ConfirmPressable(screen.View(), screen.ViewSerial(), screen.ViewSerial(), 1400, 960), "a result is not pressable");
+    // Every replacement or clearing of the view changes the serial.
+    check(s.Copy(), "pressable: the second copy");
+    const auto second = screen.ViewSerial();
+    check(second != serial && second != 0, "a new confirmation has a new serial");
+    s.screen->ClearView();
+    check(!screen.View() && screen.ViewSerial() != second, "clearing the view changes the serial");
+    check(!D810ConfirmPressable(screen.View(), screen.ViewSerial(), second, 1400, 960), "a cleared view is not pressable");
+    // The window's smallest size holds the longest confirmation: the same arithmetic as the lines count and the boundary.
+    check(D810WriteViewMaxLines() == 12, "the longest confirmation has 12 lines");
+    for (std::size_t lines = 0; lines <= 16; ++lines) check(D810WriteViewMinClientBottom(lines) == (lines == 0 ? 0 : ExpectedSmallestClient(lines)), "min client height matches the visible lines");
+    check(kD810WriteMinClientHeight == 931 && D810WriteViewVisibleLines(kD810WriteMinClientHeight) == 12 && D810WriteViewVisibleLines(kD810WriteMinClientHeight - 1) == 11,
+        "the window's minimum height shows 12 lines, one pixel less shows 11");
+    check(kD810WriteMinClientWidth >= kD810ConfirmButtonLeft + kD810ConfirmButtonWidth, "the window's minimum width holds the confirm button");
+}
+// White balance and metering on the screen (test table): the lines of the confirmation, where the confirm button's
+// "everything fits" boundary falls with seven steps, and what is said about a white balance that cannot be copied.
+void ScreenRevision() {
+    {
+        // Seven steps: the mode, ISO auto, ISO, shutter, aperture, white balance, metering.
+        ScreenBench s(kRevisionTable);
+        s.bench.a.props[0x5005].current = 4;
+        s.bench.a.props[0x500b].current = 2;
+        s.bench.b.props[0x500e].current = 3;
+        s.bench.b.props[0xd054].current = 1;
+        check(s.Copy() && s.screen->ConfirmationShown(), "revision screen: seven steps shown");
+        const auto* view = s.screen->View();
+        check(view && view->lines.size() == 11, "revision screen: two notices, the header, seven items and the closing line");
+        if (view && view->lines.size() == 11) {
+            check(view->lines[0].find(L"自動では元に戻りません") == 0 && view->lines[1].find(L"再送しません") != std::wstring::npos && view->lines[2].find(L"項目:") == 0, "revision screen: the notices come first");
+            check(view->lines[8].find(L"ホワイトバランス: CAM-B の今の値 Automatic → 書く値 Daylight") != std::wstring::npos &&
+                view->lines[8].find(L"種類だけを写します") != std::wstring::npos && view->lines[8].find(L"微調整は写りません") != std::wstring::npos, "revision screen: white balance, the kind only");
+            check(view->lines[9].find(L"測光: CAM-B の今の値 Multi-pattern → 書く値 Center-weighted") != std::wstring::npos, "revision screen: metering with its name");
+            check(view->lines[3].find(L"露出モード:") != std::wstring::npos, "revision screen: the table's order");
+        }
+        // The boundary of "every line fits" (the confirm button is offered only then) with seven steps.
+        check(view && SmallestClientThatFits(*view) == ExpectedSmallestClient(11) && ExpectedSmallestClient(11) == 887, "revision screen: eleven lines fit from a 887 px client");
+        check(view && D810WriteViewFits(*view, 960) && D810WriteViewFits(*view, 887) && !D810WriteViewFits(*view, 886) && !D810WriteViewFits(*view, 700), "revision screen: the boundary at 887/886");
+        check(s.screen->ConfirmOffered(true), "revision screen: the confirm button is offered when the plan is up");
+        check(s.Confirm() && Shows(s.screen->View(), L"一致") && s.bench.Writes() == 7 && NoResend(s.bench.b), "revision screen: seven written once");
+        check(Shows(s.screen->View(), L"ホワイトバランス: CAM-B の今の値 Automatic → 書く値 Daylight") && Shows(s.screen->View(), L"測光: CAM-B の今の値 Multi-pattern → 書く値 Center-weighted / 結果: 一致"), "revision screen: the results name the two");
+        check(s.bench.b.props[0x5005].current == 4 && s.bench.b.props[0x500b].current == 2 && s.bench.a.write_begins == 0, "revision screen: B now reads A's, A untouched");
+        check(s.screen->AdmitCapture(), "revision screen: capture admitted after a match");
+    }
+    {
+        // A white balance a copy cannot carry: listed after the steps, with the reason and what to do, and the rest is confirmable.
+        ScreenBench s(kRevisionTable);
+        s.bench.a.props[0x5005].current = 0x8013;
+        s.bench.a.props[0x500b].current = 2;
+        s.bench.b.props[0x500e].current = 3;
+        s.bench.b.props[0xd054].current = 1;
+        check(s.Copy() && s.screen->ConfirmationShown(), "preset screen: the plan is up");
+        const auto* view = s.screen->View();
+        check(view && view->lines.size() == 12, "preset screen: six steps, the left-out header and its line, the closing line");
+        check(Shows(view, L"外した項目") && Shows(view, L"ホワイトバランス: 本体に登録した内容") && Shows(view, L"色が揃わない事があります") && Shows(view, L"B の本体で合わせてください"), "preset screen: the reason and what to do");
+        check(Shows(view, L"value_content_dependent") && !Shows(view, L"ホワイトバランス: CAM-B の今の値"), "preset screen: the token is kept, no step for white balance");
+        check(view && SmallestClientThatFits(*view) == ExpectedSmallestClient(12) && ExpectedSmallestClient(12) == 931, "preset screen: twelve lines fit from a 931 px client");
+        check(view && D810WriteViewFits(*view, 931) && !D810WriteViewFits(*view, 930), "preset screen: the boundary at 931/930");
+        check(s.Confirm() && s.bench.Writes() == 6 && s.bench.b.begins_by_code.count(0x5005) == 0 && s.bench.b.props[0x5005].current == 2, "preset screen: written without the white balance");
+        check(s.screen->AdmitCapture(), "preset screen: capture admitted");
+    }
+    {
+        // Only the Preset differs from nothing: no step, but it is said that the colors are not compared.
+        ScreenBench s(kRevisionTable);
+        s.bench.b = Body(1667, 800, 64);
+        s.bench.a.props[0x5005].current = 0x8013;
+        s.bench.b.props[0x5005].current = 0x8013;
+        check(s.Copy() && s.screen->Step() == D810WriteScreenStep::Idle && Shows(s.screen->View(), L"書くものはありません") && Shows(s.screen->View(), L"ホワイトバランス: 本体に登録した内容"), "preset on both: nothing to write, listed");
+        check(Shows(s.screen->View(), L"CAM-B の設定は、書ける項目について CAM-A と同じです") && s.bench.Writes() == 0, "preset on both: the wording");
+    }
+    {
+        // The product-shaped table: a difference of the two is listed with the table's reason; the offer text names them.
+        ScreenBench s;
+        s.bench.a.props[0x5005].current = 4;
+        check(s.Copy() && s.screen->ConfirmationShown(), "disabled rows: plan");
+        check(Shows(s.screen->View(), L"ホワイトバランス: 表で無効の項目です") && s.bench.Writes() == 0, "disabled rows: left out with the table's reason");
+        s.screen->DiscardPlan();
+        check(s.screen->OfferText(true).find(L"ホワイトバランス・測光") != std::wstring::npos, "the offer text names white balance and metering");
+    }
+    {
+        // Out of A's reach: the words for the two new tokens.
+        check(D810WriteReasonText("value_content_dependent").find(L"登録した内容") != std::wstring::npos && D810WriteReasonText("value_not_listed").find(L"一覧にない値") != std::wstring::npos &&
+            D810WriteReasonText("value_not_advertised").find(L"受け付けると答えていません") != std::wstring::npos && D810WriteReasonText("copy_item_out_of_scope").find(L"対象の項目ではありません") != std::wstring::npos,
+            "the words of the tokens");
+    }
+}
 // The watchdog's flag at several points of a run: whatever was already sent stays unknown, nothing is sent after the
 // flag (not even an END), nothing is resent, and capture stays held also after a restart.
 void CancelAtThe(const char* name, const std::function<void(ScreenBench&, std::shared_ptr<std::atomic<bool>>)>& arm, int sent) {
@@ -2105,14 +2740,17 @@ int main() {
         std::cout << name << " " << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - begin).count() << " ms" << std::endl;
     };
     run("ValuesAndTable", ValuesAndTable);
+    run("WritePathReadSet", WritePathReadSet);
     run("DescriptionRules", DescriptionRules);
     run("ProductTable", ProductTable);
     run("ControllerTables", ControllerTables);
     run("FilesEnableNothing", FilesEnableNothing);
     run("CopyPlans", CopyPlans);
+    run("RevisionCopyPlans", RevisionCopyPlans);
     run("ChosenPlans", ChosenPlans);
     run("GateSweep", GateSweep);
     run("GateArmConditions", GateArmConditions);
+    run("RevisionGate", RevisionGate);
     run("GateWriteOrder", GateWriteOrder);
     run("GateStateSweep", GateStateSweep);
     run("GateFailureShapes", GateFailureShapes);
@@ -2125,6 +2763,7 @@ int main() {
     run("RereadReleases", RereadReleases);
     run("JournalStates", JournalStates);
     run("ChosenRuns", ChosenRuns);
+    run("RevisionRuns", RevisionRuns);
     run("StopsBeforeSending", StopsBeforeSending);
     run("WatchdogCancel", WatchdogCancel);
     run("ZeroByteReadsInTheWriteSession", ZeroByteReadsInTheWriteSession);
@@ -2138,6 +2777,8 @@ int main() {
     run("ScreenPartialFailure", ScreenPartialFailure);
     run("ScreenCancelAndStop", ScreenCancelAndStop);
     run("ScreenConfirmationOrder", ScreenConfirmationOrder);
+    run("ScreenConfirmPressable", ScreenConfirmPressable);
+    run("ScreenRevision", ScreenRevision);
     run("ScreenCancelAtSevenPoints", ScreenCancelAtSevenPoints);
     run("RecordWithByteOrderMark", RecordWithByteOrderMark);
     run("OwnershipIsCompareAndSwap", OwnershipIsCompareAndSwap);

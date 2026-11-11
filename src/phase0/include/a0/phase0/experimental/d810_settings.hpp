@@ -56,8 +56,12 @@ inline constexpr std::array<D810SettingSpec, 12> kD810SettingSpecs{{
     {D810SettingId::ExposureCompensation, 0x5010, D810ValueType::Int16, "exposure_compensation", true},
     {D810SettingId::PictureControl, 0xd200, D810ValueType::Uint8, "picture_control", true},
     {D810SettingId::ActiveDLighting, 0xd14e, D810ValueType::Uint8, "active_d_lighting", true},
-    {D810SettingId::IsoAutoCandidate, 0xd16a, D810ValueType::Uint8, "iso_auto_candidate", false},
+    // Diagnostic-only rows come last. 0xd16a is the last row: a body that does
+    // not support it answers the begin with a transfer context and then refuses
+    // the END, which ends the session (see WpdSettingsReadSession), and every
+    // row after the stop is reported as not_read.
     {D810SettingId::NikonShutterSpeed, 0xd100, D810ValueType::Uint32, "nikon_shutter_speed", false},
+    {D810SettingId::IsoAutoCandidate, 0xd16a, D810ValueType::Uint8, "iso_auto_candidate", false},
 }};
 inline constexpr std::uint16_t kD810LiveStateCode = 0xd1a2;
 // Upper bounds of one property description. The device is not trusted: a
@@ -253,11 +257,15 @@ inline std::string FormatD810Setting(const D810SettingSpec& spec, std::int64_t v
         default: return D810RawText(spec, value);
         }
     case D810SettingId::Metering:
+        // Names are the Nikon names in the public digiCamControl table (see
+        // third_party/PTP_PROTOCOL_REFERENCES.md). 1 has no Nikon name there, so
+        // it is shown as a raw value. The generic names for 2 to 4 in the
+        // libgphoto2 table (Center Weighted, Multi Spot, Center Spot) are not used.
         switch (value) {
-        case 1: return "Average";
-        case 2: return "Center Weighted";
-        case 3: return "Multi Spot";
-        case 4: return "Center Spot";
+        case 2: return "Center-weighted";
+        case 3: return "Multi-pattern";
+        case 4: return "Spot";
+        case 0x8010: return "Highlight-weighted";
         default: return D810RawText(spec, value);
         }
     case D810SettingId::ExposureCompensation: return D810Printf("%+.2f", value / 1000.0) + " EV";

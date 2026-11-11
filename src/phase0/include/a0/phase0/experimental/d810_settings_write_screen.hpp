@@ -89,7 +89,7 @@ inline std::wstring D810WriteReasonText(std::string_view token) {
         {"row_disabled", L"表で無効の項目です（書きません）"},
         {"copy_disabled", L"「写す」は表で無効です"},
         {"copy_targets_cam_b_only", L"写す相手は CAM-B だけです"},
-        {"copy_covers_five_items_only", L"写すのは露出の 5 項目だけです"},
+        {"copy_item_out_of_scope", L"「写す」の対象の項目ではありません"},
         {"left_out_by_operator", L"外した項目です"},
         {"invalid_table", L"書き込みの表が正しくないため、書けません"},
         {"reread_first", L"前回の書き込みが確かめられていません。先に「設定を読み直す」を押してください"},
@@ -105,6 +105,8 @@ inline std::wstring D810WriteReasonText(std::string_view token) {
         {"value_not_advertised", L"CAM-B がその値を受け付けると答えていません"},
         {"not_writable", L"CAM-B のその項目は書けない状態です"},
         {"type_mismatch", L"本体が答えた型が表と違います"},
+        {"value_content_dependent", L"本体に登録した内容に頼る値のため写せません。色が揃わない事があります。B の本体で合わせてください"},
+        {"value_not_listed", L"この画面で写せる値の一覧にない値です。CAM-B の値は変えません"},
         {"value_", L"その値は書けません"},
         {"plan_not_confirmed", L"確定した計画がありません"},
         {"invalid_options", L"内部の設定が足りないため、何も送っていません"},
@@ -135,6 +137,18 @@ inline std::wstring D810WriteReasonText(std::string_view token) {
         if (token.substr(0, entry.prefix.size()) == entry.prefix) return std::wstring(entry.text) + L"（" + D810WidenAscii(token) + L"）";
     return L"理由の符号: " + D810WidenAscii(token);
 }
+// One step of a plan or a result: the item, the value now on CAM-B and the value to write.
+inline std::wstring D810WriteStepLine(const D810WriteStep& step) {
+    std::wstring line = std::wstring(D810WriteItemLabel(step.item)) + L": CAM-B の今の値 " + D810WriteValueText(step.code, step.before) + L" → 書く値 " +
+        D810WriteValueText(step.code, step.value);
+    // The kind only: the fine adjustment of each kind is another property and is not copied.
+    if (step.item == D810WriteItem::WhiteBalance) line += L"（種類だけを写します。微調整は写りません）";
+    return line;
+}
+// One item a plan leaves out, with the reason.
+inline std::wstring D810WriteSkippedLine(D810WriteItem item, std::string_view reason) {
+    return std::wstring(L"  ") + D810WriteItemLabel(item) + L": " + D810WriteReasonText(reason);
+}
 // "<what>:<item>:<CAM-x>" from a plan, with the item's label.
 inline std::wstring D810PlanReasonText(const std::string& reason) {
     const auto first = reason.find(':');
@@ -159,11 +173,46 @@ struct D810WriteScreenView {
 // How many lines of a view fit under its title in a window whose client area is `client_bottom` high (22 px a
 // line, from 30 px under the title to 84 px above the bottom, the title at the middle of the window plus 88 px).
 // The preview draws this many and offers the confirm button only when every line of a confirmation fits.
-inline std::size_t D810WriteViewVisibleLines(int client_bottom) {
+constexpr std::size_t D810WriteViewVisibleLines(int client_bottom) {
     const int first = client_bottom / 2 + 88 + 30, bottom = client_bottom - 84;
     return bottom < first ? 0 : static_cast<std::size_t>((bottom - first) / 22);
 }
 inline bool D810WriteViewFits(const D810WriteScreenView& view, int client_bottom) { return view.lines.size() <= D810WriteViewVisibleLines(client_bottom); }
+// The most lines a confirmation can have: the three opening lines, one line per step, the skipped heading with one
+// line per skipped item, and the closing line. Every item the copy plan walks (all but the chosen-value item) is
+// either a step or a skipped one, so that is 5 + (the number of those items) at most.
+constexpr std::size_t D810WriteViewMaxLines() {
+    std::size_t items = 0;
+    for (const auto& spec : kD810WriteItems)
+        if (spec.scope != D810ItemScope::Adr41) ++items;
+    return 5 + items;
+}
+// The smallest client height at which `lines` lines are visible (the inverse of D810WriteViewVisibleLines).
+constexpr int D810WriteViewMinClientBottom(std::size_t lines) {
+    for (int bottom = 0; bottom < 8000; ++bottom)
+        if (D810WriteViewVisibleLines(bottom) >= lines) return bottom;
+    return 8000;
+}
+// The window's smallest client area when a row is enabled: the height shows the longest confirmation, the width holds
+// the button row and the notice lines in the default font (a line still cut at this width is not drawn whole).
+inline constexpr int kD810WriteMinClientWidth = 1240;
+inline constexpr int kD810WriteMinClientHeight = D810WriteViewMinClientBottom(D810WriteViewMaxLines());
+// The confirm button: its left edge, size and distance from the bottom of the client area (the preview lays it out
+// with these). It is pressable only when it lies inside the client area.
+inline constexpr int kD810ConfirmButtonLeft = 432, kD810ConfirmButtonWidth = 200, kD810ConfirmButtonHeight = 28, kD810ButtonRowGap = 40;
+constexpr bool D810ConfirmButtonInside(int client_width, int client_bottom) {
+    return client_bottom >= kD810ButtonRowGap && client_width >= kD810ConfirmButtonLeft + kD810ConfirmButtonWidth;
+}
+// Whether the confirm button may be pressed: the one decision both the button state and its handler ask. A
+// confirmation is presented; the last present of the window drew exactly this one whole (`drawn_serial` is the serial
+// of the view that present drew completely, 0 when none, so a view of an earlier serial, a window too small to draw
+// and a failed present all leave it different); every line still fits the height of the window as it is now; and the
+// button is inside the window. Anything else is not pressable (fail closed).
+inline bool D810ConfirmPressable(const D810WriteScreenView* view, std::uint64_t view_serial, std::uint64_t drawn_serial,
+    int client_width, int client_bottom) {
+    if (!view || !view->confirmation || view_serial == 0 || drawn_serial != view_serial) return false;
+    return D810WriteViewFits(*view, client_bottom) && D810ConfirmButtonInside(client_width, client_bottom);
+}
 // Closes are counted here: a camera that could not be closed holds the screen
 // (no further read, write or Live restart) as stage A does.
 class D810TrackedCameraAccess final: public D810SettingsCameraAccess {
@@ -214,6 +263,9 @@ public:
     bool Busy() const { return worker_.valid(); }
     bool CloseFailed() const { return close_failed_; }
     const D810WriteScreenView* View() const { return view_ ? &*view_ : nullptr; }
+    // Changes whenever the view is replaced or cleared (never 0 once a view has existed). The preview remembers the
+    // serial of the confirmation it drew whole; a confirmation it has not drawn is not pressable.
+    std::uint64_t ViewSerial() const { return view_serial_; }
     // The confirmation is up and the confirm button may be offered: whatever else the preview shows, it is drawn first.
     bool ConfirmationShown() const { return step_ == D810WriteScreenStep::Confirming && view_ && view_->confirmation; }
     // The last event in one line, for the preview's status line. Empty when none.
@@ -244,14 +296,14 @@ public:
         if (!WriteAllowedByBlock(status_.block)) return D810CaptureBlockText(status_.block);
         if (!status_.write_allowed) return L"「A の設定を B に写す」は今は押せません（書き込みの表が正しくないか、カメラを別の処理が使っています）。";
         if (!screen_ready) return L"「A の設定を B に写す」は、両台のライブを止めて切断を確かめた後に押せます（撮影中・読み取り中は押せません）。";
-        return L"「A の設定を B に写す」: CAM-A の露出の 5 項目を読み、CAM-B に書く内容を確定の前に表示します。";
+        return L"「A の設定を B に写す」: CAM-A の露出の 5 項目と、ホワイトバランス・測光を読み、CAM-B に書く内容を確定の前に表示します。";
     }
 
     // "A の設定を B に写す": read both (read-only), then show the plan. Sends no write.
     bool RequestCopy(bool screen_ready) {
         if (!Busy()) Refresh();
         if (!CopyOffered(screen_ready)) { Say("settings_write_ui_copy_refused=1 setting_writes=0"); return false; }
-        view_.reset();
+        ResetView();
         Say("settings_write_ui_copy_requested=1 setting_writes=0");
         Launch(D810WriteScreenStep::ReadingForPlan);
         return true;
@@ -281,7 +333,7 @@ public:
     // every block item reads the same on both.
     bool RequestReread(bool screen_ready) {
         if (!RereadOffered(screen_ready)) { Say("settings_write_ui_reread_refused=1"); return false; }
-        view_.reset();
+        ResetView();
         Say("settings_write_ui_reread_requested=1 setting_writes=0");
         Launch(D810WriteScreenStep::Rereading);
         return true;
@@ -314,12 +366,17 @@ public:
             step_ = D810WriteScreenStep::Idle;
             Refresh();
         }
-        view_.reset();
+        ResetView();
     }
     // The running operation's stop flag (window close). Only set, never cleared.
     void Stop() {
         if (stop_) stop_->store(true);
     }
+#if defined(A0_SETTINGS_WRITE_TEST_TABLES)
+    // Test builds only (the target that also has the table-taking controller): take a read made without a camera
+    // as the worker's result, so a confirmation can be put up for the window's own code to draw.
+    void TakePlanReadForTest(const D810PlanRead& read) { ApplyRead(read); }
+#endif
     // Waits for the worker (its cameras are closed when it returns) and takes its result.
     void Wait() {
         if (!worker_.valid()) return;
@@ -338,6 +395,8 @@ private:
     };
     static bool WriteAllowedByBlock(D810CaptureBlock block) { return block == D810CaptureBlock::None || block == D810CaptureBlock::Mismatch; }
     void Say(const std::string& line) const { if (options_.log) options_.log(line); }
+    void ResetView() { view_.reset(); ++view_serial_; }
+    void SetView(D810WriteScreenView view) { view_ = std::move(view); ++view_serial_; }
     void Launch(D810WriteScreenStep step) {
         step_ = step;
         auto stop = std::make_shared<std::atomic<bool>>(false);
@@ -381,16 +440,13 @@ private:
         if (!status_.capture_allowed) lines.push_back(D810CaptureBlockText(status_.block));
         else lines.push_back(L"撮影の止めはありません。");
         status_line_ = title;
-        view_ = D810WriteScreenView{std::move(title), std::move(lines), false};
+        SetView(D810WriteScreenView{std::move(title), std::move(lines), false});
     }
-    std::wstring StepLine(const D810WriteStep& step) const {
-        return std::wstring(D810WriteItemLabel(step.item)) + L": CAM-B の今の値 " + D810WriteValueText(step.code, step.before) + L" → 書く値 " +
-            D810WriteValueText(step.code, step.value);
-    }
+    static std::wstring StepLine(const D810WriteStep& step) { return D810WriteStepLine(step); }
     void AddSkipped(std::vector<std::wstring>& lines, const D810WritePlan& plan) const {
         if (plan.skipped.empty()) return;
-        lines.push_back(L"外した項目（書きません。CAM-A と CAM-B の違いはそのまま残ります）:");
-        for (const auto& [item, reason] : plan.skipped) lines.push_back(std::wstring(L"  ") + D810WriteItemLabel(item) + L": " + D810WriteReasonText(reason));
+        lines.push_back(L"外した項目（書きません。CAM-A と CAM-B で違う、または比べられない項目は、そのまま残ります）:");
+        for (const auto& [item, reason] : plan.skipped) lines.push_back(D810WriteSkippedLine(item, reason));
     }
     void Apply(const Outcome& outcome) {
         if (!outcome.error.empty()) {
@@ -420,7 +476,7 @@ private:
         const auto& plan = *result.plan;
         Say("settings_write_ui_plan steps=" + std::to_string(plan.steps.size()) + " skipped=" + std::to_string(plan.skipped.size()));
         if (plan.steps.empty()) {
-            std::vector<std::wstring> lines{L"CAM-B の露出の設定は、書ける項目について CAM-A と同じです。"};
+            std::vector<std::wstring> lines{L"CAM-B の設定は、書ける項目について CAM-A と同じです。"};
             AddSkipped(lines, plan);
             controller_.Discard();
             Finish(L"書くものはありません。何も書いていません。", std::move(lines));
@@ -440,7 +496,7 @@ private:
         AddSkipped(view.lines, plan);
         view.lines.push_back(L"よければ「書き込む（1回だけ）」、やめる時は「やめる」を押してください。");
         status_line_ = L"写す内容を確かめてください（まだ何も書いていません）。";
-        view_ = std::move(view);
+        SetView(std::move(view));
     }
     void ApplyRun(const D810WriteRun& run) {
         plan_.reset();
@@ -496,6 +552,7 @@ private:
     std::optional<D810WritePlan> plan_;
     std::uint64_t plan_id_{};
     std::optional<D810WriteScreenView> view_;
+    std::uint64_t view_serial_{};
     std::wstring status_line_;
     std::shared_ptr<std::atomic<bool>> stop_;
     std::future<Outcome> worker_;

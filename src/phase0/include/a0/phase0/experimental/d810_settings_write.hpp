@@ -38,6 +38,16 @@ inline const char* D810CameraAlias(D810Camera camera) { return camera == D810Cam
 // --- Item table ------------------------------------------------------------------
 enum class D810WriteItem : std::uint8_t { ExposureMode, IsoAuto, Iso, ShutterSpeed, Aperture, WhiteBalance, Metering, ExposureCompensation };
 inline constexpr std::size_t kD810WriteItemCount = 8;
+// The decision an item belongs to.
+//   Adr38          the five exposure items ADR-0038 accepted.
+//   Adr38Revision  white balance and metering mode: the ADR-0038 revision (Proposed, awaiting the owner).
+//                  A copy plan covers them, but a product table may not enable their rows
+//                  until kD810Adr38RevisionAccepted is set in a reviewed commit.
+//   Adr41          the rest (Proposed, values chosen by the operator only).
+enum class D810ItemScope : std::uint8_t { Adr38, Adr38Revision, Adr41 };
+// Set by a reviewed commit once the owner accepts the ADR-0038 revision. Until then the
+// product table cannot hold an enabled row for an Adr38Revision item (static_assert below).
+inline constexpr bool kD810Adr38RevisionAccepted = false;
 // What the target body must read, in the same session and generation, before
 // the item may be armed (ADR-0038 decision 4, M-3).
 enum class D810WritePrecondition : std::uint8_t { LiveOff, ManualMode, ManualModeIsoAutoOff };
@@ -52,25 +62,34 @@ struct D810WriteItemSpec {
     std::size_t code_count;
     bool fixed;
     std::int64_t fixed_value;
-    // One of the five ADR-0038 items. The others belong to ADR-0041.
-    bool accepted_scope;
+    D810ItemScope scope;
     D810WritePrecondition precondition;
     // Values that depend on other content of the body (white balance Manual,
-    // Color Temperature, Preset): never written, and "unknown" when compared.
-    std::array<std::int64_t, 3> excluded;
+    // One-push Automatic, Color Temperature, Preset): never written and never
+    // copied, and "unknown" when compared.
+    std::array<std::int64_t, 4> excluded;
     std::size_t excluded_count;
+    // A closed list of the values that may be written (the values whose meaning
+    // is named in third_party/PTP_PROTOCOL_REFERENCES.md). Empty: no list.
+    std::array<std::int64_t, 8> allowed;
+    std::size_t allowed_count;
 };
 // Table order is the write order (ADR-0038 decision 5). Picture Control and
 // Active D-Lighting are absent on purpose: their scalar type is not settled.
 inline constexpr std::array<D810WriteItemSpec, kD810WriteItemCount> kD810WriteItems{{
-    {D810WriteItem::ExposureMode, "exposure_mode", D810ValueType::Uint16, {0x500e, 0}, 1, true, 1, true, D810WritePrecondition::LiveOff, {}, 0},
-    {D810WriteItem::IsoAuto, "iso_auto", D810ValueType::Uint8, {0xd054, 0xd16a}, 2, true, 0, true, D810WritePrecondition::ManualMode, {}, 0},
-    {D810WriteItem::Iso, "iso", D810ValueType::Uint16, {0x500f, 0}, 1, false, 0, true, D810WritePrecondition::ManualModeIsoAutoOff, {}, 0},
-    {D810WriteItem::ShutterSpeed, "shutter_speed", D810ValueType::Uint32, {0x500d, 0xd100}, 2, false, 0, true, D810WritePrecondition::ManualModeIsoAutoOff, {}, 0},
-    {D810WriteItem::Aperture, "aperture", D810ValueType::Uint16, {0x5007, 0}, 1, false, 0, true, D810WritePrecondition::ManualModeIsoAutoOff, {}, 0},
-    {D810WriteItem::WhiteBalance, "white_balance", D810ValueType::Uint16, {0x5005, 0}, 1, false, 0, false, D810WritePrecondition::ManualModeIsoAutoOff, {1, 0x8012, 0x8013}, 3},
-    {D810WriteItem::Metering, "metering", D810ValueType::Uint16, {0x500b, 0}, 1, false, 0, false, D810WritePrecondition::ManualModeIsoAutoOff, {}, 0},
-    {D810WriteItem::ExposureCompensation, "exposure_compensation", D810ValueType::Int16, {0x5010, 0}, 1, false, 0, false, D810WritePrecondition::ManualModeIsoAutoOff, {}, 0},
+    {D810WriteItem::ExposureMode, "exposure_mode", D810ValueType::Uint16, {0x500e, 0}, 1, true, 1, D810ItemScope::Adr38, D810WritePrecondition::LiveOff, {}, 0, {}, 0},
+    {D810WriteItem::IsoAuto, "iso_auto", D810ValueType::Uint8, {0xd054, 0xd16a}, 2, true, 0, D810ItemScope::Adr38, D810WritePrecondition::ManualMode, {}, 0, {}, 0},
+    {D810WriteItem::Iso, "iso", D810ValueType::Uint16, {0x500f, 0}, 1, false, 0, D810ItemScope::Adr38, D810WritePrecondition::ManualModeIsoAutoOff, {}, 0, {}, 0},
+    {D810WriteItem::ShutterSpeed, "shutter_speed", D810ValueType::Uint32, {0x500d, 0xd100}, 2, false, 0, D810ItemScope::Adr38, D810WritePrecondition::ManualModeIsoAutoOff, {}, 0, {}, 0},
+    {D810WriteItem::Aperture, "aperture", D810ValueType::Uint16, {0x5007, 0}, 1, false, 0, D810ItemScope::Adr38, D810WritePrecondition::ManualModeIsoAutoOff, {}, 0, {}, 0},
+    // White balance: the kind only (Automatic, Daylight, Fluorescent, Tungsten, Flash, Cloudy, Shade). Manual (1),
+    // One-push Automatic (3), Color Temperature (0x8012) and Preset (0x8013) lean on content held in the body
+    // (a measured white, a temperature in another property), which a copy cannot carry.
+    {D810WriteItem::WhiteBalance, "white_balance", D810ValueType::Uint16, {0x5005, 0}, 1, false, 0, D810ItemScope::Adr38Revision, D810WritePrecondition::ManualModeIsoAutoOff,
+        {1, 3, 0x8012, 0x8013}, 4, {2, 4, 5, 6, 7, 0x8010, 0x8011}, 7},
+    {D810WriteItem::Metering, "metering", D810ValueType::Uint16, {0x500b, 0}, 1, false, 0, D810ItemScope::Adr38Revision, D810WritePrecondition::ManualModeIsoAutoOff,
+        {}, 0, {1, 2, 3, 4}, 4},
+    {D810WriteItem::ExposureCompensation, "exposure_compensation", D810ValueType::Int16, {0x5010, 0}, 1, false, 0, D810ItemScope::Adr41, D810WritePrecondition::ManualModeIsoAutoOff, {}, 0, {}, 0},
 }};
 inline constexpr std::uint16_t kD810ExposureModeCode = 0x500e;
 inline constexpr std::int64_t kD810ExposureModeManual = 1;
@@ -97,6 +116,25 @@ constexpr bool D810WriteValueExcluded(const D810WriteItemSpec& spec, std::int64_
     for (std::size_t i = 0; i < spec.excluded_count; ++i)
         if (spec.excluded[i] == value) return true;
     return false;
+}
+// True when the item has no closed list, or the list names `value`.
+constexpr bool D810WriteValueListed(const D810WriteItemSpec& spec, std::int64_t value) {
+    if (spec.allowed_count == 0) return true;
+    for (std::size_t i = 0; i < spec.allowed_count; ++i)
+        if (spec.allowed[i] == value) return true;
+    return false;
+}
+// The reason a value cannot be copied from CAM-A at all (before CAM-B is asked), or nullptr.
+// "value_content_dependent": the value leans on content held in the body, which a copy cannot carry.
+// "value_not_listed": the value is not one of those the item names.
+constexpr const char* D810CopyValueRefusal(const D810WriteItemSpec& spec, std::int64_t value) {
+    if (D810WriteValueExcluded(spec, value)) return "value_content_dependent";
+    if (!D810WriteValueListed(spec, value)) return "value_not_listed";
+    return nullptr;
+}
+// Items a product table may enable: the accepted five, and the revision items once it is accepted.
+constexpr bool D810ItemInProductScope(const D810WriteItemSpec& spec) {
+    return spec.scope == D810ItemScope::Adr38 || (spec.scope == D810ItemScope::Adr38Revision && kD810Adr38RevisionAccepted);
 }
 
 // --- Values ------------------------------------------------------------------------
@@ -150,7 +188,7 @@ inline const char* D810WriteValueRefusal(const D810WriteItemSpec& spec, const D8
     if (!D810DescWritable(desc)) return "not_writable";
     if (!D810ValueFits(spec.type, value)) return "value_out_of_type";
     if (spec.fixed && value != spec.fixed_value) return "value_not_fixed";
-    if (D810WriteValueExcluded(spec, value)) return "value_content_dependent";
+    if (const auto refusal = D810CopyValueRefusal(spec, value)) return refusal;
     if (spec.item == D810WriteItem::ShutterSpeed) {
         if (const auto refusal = D810ShutterRefusal(value)) return refusal;
     }
@@ -168,7 +206,8 @@ struct D810WriteRow {
 };
 struct D810WriteTable {
     std::array<D810WriteRow, 2 * kD810WriteItemCount> rows;
-    // ADR-0038: copy CAM-A's five exposure items to CAM-B.
+    // ADR-0038: copy CAM-A's five exposure items to CAM-B (and, once the ADR-0038
+    // revision is accepted, white balance and metering).
     bool copy_a_to_b;
     // ADR-0041 (Proposed): values chosen by the operator.
     bool chosen_values;
@@ -225,15 +264,16 @@ constexpr const char* D810WriteTableProblem(const D810WriteTable& table) {
     return nullptr;
 }
 // What the product table may hold until ADR-0041 is accepted: rows for CAM-B
-// and the five ADR-0038 items only, no chosen values. ADR-0038 invariant 2
-// (CAM-A is never written) holds at compile time.
+// and the accepted items only (the five of ADR-0038, plus white balance and
+// metering once the ADR-0038 revision is accepted), no chosen values. ADR-0038
+// invariant 2 (CAM-A is never written) holds at compile time.
 constexpr const char* D810ProductTableProblem(const D810WriteTable& table) {
     if (const auto problem = D810WriteTableProblem(table)) return problem;
     if (table.chosen_values) return "chosen_values_before_adr0041";
     for (const auto& row : table.rows) {
         if (!row.enabled) continue;
         if (row.camera == D810Camera::A) return "cam_a_row_enabled";
-        if (!D810WriteItemOf(row.item).accepted_scope) return "extra_item_enabled";
+        if (!D810ItemInProductScope(D810WriteItemOf(row.item))) return "extra_item_enabled";
     }
     return nullptr;
 }
@@ -264,7 +304,7 @@ inline const char* D810RowRefusal(const D810WriteTable& table, D810WriteItem ite
     if (source == D810PlanSource::CopyAToB) {
         if (!table.copy_a_to_b) return "copy_disabled";
         if (camera != D810Camera::B) return "copy_targets_cam_b_only";
-        if (!spec.accepted_scope) return "copy_covers_five_items_only";
+        if (spec.scope == D810ItemScope::Adr41) return "copy_item_out_of_scope";
     } else if (!table.chosen_values) return "chosen_values_disabled";
     const auto* row = table.Row(item, camera);
     if (!row || !row->enabled) return "row_disabled";
@@ -275,15 +315,16 @@ inline const char* D810RowRefusal(const D810WriteTable& table, D810WriteItem ite
 inline bool D810BodyVerified(const D810WriteTable& table, std::string_view model, std::string_view firmware) {
     return table.verified_model && table.verified_firmware && model == table.verified_model && firmware == table.verified_firmware;
 }
-// Items whose equality on both cameras releases a capture block: the five, and
-// every additional item with an enabled row.
+// Items whose equality on both cameras releases a capture block: the five of
+// ADR-0038, and every additional item with an enabled row (white balance and
+// metering join once their rows are enabled, never before).
 inline std::vector<D810WriteItem> D810BlockItems(const D810WriteTable& table) {
     std::vector<D810WriteItem> items;
     for (const auto& spec : kD810WriteItems) {
         bool enabled = false;
         for (const auto camera : {D810Camera::A, D810Camera::B})
             if (const auto* row = table.Row(spec.item, camera)) enabled |= row->enabled;
-        if (spec.accepted_scope || enabled) items.push_back(spec.item);
+        if (spec.scope == D810ItemScope::Adr38 || enabled) items.push_back(spec.item);
     }
     return items;
 }
@@ -377,11 +418,19 @@ inline void CheckPreconditions(const D810WritePlan& plan, D810Camera camera, con
 }
 } // namespace d810_plan_detail
 
-// ADR-0038: copy CAM-A's five exposure items to CAM-B. CAM-A must be in M with
-// ISO auto off and a finite, short shutter time. Only items that differ are
-// written. A differing item whose row is disabled, or that the operator left
-// out (`only` given and the item not in it), is listed in `skipped`; its value
-// is never replaced by another one.
+// ADR-0038: copy CAM-A's five exposure items to CAM-B, and (ADR-0038 revision,
+// Proposed) white balance and metering. CAM-A must be in M with ISO auto off and
+// a finite, short shutter time. Only items that differ are written. A differing
+// item whose row is disabled, or that the operator left out (`only` given and
+// the item not in it), is listed in `skipped`; its value is never replaced by
+// another one.
+//
+// A value of CAM-A that a copy cannot carry (white balance Manual, One-push
+// Automatic, Color Temperature or Preset, which lean on a measured white or a
+// temperature held in the body; or a value the item does not name) is listed in
+// `skipped` with its reason whatever CAM-B reads, and CAM-B's value is left as it
+// is: the plan for the other items still stands. Equal numbers do not mean equal
+// colors for such a value, so it is listed also when CAM-B reads the same number.
 inline D810PlanResult BuildD810CopyPlan(const D810SettingsSnapshot& a, const D810SettingsSnapshot& b, const D810WriteTable& table,
     const std::optional<std::vector<D810WriteItem>>& only = std::nullopt) {
     using namespace d810_plan_detail;
@@ -407,15 +456,30 @@ inline D810PlanResult BuildD810CopyPlan(const D810SettingsSnapshot& a, const D81
     plan.source = D810PlanSource::CopyAToB;
     plan.iso_auto_code = iso_auto_code;
     for (const auto& spec : kD810WriteItems) {
-        if (!spec.accepted_scope) continue;
+        if (spec.scope == D810ItemScope::Adr41) continue;
         const auto code = table.Code(spec.item);
         const auto* from = AvailableD810Reading(a, code);
         const auto* to = AvailableD810Reading(b, code);
+        if (spec.scope == D810ItemScope::Adr38Revision && (!from || !to)) {
+            // The five exposure items do not wait for white balance or metering: an item this read could not
+            // get from either body is left out, and its value on CAM-B stays as it is.
+            plan.skipped.emplace_back(spec.item, "unreadable");
+            continue;
+        }
         if (!from) { reasons.push_back(Reason("unreadable", spec, D810Camera::A)); continue; }
         if (!to) { reasons.push_back(Reason("unreadable", spec, D810Camera::B)); continue; }
         Observe(plan.observed, D810Camera::A, code, from->desc.current_value);
         Observe(plan.observed, D810Camera::B, code, to->desc.current_value);
         const auto value = spec.fixed ? spec.fixed_value : from->desc.current_value;
+        // White balance and metering: the value rule is looked at only while the table lets the row through.
+        // With the row disabled they behave like the five (listed with the short table reason, and only when
+        // the two bodies differ), so a disabled row never shows the long value-based reason.
+        const bool value_rule_applies = spec.scope != D810ItemScope::Adr38Revision ||
+            D810RowRefusal(table, spec.item, D810Camera::B, plan.source) == nullptr;
+        if (const auto refusal = value_rule_applies ? D810CopyValueRefusal(spec, value) : nullptr) {
+            plan.skipped.emplace_back(spec.item, refusal);
+            continue;
+        }
         if (to->desc.current_value == value) continue;
         if (only && std::find(only->begin(), only->end(), spec.item) == only->end()) {
             plan.skipped.emplace_back(spec.item, "left_out_by_operator");
@@ -426,7 +490,8 @@ inline D810PlanResult BuildD810CopyPlan(const D810SettingsSnapshot& a, const D81
             continue;
         }
         if (const auto refusal = D810WriteValueRefusal(spec, to->desc, value)) {
-            reasons.push_back(Reason(refusal, spec, D810Camera::B));
+            if (spec.scope == D810ItemScope::Adr38Revision) plan.skipped.emplace_back(spec.item, refusal);
+            else reasons.push_back(Reason(refusal, spec, D810Camera::B));
             continue;
         }
         plan.steps.push_back({D810Camera::B, spec.item, code, to->desc.current_value, value});

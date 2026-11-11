@@ -305,7 +305,8 @@ void Formatting() {
     check(text(D810SettingId::Iso, 64) == "64" && text(D810SettingId::Iso, 12800) == "12800", "iso");
     check(text(D810SettingId::IsoAuto, 0) == "OFF" && text(D810SettingId::IsoAuto, 1) == "ON" && text(D810SettingId::IsoAuto, 7) == "raw 0x07", "iso auto");
     check(text(D810SettingId::WhiteBalance, 2) == "Automatic" && text(D810SettingId::WhiteBalance, 0x8013) == "Preset" && text(D810SettingId::WhiteBalance, 0x1234) == "raw 0x1234", "wb");
-    check(text(D810SettingId::Metering, 2) == "Center Weighted" && text(D810SettingId::Metering, 5) == "raw 0x0005", "metering");
+    check(text(D810SettingId::Metering, 2) == "Center-weighted" && text(D810SettingId::Metering, 3) == "Multi-pattern" && text(D810SettingId::Metering, 4) == "Spot" &&
+        text(D810SettingId::Metering, 0x8010) == "Highlight-weighted" && text(D810SettingId::Metering, 1) == "raw 0x0001" && text(D810SettingId::Metering, 5) == "raw 0x0005", "metering: Nikon names, a value without one stays raw");
     check(text(D810SettingId::ExposureCompensation, 0) == "+0.00 EV" && text(D810SettingId::ExposureCompensation, -333) == "-0.33 EV" && text(D810SettingId::ExposureCompensation, 1000) == "+1.00 EV", "comp");
     check(text(D810SettingId::PictureControl, 3) == "raw 0x03" && text(D810SettingId::ActiveDLighting, 2) == "raw 0x02", "unnamed values stay raw");
     // The log line of the issue's example.
@@ -647,6 +648,30 @@ void UnreadableItems() {
     bool typed = false;
     for (const auto& line : rig.log) typed = typed || (line.find("code=0x5007 unavailable reason=type_mismatch") != std::string::npos && line.find("type=0x0002") != std::string::npos);
     check(typed, "type kept in the unavailable line");
+}
+// The two diagnostic-only rows come last and 0xd100 is read before 0xd16a. A body that does not
+// support 0xd16a answers the begin with a transfer context and a size of 0, then refuses the END
+// with 0x200a; the read session classifies that as a failure and sends nothing more. With 0xd16a
+// last, every other row has been read by then.
+void UnsupportedIsoAutoCandidateIsLast() {
+    const auto& specs = kD810SettingSpecs;
+    check(specs[specs.size() - 2].code == 0xd100 && specs[specs.size() - 1].code == 0xd16a, "0xd100 before 0xd16a, both last");
+    for (std::size_t i = 0; i + 2 < specs.size(); ++i) check(specs[i].in_table, "table rows come first");
+    auto body = HappyBody();
+    body.descs[0xd16a] = Bytes{};
+    body.end_response[0xd16a] = 0x200a;
+    Rig rig(std::move(body));
+    const auto read = rig.Run();
+    check(read.readings.size() == specs.size(), "every row present");
+    for (std::size_t i = 0; i + 1 < specs.size(); ++i) check(read.readings[i].available, "every row before 0xd16a is read");
+    check(FindD810Reading(read.readings, D810SettingId::NikonShutterSpeed)->available, "0xd100 is read");
+    const auto& candidate = *FindD810Reading(read.readings, D810SettingId::IsoAutoCandidate);
+    check(!candidate.available && candidate.reason == "transfer_failed_6", "0xd16a stops the session");
+    check(rig.session->Poisoned() && rig.body.CountOf("1014(") == 12 && rig.body.ends == rig.body.begins && NoWrites(rig), "nothing sent after the stop");
+    // The last row leaves no stop reason behind, so the listing counts as complete although the session is spent:
+    // this is the stage A read, whose callers look at the rows; the write path asks the session as well.
+    check(read.Complete() && read.stop_reason.empty(), "a stop on the last row leaves the listing complete");
+    check(std::any_of(rig.log.begin(), rig.log.end(), [](const std::string& line) { return line.find("CAM-B settings_stop code=0xd16a") != std::string::npos && line.find("end_mtp=0x200a") != std::string::npos; }), "the stop is logged with the END code");
 }
 void TransportFailure() {
     auto body = HappyBody();
@@ -1068,6 +1093,7 @@ int main() {
     run("HappyRead", HappyRead);
     run("LiveViewOn", LiveViewOn);
     run("UnreadableItems", UnreadableItems);
+    run("UnsupportedIsoAutoCandidateIsLast", UnsupportedIsoAutoCandidateIsLast);
     run("TransportFailure", TransportFailure);
     run("DeadlineAndStop", DeadlineAndStop);
     run("DeviceReadiness", DeviceReadiness);
