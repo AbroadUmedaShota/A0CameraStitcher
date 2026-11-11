@@ -3600,6 +3600,43 @@ void WritesAreHeldWhileCaptureIsBlocked() {
     }
 }
 
+// A record changed after it was written, within one operation: the same (camera, item) twice, or a CAM-A step before a
+// CAM-B one (a plan holds neither). A step that is hidden that way may have been sent, so the planned values do not
+// release: the two cameras are compared, as for a damaged record.
+void RecordRewrittenWithinAnOperation() {
+    const std::string op = "a0sw1 op=00000000000000c1 ";
+    const std::string plan = op + "ev=plan t=x source=chosen steps=2\n";
+    const std::string end = op + "ev=end t=x verdict=mismatch sent=1 reason=x\n";
+    const std::string a_iso = op + "ev=step i=0 alias=CAM-A item=iso code=0x500f before=0x0040 value=0x00c8\n";
+    const std::string a_iso_again = op + "ev=step i=1 alias=CAM-A item=iso code=0x500f before=0x0040 value=0x00c8\n";
+    const std::string b_aperture_second = op + "ev=step i=1 alias=CAM-B item=aperture code=0x5007 before=0x0230 value=0x0320\n";
+    const std::string b_iso = op + "ev=step i=0 alias=CAM-B item=iso code=0x500f before=0x0064 value=0x0190\n";
+    const std::string a_iso_second = op + "ev=step i=1 alias=CAM-A item=iso code=0x500f before=0x0040 value=0x00c8\n";
+    // Untouched: CAM-B first, then CAM-A.
+    check(!ParseD810Journal(plan + b_iso + a_iso_second + end).history_damaged, "CAM-B before CAM-A is a plan");
+    struct Case { const char* what; std::string text; std::size_t expected; };
+    const std::vector<Case> cases{
+        {"the same item of a camera twice", plan + a_iso + a_iso_again + end, 1},
+        {"a CAM-B step after a CAM-A step", plan + a_iso + b_aperture_second + end, 2},
+    };
+    for (const auto& c : cases) {
+        const std::string n = c.what;
+        const auto state = ParseD810Journal(c.text);
+        check(state.chosen_unresolved && state.history_damaged && state.malformed_lines == 0 && state.block == D810CaptureBlock::Mismatch && state.expected.size() == c.expected, (n + ": the record reads, and is marked damaged").c_str());
+        Bench bench(kChosenTable, -1, true);
+        WriteFile(bench.file.Path(), c.text);
+        // Every planned value that can be seen is there (CAM-A's ISO 200, and for the second record CAM-B's aperture 800),
+        // while the two cameras differ: by the planned values alone this would release.
+        bench.a = Body(1667, 800, 200);
+        bench.b = Body(333, 800, 100);
+        auto reread = bench.controller->Reread(bench.access, bench.options);
+        check(reread.complete && !reread.check.released && !reread.check.differences.empty() && reread.check.differences[0] == "iso" && !bench.controller->CaptureAllowed(), (n + ": not released while the cameras differ").c_str());
+        bench.b = Body(1667, 800, 200);
+        reread = bench.controller->Reread(bench.access, bench.options);
+        check(reread.check.released && bench.controller->CaptureAllowed(), (n + ": released when the cameras agree").c_str());
+    }
+}
+
 // "Same as CAM-A" asks nothing of CAM-A's mode or ISO auto (only CAM-B, which is written, must be in M with ISO auto off):
 // CAM-A is only read. What it relies on is the value read: if CAM-A's value moves before the run, the run stops.
 void SameAsADoesNotAskCamAToBeInM() {
@@ -5021,6 +5058,7 @@ int main() {
     run("ChosenPlanSubsets", ChosenPlanSubsets);
     run("ChosenTenItems", ChosenTenItems);
     run("WritesAreHeldWhileCaptureIsBlocked", WritesAreHeldWhileCaptureIsBlocked);
+    run("RecordRewrittenWithinAnOperation", RecordRewrittenWithinAnOperation);
     run("SameAsADoesNotAskCamAToBeInM", SameAsADoesNotAskCamAToBeInM);
     run("ChosenRelease", ChosenRelease);
     run("JournalPlanned", JournalPlanned);
