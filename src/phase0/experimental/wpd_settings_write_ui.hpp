@@ -695,6 +695,9 @@ int RunSettingsWriteConfirmSmoke(){
     HWND window=CreateSettingsWriteSmokeWindow(L"A0SettingsWriteConfirmSmoke",instance);
     if(!window)return 2;
     review_button=CreateWindowExW(0,L"BUTTON",L"x",WS_CHILD,0,0,200,28,window,reinterpret_cast<HMENU>(401),instance,nullptr);
+    // Shown without taking the focus: the present of a paint is a BitBlt to the window's DC, which a window that was
+    // never shown can refuse on a remote session, and the checks below need "drawn whole" to mean a successful present.
+    ShowWindow(window,SW_SHOWNOACTIVATE);
     auto opens=std::make_shared<std::atomic<int>>(0);
     InitSettingsWriteWithTable(SmokeConfirmTable(),std::make_unique<D810SettingsFileJournal>(folder),[opens]{return std::make_unique<NoCameraSettingsAccess>(opens);});
     auto* screen=settings_write->screen.get();
