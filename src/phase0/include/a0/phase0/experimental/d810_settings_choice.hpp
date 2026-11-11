@@ -102,6 +102,10 @@ static_assert(D810ChoiceItemsFollowTable(), "the pickable items follow the order
 // kD810MaxWritableExposureUnits (1 s).
 inline constexpr std::int64_t kD810ChoiceIsoMin = 64;
 inline constexpr std::int64_t kD810ChoiceIsoMax = 12800;
+// The ceiling of the band: widening it (the ISO extension values, an exposure over 1 s) is a decision and a reviewed
+// edit of this assert, never a side effect of changing a constant.
+static_assert(kD810ChoiceIsoMin >= 64 && kD810ChoiceIsoMax <= 12800 && kD810MaxWritableExposureUnits <= 10000,
+    "the band of picked values stays inside the standard ISO range and 1 s");
 
 constexpr bool D810ChoiceBand(D810ChoiceItem item, std::int64_t value) {
     switch (item) {

@@ -536,6 +536,22 @@ inline std::string D810PlanProblem(const D810WritePlan& plan, const D810WriteTab
     }
     return D810PlanTableRefusal(plan, table);
 }
+// The key to a CAM-A write session (D810WriteGateConfig::cam_a_allowed), an own guard apart from the plan's checks:
+// open only for a plan of picked values, under a table that switches picked values on, with a CAM-A firmware version
+// named, and when the table enables the row of every CAM-A step of the plan. A switch alone (`chosen_values`) does
+// not open it.
+inline bool D810CamAKeyOpen(const D810WritePlan& plan, const D810WriteTable& table) {
+    if (plan.source != D810PlanSource::Chosen || !table.chosen_values || !D810TextPresent(table.verified_firmware_a)) return false;
+    for (const auto& step : plan.steps)
+        if (step.camera == D810Camera::A && D810RowRefusal(table, step.item, D810Camera::A, plan.source)) return false;
+    return true;
+}
+// A CAM-A row of the table is enabled: the plan's read then reports how CAM-A's body compared (booleans only).
+constexpr bool D810AnyCamARowEnabled(const D810WriteTable& table) {
+    for (const auto& row : table.rows)
+        if (row.camera == D810Camera::A && row.enabled) return true;
+    return false;
+}
 
 // The time the write stage of a run may take. The base is the screen's provisional 60 s (ADR-0038 decision 10).
 // The run starts a step only when `step_budget` (5 s) per remaining step is left, so a long plan, which also
@@ -701,9 +717,27 @@ struct D810ExpectedValue {
 // "<item>:<CAM-x>:content_dependent" (the value leans on content held in the body, white balance Preset and the
 // like: unknown, never a match) or "<item>:<CAM-x>:not_planned_value". Nothing planned means nothing is released
 // by this check: the caller uses the comparison of the two cameras then.
-inline D810ReleaseCheck CheckD810ReleasePlanned(const D810SettingsSnapshot& a, const D810SettingsSnapshot& b, const std::vector<D810ExpectedValue>& expected) {
+//
+// A planned value is taken by the picture only with the camera in manual mode and ISO auto off (the plan was made
+// on that condition, and the copy rule compares both too): for every camera that has an expected value, the
+// exposure mode must read M and ISO auto must read Off, else "exposure_mode:<CAM-x>:not_manual" or
+// "iso_auto:<CAM-x>:not_off" (":unreadable" when it is not read). ISO auto is read at the table's confirmed code.
+inline D810ReleaseCheck CheckD810ReleasePlanned(const D810SettingsSnapshot& a, const D810SettingsSnapshot& b, const std::vector<D810ExpectedValue>& expected,
+    const D810WriteTable& table) {
     D810ReleaseCheck check;
     if (expected.empty()) { check.differences.push_back("nothing_planned"); return check; }
+    for (const auto camera : {D810Camera::A, D810Camera::B}) {
+        if (std::none_of(expected.begin(), expected.end(), [&](const auto& entry) { return entry.camera == camera; })) continue;
+        const auto& snapshot = camera == D810Camera::A ? a : b;
+        const std::string alias = D810CameraAlias(camera);
+        const auto* mode = AvailableD810Reading(snapshot, kD810ExposureModeCode);
+        if (!mode) check.differences.push_back("exposure_mode:" + alias + ":unreadable");
+        else if (mode->desc.current_value != kD810ExposureModeManual) check.differences.push_back("exposure_mode:" + alias + ":not_manual");
+        const auto iso_auto_code = table.Code(D810WriteItem::IsoAuto);
+        const auto* iso_auto = iso_auto_code ? AvailableD810Reading(snapshot, iso_auto_code) : nullptr;
+        if (!iso_auto) check.differences.push_back("iso_auto:" + alias + ":unreadable");
+        else if (iso_auto->desc.current_value != kD810IsoAutoOff) check.differences.push_back("iso_auto:" + alias + ":not_off");
+    }
     for (const auto& entry : expected) {
         const auto& spec = D810WriteItemOf(entry.item);
         const std::string label = std::string(spec.name) + ":" + D810CameraAlias(entry.camera) + ":";

@@ -2427,6 +2427,29 @@ void PlanReadChecksTheBody() {
         check(read.complete && !Contains(joined(bench.log), "CAM-A settings_write_body_check"), "plan read: CAM-A's version does not matter");
     }
     {
+        // A table that enables a CAM-A row: the log says how CAM-A's body compared (booleans only), and the read goes on.
+        Bench bench(kChosenTable);
+        auto read = bench.controller->ReadForPlan(bench.access, bench.options);
+        check(read.complete && read.verified[0] && read.verified[1] &&
+                Contains(joined(bench.log), "CAM-A settings_write_body_check model_match=1 firmware_match=1 setting_writes=0"),
+            "plan read: CAM-A's comparison held");
+        Bench other(kChosenTable);
+        other.access.firmware[0] = "other-text";
+        read = other.controller->ReadForPlan(other.access, other.options);
+        const auto log = joined(other.log);
+        check(read.complete && !read.verified[0] && read.verified[1] && other.Writes() == 0 &&
+                Contains(log, "CAM-A settings_write_body_check model_match=1 firmware_match=0 setting_writes=0") && !Contains(log, "other-text") && !Contains(log, "1.00"),
+            "plan read: CAM-A's version differs, reported and not stopped");
+        other.access.model[0] = "";
+        other.log.clear();
+        other.controller->ReadForPlan(other.access, other.options);
+        check(Contains(joined(other.log), "CAM-A settings_write_body_check model_match=0 firmware_match=0 setting_writes=0"), "plan read: CAM-A's model unreadable");
+        // No CAM-A row enabled (the product's shape): nothing about CAM-A is reported.
+        Bench none(kAdr38Table);
+        none.controller->ReadForPlan(none.access, none.options);
+        check(!Contains(joined(none.log), "CAM-A settings_write_body_check"), "plan read: no CAM-A row, no CAM-A line");
+    }
+    {
         // The reread releases a block whatever the bodies report: it is read-only and is not gated by the version.
         Bench bench(kAdr38Table, -1, true);
         bench.b = Body(1667, 800, 64); // the two bodies read the same
@@ -2713,6 +2736,39 @@ void ChosenRuns() {
     using Item = D810WriteItem;
     const auto A = D810Camera::A, B = D810Camera::B;
     {
+        // The key to a CAM-A session is an own guard: a plan of picked values, the switch, a CAM-A firmware version and the
+        // enabled row of every CAM-A step. The switch alone does not open it.
+        Bench bench(kChosenTable);
+        const auto made = bench.Chosen({PickFor(B, Item::Iso, 400), PickFor(A, Item::Iso, 200), PickFor(A, Item::Metering, 4)});
+        check(made.Ok(), "a plan with two CAM-A steps");
+        const auto& plan = *made.plan;
+        check(D810CamAKeyOpen(plan, kChosenTable), "the key opens for a plan the table lets through");
+        auto no_switch = kChosenTable;
+        no_switch.chosen_values = false;
+        check(!D810CamAKeyOpen(plan, no_switch), "no key without the switch");
+        auto no_version = kChosenTable;
+        no_version.verified_firmware_a = nullptr;
+        check(!D810CamAKeyOpen(plan, no_version), "no key without a CAM-A version");
+        no_version.verified_firmware_a = "";
+        check(!D810CamAKeyOpen(plan, no_version), "no key with an empty CAM-A version");
+        for (const auto item : {Item::Iso, Item::Metering}) {
+            auto row_off = kChosenTable;
+            for (auto& row : row_off.rows)
+                if (row.camera == A && row.item == item) row.enabled = false;
+            check(!D810CamAKeyOpen(plan, row_off), "no key while the row of a CAM-A step is disabled");
+        }
+        auto other_row_off = kChosenTable;
+        for (auto& row : other_row_off.rows)
+            if (row.camera == A && row.item == Item::Aperture) row.enabled = false;
+        check(D810CamAKeyOpen(plan, other_row_off), "a row nobody plans does not matter");
+        auto copy = plan;
+        copy.source = D810PlanSource::CopyAToB;
+        check(!D810CamAKeyOpen(copy, kChosenTable), "no key for a copy");
+        // And in a run: the CAM-A steps go out with the key.
+        const auto run = bench.Run(made);
+        check(run.verdict == D810WriteVerdict::Match && run.sent == 3 && bench.a.write_begins == 2, "the run sends the CAM-A steps");
+    }
+    {
         // Both cameras, different values: every CAM-B item first, CAM-A last, once each, on its own body.
         Bench bench(kChosenTable);
         bench.TraceBegins();
@@ -2935,20 +2991,71 @@ void ChosenRelease() {
         run_case("no end line and a step line is missing", plan(op1, "chosen", 2) + b_step, false);
     }
     {
+        // A record that exists but cannot be read releases nothing, whatever the cameras read. A missing record
+        // is not that: it compares the cameras, as before.
+        Bench bench(kChosenTable, -1, true);
+        fs::create_directories(bench.file.Path());
+        bench.a = Body(1667, 800, 64);
+        bench.b = Body(1667, 800, 64);
+        const auto reread = bench.controller->Reread(bench.access, bench.options);
+        check(reread.complete && !reread.check.released && reread.check.differences == std::vector<std::string>{"record_unreadable"} && !bench.controller->CaptureAllowed(), "an unreadable record releases nothing");
+        Bench absent(kChosenTable, -1, true);
+        absent.a = Body(1667, 800, 64);
+        absent.b = Body(1667, 800, 64);
+        const auto none = absent.controller->Reread(absent.access, absent.options);
+        check(none.complete && none.check.released && none.check.differences.empty(), "no record: the cameras are compared");
+    }
+    {
+        // The planned values release only with the camera in M and ISO auto off; a camera with no planned value is not looked at.
+        Bench bench(kChosenTable, -1, true);
+        bench.b.apply_as[0x500f] = 200;
+        check(bench.Run(bench.Chosen({PickFor(B, Item::Iso, 400)})).verdict == D810WriteVerdict::Mismatch, "the pick did not take");
+        bench.b.props[0x500f].current = 400;
+        bench.b.props[0x500e].current = 3; // P
+        auto reread = bench.controller->Reread(bench.access, bench.options);
+        check(reread.complete && !reread.check.released && differences(reread) == std::vector<std::string>{"exposure_mode:CAM-B:not_manual"} && !bench.controller->CaptureAllowed(), "the planned value is there, the mode is not M");
+        bench.b.props[0x500e].current = 1;
+        bench.b.props[0xd054].current = 1; // ISO auto on
+        reread = bench.controller->Reread(bench.access, bench.options);
+        check(!reread.check.released && differences(reread) == std::vector<std::string>{"iso_auto:CAM-B:not_off"}, "the planned value is there, ISO auto is not off");
+        bench.b.props[0xd054].current = 0;
+        bench.a.props[0x500e].current = 3; // CAM-A has no planned value
+        bench.a.props[0xd054].current = 1;
+        reread = bench.controller->Reread(bench.access, bench.options);
+        check(reread.check.released && bench.controller->CaptureAllowed(), "M and off on the camera with the value: released");
+    }
+    {
         // The check on its own.
         auto a = Body(1667, 800, 64), b = Body(333, 560, 100);
         const D810ExpectedValue b_iso{B, Item::Iso, 0x500f, 100}, a_iso{A, Item::Iso, 0x500f, 64};
-        check(CheckD810ReleasePlanned(Snapshot(a, "CAM-A"), Snapshot(b, "CAM-B"), {b_iso, a_iso}).released, "both at their values");
-        check(CheckD810ReleasePlanned(Snapshot(a, "CAM-A"), Snapshot(b, "CAM-B"), {D810ExpectedValue{B, Item::Iso, 0x500f, 64}}).differences == std::vector<std::string>{"iso:CAM-B:not_planned_value"},
+        check(CheckD810ReleasePlanned(Snapshot(a, "CAM-A"), Snapshot(b, "CAM-B"), {b_iso, a_iso}, kChosenTable).released, "both at their values");
+        check(CheckD810ReleasePlanned(Snapshot(a, "CAM-A"), Snapshot(b, "CAM-B"), {D810ExpectedValue{B, Item::Iso, 0x500f, 64}}, kChosenTable).differences == std::vector<std::string>{"iso:CAM-B:not_planned_value"},
             "a camera is compared with its own value, not the other camera's");
-        const auto none = CheckD810ReleasePlanned(Snapshot(a, "CAM-A"), Snapshot(b, "CAM-B"), {});
+        const auto none = CheckD810ReleasePlanned(Snapshot(a, "CAM-A"), Snapshot(b, "CAM-B"), {}, kChosenTable);
         check(!none.released && none.differences == std::vector<std::string>{"nothing_planned"}, "nothing planned releases nothing");
         a.props.erase(0x500f);
-        check(CheckD810ReleasePlanned(Snapshot(a, "CAM-A"), Snapshot(b, "CAM-B"), {a_iso}).differences == std::vector<std::string>{"iso:CAM-A:unreadable"}, "unreadable");
+        check(CheckD810ReleasePlanned(Snapshot(a, "CAM-A"), Snapshot(b, "CAM-B"), {a_iso}, kChosenTable).differences == std::vector<std::string>{"iso:CAM-A:unreadable"}, "unreadable");
         auto c = Body(1667, 800, 64);
         c.props[0x5005].current = 0x8013;
-        check(CheckD810ReleasePlanned(Snapshot(c, "CAM-A"), Snapshot(b, "CAM-B"), {D810ExpectedValue{A, Item::WhiteBalance, 0x5005, 0x8013}}).differences == std::vector<std::string>{"white_balance:CAM-A:content_dependent"},
+        check(CheckD810ReleasePlanned(Snapshot(c, "CAM-A"), Snapshot(b, "CAM-B"), {D810ExpectedValue{A, Item::WhiteBalance, 0x5005, 0x8013}}, kChosenTable).differences == std::vector<std::string>{"white_balance:CAM-A:content_dependent"},
             "Preset on both sides of the comparison is unknown");
+        // The mode and ISO auto of a camera with a planned value: M and off, else not manual / not off, or unreadable.
+        auto d = Body(1667, 800, 64);
+        d.props[0x500e].current = 2;
+        d.props[0xd054].current = 1;
+        const D810ExpectedValue d_iso{A, Item::Iso, 0x500f, 64};
+        check(CheckD810ReleasePlanned(Snapshot(d, "CAM-A"), Snapshot(b, "CAM-B"), {d_iso}, kChosenTable).differences == std::vector<std::string>{"exposure_mode:CAM-A:not_manual", "iso_auto:CAM-A:not_off"},
+            "not M and ISO auto on");
+        check(CheckD810ReleasePlanned(Snapshot(d, "CAM-A"), Snapshot(b, "CAM-B"), {D810ExpectedValue{B, Item::Iso, 0x500f, 100}}, kChosenTable).released,
+            "a camera with no planned value is not looked at");
+        d.props.erase(0x500e);
+        d.props.erase(0xd054);
+        check(CheckD810ReleasePlanned(Snapshot(d, "CAM-A"), Snapshot(b, "CAM-B"), {d_iso}, kChosenTable).differences == std::vector<std::string>{"exposure_mode:CAM-A:unreadable", "iso_auto:CAM-A:unreadable"},
+            "mode and ISO auto not read");
+        auto no_code = kChosenTable;
+        for (auto& row : no_code.rows)
+            if (row.item == D810WriteItem::IsoAuto) row.code = 0;
+        check(CheckD810ReleasePlanned(Snapshot(c, "CAM-A"), Snapshot(b, "CAM-B"), {d_iso}, no_code).differences == std::vector<std::string>{"iso_auto:CAM-A:unreadable"}, "no confirmed ISO auto code: unreadable");
     }
 }
 
