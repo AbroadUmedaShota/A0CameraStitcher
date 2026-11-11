@@ -437,6 +437,8 @@ struct Camera final:WpdLiveViewCommandChannel {
     DWORD focus_mode{0xffffffff};
     PreviewAfState af; // AF frame the body reports (#426); guarded by `mutex`
     void UpdateAfFrame(std::span<const unsigned char> payload,unsigned width,unsigned height); // wpd_dual_preview_af.hpp
+    void ApplyAfPoint(const PreviewAfPointRequest& point); // one AF frame move; the worker only
+    WpdLiveViewExchange DispatchAfPoint(IPortableDeviceValues* request); // its own gate; Dispatch refuses 0x9205
     Clock::time_point first{},last{},busy_since{};std::atomic<bool> done{},failed{};
     Clock::time_point send_deadline{Clock::time_point::max()};
     bool admission_cancelled{},frame_dispatched{};
@@ -644,6 +646,7 @@ struct Camera final:WpdLiveViewCommandChannel {
                 ComPtr<IWICImagingFactory> factory;Check(CoCreateInstance(CLSID_WICImagingFactory,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&factory)),"WIC factory");
                 while(!stopping){
                     if(const auto action=focus_mailbox.Take())ApplyFocus(*action);
+                    else if(const auto point=focus_mailbox.TakeAfPoint())ApplyAfPoint(*point);
                     if(stopping)break;
                     const auto deadline=Clock::now()+std::chrono::seconds(10);
                     send_deadline=deadline;

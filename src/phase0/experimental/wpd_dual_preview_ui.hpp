@@ -813,6 +813,11 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM w,LPARAM l){
             merged.alignment_status=L"手動調整（要目視確認）";++merged.revision;merged.pixels={};
             Log("C ui_manual_adjustment="+std::to_string(id-300)+" overlap_px="+std::to_string(merged.overlap_pixels)+" vertical_px="+std::to_string(merged.vertical_pixels));return 0;
         }break;}
+    case WM_MOUSEACTIVATE:{ // #426: the click that raises the window is not a click on a picture
+        RECT area{};GetClientRect(hwnd,&area);POINT cursor{};GetCursorPos(&cursor);ScreenToClient(hwnd,&cursor);
+        if(const auto eaten=AfMouseActivate(area,LOWORD(l),HIWORD(l),cursor))return eaten;
+        break;}
+    case WM_LBUTTONDOWN:HandleAfPointClick(hwnd,static_cast<short>(LOWORD(l)),static_cast<short>(HIWORD(l)));return 0; // #426
     case WM_PAINT:{
         PAINTSTRUCT ps{};auto dc=BeginPaint(hwnd,&ps);RECT r;GetClientRect(hwnd,&r);PreviewBackBuffer frame(dc,r.right,r.bottom);
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)

@@ -5,6 +5,19 @@
 // that the mark is the body's report, not an optical focus decision.
 inline constexpr COLORREF kAfReportedColor=RGB(0,230,0);
 inline constexpr COLORREF kAfRequestColor=RGB(255,60,60);
+// Red: the position of the last accepted click, drawn for this long so that the move can be compared with
+// the green frame the body reports afterwards.
+inline constexpr auto kAfRequestShown=std::chrono::seconds(10);
+// The request is shown only while the header it was made in is still the current one.
+bool AfRequestVisible(const Camera& c,Clock::time_point now){
+    if(!c.af.frame || !c.af.request)return false;
+    const auto& mark=*c.af.request;
+    return now>=mark.at && now-mark.at<kAfRequestShown && mark.width==static_cast<unsigned>(c.af.frame->image_width) &&
+        mark.height==static_cast<unsigned>(c.af.frame->image_height);
+}
+// The bottom rows of a picture carry the status text. They look like a part of the display, not of the
+// scene, so a click on them selects nothing.
+inline constexpr int kAfStripHeight=22;
 // Where Paint puts the picture of camera `index`. Paint calls DrawPixels with the same numbers; the
 // click conversion uses this function so that a click and the drawing never disagree.
 PixelRect PanePictureRect(const RECT& client,int index,const Pixels& pixels){
@@ -30,7 +43,8 @@ std::wstring AfStatusText(const Camera& c){
     const auto& f=*c.af.frame;
     return L"AF枠（本体の報告）: 中心 "+std::to_wstring(f.center_x)+L","+std::to_wstring(f.center_y)+
         L" / 枠 "+std::to_wstring(f.frame_width)+L"x"+std::to_wstring(f.frame_height)+
-        L" / 合焦の印: "+(f.FocusReported()?L"あり":L"なし")+L"（本体の報告）";
+        L" / 合焦の印: "+(f.FocusReported()?L"あり":L"なし")+L"（本体の報告）"+
+        (AfRequestVisible(c,Clock::now())?L" / 要求 "+std::to_wstring(c.af.request->x)+L","+std::to_wstring(c.af.request->y):L"");
 }
 // A two pixel outline, clipped to the picture so that it never spills into the next pane.
 bool DrawAfRect(HDC dc,const PreviewAfRect& rect,const PixelRect& picture,COLORREF color){
@@ -48,13 +62,63 @@ bool DrawAfOverlay(HDC dc,const Camera& c,const RECT& client,int index){
     if(picture.width<=0 || picture.height<=0)return false;
     const PreviewAfRect area{picture.left,picture.top,picture.width,picture.height};
     bool drawn=false;
+    if(AfRequestVisible(c,Clock::now())){
+        D810AfHeader asked=*c.af.frame;asked.center_x=static_cast<int>(c.af.request->x);asked.center_y=static_cast<int>(c.af.request->y);
+        if(const auto rect=PreviewAfFrameOnDisplay(asked,area))DrawAfRect(dc,*rect,picture,kAfRequestColor);
+    }
     if(c.af.frame){
         const auto rect=PreviewAfFrameOnDisplay(*c.af.frame,area);
         drawn=rect && DrawAfRect(dc,*rect,picture,kAfReportedColor);
     }
     const auto text=AfStatusText(c);
-    RECT strip{picture.left,std::max<int>(picture.top,picture.top+picture.height-22),picture.left+picture.width,picture.top+picture.height};
+    RECT strip{picture.left,std::max<int>(picture.top,picture.top+picture.height-kAfStripHeight),picture.left+picture.width,picture.top+picture.height};
     FillRect(dc,&strip,static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
     DrawTextW(dc,text.c_str(),-1,&strip,DT_LEFT|DT_SINGLELINE|DT_NOPREFIX|DT_VCENTER|DT_END_ELLIPSIS);
     return drawn;
+}
+// Which camera's selectable part of the picture holds the client point, or -1. Below the size at which
+// Paint draws nothing there is no picture, so there is nothing to select either.
+int AfPictureAt(const RECT& client,int x,int y){
+    if(client.right<200 || client.bottom<240)return -1;
+    for(int i=0;i<2;++i){
+        PixelRect picture;
+        {std::lock_guard lock(cameras[i]->mutex);picture=PanePictureRect(client,i,cameras[i]->pixels);}
+        if(picture.width>0 && x>=picture.left && x<picture.left+picture.width && y>=picture.top && y<picture.top+picture.height-kAfStripHeight)return i;
+    }
+    return -1;
+}
+// WM_MOUSEACTIVATE. The click that brings the window to the front is not an instruction: over a picture
+// it is eaten (MA_ACTIVATEANDEAT), so it activates the window and never reaches HandleAfPointClick.
+// Returns 0 when the default handling applies.
+LRESULT AfMouseActivate(const RECT& client,WORD hit,WORD message,POINT client_point){
+    if(hit==HTCLIENT && message==WM_LBUTTONDOWN && AfPictureAt(client,client_point.x,client_point.y)>=0)return MA_ACTIVATEANDEAT;
+    return 0;
+}
+// WM_LBUTTONDOWN. A click on a camera's picture asks for one AF frame move on that camera: nothing else.
+// The click is accepted under the conditions of the AF button (CanFocus: Live running, first frames
+// shown, picture fresh, nothing pending), only when the header of the shown frame is usable, and the
+// mailbox keeps it to one pending request. It never starts AF and never writes a setting. When the
+// camera is not in a state to take a click, nothing is written: no status text and no log line.
+void HandleAfPointClick(HWND hwnd,int x,int y){
+    if(camera_end_restart_smoke)return;
+    RECT client{};GetClientRect(hwnd,&client);
+    const int index=AfPictureAt(client,x,y);
+    if(index<0)return;
+    auto& c=*cameras[index];
+    if(!CanFocus(c))return;
+    PixelRect picture;std::optional<D810AfHeader> frame;
+    {std::lock_guard lock(c.mutex);picture=PanePictureRect(client,index,c.pixels);frame=c.af.frame;}
+    if(!frame){
+        c.FocusStatus(L"AF枠の位置が不明なため、枠は動かしません");
+        Log(c.alias+" ui_af_point queued=0 reason=header_unknown");return;
+    }
+    const auto point=PreviewAfPointFromClick(PreviewAfRect{picture.left,picture.top,picture.width,picture.height},x,y,*frame);
+    if(!point){Log(c.alias+" ui_af_point queued=0 reason=no_point");return;}
+    // The red mark is set before the request is queued: once queued, the worker may finish and clear it.
+    std::optional<PreviewAfMark> previous;
+    {std::lock_guard lock(c.mutex);previous=c.af.request;c.af.request=PreviewAfMark{point->x,point->y,point->width,point->height,Clock::now()};}
+    const bool queued=c.focus_mailbox.TryQueueAfPoint(*point,true);
+    if(!queued){std::lock_guard lock(c.mutex);c.af.request=previous;}
+    Log(c.alias+" ui_af_point queued="+std::to_string(queued));
+    if(queued)c.FocusStatus(L"AF枠の移動を受け付けました…");
 }

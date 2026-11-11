@@ -74,6 +74,22 @@ int main() {
         request->SetUnsignedIntegerValue(WPD_PROPERTY_MTP_EXT_OPERATION_CODE,forbidden);
         check(!AllowedD810PreviewRequest(request.Get()));
     }
+    // #426: 0x9205 stays refused with arguments too, among them the shape of the fine drive it sits next to.
+    for(auto action:{PreviewFocusAction::Near,PreviewFocusAction::Far}){
+        auto request=BuildPreviewFocusRequest(action); // two arguments: direction and the fixed step
+        request->SetUnsignedIntegerValue(WPD_PROPERTY_MTP_EXT_OPERATION_CODE,0x9205);
+        check(!AllowedD810PreviewRequest(request.Get()));
+        check(!AdmitD810PreviewDispatch(request.Get(),true,false,false));
+    }
+    for(auto values:{std::pair<DWORD,DWORD>{5,6},{0,0},{1,1},{640,426},{1,10}}){
+        auto request=BuildPreviewFocusRequest(PreviewFocusAction::Near);
+        request->SetUnsignedIntegerValue(WPD_PROPERTY_MTP_EXT_OPERATION_CODE,0x9205);
+        Microsoft::WRL::ComPtr<IPortableDevicePropVariantCollection> args;
+        request->GetIPortableDevicePropVariantCollectionValue(WPD_PROPERTY_MTP_EXT_OPERATION_PARAMS,&args);args->Clear();
+        PROPVARIANT v{};v.vt=VT_UI4;v.ulVal=values.first;args->Add(&v);v.ulVal=values.second;args->Add(&v);
+        check(!AllowedD810PreviewRequest(request.Get()));
+        check(!AdmitD810PreviewDispatch(request.Get(),true,false,false));
+    }
     for(DWORD bad_direction:{0u,3u}){
         auto request=BuildPreviewFocusRequest(PreviewFocusAction::Near);
         Microsoft::WRL::ComPtr<IPortableDevicePropVariantCollection> args;
