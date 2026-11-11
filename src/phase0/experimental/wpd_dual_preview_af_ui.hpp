@@ -89,10 +89,22 @@ int AfPictureAt(const RECT& client,int x,int y){
 }
 // WM_MOUSEACTIVATE. The click that brings the window to the front is not an instruction: over a picture
 // it is eaten (MA_ACTIVATEANDEAT), so it activates the window and never reaches HandleAfPointClick.
-// Returns 0 when the default handling applies.
-LRESULT AfMouseActivate(const RECT& client,WORD hit,WORD message,POINT client_point){
-    if(hit==HTCLIENT && message==WM_LBUTTONDOWN && AfPictureAt(client,client_point.x,client_point.y)>=0)return MA_ACTIVATEANDEAT;
+// Windows also sends the message to the parent for every click on a child control, even when the window is
+// in front, so the click is eaten only when the window is not in front and no visible child is under the
+// cursor: a button or list laid over a picture still works. Returns 0 when the default handling applies.
+LRESULT AfMouseActivate(const RECT& client,WORD hit,WORD message,POINT client_point,bool window_in_front=false,bool over_child=false){
+    if(hit==HTCLIENT && message==WM_LBUTTONDOWN && !window_in_front && !over_child && AfPictureAt(client,client_point.x,client_point.y)>=0)return MA_ACTIVATEANDEAT;
     return 0;
+}
+// Whether a visible child window lies under the client point.
+bool AfChildAt(HWND hwnd,POINT client_point){
+    const HWND child=ChildWindowFromPointEx(hwnd,client_point,CWP_SKIPINVISIBLE|CWP_SKIPTRANSPARENT);
+    return child && child!=hwnd;
+}
+// The window procedure's side of WM_MOUSEACTIVATE: reads the cursor and the foreground window.
+LRESULT AfMouseActivateOf(HWND hwnd,LPARAM l){
+    RECT area{};GetClientRect(hwnd,&area);POINT cursor{};GetCursorPos(&cursor);ScreenToClient(hwnd,&cursor);
+    return AfMouseActivate(area,LOWORD(l),HIWORD(l),cursor,GetForegroundWindow()==hwnd,AfChildAt(hwnd,cursor));
 }
 // WM_LBUTTONDOWN. A click on a camera's picture asks for one AF frame move on that camera: nothing else.
 // The click is accepted under the conditions of the AF button (CanFocus: Live running, first frames

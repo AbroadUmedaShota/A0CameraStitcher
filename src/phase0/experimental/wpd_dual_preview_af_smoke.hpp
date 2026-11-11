@@ -202,6 +202,24 @@ int RunAfPointUiSmoke(){
         check(AfMouseActivate(real,HTCLIENT,WM_RBUTTONDOWN,POINT{in_picture.first,in_picture.second})==0);
         check(AfMouseActivate(real,HTCLIENT,WM_LBUTTONDOWN,POINT{-4,-4})==0);
         check(SendMessageW(window,WM_MOUSEACTIVATE,reinterpret_cast<WPARAM>(window),MAKELPARAM(HTCAPTION,WM_LBUTTONDOWN))!=MA_ACTIVATEANDEAT); // the title bar raises the window normally
+        // Not when the window is already in front (Windows sends the message for every child click too), and not over a child.
+        check(AfMouseActivate(real,HTCLIENT,WM_LBUTTONDOWN,POINT{in_picture.first,in_picture.second},true,false)==0);
+        check(AfMouseActivate(real,HTCLIENT,WM_LBUTTONDOWN,POINT{in_picture.first,in_picture.second},false,true)==0);
+        check(AfMouseActivate(real,HTCLIENT,WM_LBUTTONDOWN,POINT{in_picture.first,in_picture.second},false,false)==MA_ACTIVATEANDEAT);
+        {
+            // A real child control over the picture: found under its own pixels, not elsewhere, and then the click is not eaten.
+            HWND child=CreateWindowExW(0,L"BUTTON",L"x",WS_CHILD|WS_VISIBLE,in_picture.first-20,in_picture.second-10,40,20,window,nullptr,instance,nullptr);
+            check(child!=nullptr);
+            if(child){
+                const POINT on_child{in_picture.first,in_picture.second},beside{in_picture.first+60,in_picture.second};
+                check(AfChildAt(window,on_child) && !AfChildAt(window,beside));
+                check(AfMouseActivate(real,HTCLIENT,WM_LBUTTONDOWN,on_child,false,AfChildAt(window,on_child))==0);
+                check(AfMouseActivate(real,HTCLIENT,WM_LBUTTONDOWN,beside,false,AfChildAt(window,beside))==MA_ACTIVATEANDEAT);
+                ShowWindow(child,SW_HIDE); // an invisible child does not count
+                check(!AfChildAt(window,on_child));
+                DestroyWindow(child);
+            }
+        }
         // Eaten clicks never reach the handler, so activation alone queues nothing.
         check(cameras[0]->focus_mailbox.Available() && cameras[1]->focus_mailbox.Available());
         // 7d. Too small a window draws no picture and takes no click.
