@@ -3544,6 +3544,88 @@ void ChosenTenItems() {
     }
 }
 
+// While capture is held by the record (an operation without its end, an unknown result, a record that cannot be read)
+// nothing is planned and nothing is sent; a block that only says "mismatch" lets a new plan through (it is the way to fix
+// it). A plan confirmed before the block appeared (another instance left it) is stopped at the run, with nothing sent.
+void WritesAreHeldWhileCaptureIsBlocked() {
+    using Item = D810WriteItem;
+    const std::vector<D810CameraChoice> pick{PickFor(D810Camera::B, Item::Iso, 200)};
+    const std::string op = "a0sw1 op=00000000000000b1 ";
+    const std::string open_op = op + "ev=plan t=x source=copy steps=1\n" + op + "ev=step i=0 alias=CAM-B item=iso code=0x500f before=0x0064 value=0x0190\n";
+    struct Kind { const char* name; std::string text; bool holds; bool unreadable; };
+    const std::vector<Kind> kinds{
+        {"unconfirmed", open_op, true, false},
+        {"unknown", open_op + op + "ev=end t=x verdict=unknown sent=1 reason=x\n", true, false},
+        {"unreadable record", "", true, true},
+        {"mismatch", open_op + op + "ev=end t=x verdict=mismatch sent=1 reason=x\n", false, false},
+    };
+    const auto leave_block = [](Bench& bench, const Kind& kind) {
+        if (kind.unreadable) fs::create_directories(bench.file.Path());
+        else WriteFile(bench.file.Path(), kind.text);
+    };
+    for (const auto& kind : kinds) {
+        const std::string n = kind.name;
+        {
+            // Planning: PlanChosen and PlanCopy.
+            Bench bench(kChosenTable, -1, true);
+            leave_block(bench, kind);
+            const auto read = bench.controller->ReadForPlan(bench.access, bench.options);
+            check(read.complete, (n + ": the read itself is not held").c_str());
+            const auto chosen = bench.controller->PlanChosen(read, pick);
+            const auto copy = bench.Copy();
+            if (kind.holds) {
+                check(!chosen.Ok() && HasReason(chosen, "reread_first"), (n + ": no plan of picked values").c_str());
+                check(!copy.Ok() && HasReason(copy, "reread_first") && !bench.controller->Status().plan_pending, (n + ": no copy plan").c_str());
+            } else {
+                check(chosen.Ok() && copy.Ok(), (n + ": plans are made, to fix the mismatch").c_str());
+            }
+        }
+        for (const bool use_copy : {false, true}) {
+            // The run of a plan confirmed before the block appeared.
+            Bench bench(kChosenTable, -1, true);
+            const auto plan = use_copy ? bench.Copy() : bench.Chosen(pick);
+            check(plan.Ok(), (n + ": a plan on a clean record").c_str());
+            if (!plan.Ok()) continue;
+            leave_block(bench, kind);
+            const auto run = bench.Run(plan);
+            const std::string what = n + (use_copy ? " (copy)" : " (picked values)");
+            if (kind.holds) {
+                check(run.sent == 0 && run.reason == "reread_first" && bench.Writes() == 0, (what + ": the run sends nothing").c_str());
+                check(bench.access.opens[0] == 0 && bench.access.opens[1] == 0, (what + ": no camera is opened").c_str());
+                check(bench.controller->Execute(plan.plan->id, bench.access, bench.options).reason == "plan_not_confirmed", (what + ": the plan is consumed").c_str());
+            } else {
+                check(run.sent >= 1 && bench.Writes() >= 1, (what + ": under a mismatch the run goes on").c_str());
+            }
+        }
+    }
+}
+
+// "Same as CAM-A" asks nothing of CAM-A's mode or ISO auto (only CAM-B, which is written, must be in M with ISO auto off):
+// CAM-A is only read. What it relies on is the value read: if CAM-A's value moves before the run, the run stops.
+void SameAsADoesNotAskCamAToBeInM() {
+    using Item = D810WriteItem;
+    const auto setup = [](Bench& bench) {
+        bench.a.props[0x500e].current = 3; // not M
+        bench.a.props[0xd054].current = 1; // ISO auto on
+    };
+    {
+        Bench bench(kChosenTable);
+        setup(bench);
+        const auto plan = bench.Chosen({FollowA(Item::Iso)});
+        check(plan.Ok() && plan.plan->steps.size() == 1 && plan.plan->steps[0].camera == D810Camera::B && plan.plan->steps[0].value == 64, "the plan follows CAM-A's ISO although CAM-A is not in M");
+        const auto run = bench.Run(plan);
+        check(run.verdict == D810WriteVerdict::Match && run.sent == 1 && bench.a.write_begins == 0 && bench.b.props[0x500f].current == 64, "and runs: CAM-B written, CAM-A only read");
+    }
+    {
+        Bench bench(kChosenTable);
+        setup(bench);
+        const auto plan = bench.Chosen({FollowA(Item::Iso)});
+        bench.a.props[0x500f].current = 100; // CAM-A moves after the plan
+        const auto run = bench.Run(plan);
+        check(run.sent == 0 && run.reason.rfind("plan_changed:CAM-A", 0) == 0 && bench.Writes() == 0, "CAM-A's value moved: the run stops before a send");
+    }
+}
+
 // White balance and metering through the whole run (test table): the order, the one send, the read back, the block.
 void RevisionRuns() {
     const auto index_of = [](const FakeWriteBody& body, const std::string& entry) {
@@ -4938,6 +5020,8 @@ int main() {
     run("ChosenStopsOnB", ChosenStopsOnB);
     run("ChosenPlanSubsets", ChosenPlanSubsets);
     run("ChosenTenItems", ChosenTenItems);
+    run("WritesAreHeldWhileCaptureIsBlocked", WritesAreHeldWhileCaptureIsBlocked);
+    run("SameAsADoesNotAskCamAToBeInM", SameAsADoesNotAskCamAToBeInM);
     run("ChosenRelease", ChosenRelease);
     run("JournalPlanned", JournalPlanned);
     run("RevisionRuns", RevisionRuns);
