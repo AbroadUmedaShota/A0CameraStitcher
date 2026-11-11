@@ -851,6 +851,8 @@ struct D810WriteStatus {
     bool write_allowed{};
     bool plan_pending{};
     bool plan_confirmed{};
+    // The history since the capture was last free of a block holds a plan of picked values (a copy only otherwise).
+    bool chosen_history{};
     // Rows the fixed table enables.
     std::size_t enabled_rows{};
     // The items a copy may write to CAM-B with this table, in table order (the screen names them).
@@ -942,6 +944,8 @@ public:
         status.write_allowed = table_valid_ && status.enabled_rows > 0 && WriteAllowed(status.block) && owner_.Current() == D810CameraUse::None;
         status.plan_pending = pending_.has_value();
         status.plan_confirmed = confirmed_.has_value();
+        // The record shows a plan of picked values not yet read back: the capture block is then told in terms of the values written.
+        if (const auto file = journal_.Read(); file.kind == D810TextFile::Kind::Read) status.chosen_history = ParseD810Journal(file.text).chosen_unresolved;
         return status;
     }
     // The read step of a copy (ADR-0038 decision 5): CAM-A, then CAM-B, each

@@ -12,7 +12,8 @@
 // on this). The controller's Confirm is called from ConfirmShownPlan only, and
 // the screen calls that from its confirm button only.
 //
-// There is no "undo", no value chosen by the operator and no other way in.
+// There is no "undo" and no other way in. The values an operator picks in the panel are a draft: they reach a camera only as a
+// plan that the confirm button confirms (D810SettingsWriteController::PlanChosen, then Confirm and Execute).
 #if !defined(A0_ENABLE_WPD_SETTINGS_WRITE)
 #error "d810_settings_write_screen.hpp is only for targets built with A0_BUILD_WPD_SETTINGS_WRITE"
 #endif
@@ -60,11 +61,15 @@ inline const wchar_t* D810WriteVerdictText(D810WriteVerdict verdict) {
     }
     return L"不明";
 }
-// Why capture is held, in the words of docs/WPD_DUAL_PREVIEW.md. Empty when it is not.
-inline std::wstring D810CaptureBlockText(D810CaptureBlock block) {
+// Why capture is held, in the words of docs/WPD_DUAL_PREVIEW.md. Empty when it is not. `chosen_history`: the record holds
+// a plan of picked values, for which a mismatch is a written value that was not read back, not a difference of the two cameras.
+inline std::wstring D810CaptureBlockText(D810CaptureBlock block, bool chosen_history = false) {
     switch (block) {
     case D810CaptureBlock::None: return {};
     case D810CaptureBlock::Mismatch:
+        if (chosen_history)
+            return L"撮影を止めています（不一致）: 書いた値が、読み戻しで確かめられていません。"
+                   L"ライブを止めて「設定を読み直す」を押すと、各台が書いた値のまま読めた時に撮影できます。";
         return L"撮影を止めています（不一致）: 設定の書き込みのあと、CAM-B の露出の設定が CAM-A と合っていません。"
                L"ライブを止めて「設定を読み直す」を押し、両台が同じと確かめると撮影できます。";
     case D810CaptureBlock::Unknown:
@@ -150,16 +155,49 @@ inline std::wstring D810WriteStepLine(const D810WriteStep& step) {
 inline std::wstring D810WriteSkippedLine(D810WriteItem item, std::string_view reason) {
     return std::wstring(L"  ") + D810WriteItemLabel(item) + L": " + D810WriteReasonText(reason);
 }
-// "<what>:<item>:<CAM-x>" from a plan, with the item's label.
-inline std::wstring D810PlanReasonText(const std::string& reason) {
+// The reasons of a plan of picked values (and of its run) whose words do not name CAM-B: the picks go to either camera.
+// Everything else is told as for a copy.
+inline const wchar_t* D810ChosenReasonText(std::string_view what) {
+    struct Entry { std::string_view token; const wchar_t* text; };
+    static constexpr Entry kEntries[] = {
+        {"chosen_values_disabled", L"この版では、選んだ値を書くことはできません"},
+        {"no_choice", L"書く値が選ばれていません"},
+        {"item_not_choosable", L"この項目は、選んで書く対象ではありません"},
+        {"same_as_a_on_cam_a", L"CAM-A を「A と同じ」にはできません"},
+        {"same_as_a_not_offered", L"CAM-A の値を、この台は受け付けると答えていません"},
+        {"duplicate_choice", L"同じ項目を 2 回選んでいます"},
+        {"value_not_named", L"名前を確かめていない値は選べません"},
+        {"value_out_of_band", L"選べる範囲の外の値です"},
+        {"value_not_advertised", L"この台が、その値を受け付けると答えていません"},
+        {"not_writable", L"この台のその項目は、書けない状態です"},
+        {"live_view_on", L"書く相手の台のライブビューが動いています"},
+        {"changed_before_write", L"書く直前に、書く相手の台の値が変わっていました"},
+        {"plan_order", L"計画の台の順が正しくないため、何も送っていません"},
+        {"plan_step_code", L"計画の項目の番号が正しくないため、何も送っていません"},
+    };
+    for (const auto& entry : kEntries)
+        if (entry.token == what) return entry.text;
+    return nullptr;
+}
+// "<what>:<item>:<CAM-x>" from a plan, with the item's label. `chosen`: the plan is one of picked values.
+inline std::wstring D810PlanReasonText(const std::string& reason, bool chosen = false) {
     const auto first = reason.find(':');
-    if (first == std::string::npos) return D810WriteReasonText(reason);
+    const auto what = reason.substr(0, first);
+    const auto* chosen_text = chosen ? D810ChosenReasonText(what) : nullptr;
+    const auto told = [&] { return chosen_text ? std::wstring(chosen_text) + L"（" + D810WidenAscii(what) + L"）" : D810WriteReasonText(what); };
+    if (first == std::string::npos) return told();
     const auto second = reason.find(':', first + 1);
     const auto item = reason.substr(first + 1, second == std::string::npos ? std::string::npos : second - first - 1);
     const auto camera = second == std::string::npos ? std::string() : reason.substr(second + 1);
+    // The two preconditions name the camera in the place of the item ("...:CAM-A"), and the advice is for that body.
+    if (chosen && second == std::string::npos && (what == "exposure_mode_not_manual_set_on_body" || what == "iso_auto_not_off")) {
+        const auto body = D810WidenAscii(item);
+        return what == "iso_auto_not_off" ? body + L": " + body + L" の ISO感度自動制御が OFF ではないため、書けません。" + body + L" の本体で OFF にしてください（iso_auto_not_off）"
+                                          : body + L": " + body + L" が M ではないため、露出モードは書けません。" + body + L" の本体で M にしてください（exposure_mode_not_manual_set_on_body）";
+    }
     std::wstring subject = D810WriteItemNameLabel(item);
     if (!camera.empty()) subject = D810WidenAscii(camera) + L" の" + subject;
-    return subject + L": " + D810WriteReasonText(reason.substr(0, first));
+    return subject + L": " + told();
 }
 
 // --- The settings panel: words and rows ----------------------------------------------------
@@ -249,6 +287,101 @@ inline bool D810ConfirmPressable(const D810WriteScreenView* view, std::uint64_t 
     if (!view || !view->confirmation || view_serial == 0 || drawn_serial != view_serial) return false;
     return D810WriteViewFits(*view, client_bottom) && D810ConfirmButtonInside(client_width, client_bottom);
 }
+// --- Words and lines of a plan of picked values (#416, ADR-0041) -----------------------------------------------------
+inline std::wstring D810WidenUtf8(std::string_view text) {
+    if (text.empty()) return {};
+    const int length = MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0);
+    if (length <= 0) return D810WidenAscii(text);
+    std::wstring out(static_cast<std::size_t>(length), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), out.data(), length);
+    return out;
+}
+// A value as the drop-down shows it, for the items that can be picked; otherwise the plain value text.
+inline std::wstring D810ChoiceValueText(D810WriteItem item, std::uint16_t code, std::int64_t value) {
+    if (const auto choice = D810ChoiceItemOf(item)) return D810WidenUtf8(D810ChoiceLabel(*choice, value));
+    return D810WriteValueText(code, value);
+}
+// The value a camera reads now: the drop-down's label when the application could pick it back, otherwise the value
+// as the camera reports it (a white balance Preset, for example), which the application cannot set again.
+inline std::wstring D810ChosenBeforeText(const D810WriteStep& step, const D810SettingsSnapshot& snapshot, bool& restorable) {
+    const auto choice = D810ChoiceItemOf(step.item);
+    const auto* reading = AvailableD810Reading(snapshot, step.code);
+    restorable = choice && reading && D810ChoosableRefusal(*choice, reading->desc, step.before) == nullptr;
+    return restorable ? D810ChoiceValueText(step.item, step.code, step.before) : D810WriteValueText(step.code, step.before);
+}
+// The items of a plan or a run in the order its steps first name them (CAM-B's items, then CAM-A's others).
+template <class Steps, class Item>
+inline std::vector<D810WriteItem> D810ItemsInStepOrder(const Steps& steps, Item item_of) {
+    std::vector<D810WriteItem> order;
+    for (const auto& step : steps) {
+        const auto item = item_of(step);
+        if (std::find(order.begin(), order.end(), item) == order.end()) order.push_back(item);
+    }
+    return order;
+}
+// The confirmation of a plan of picked values: the notices of ADR-0038 decision 5 first, the order the cameras are
+// written in, then one line per item with each camera's value now and the value to write, in the order the plan's
+// steps name them (CAM-B's steps come first in a plan, and the lines follow them; they are not sorted again).
+// `model`: the panel's model, to say that a camera's value changed after the panel was read.
+inline D810WriteScreenView BuildD810ChosenConfirmation(const D810WritePlan& plan, const std::array<D810SettingsSnapshot, 2>& snapshots, const D810PanelModel* model) {
+    D810WriteScreenView view;
+    view.confirmation = true;
+    view.title = L"選んだ値を書く前の確認（まだ何も書いていません）";
+    view.lines.push_back(L"自動では元に戻りません。書く前の値に戻す時は、本体で操作してください。");
+    view.lines.push_back(L"書き込みは項目ごとに 1 回だけです。失敗しても再送しません。結果を確かめられない時は撮影を止めます。");
+    view.lines.push_back(L"書く順: CAM-B の項目を先に、CAM-A の項目を最後に書きます。どれかが失敗したら、残りは送りません。");
+    view.lines.push_back(L"項目: CAM-B の今の値 → 書く値 ／ CAM-A の今の値 → 書く値");
+    const auto order = D810ItemsInStepOrder(plan.steps, [](const D810WriteStep& step) { return step.item; });
+    bool a_written = false, changed = false;
+    for (const auto item : order) {
+        std::array<const D810WriteStep*, 2> by_camera{};
+        for (const auto& step : plan.steps)
+            if (step.item == item) by_camera[static_cast<std::size_t>(step.camera)] = &step;
+        std::wstring line = std::wstring(L"  ") + D810WriteItemLabel(item) + L":";
+        bool restorable_all = true;
+        for (const auto camera : {D810Camera::B, D810Camera::A}) {
+            const auto* step = by_camera[static_cast<std::size_t>(camera)];
+            line += camera == D810Camera::B ? L" CAM-B " : L" ／ CAM-A ";
+            if (!step) { line += L"変えない"; continue; }
+            bool restorable = true;
+            line += D810ChosenBeforeText(*step, snapshots[static_cast<std::size_t>(camera)], restorable) + L" → " + D810ChoiceValueText(step->item, step->code, step->value);
+            restorable_all = restorable_all && restorable;
+            a_written = a_written || camera == D810Camera::A;
+            if (model)
+                if (const auto choice = D810ChoiceItemOf(step->item)) {
+                    const auto& cell = model->At(camera, *choice);
+                    changed = changed || !cell.readable || cell.current != step->before;
+                }
+        }
+        if (!restorable_all) line += L"（元の値は本体でしか戻せません）";
+        view.lines.push_back(std::move(line));
+    }
+    if (a_written) view.lines.push_back(L"CAM-A は合成と校正の基準のカメラです。承認済みの撮影の設定と違う値になると、撮影の前の照合で止まります。");
+    if (changed) view.lines.push_back(L"設定の画面を開いた後に、本体の値が変わった項目があります。");
+    view.lines.push_back(L"よければ「書き込む（1回だけ）」、やめる時は「やめる」を押してください。");
+    return view;
+}
+// The result of a run of picked values: one line per item, each camera's outcome.
+inline std::vector<std::wstring> D810ChosenRunLines(const D810WriteRun& run) {
+    std::vector<std::wstring> lines;
+    const auto order = D810ItemsInStepOrder(run.steps, [](const D810StepOutcome& outcome) { return outcome.step.item; });
+    for (const auto item : order) {
+        std::array<const D810StepOutcome*, 2> by_camera{};
+        for (const auto& outcome : run.steps)
+            if (outcome.step.item == item) by_camera[static_cast<std::size_t>(outcome.step.camera)] = &outcome;
+        std::wstring line = std::wstring(L"  ") + D810WriteItemLabel(item) + L":";
+        for (const auto camera : {D810Camera::B, D810Camera::A}) {
+            const auto* outcome = by_camera[static_cast<std::size_t>(camera)];
+            line += camera == D810Camera::B ? L" CAM-B " : L" ／ CAM-A ";
+            if (!outcome) { line += L"変えない"; continue; }
+            if (!outcome->sent) { line += L"書いていません"; continue; }
+            line += D810WriteVerdictText(outcome->verdict);
+            if (outcome->readback) line += L"（読み戻し " + D810ChoiceValueText(outcome->step.item, outcome->step.code, *outcome->readback) + L"）";
+        }
+        lines.push_back(std::move(line));
+    }
+    return lines;
+}
 // Closes are counted here: a camera that could not be closed holds the screen
 // (no further read, write or Live restart) as stage A does.
 class D810TrackedCameraAccess final: public D810SettingsCameraAccess {
@@ -333,7 +466,7 @@ public:
         if (status_.enabled_rows == 0)
             return L"「A の設定を B に写す」は押せません: 書ける項目がありません。ISO感度自動制御とシャッター速度の番号（code）が本体でまだ確定しておらず、"
                    L"書く相手の本体（機種・版）も確かめていないため、表の行はすべて無効です。";
-        if (!WriteAllowedByBlock(status_.block)) return D810CaptureBlockText(status_.block);
+        if (!WriteAllowedByBlock(status_.block)) return BlockText();
         if (!status_.write_allowed) return L"「A の設定を B に写す」は今は押せません（書き込みの表が正しくないか、カメラを別の処理が使っています）。";
         if (!screen_ready) return L"「A の設定を B に写す」は、両台のライブを止めて切断を確かめた後に押せます（撮影中・読み取り中は押せません）。";
         // What is read and what can be written are different: both bodies' exposure items and white balance and
@@ -385,6 +518,7 @@ public:
         if (!RereadOffered(screen_ready)) { Say("settings_write_ui_reread_refused=1"); return false; }
         ResetView();
         Say("settings_write_ui_reread_requested=1 setting_writes=0");
+        reread_chosen_ = status_.chosen_history;
         Launch(D810WriteScreenStep::Rereading);
         return true;
     }
@@ -419,6 +553,7 @@ public:
         if (!panel_open_ || !RereadOffered(screen_ready)) { Say("settings_write_ui_reread_refused=1"); return false; }
         ResetView();
         Say("settings_write_ui_reread_requested=1 setting_writes=0");
+        reread_chosen_ = status_.chosen_history;
         Launch(D810WriteScreenStep::Rereading, true);
         return true;
     }
@@ -526,6 +661,38 @@ public:
         if (dirty == 0) return L"値を選ぶと「変更予定」になります。選んだだけでは、カメラには何も送りません。";
         return L"変更予定 " + std::to_wstring(dirty) + L" 件（まだ何も書いていません）。";
     }
+    // "N 件を書き込む…" may be pressed: the panel's values are current, there is at least one change, nothing runs
+    // and no confirmation is up, the preview is ready, and the table lets a plan be made and run (a block that is a
+    // known mismatch lets one through, as for a copy). With the product table no cell can be picked, so there is never
+    // a change and this is false.
+    bool ChosenOffered(bool screen_ready) const {
+        return screen_ready && !Busy() && !close_failed_ && PanelEditable() && status_.write_allowed && PanelDirty() > 0;
+    }
+    // Why "N 件を書き込む…" cannot be pressed, or what it does.
+    std::wstring ChosenOfferText(bool screen_ready) const {
+        if (!panel_open_) return {};
+        if (Busy() || step_ != D810WriteScreenStep::Idle) return OfferText(screen_ready);
+        if (panel_stale_) return L"書き込みのあとです。「設定を読み直す」を押して、最新の値を読んでください。";
+        if (close_failed_) return OfferText(screen_ready);
+        if (PanelDirty() == 0) return L"変更予定がありません。値を選ぶと、書き込めるようになります。";
+        if (!WriteAllowedByBlock(status_.block)) return BlockText();
+        if (!status_.write_allowed) return L"今は書き込めません（書き込みの表が正しくないか、カメラを別の処理が使っています）。";
+        if (!screen_ready) return L"書き込みは、両台のライブを止めて切断を確かめた後に押せます（撮影中・読み取り中は押せません）。";
+        return L"「" + std::to_wstring(PanelDirty()) + L" 件を書き込む…」を押すと、書く前に両台をもう一度読んで、確認の画面を出します。まだ何も書きません。";
+    }
+    // "N 件を書き込む…": read both cameras again (read-only), make the plan of the picks from that read and show it
+    // for confirmation. Sends no write.
+    bool RequestChosen(bool screen_ready) {
+        if (!Busy()) Refresh();
+        if (!ChosenOffered(screen_ready)) { Say("settings_write_ui_chosen_refused=1 setting_writes=0"); return false; }
+        choices_ = draft_.Choices(); // a copy: the worker and the plan never see the draft itself
+        ResetView();
+        Say("settings_write_ui_chosen_requested=1 changes=" + std::to_string(PanelDirty()) + " setting_writes=0");
+        Launch(D810WriteScreenStep::ReadingForChosen);
+        return true;
+    }
+    // Whether the confirmation that is up (or the run that is going) is one of picked values.
+    bool RunIsChosen() const { return run_source_ == D810PlanSource::Chosen; }
     // Takes a finished worker's result. True when something changed.
     bool Poll() {
         if (!worker_.valid() || worker_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
@@ -544,7 +711,7 @@ public:
     }
     std::wstring CaptureRefusalText() const {
         if (Busy()) return L"設定の書き込み・読み直しの途中です。終わるまで撮影はできません。";
-        return D810CaptureBlockText(status_.block);
+        return BlockText();
     }
     // A Live restart or a new stage A read: the confirmation and the last result go.
     void ClearView() {
@@ -568,6 +735,10 @@ public:
     void TakePlanReadForTest(const D810PlanRead& read) { ApplyRead(read); }
     // The same for the panel: a read made without a camera becomes the panel's model.
     void TakePanelReadForTest(const D810PlanRead& read) { ApplyPanelRead(read); }
+    // The read made for "N 件を書き込む…" without a camera, from the picks now in the draft: the plan and its confirmation.
+    void TakeChosenReadForTest(const D810PlanRead& read) { choices_ = draft_.Choices(); ApplyChosenRead(read); }
+    // A finished run of a plan of `source` as the worker would hand it back.
+    void TakeRunForTest(const D810WriteRun& run, D810PlanSource source) { run_source_ = source; ApplyRun(run); }
 #endif
     // Waits for the worker (its cameras are closed when it returns) and takes its result.
     void Wait() {
@@ -587,6 +758,7 @@ private:
         bool close_failed{};
         std::string error;
     };
+    std::wstring BlockText() const { return D810CaptureBlockText(status_.block, status_.chosen_history); }
     static bool WriteAllowedByBlock(D810CaptureBlock block) { return block == D810CaptureBlock::None || block == D810CaptureBlock::Mismatch; }
     void Say(const std::string& line) const { if (options_.log) options_.log(line); }
     void ResetView() { view_.reset(); ++view_serial_; }
@@ -641,7 +813,7 @@ private:
     void Finish(std::wstring title, std::vector<std::wstring> lines) {
         step_ = D810WriteScreenStep::Idle;
         Refresh();
-        if (!status_.capture_allowed) lines.push_back(D810CaptureBlockText(status_.block));
+        if (!status_.capture_allowed) lines.push_back(BlockText());
         else lines.push_back(L"撮影の止めはありません。");
         status_line_ = title;
         SetView(D810WriteScreenView{std::move(title), std::move(lines), false});
@@ -661,6 +833,7 @@ private:
         }
         if (outcome.step == D810WriteScreenStep::ReadingForPlan) ApplyRead(outcome.read);
         else if (outcome.step == D810WriteScreenStep::ReadingForPanel) ApplyPanelRead(outcome.read);
+        else if (outcome.step == D810WriteScreenStep::ReadingForChosen) ApplyChosenRead(outcome.read);
         else if (outcome.step == D810WriteScreenStep::Writing) ApplyRun(outcome.run);
         else ApplyReread(outcome.reread, outcome.panel_read ? &outcome.read : nullptr);
     }
@@ -686,6 +859,36 @@ private:
         ++draft_serial_;
         return dropped;
     }
+    // The read made for "N 件を書き込む…": the plan of the picks (`choices_`) from this read and the flags of the same
+    // read (`read.verified`: the plan refuses a camera whose body the table does not name), then the confirmation.
+    void ApplyChosenRead(const D810PlanRead& read) {
+        if (!read.complete) {
+            Finish(L"書く前の読み取りを最後まで終えられませんでした。何も書いていません。", {D810WriteReasonText(read.reason)});
+            Say("settings_write_ui_chosen_read_incomplete=1 reason=" + read.reason);
+            return;
+        }
+        const auto result = controller_.PlanChosen(read.snapshots[0], read.snapshots[1], read.verified, choices_);
+        if (!result.Ok()) {
+            std::vector<std::wstring> lines;
+            for (const auto& reason : result.reasons) lines.push_back(D810PlanReasonText(reason, true));
+            Finish(L"書けません。何も書いていません。", std::move(lines));
+            Say("settings_write_ui_plan_refused=1 reasons=" + std::to_string(result.reasons.size()));
+            return;
+        }
+        const auto& plan = *result.plan;
+        Say("settings_write_ui_plan steps=" + std::to_string(plan.steps.size()) + " source=chosen");
+        if (plan.steps.empty()) {
+            controller_.Discard();
+            Finish(L"書くものはありません。何も書いていません。", {L"選んだ値は、どちらのカメラも今の値と同じです。"});
+            return;
+        }
+        plan_ = plan;
+        step_ = D810WriteScreenStep::Confirming;
+        Refresh();
+        auto view = BuildD810ChosenConfirmation(plan, read.snapshots, model_ ? &*model_ : nullptr);
+        status_line_ = L"書く内容を確かめてください（まだ何も書いていません）。";
+        SetView(std::move(view));
+    }
     void ApplyPanelRead(const D810PlanRead& read) {
         if (!read.complete) {
             Finish(L"両台の設定を読めませんでした。設定の画面は開きません。何も書いていません。", {D810WriteReasonText(read.reason)});
@@ -697,7 +900,7 @@ private:
         step_ = D810WriteScreenStep::Idle;
         Refresh();
         status_line_ = L"両台の設定を読みました（読み取りのみ）。値を選ぶだけでは、カメラには何も送りません。";
-        if (!status_.capture_allowed) status_line_ += L" " + D810CaptureBlockText(status_.block);
+        if (!status_.capture_allowed) status_line_ += L" " + BlockText();
         Say("settings_write_ui_panel_opened=1 setting_writes=0");
     }
     void ApplyRead(const D810PlanRead& read) {
@@ -751,20 +954,29 @@ private:
         }
         Say("settings_write_ui_result verdict=" + std::string(D810WriteVerdictToken(run.verdict)) + " sent=" + std::to_string(run.sent) +
             " reason=" + (run.reason.empty() ? std::string("none") : run.reason));
+        const bool chosen = run_source_ == D810PlanSource::Chosen;
         std::vector<std::wstring> lines;
-        for (const auto& outcome : run.steps) {
-            std::wstring line = L"  " + StepLine(outcome.step) + L" / 結果: " + D810WriteVerdictText(outcome.verdict);
-            if (outcome.readback) line += L"（読み戻し " + D810WriteValueText(outcome.step.code, *outcome.readback) + L"）";
-            lines.push_back(std::move(line));
+        if (chosen) {
+            lines = D810ChosenRunLines(run);
+        } else {
+            for (const auto& outcome : run.steps) {
+                std::wstring line = L"  " + StepLine(outcome.step) + L" / 結果: " + D810WriteVerdictText(outcome.verdict);
+                if (outcome.readback) line += L"（読み戻し " + D810WriteValueText(outcome.step.code, *outcome.readback) + L"）";
+                lines.push_back(std::move(line));
+            }
         }
-        if (!run.reason.empty()) lines.push_back(L"止めた理由: " + D810WriteReasonText(run.reason));
+        if (!run.reason.empty()) {
+            const auto* chosen_text = chosen ? D810ChosenReasonText(run.reason.substr(0, run.reason.find(':'))) : nullptr;
+            lines.push_back(L"止めた理由: " + (chosen_text ? std::wstring(chosen_text) + L"（" + D810WidenAscii(run.reason) + L"）" : D810WriteReasonText(run.reason)));
+        }
         lines.push_back(L"再送も、前の値への書き戻しもしていません。");
-        if (dropped_picks && run_source_ == D810PlanSource::CopyAToB) lines.push_back(L"設定の画面で選んでいた、書いていない変更 " + std::to_wstring(dropped_picks) + L" 件は捨てました。");
+        if (dropped_picks && !chosen) lines.push_back(L"設定の画面で選んでいた、書いていない変更 " + std::to_wstring(dropped_picks) + L" 件は捨てました。");
         std::wstring title;
+        const std::wstring who = chosen ? L"選んだ値" : L"CAM-B";
         switch (run.verdict) {
-        case D810WriteVerdict::Match: title = L"CAM-B に書きました: 一致（" + std::to_wstring(run.sent) + L" 項目、読み戻した値が書いた値と同じ）"; break;
-        case D810WriteVerdict::Mismatch: title = L"CAM-B への書き込み: 不一致（送った項目 " + std::to_wstring(run.sent) + L"）"; break;
-        case D810WriteVerdict::Unknown: title = L"CAM-B への書き込み: 不明（結果を確かめられません。送った項目 " + std::to_wstring(run.sent) + L"）"; break;
+        case D810WriteVerdict::Match: title = (chosen ? L"選んだ値を書きました" : L"CAM-B に書きました") + std::wstring(L": 一致（") + std::to_wstring(run.sent) + L" 項目、読み戻した値が書いた値と同じ）"; break;
+        case D810WriteVerdict::Mismatch: title = who + (chosen ? L"の書き込み" : L"への書き込み") + L": 不一致（送った項目 " + std::to_wstring(run.sent) + L"）"; break;
+        case D810WriteVerdict::Unknown: title = who + (chosen ? L"の書き込み" : L"への書き込み") + L": 不明（結果を確かめられません。送った項目 " + std::to_wstring(run.sent) + L"）"; break;
         case D810WriteVerdict::NotSent: title = L"何も書いていません"; break;
         }
         Finish(std::move(title), std::move(lines));
@@ -796,7 +1008,26 @@ private:
             return;
         }
         if (reread.check.released) {
-            finish(L"読み直しました: 止めの対象の項目は CAM-A と CAM-B で同じです。", {});
+            finish(reread_chosen_ ? L"読み直しました: 書いた値は、各台でそのまま読めました。" : L"読み直しました: 止めの対象の項目は CAM-A と CAM-B で同じです。", {});
+            return;
+        }
+        if (reread_chosen_) {
+            // The record holds a plan of picked values: the cameras are not compared; each is checked against what was written
+            // ("<item>:<CAM-x>:<why>", or "nothing_planned").
+            std::vector<std::wstring> lines{L"書いた値と違う項目（または読めない項目）:"};
+            for (const auto& difference : reread.check.differences) {
+                const auto first = difference.find(':');
+                const auto second = first == std::string::npos ? std::string::npos : difference.find(':', first + 1);
+                if (second == std::string::npos) {
+                    lines.push_back(L"  書く予定だった値が記録に残っていません。本体で合わせてから、もう一度押してください");
+                    continue;
+                }
+                const auto why = difference.substr(second + 1);
+                std::wstring line = L"  " + D810WriteItemNameLabel(difference.substr(0, first)) + L": " + D810WidenAscii(difference.substr(first + 1, second - first - 1));
+                line += why == "unreadable" ? L" は読めません" : why == "content_dependent" ? L" の値は、本体の別の中身に頼るため確かめられません" : L" は、書いた値になっていません";
+                lines.push_back(std::move(line));
+            }
+            finish(L"読み直しました: 書いた値と違う項目があります。", std::move(lines));
             return;
         }
         std::vector<std::wstring> lines{L"違う項目（または読めない項目）:"};
@@ -830,5 +1061,9 @@ private:
     std::uint64_t generation_{}, panel_serial_{}, draft_serial_{};
     // The source of the plan the last confirmation ran.
     D810PlanSource run_source_{D810PlanSource::CopyAToB};
+    // The picks the plan in the making is built from (a copy of the draft taken when "N 件を書き込む…" was pressed).
+    std::vector<D810CameraChoice> choices_;
+    // The record held a plan of picked values when the reread was asked: the reread is told in terms of the values written.
+    bool reread_chosen_{};
 };
 } // namespace a0::phase0::experimental

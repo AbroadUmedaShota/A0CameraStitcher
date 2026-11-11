@@ -185,7 +185,7 @@ void InstallSettingsWriteHost(std::unique_ptr<SettingsWriteHost> host,D810Settin
     Log("settings_write_screen=1 enabled_rows="+std::to_string(status.enabled_rows)+" capture_block="+D810CaptureBlockToken(status.block)+
         " capture_allowed="+std::to_string(status.capture_allowed)+" setting_writes=0");
     // A block left by an earlier run (not confirmed, mismatch, unknown) holds capture from the start.
-    if(!status.capture_allowed)capture_status=D810CaptureBlockText(status.block);
+    if(!status.capture_allowed)capture_status=D810CaptureBlockText(status.block,status.chosen_history);
     settings_write=std::move(host);
 }
 void InitSettingsWrite(std::unique_ptr<D810SettingsJournal> journal,D810SettingsWriteScreen::AccessFactory access){
@@ -406,7 +406,7 @@ bool HandleSettingsWriteCommand(int id,WORD code,HWND control){
                 (screen.StatusLine().empty()?screen.OfferText(ready):screen.StatusLine());
             return true;
         }
-        if(screen.ConfirmShownPlan(ready))capture_status=L"CAM-B に書いています（項目ごとに1回だけ）…";
+        if(screen.ConfirmShownPlan(ready))capture_status=screen.RunIsChosen()?screen.OfferText(ready):L"CAM-B に書いています（項目ごとに1回だけ）…";
         else capture_status=screen.StatusLine().empty()?screen.OfferText(ready):screen.StatusLine();
         return true;
     }
@@ -422,6 +422,13 @@ bool HandleSettingsWriteCommand(int id,WORD code,HWND control){
     }
     if(id==kPanelCloseButtonId && control==settings_panel_close_button){
         if(screen.PanelCloseOffered()){screen.ClosePanel();capture_status=screen.StatusLine();}
+        return true;
+    }
+    // "N 件を書き込む…": reads both cameras again and puts up the confirmation of the picks. It sends nothing itself; the
+    // confirm button (above) is the only way on.
+    if(id==kPanelWriteButtonId && control==settings_panel_write_button){
+        if(screen.RequestChosen(ready)){review_visible=false;capture_status=screen.OfferText(ready);}
+        else capture_status=screen.ChosenOfferText(ready);
         return true;
     }
     if(id==kPanelCancelButtonId && control==settings_panel_cancel_button){
@@ -461,8 +468,8 @@ void SettingsWriteTimer(){
         ShowSettingsWriteButton(settings_panel_open_button,shown && !panel,screen.PanelOpenOffered(ready));
         ShowSettingsWriteButton(settings_panel_close_button,panel_shown && !confirming,screen.PanelCloseOffered());
         ShowSettingsWriteButton(settings_panel_cancel_button,panel_shown && !confirming,screen.PanelEditable() && screen.PanelEntryCount()>0);
-        // The confirmation that "N 件を書き込む…" opens is not built yet in this part: the button is shown and not offered.
-        ShowSettingsWriteButton(settings_panel_write_button,panel_shown && !confirming,false);
+        // "N 件を書き込む…" is offered by the screen: a change is planned and nothing else holds the cameras.
+        ShowSettingsWriteButton(settings_panel_write_button,panel_shown && !confirming,screen.ChosenOffered(ready));
         if(panel_shown){
             if(screen.PanelSerial()!=settings_panel_built_serial){RebuildSettingsPanelCombos();settings_panel_built_serial=screen.PanelSerial();SyncSettingsPanelSelection(true);settings_panel_synced_serial=screen.DraftSerial();}
             else if(screen.DraftSerial()!=settings_panel_synced_serial){SyncSettingsPanelSelection(false);settings_panel_synced_serial=screen.DraftSerial();}
@@ -1110,6 +1117,47 @@ std::wstring SmokeComboText(HWND combo,int index){
     SendMessageW(combo,CB_GETLBTEXT,static_cast<WPARAM>(index),reinterpret_cast<LPARAM>(text.data()));
     text.resize(static_cast<std::size_t>(length));return text;
 }
+// The widest line, measured as the window measures it (DT_CALCRECT, one line, the default font), that a confirmation of picks or
+// its result can show beyond its fixed lines: the line of an item with the widest values it can name on both cameras and the
+// note about a value that cannot be set again, and the line of a result with the widest read-back. `which` receives its text.
+int WidestPossibleChosenLine(HDC dc,std::wstring& which){
+    int widest=0;
+    const auto width_of=[&](const std::wstring& text){RECT r{0,0,0,0};DrawTextW(dc,text.c_str(),-1,&r,DT_CALCRECT|DT_LEFT|DT_SINGLELINE|DT_NOPREFIX);return static_cast<int>(r.right);};
+    const auto note=[&](const std::wstring& text){const int w=width_of(text);if(w>widest){widest=w;which=text;}};
+    // The widest of a set of texts: only the ones with the most characters are measured (two characters fewer is never wider here).
+    const auto widest_text=[&](const std::vector<std::wstring>& texts){
+        std::size_t longest=0;
+        for(const auto& text:texts)longest=std::max(longest,text.size());
+        std::wstring best;int best_width=-1;
+        for(const auto& text:texts){
+            if(text.size()+2<longest)continue;
+            const int w=width_of(text);if(w>best_width){best_width=w;best=text;}
+        }
+        return best;
+    };
+    for(const auto choice:kD810ChoiceItems){
+        const auto item=D810ChoiceWriteItem(choice);const auto& spec=D810WriteItemOf(item);
+        const std::int64_t top=spec.type==D810ValueType::Uint8?0xff:0xffff;
+        std::vector<std::wstring> can_set,as_read,as_read_back;
+        std::vector<std::int64_t> domain;
+        for(std::int64_t v=0;v<=top;++v)domain.push_back(v);
+        if(spec.type==D810ValueType::Uint32){domain.push_back(0xfffffffdLL);domain.push_back(0xffffffffLL);}
+        for(const auto v:domain){
+            if(D810ChoiceNamed(choice,v) && D810ChoiceBand(choice,v))can_set.push_back(D810ChoiceValueText(item,spec.codes[0],v));
+            as_read.push_back(D810WriteValueText(spec.codes[0],v));
+            as_read_back.push_back(D810ChoiceValueText(item,spec.codes[0],v));
+        }
+        const auto set=widest_text(can_set);
+        const auto read=widest_text(as_read);
+        const auto back=widest_text(as_read_back);
+        const std::wstring label=std::wstring(D810WriteItemLabel(item));
+        // Both values can be set again: no note. A value that cannot be set again is shown as the camera reports it, with the note.
+        note(L"  "+label+L": CAM-B "+set+L" → "+set+L" ／ CAM-A "+set+L" → "+set);
+        note(L"  "+label+L": CAM-B "+read+L" → "+set+L" ／ CAM-A "+read+L" → "+set+L"（元の値は本体でしか戻せません）");
+        note(L"  "+label+L": CAM-B 不一致（読み戻し "+back+L"） ／ CAM-A 不一致（読み戻し "+back+L"）");
+    }
+    return widest;
+}
 int RunSettingsWriteChosenSmoke(){
     Log("settings_write_chosen_smoke=1 camera_operations=0 test_table=1");
     unsigned checks{},failures{};const auto check=[&](bool ok,int line=__builtin_LINE()){++checks;if(!ok){++failures;Log("settings_write_chosen_failed_check="+std::to_string(checks)+" source_line="+std::to_string(line));}};
@@ -1280,6 +1328,150 @@ int RunSettingsWriteChosenSmoke(){
     click(kPanelCloseButtonId,settings_panel_close_button);tick();
     check(!SettingsPanelOpen() && capture_status.find(L"書いていない変更 1 件を捨てて")!=std::wstring::npos && screen->PanelDirty()==0);
     check(opens->load()<=2); // the panel was put up with a read made without a camera: nothing was opened for any pick
+
+    // 3. "N 件を書き込む…" and the confirmation of the picks: the window's own code draws it, and the confirm button keeps the
+    //    rule of the copy (drawn whole, every line in the window, the button inside it).
+    const auto paint=[&]{SendMessageW(window,WM_PAINT,0,0);};
+    const auto wait_idle=[&]{for(int i=0;i<400;++i){tick();if(!SettingsWriteBusy())return true;std::this_thread::sleep_for(std::chrono::milliseconds(5));}return false;};
+    const auto choose_value=[&](int camera,int item,std::int64_t value){
+        HWND combo=combo_ok(camera,item);const auto& values=settings_panel_values[camera][item];
+        for(std::size_t k=0;k<values.size();++k)if(values[k]==value){
+            SendMessageW(combo,CB_SETCURSEL,static_cast<WPARAM>(k),0);
+            SendMessageW(window,WM_COMMAND,MAKEWPARAM(kPanelComboBaseId+camera*static_cast<int>(kD810ChoiceItemCount)+item,CBN_SELCHANGE),reinterpret_cast<LPARAM>(combo));
+            return true;
+        }
+        return false;
+    };
+    constexpr int kAperture=static_cast<int>(D810ChoiceItem::Aperture),kMetering=static_cast<int>(D810ChoiceItem::Metering);
+    const auto confirm_enabled=[&]{return shown(settings_confirm_button) && IsWindowEnabled(settings_confirm_button)!=FALSE;};
+    settings_write.reset();std::filesystem::remove_all(folder,ignored);capture_status.clear();
+    InitSettingsWriteWithTable(SmokeChosenTable(),std::make_unique<D810SettingsFileJournal>(folder),factory);
+    screen=settings_write->screen.get();
+    screen->TakePanelReadForTest(read_of(true,true));
+    check(resize(kD810WriteMinClientWidth,kD810WriteMinClientHeight));
+    tick();
+    check(!enabled(settings_panel_write_button) && screen->ChosenOfferText(true).find(L"変更予定がありません")!=std::wstring::npos);
+    {   // Ten changes: every item on both cameras.
+
+
+        bool all=true;
+        all=choose_value(1,kIso,400) && all;all=choose_value(1,kShutter,1000) && all;all=choose_value(1,kAperture,800) && all;
+        all=choose_value(1,kWb,4) && all;all=choose_value(1,kMetering,3) && all;
+        all=choose_value(0,kIso,100) && all;all=choose_value(0,kShutter,500) && all;all=choose_value(0,kAperture,560) && all;
+        all=choose_value(0,kWb,5) && all;all=choose_value(0,kMetering,2) && all;
+        check(all && screen->PanelDirty()==10);
+    }
+    tick();
+    GetWindowTextW(settings_panel_write_button,text,64);
+    check(std::wstring(text)==L"10 件を書き込む…" && enabled(settings_panel_write_button) && enabled(settings_panel_cancel_button));
+    // Pressed with no camera behind it: the read cannot complete, nothing is planned, and the picks stay.
+    {
+        const int opens_then=opens->load();
+        click(kPanelWriteButtonId,settings_panel_write_button);
+        check(wait_idle());
+        check(opens->load()==opens_then+1 && screen->Step()==D810WriteScreenStep::Idle && !screen->ConfirmationShown() && screen->PanelDirty()==10 && screen->PanelOpen() &&
+            screen->View() && screen->View()->title.find(L"書く前の読み取りを最後まで終えられませんでした")!=std::wstring::npos && !screen->Status().plan_pending);
+        tick();
+        check(shown(settings_panel_write_button) && !shown(settings_confirm_button));
+    }
+    // The plan from a read that differs from the panel's in one value (CAM-B's ISO): twelve lines, the longest a confirmation has.
+    {
+        D810PlanRead read=read_of(true,true);
+        read.snapshots[1]=SmokeBody(500,560,64,2,2);
+        screen->TakeChosenReadForTest(read);
+        const auto* view=screen->View();
+        check(screen->ConfirmationShown() && view && view->confirmation && view->lines.size()==12 && view->lines.size()<=D810WriteViewMaxLines() && D810WriteViewFits(*view,kD810WriteMinClientHeight));
+        check(screen->Status().plan_pending && !screen->Status().plan_confirmed && screen->PanelOpen());
+        tick();
+        // Shown, not drawn: the button is not pressable and the handler refuses.
+        check(shown(settings_confirm_button) && !confirm_enabled() && !shown(settings_panel_write_button) && !shown(settings_panel_close_button) && !shown(settings_panel_cancel_button) && !shown(settings_panel_open_button));
+        {
+            bool combos_off=true;
+            for(int camera=0;camera<2;++camera)for(int item=0;item<static_cast<int>(kD810ChoiceItemCount);++item)combos_off=combos_off && shown(combo_ok(camera,item)) && !enabled(combo_ok(camera,item));
+            check(combos_off && !CanRestartPreview());
+        }
+        const auto refusals=settings_write_confirm_refusals;
+        const int opens_then=opens->load();
+        click(407,settings_confirm_button);
+        check(settings_write_confirm_refusals==refusals+1 && opens->load()==opens_then && screen->Step()==D810WriteScreenStep::Confirming && !screen->Status().plan_confirmed);
+        // Drawn whole by a present of the window: pressable. The window one row too short: not.
+        paint();tick();
+        check(settings_write_drawn_serial==screen->ViewSerial() && confirm_enabled());
+        check(resize(kD810WriteMinClientWidth,kD810WriteMinClientHeight-1));tick();
+        check(!confirm_enabled());
+        paint();
+        check(settings_write_drawn_serial==0);
+        check(resize(kD810WriteMinClientWidth,kD810WriteMinClientHeight));paint();tick();
+        check(settings_write_drawn_serial==screen->ViewSerial() && confirm_enabled());
+        // The lines are not cut at the smallest width.
+        {
+            HDC dc=CreateCompatibleDC(nullptr);int widest=0;
+            if(dc){
+                const auto width_of=[&](const std::wstring& value){RECT r{0,0,0,0};DrawTextW(dc,value.c_str(),-1,&r,DT_CALCRECT|DT_LEFT|DT_SINGLELINE|DT_NOPREFIX);return static_cast<int>(r.right);};
+                widest=width_of(view->title);for(const auto& line:view->lines)widest=std::max(widest,width_of(line));
+                DeleteDC(dc);
+            }
+            check(widest>0 && widest<=kD810WriteMinClientWidth-24);
+        }
+        // Drawn: the confirmation under the panel, which stays in the upper part.
+        {
+            SettingsWriteSmokeFrame frame(kD810WriteMinClientWidth,kD810WriteMinClientHeight);
+            check(frame.Lit(SettingsPanelRowY(1),SettingsPanelRowY(8))>400 && frame.Lit(kD810WriteMinClientHeight/2+88,kD810WriteMinClientHeight/2+130)>50);
+        }
+        // "やめる": back to the panel with the picks; a plan is made again from the picks.
+        click(408,settings_discard_button);tick();
+        check(screen->Step()==D810WriteScreenStep::Idle && screen->PanelDirty()==10 && screen->PanelEditable() && !shown(settings_confirm_button) && enabled(settings_panel_write_button));
+        screen->TakeChosenReadForTest(read);
+        paint();tick();
+        check(screen->ConfirmationShown() && confirm_enabled());
+        // Confirmed: the run (with no camera it sends nothing), then the panel is old and the picks are used up.
+        const auto refusals_now=settings_write_confirm_refusals;
+        click(407,settings_confirm_button);
+        check(wait_idle() && settings_write_confirm_refusals==refusals_now && screen->Step()==D810WriteScreenStep::Idle && screen->PanelStale() && screen->PanelDirty()==0 && screen->View() && !screen->View()->confirmation);
+        check(screen->View() && screen->View()->title.find(L"何も書いていません")!=std::wstring::npos);
+        click(407,settings_confirm_button); // the plan was used
+        check(!SettingsWriteBusy() && screen->Step()==D810WriteScreenStep::Idle);
+        tick();
+        check(shown(settings_panel_close_button) && enabled(settings_panel_close_button) && !enabled(settings_panel_write_button));
+        {
+            bool combos_off=true;
+            for(int camera=0;camera<2;++camera)for(int item=0;item<static_cast<int>(kD810ChoiceItemCount);++item)combos_off=combos_off && !enabled(combo_ok(camera,item));
+            check(combos_off);
+        }
+    }
+    // The result of a run that wrote all ten and read them back: seven lines, in the window, drawn.
+    {
+        D810WriteRun run;
+        run.verdict=D810WriteVerdict::Match;run.sent=10;
+        for(const auto camera:{D810Camera::B,D810Camera::A})
+            for(const auto item:kD810ChoiceItems){
+                const auto write_item=D810ChoiceWriteItem(item);
+                D810StepOutcome outcome;
+                outcome.step={camera,write_item,D810WriteItemOf(write_item).codes[0],100,200};
+                outcome.sent=true;outcome.readback=200;outcome.verdict=D810WriteVerdict::Match;
+                run.steps.push_back(outcome);
+            }
+        screen->TakeRunForTest(run,D810PlanSource::Chosen);
+        const auto* view=screen->View();
+        check(view && !view->confirmation && view->lines.size()==7 && view->lines.size()<=D810WriteViewMaxLines() && D810WriteViewFits(*view,kD810WriteMinClientHeight));
+        check(view && view->title.find(L"選んだ値を書きました: 一致（10 項目")!=std::wstring::npos);
+        paint();tick();
+        SettingsWriteSmokeFrame frame(kD810WriteMinClientWidth,kD810WriteMinClientHeight);
+        check(frame.Lit(kD810WriteMinClientHeight/2+88,kD810WriteMinClientHeight/2+130)>50 && !confirm_enabled());
+    }
+    // The widest line that a confirmation of picks or its result can have fits the smallest window.
+    {
+        HDC dc=CreateCompatibleDC(nullptr);
+        std::wstring which;int widest=0;
+        if(dc){widest=WidestPossibleChosenLine(dc,which);DeleteDC(dc);}
+        std::string which_utf8;
+        if(!which.empty()){
+            const int bytes=WideCharToMultiByte(CP_UTF8,0,which.c_str(),static_cast<int>(which.size()),nullptr,0,nullptr,nullptr);
+            if(bytes>0){which_utf8.assign(static_cast<std::size_t>(bytes),'\0');WideCharToMultiByte(CP_UTF8,0,which.c_str(),static_cast<int>(which.size()),which_utf8.data(),bytes,nullptr,nullptr);}
+        }
+        Log("settings_write_chosen_widest_possible_line_px="+std::to_string(widest)+" window_line_px="+std::to_string(kD810WriteMinClientWidth-24)+" widest_chars="+std::to_string(which.size())+" widest_text="+which_utf8);
+        check(widest>0 && widest<=kD810WriteMinClientWidth-24);
+    }
 
     FinishSettingsWrite();
     if(IsWindow(window))DestroyWindow(window);
