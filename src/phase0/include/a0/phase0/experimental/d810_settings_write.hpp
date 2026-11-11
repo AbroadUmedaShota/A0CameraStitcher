@@ -925,7 +925,8 @@ struct D810JournalState {
     // operation that sent nothing (end verdict not_sent) are not in it: nothing was written for them.
     std::vector<D810ExpectedValue> expected;
     // Part of that history cannot be trusted: a line of it cannot be read, or an operation that may have sent holds
-    // other step lines than its plan line announced (a step line missing, repeated or out of order). The planned
+    // other step lines than its plan line announced (a step line missing, repeated, out of order, or an item twice, or
+    // CAM-A before CAM-B: a plan holds neither). The planned
     // values then miss steps that may have been sent, so a release does not rest on them: it compares the two
     // cameras (the rule of a history of copies), as for a history that gave no planned value.
     bool history_damaged{};
@@ -942,14 +943,15 @@ struct D810JournalState {
 //
 // history_damaged is set by a line that cannot be read, anywhere from the last start of the history (a start
 // clears it, as it clears the rest of the history), and by an operation that may have sent (any end other than
-// `not_sent sent=0`, or none) whose step lines are not the steps= of its plan line, numbered i=0, 1, 2 ... in order.
+// `not_sent sent=0`, or none) whose step lines are not the steps= of its plan line, numbered i=0, 1, 2 ... in order, or
+// hold the same (camera, item) twice, or a CAM-A step before a CAM-B one (a plan holds neither).
 inline D810JournalState ParseD810Journal(std::string_view text) {
     D810JournalState state;
     std::optional<std::string> open_op;
     bool open_chosen = false;
     std::vector<D810ExpectedValue> op_steps;
     std::optional<std::size_t> op_declared; // steps= of the open operation's plan line
-    bool op_in_order = true;                // its step lines came as i=0, 1, 2 ...
+    bool op_in_order = true;                // its step lines came as i=0, 1, 2 ..., CAM-B before CAM-A, no (camera, item) twice
     const auto hold = [&](D810CaptureBlock block) { state.block = StrongerD810Block(state.block, block); };
     // The open operation's planned values join the history (it may have sent), or are dropped when it sent nothing.
     const auto commit = [&] {
@@ -1017,6 +1019,12 @@ inline D810JournalState ParseD810Journal(std::string_view text) {
                 if (!step) { malformed(); continue; }
                 const auto index = ParseD810Decimal(*D810FieldValue(fields[3], "i"), 1000);
                 if (!index || *index != op_steps.size()) op_in_order = false;
+                // A plan has each (camera, item) once and every CAM-B step before every CAM-A step; a record that says
+                // otherwise was changed after it was written, and what it hides (a CAM-B step) may have been sent.
+                for (const auto& seen : op_steps) {
+                    if (seen.camera == step->camera && seen.item == step->item) op_in_order = false;
+                    if (seen.camera == D810Camera::A && step->camera == D810Camera::B) op_in_order = false;
+                }
                 op_steps.push_back(*step);
             }
         } else if (*event == "end") {
