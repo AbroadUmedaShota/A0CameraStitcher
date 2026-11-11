@@ -928,6 +928,8 @@ public:
         D810SettingsWriteController(AnyTable{}, table, journal, owner) {}
 #endif
 
+    // The table this controller decides every row by (the screen builds its panel from it).
+    const D810WriteTable& Table() const { return table_; }
     // The record on disk is the authority; the in-memory block only adds to it.
     D810CaptureBlock Block() const { return StrongerD810Block(D810JournalBlock(journal_.Read()), memory_block_); }
     bool CaptureAllowed() const { return Block() == D810CaptureBlock::None; }

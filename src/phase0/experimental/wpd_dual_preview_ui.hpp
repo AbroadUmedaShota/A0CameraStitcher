@@ -106,11 +106,12 @@ void LogPreviewChoice(const FixedPreviewChoice& choice){
 }
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
 bool SettingsWriteBusy(); // #416 stage B (wpd_settings_write_ui.hpp)
+bool SettingsPanelOpen(); // the settings panel is in the place of the Live area (#416 stage 3)
 #endif
 bool CanFocus(Camera& camera){
     std::lock_guard lock(camera.mutex);
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
-    if(SettingsWriteBusy())return false; // a settings write or reread holds the cameras: no AF, no capture
+    if(SettingsWriteBusy() || SettingsPanelOpen())return false; // a settings write or reread holds the cameras, and the panel takes the place of the Live area: no AF, no capture
 #endif
     return !stopping && !closing && !capture_pending && !capture_future.valid() && !settings_future.valid() && !camera.done && !camera.failed && camera.frames>=20 &&
         Clock::now()-camera.last<std::chrono::seconds(2) && camera.focus_mailbox.Available();
@@ -127,10 +128,13 @@ bool LiveStoppedAndClosed(){
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
 bool SettingsWriteBusy(); // #416 stage B (wpd_settings_write_ui.hpp): a settings write or reread also holds the cameras
 bool SettingsReadBusy(){return settings_future.valid() || SettingsWriteBusy();}
+// The settings panel stands where the Live area was: Live is not restarted by hand while it is open (closing it is the way out).
+bool PanelHoldsLive(){return SettingsPanelOpen();}
 #else
 bool SettingsReadBusy(){return settings_future.valid();}
+bool PanelHoldsLive(){return false;}
 #endif
-bool CanRestartPreview(){return !SettingsReadBusy() && !settings_close_failed && LiveStoppedAndClosed();}
+bool CanRestartPreview(){return !SettingsReadBusy() && !settings_close_failed && !PanelHoldsLive() && LiveStoppedAndClosed();}
 // Re-checked inside the handler, not only through the button state.
 bool CanReadSettings(){return !SettingsReadBusy() && !settings_close_failed && LiveStoppedAndClosed() && settings_backend;}
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
@@ -500,7 +504,7 @@ void ApplySettingsOutcome(const SettingsReadOutcome& outcome){
 }
 void RequestSettingsRead(){
     // The button state is not trusted: every condition is checked again here.
-    if(!CanReadSettings()){Log("ui_settings_read_refused=1 setting_writes=0");return;}
+    if(!CanReadSettings() || PanelHoldsLive()){Log("ui_settings_read_refused=1 setting_writes=0");return;}
     review_visible=false;DiscardSettingsView();
     auto stop=std::make_shared<std::atomic<bool>>(false);settings_stop=stop;
     const auto deadline=Clock::now()+std::chrono::seconds(30);
@@ -523,15 +527,23 @@ std::array<std::uint64_t,6> Paint(HDC dc,RECT client){
 #endif
     FillRect(dc,&client,static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(240,240,240));
     if(client.right<200 || client.bottom<240)return drawn;
+#if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
+    const bool panel_over_live=preview_joined && SettingsPanelOpen();
+#else
+    const bool panel_over_live=false;
+#endif
     for(int i=0;i<2;++i){auto& c=*cameras[i];std::lock_guard lock(c.mutex);
         const int pane=client.right/2,left=i*pane+12,top=174;
         std::wstring title=i==0?L"CAM-A（左）":L"CAM-B（右）";title+=L"   frames: "+std::to_wstring(c.frames);
         if(c.failed)title+=L"   FAILED";else if(stopping)title+=L"   STOPPED / STOPPING";else if(c.frames)title+=L"   LIVE";else title+=L"   STARTING";
         TextOutW(dc,left,16,title.c_str(),static_cast<int>(title.size()));TextOutW(dc,left,82,c.focus_status.c_str(),static_cast<int>(c.focus_status.size()));
-        if(DrawLevel(dc,left,pane-24,c))drawn[4+i]=c.frames;
-        if(!c.pixels.bytes.empty() && Clock::now()-c.last<std::chrono::seconds(2) && !stopping &&
+        if(!panel_over_live && DrawLevel(dc,left,pane-24,c))drawn[4+i]=c.frames;
+        if(!panel_over_live && !c.pixels.bytes.empty() && Clock::now()-c.last<std::chrono::seconds(2) && !stopping &&
             DrawPixels(dc,c.pixels,left,top,pane-24,client.bottom/2-top-8))drawn[i]=c.frames;
     }
+#if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
+    if(panel_over_live)DrawSettingsPanel(dc,client); // the settings panel takes the place of both Live areas
+#endif
     RECT status_rect{12,client.bottom/2+4,client.right-12,client.bottom/2+48};
     DrawTextW(dc,capture_status.c_str(),-1,&status_rect,DT_LEFT|DT_WORDBREAK|DT_NOPREFIX);
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
@@ -848,7 +860,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM w,LPARAM l){
         if(pair_button)EnableWindow(pair_button,CanFocus(*cameras[0]) && CanFocus(*cameras[1]));
         if(review_button){EnableWindow(review_button,!review_pixels.bytes.empty());SetWindowTextW(review_button,review_visible?L"ライブCに戻す":L"撮影結果を見る");}
         if(inspect_button)EnableWindow(inspect_button,!review_path.empty());
-        if(settings_button)EnableWindow(settings_button,CanReadSettings());
+        if(settings_button)EnableWindow(settings_button,CanReadSettings() && !PanelHoldsLive());
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
         SettingsWriteTimer();
 #endif

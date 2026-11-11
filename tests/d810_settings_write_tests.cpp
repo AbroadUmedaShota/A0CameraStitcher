@@ -3629,6 +3629,173 @@ void ScreenProductRows() {
         check(s.Confirm() && s.bench.Writes() == 4 && s.bench.b.begins_by_code.count(0x5005) == 0, "product screen, Preset: written without the white balance");
     }
 }
+// --- The settings panel (the screen's panel model, the drop-down picks and the draft) --------------------------------
+bool OpenPanel(ScreenBench& s) { return s.screen->RequestPanelOpen(true) && s.WaitIdle() && s.screen->PanelOpen(); }
+bool PanelAllLocked(const D810SettingsWriteScreen& screen, const char* reason) {
+    const auto* model = screen.Panel();
+    if (!model) return false;
+    for (const auto camera : {D810Camera::A, D810Camera::B})
+        for (const auto item : kD810ChoiceItems) {
+            const auto& cell = model->At(camera, item);
+            if (cell.Editable() || !cell.locked_reason || std::string(cell.locked_reason) != reason) return false;
+        }
+    return true;
+}
+bool PanelAllEditable(const D810SettingsWriteScreen& screen) {
+    const auto* model = screen.Panel();
+    if (!model) return false;
+    for (const auto camera : {D810Camera::A, D810Camera::B})
+        for (const auto item : kD810ChoiceItems)
+            if (!model->At(camera, item).Editable()) return false;
+    return true;
+}
+void ScreenPanelProductTable() {
+    // The product table: the panel opens and shows both cameras, and no cell can be picked.
+    ScreenBench s(kProduct);
+    PrepareProductBench(s.bench);
+    auto& screen = *s.screen;
+    check(screen.PanelOpenOffered(true) && !screen.PanelOpenOffered(false) && !screen.PanelOpen() && !screen.Panel(), "panel, product: offered when ready, not open");
+    check(!screen.RequestPanelOpen(false) && s.bench.access.opens[0] + s.bench.access.opens[1] == 0, "panel, product: not ready, nothing read");
+    check(screen.RequestPanelOpen(true) && screen.Busy() && !screen.PanelEditable() && !screen.PanelOpenOffered(true), "panel, product: a read is running");
+    check(screen.OfferText(true).find(L"読んでいます") != std::wstring::npos, "panel, product: the offer says it reads");
+    check(s.WaitIdle() && screen.PanelOpen() && screen.Panel() && screen.Step() == D810WriteScreenStep::Idle && !screen.View(), "panel, product: open, no view");
+    check(s.bench.access.opens[0] == 1 && s.bench.access.opens[1] == 1 && !s.bench.access.overlap && s.bench.Writes() == 0, "panel, product: read only, one body at a time");
+    check(PanelAllLocked(screen, "chosen_values_disabled") && screen.PanelEditable(), "panel, product: every cell is locked by the table");
+    // Nothing can be picked, not even a value the cell offers.
+    std::size_t tried = 0;
+    for (const auto camera : {D810Camera::A, D810Camera::B})
+        for (const auto item : kD810ChoiceItems)
+            for (const auto& option : screen.Panel()->At(camera, item).options) {
+                ++tried;
+                check(!screen.PanelPick(camera, item, option.value), "panel, product: a pick is refused");
+            }
+    for (const auto item : kD810ChoiceItems) check(!screen.PanelPickSameAsA(item) && !screen.PanelSameAsAOffered(item), "panel, product: same-as-A is refused");
+    check(tried > 20 && screen.PanelEntryCount() == 0 && screen.PanelDirty() == 0 && screen.PanelPlanned().empty(), "panel, product: no pick, no change");
+    const auto rows = screen.PanelRows();
+    check(rows.size() == 7 && !rows[0].choosable && !rows[1].choosable && rows[0].label == L"露出モード" && rows[1].label == L"ISO感度自動制御", "panel, product: two read-only rows and five to pick");
+    bool noted = true;
+    for (std::size_t i = 2; i < rows.size(); ++i) noted = noted && rows[i].choosable && rows[i].note[0] == L"この版では選べません" && rows[i].note[1] == L"この版では選べません";
+    check(noted, "panel, product: each cell says why it cannot be picked");
+    check(screen.PanelSummaryText().find(L"値を選んで書くことはできません") != std::wstring::npos, "panel, product: the line under the panel says it is read only");
+    check(screen.PanelCancelAll() == 0 && screen.PanelCloseOffered(), "panel, product: nothing to cancel, can close");
+    check(screen.ClosePanel() == 0 && !screen.PanelOpen() && !screen.Panel() && s.bench.Writes() == 0, "panel, product: closed, nothing written");
+}
+void ScreenPanelPicks() {
+    ScreenBench s(kChosenTable);
+    auto& screen = *s.screen;
+    check(OpenPanel(s), "panel: open");
+    const auto serial = screen.PanelSerial();
+    check(PanelAllEditable(screen) && screen.PanelEditable(), "panel: the cells can be picked");
+    const auto* model = screen.Panel();
+    const auto& iso_b = model->At(D810Camera::B, D810ChoiceItem::Iso);
+    check(iso_b.readable && iso_b.current == 100 && iso_b.Offers(200) && !iso_b.Offers(999) && model->At(D810Camera::A, D810ChoiceItem::Iso).current == 64, "panel: the model holds what each camera reads and offers");
+    // Rows: the two that are only read, then the five to pick, with the difference of the two cameras.
+    {
+        const auto rows = screen.PanelRows();
+        check(rows.size() == 7 && rows[0].value[0] == L"M" && rows[0].value[1] == L"M" && rows[0].difference == L"=" && rows[1].value[0] == L"OFF" && rows[1].difference == L"=", "panel: read-only rows");
+        check(rows[2].item == D810ChoiceItem::Iso && rows[2].difference == L"≠" && rows[5].item == D810ChoiceItem::WhiteBalance && rows[5].difference == L"=", "panel: the difference column");
+        check(rows[2].note[0].empty() && rows[2].note[1].empty(), "panel: no note without a pick or a lock");
+    }
+    // A pick changes the draft and nothing else.
+    check(screen.PanelPick(D810Camera::B, D810ChoiceItem::Iso, 200) && screen.PanelDirty() == 1 && screen.PanelEntryCount() == 1, "panel: a pick");
+    check(screen.PanelShownValue(D810Camera::B, D810ChoiceItem::Iso) == 200 && screen.PanelShownValue(D810Camera::A, D810ChoiceItem::Iso) == 64, "panel: the cell shows the pick");
+    check(screen.PanelSerial() == serial, "panel: a pick does not replace the model");
+    check(!screen.PanelPick(D810Camera::B, D810ChoiceItem::Iso, 999) && !screen.PanelPick(D810Camera::A, D810ChoiceItem::Aperture, 12345) && screen.PanelDirty() == 1, "panel: a value the cell does not offer is refused");
+    check(screen.PanelRows()[2].note[1] == L"＊変更予定" && screen.PanelRows()[2].note[0].empty(), "panel: the pick is marked");
+    check(screen.PanelSummaryText().find(L"変更予定 1 件（まだ何も書いていません）") != std::wstring::npos, "panel: the line under the panel counts the changes");
+    // Same as CAM-A: B follows A's pick.
+    check(screen.PanelSameAsAOffered(D810ChoiceItem::Iso) && screen.PanelPickSameAsA(D810ChoiceItem::Iso) && screen.PanelShownValue(D810Camera::B, D810ChoiceItem::Iso) == 64, "panel: B the same as A");
+    check(screen.PanelRows()[2].note[1] == L"＊変更予定（A と同じ）", "panel: the follow is marked");
+    check(screen.PanelPick(D810Camera::A, D810ChoiceItem::Iso, 200) && screen.PanelShownValue(D810Camera::B, D810ChoiceItem::Iso) == 200 && screen.PanelDirty() == 2, "panel: B follows A's pick");
+    {
+        const auto planned = screen.PanelPlanned();
+        check(planned.size() == 2 && planned[0].camera == D810Camera::B && planned[0].value == 200 && planned[0].current == 100 && planned[1].camera == D810Camera::A && planned[1].value == 200 && planned[1].current == 64,
+            "panel: the changes are CAM-B first, then CAM-A");
+    }
+    check(screen.PanelCancelAll() == 2 && screen.PanelDirty() == 0 && screen.PanelEntryCount() == 0 && screen.PanelShownValue(D810Camera::B, D810ChoiceItem::Iso) == 100, "panel: cancel drops every pick");
+    check(s.bench.Writes() == 0 && s.bench.access.opens[0] == 1 && s.bench.access.opens[1] == 1, "panel: picks and cancels sent nothing and opened nothing");
+}
+void ScreenPanelDiscards() {
+    {
+        // A reread with picks up: the count is said, the picks are gone, the model is the new read.
+        ScreenBench s(kChosenTable);
+        auto& screen = *s.screen;
+        check(OpenPanel(s) && screen.PanelPick(D810Camera::B, D810ChoiceItem::Iso, 200) && screen.PanelPick(D810Camera::A, D810ChoiceItem::Aperture, 560) && screen.PanelDirty() == 2, "discard: two changes");
+        const auto before = screen.Panel()->read_generation;
+        s.bench.b.props[0x500f].current = 400;
+        check(screen.RequestPanelReread(true) && screen.Busy() && !screen.PanelEditable(), "discard: the reread runs");
+        check(s.WaitIdle(), "discard: the reread ended");
+        check(Shows(screen.View(), L"書いていない変更 2 件を捨てました") && screen.PanelOpen() && screen.PanelDirty() == 0 && screen.PanelEntryCount() == 0, "discard: the count is said and the picks are gone");
+        check(screen.Panel()->read_generation != before && screen.Panel()->At(D810Camera::B, D810ChoiceItem::Iso).current == 400, "discard: the new model holds the new read");
+        // The panel was read once, the reread read each camera once, and the panel was read once more.
+        check(screen.PanelEditable() && s.bench.Writes() == 0 && s.bench.access.opens[0] == 3 && s.bench.access.opens[1] == 3 && !s.bench.access.overlap, "discard: read again, one body at a time, nothing written");
+        // A reread with no picks says nothing about them.
+        check(screen.RequestPanelReread(true) && s.WaitIdle() && !Shows(screen.View(), L"捨てました"), "discard: no picks, nothing said");
+    }
+    {
+        // Closing with picks up.
+        ScreenBench s(kChosenTable);
+        auto& screen = *s.screen;
+        check(OpenPanel(s) && screen.PanelPick(D810Camera::B, D810ChoiceItem::Metering, 2) && screen.PanelDirty() == 1, "close: one change");
+        check(screen.ClosePanel() == 1 && !screen.PanelOpen() && !screen.Panel() && screen.StatusLine().find(L"書いていない変更 1 件を捨てて") != std::wstring::npos, "close: the count is said");
+        check(screen.PanelDirty() == 0 && screen.PanelEntryCount() == 0 && !screen.PanelPick(D810Camera::B, D810ChoiceItem::Metering, 2), "close: nothing is left of the picks");
+        check(screen.ClosePanel() == 0 && s.bench.Writes() == 0, "close: twice does nothing");
+        // Opened again, the panel starts from a new read with no picks.
+        check(OpenPanel(s) && screen.PanelDirty() == 0 && screen.PanelEntryCount() == 0, "close: opened again with no picks");
+    }
+    {
+        // A Live restart or a new stage A read (ClearView) takes the panel with it.
+        ScreenBench s(kChosenTable);
+        check(OpenPanel(s) && s.screen->PanelPick(D810Camera::B, D810ChoiceItem::Iso, 200), "clear: picks up");
+        s.screen->ClearView();
+        check(!s.screen->PanelOpen() && !s.screen->Panel() && s.screen->PanelDirty() == 0, "clear: the panel is gone");
+    }
+}
+void ScreenPanelLocksAndFailures() {
+    {
+        // CAM-A not in M: its cells say so, and so does the read-only row; CAM-B can still be picked.
+        ScreenBench s(kChosenTable);
+        s.bench.a.props[0x500e].current = 3;
+        check(OpenPanel(s), "locks: open");
+        const auto rows = s.screen->PanelRows();
+        check(rows[0].value[0] == L"A" && rows[0].note[0] == L"本体を M に" && rows[0].note[1].empty(), "locks: the read-only row says A is not in M");
+        check(rows[2].note[0] == L"本体を M に" && rows[2].note[1].empty() && !s.screen->PanelPick(D810Camera::A, D810ChoiceItem::Iso, 200) && s.screen->PanelPick(D810Camera::B, D810ChoiceItem::Iso, 200), "locks: A cannot be picked, B can");
+    }
+    {
+        // CAM-A's firmware is not the one the table names: A's cells are locked, B's are not.
+        ScreenBench s(kChosenTable);
+        s.bench.access.firmware[0] = "9.99";
+        check(OpenPanel(s), "version: open");
+        const auto rows = s.screen->PanelRows();
+        check(rows[2].note[0] == L"本体が未確認です" && rows[2].note[1].empty() && s.screen->Panel()->At(D810Camera::B, D810ChoiceItem::Iso).Editable(), "version: only A is locked");
+    }
+    {
+        // CAM-B's firmware is not the one the table names: no read for a plan completes, so the panel does not open.
+        ScreenBench s(kChosenTable);
+        s.bench.access.firmware[1] = "9.99";
+        check(s.screen->RequestPanelOpen(true) && s.WaitIdle() && !s.screen->PanelOpen() && !s.screen->Panel(), "version: B not verified, no panel");
+        check(Shows(s.screen->View(), L"両台の設定を読めませんでした") && Shows(s.screen->View(), L"本体が未確認") && s.bench.Writes() == 0, "version: the reason is said");
+    }
+    {
+        // A camera that cannot be opened.
+        ScreenBench s(kChosenTable);
+        s.bench.access.open_fail[0] = true;
+        check(s.screen->RequestPanelOpen(true) && s.WaitIdle() && !s.screen->PanelOpen() && Shows(s.screen->View(), L"読めませんでした"), "open failure: no panel");
+    }
+    {
+        // A copy while the panel is open: the picks wait behind the confirmation, the run makes the panel old.
+        ScreenBench s(kChosenTable);
+        auto& screen = *s.screen;
+        check(OpenPanel(s) && screen.PanelPick(D810Camera::A, D810ChoiceItem::Aperture, 560), "copy: one pick");
+        check(s.Copy() && screen.ConfirmationShown(), "copy: the confirmation is up over the open panel");
+        check(!screen.PanelEditable() && !screen.PanelPick(D810Camera::B, D810ChoiceItem::Iso, 200) && !screen.PanelCloseOffered() && !screen.PanelOpenOffered(true), "copy: no pick, no close, no second panel meanwhile");
+        check(s.Confirm() && screen.PanelOpen() && screen.PanelStale() && !screen.PanelEditable() && screen.PanelDirty() == 0, "copy: the panel is old after the run");
+        check(Shows(screen.View(), L"書いていない変更 1 件は捨てました") && screen.PanelSummaryText().find(L"書き込みのあと") != std::wstring::npos, "copy: the dropped pick is said");
+        check(!screen.PanelPick(D810Camera::B, D810ChoiceItem::Iso, 200), "copy: an old panel takes no pick");
+        check(screen.RequestPanelReread(true) && s.WaitIdle() && !screen.PanelStale() && screen.PanelEditable() && screen.Panel()->At(D810Camera::B, D810ChoiceItem::Iso).current == 64,
+            "copy: a reread shows what was written");
+    }
+}
 void ScreenSkippedShown() {
     // A row the table does not enable is listed as left out, with the reason, before confirming.
     ScreenBench s(Adr38Only({D810WriteItem::ExposureMode, D810WriteItem::IsoAuto, D810WriteItem::ShutterSpeed, D810WriteItem::Aperture}));
@@ -3992,6 +4159,10 @@ int main() {
     run("ScreenRefusals", ScreenRefusals);
     run("ScreenBodyNotVerified", ScreenBodyNotVerified);
     run("ScreenProductRows", ScreenProductRows);
+    run("ScreenPanelProductTable", ScreenPanelProductTable);
+    run("ScreenPanelPicks", ScreenPanelPicks);
+    run("ScreenPanelDiscards", ScreenPanelDiscards);
+    run("ScreenPanelLocksAndFailures", ScreenPanelLocksAndFailures);
     run("ScreenSkippedShown", ScreenSkippedShown);
     run("ScreenBlockAndReread", ScreenBlockAndReread);
     run("ScreenPartialFailure", ScreenPartialFailure);

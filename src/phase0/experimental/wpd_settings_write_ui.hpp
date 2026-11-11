@@ -207,6 +207,106 @@ void InitProductSettingsWrite(){
     settings_write_required=true;
     InitSettingsWrite(OpenProductD810SettingsJournal(),[]{return std::make_unique<WpdSettingsWriteCameraAccess>(registered_ids);});
 }
+// --- The settings panel (#416, ADR-0041): controls, layout and drawing -------------------------------------------
+// The panel takes the place of both Live areas while it is open (the preview stops Live first). One row per item, one
+// drop-down per camera and item; the decisions (what can be picked, what a pick does) are in D810SettingsWriteScreen.
+// A pick changes the draft only: nothing in this part sends to a camera.
+constexpr int kPanelTitleY=104,kPanelHeaderY=132,kPanelRowHeight=30;
+constexpr int kPanelLabelX=12,kPanelLabelWidth=170,kPanelAX=190,kPanelComboWidth=210,kPanelANoteX=406,kPanelNoteWidth=190;
+constexpr int kPanelDiffX=600,kPanelDiffWidth=36,kPanelBX=640,kPanelBNoteX=856,kPanelSameX=1052,kPanelSameWidth=140;
+constexpr int kPanelComboBaseId=430,kPanelSameBaseId=420;
+constexpr int kPanelOpenButtonId=410,kPanelCloseButtonId=411,kPanelCancelButtonId=412,kPanelWriteButtonId=413;
+constexpr int kPanelFirstChoiceRow=3; // the heading, then the two read-only rows
+std::array<std::array<HWND,kD810ChoiceItemCount>,2> settings_panel_combos{};
+std::array<HWND,kD810ChoiceItemCount> settings_panel_same_buttons{};
+HWND settings_panel_open_button{},settings_panel_close_button{},settings_panel_cancel_button{},settings_panel_write_button{};
+// The value behind each entry of a drop-down; nullopt for an entry that only shows a value that cannot be picked.
+std::array<std::array<std::vector<std::optional<std::int64_t>>,kD810ChoiceItemCount>,2> settings_panel_values;
+std::uint64_t settings_panel_built_serial=~std::uint64_t{},settings_panel_synced_serial=~std::uint64_t{};
+unsigned settings_panel_picks{};
+bool SettingsPanelOpen(){return settings_write && settings_write->screen->PanelOpen();}
+int SettingsPanelRowY(int row){return kPanelHeaderY+row*kPanelRowHeight;}
+D810Camera SettingsPanelCamera(int camera){return camera==0?D810Camera::A:D810Camera::B;}
+// Fills the drop-downs from the panel's model (when it is replaced). The entries of a cell: the value it reads now
+// when that cannot be picked (it only stands there), then the values it offers.
+void RebuildSettingsPanelCombos(){
+    if(!settings_write)return;
+    const auto* model=settings_write->screen->Panel();
+    for(int camera=0;camera<2;++camera)for(std::size_t item=0;item<kD810ChoiceItemCount;++item){
+        HWND combo=settings_panel_combos[camera][item];auto& values=settings_panel_values[camera][item];values.clear();
+        if(!combo)continue;
+        SendMessageW(combo,CB_RESETCONTENT,0,0);
+        if(!model)continue;
+        const auto& cell=model->At(SettingsPanelCamera(camera),static_cast<D810ChoiceItem>(item));
+        const auto add=[&](const std::wstring& text,std::optional<std::int64_t> value){SendMessageW(combo,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(text.c_str()));values.push_back(value);};
+        if(!cell.readable){add(L"読めません",std::nullopt);continue;}
+        if(!cell.current_choosable)add(WidenUtf8(cell.current_text),std::nullopt);
+        for(const auto& option:cell.options)add(WidenUtf8(option.label),option.value);
+    }
+}
+// Shows the value of each cell (the pick, else the value read). A drop-down the operator has open is left alone
+// unless `force`.
+void SyncSettingsPanelSelection(bool force){
+    if(!settings_write)return;
+    const auto& screen=*settings_write->screen;
+    for(int camera=0;camera<2;++camera)for(std::size_t item=0;item<kD810ChoiceItemCount;++item){
+        HWND combo=settings_panel_combos[camera][item];
+        if(!combo || (!force && SendMessageW(combo,CB_GETDROPPEDSTATE,0,0)))continue;
+        const auto& values=settings_panel_values[camera][item];
+        const auto shown=screen.PanelShownValue(SettingsPanelCamera(camera),static_cast<D810ChoiceItem>(item));
+        int index=-1;
+        for(std::size_t k=0;k<values.size() && shown;++k)if(values[k]==shown){index=static_cast<int>(k);break;}
+        if(index<0 && !values.empty() && !values[0])index=0;
+        if(static_cast<int>(SendMessageW(combo,CB_GETCURSEL,0,0))!=index)SendMessageW(combo,CB_SETCURSEL,static_cast<WPARAM>(index),0);
+    }
+}
+std::wstring SettingsPanelWriteButtonText(){
+    const auto dirty=settings_write?settings_write->screen->PanelDirty():0;
+    return std::to_wstring(dirty)+L" 件を書き込む…";
+}
+void LayoutSettingsPanel(const RECT& rect){
+    for(int camera=0;camera<2;++camera)for(int item=0;item<static_cast<int>(kD810ChoiceItemCount);++item)
+        if(settings_panel_combos[camera][item])MoveWindow(settings_panel_combos[camera][item],camera==0?kPanelAX:kPanelBX,SettingsPanelRowY(kPanelFirstChoiceRow+item),kPanelComboWidth,240,TRUE);
+    for(int item=0;item<static_cast<int>(kD810ChoiceItemCount);++item)
+        if(settings_panel_same_buttons[item])MoveWindow(settings_panel_same_buttons[item],kPanelSameX,SettingsPanelRowY(kPanelFirstChoiceRow+item),kPanelSameWidth,kPanelRowHeight-4,TRUE);
+    const int y=std::max(0L,rect.bottom-kD810ButtonRowGap);
+    if(settings_panel_open_button)MoveWindow(settings_panel_open_button,432,y,170,28,TRUE);
+    if(settings_panel_close_button)MoveWindow(settings_panel_close_button,432,y,170,28,TRUE);
+    if(settings_panel_cancel_button)MoveWindow(settings_panel_cancel_button,612,y,150,28,TRUE);
+    if(settings_panel_write_button)MoveWindow(settings_panel_write_button,772,y,220,28,TRUE);
+}
+// The words and the grid of the panel (the drop-downs and buttons are windows of their own).
+void DrawSettingsPanel(HDC dc,const RECT& client){
+    if(!settings_write)return;
+    const auto& screen=*settings_write->screen;
+    if(!screen.PanelOpen())return;
+    const auto text=[&](int x,int y,int width,const std::wstring& value){
+        RECT area{x,y,x+width,y+22};DrawTextW(dc,value.c_str(),-1,&area,DT_LEFT|DT_SINGLELINE|DT_NOPREFIX|DT_END_ELLIPSIS);
+    };
+    const COLORREF body=RGB(240,240,240),amber=RGB(255,200,90),quiet=RGB(168,168,168);
+    SetTextColor(dc,body);
+    text(kPanelLabelX,kPanelTitleY,client.right-24,L"カメラの設定（ライブは止めています。値を選んだだけでは、カメラには何も送りません）");
+    const int header=SettingsPanelRowY(0);
+    text(kPanelLabelX,header,kPanelLabelWidth,L"項目");text(kPanelAX,header,kPanelComboWidth,L"CAM-A（左・基準）");text(kPanelDiffX,header,kPanelDiffWidth,L"差");
+    text(kPanelBX,header,kPanelComboWidth,L"CAM-B（右）");text(kPanelSameX,header,kPanelSameWidth,L"B を A に揃える");
+    const auto rows=screen.PanelRows();
+    int row=1;
+    for(const auto& view:rows){
+        const int y=SettingsPanelRowY(row++);
+        SetTextColor(dc,body);
+        text(kPanelLabelX,y+4,kPanelLabelWidth,view.label);
+        if(!view.choosable){
+            SetTextColor(dc,quiet);
+            text(kPanelAX+4,y+4,kPanelComboWidth,view.value[0]+L"（読むだけ）");text(kPanelBX+4,y+4,kPanelComboWidth,view.value[1]+L"（読むだけ）");
+        }
+        SetTextColor(dc,view.difference==L"≠"?amber:body);
+        text(kPanelDiffX+8,y+4,kPanelDiffWidth,view.difference);
+        SetTextColor(dc,amber);
+        text(kPanelANoteX,y+4,kPanelNoteWidth,view.note[0]);text(kPanelBNoteX,y+4,kPanelNoteWidth,view.note[1]);
+    }
+    SetTextColor(dc,body);
+    text(kPanelLabelX,SettingsPanelRowY(row)+4,client.right-24,screen.PanelSummaryText());
+}
 void CreateSettingsWriteControls(HWND window,HINSTANCE instance){
     const auto button=[&](const wchar_t* text,int id){
         HWND h=CreateWindowExW(0,L"BUTTON",text,WS_CHILD|WS_TABSTOP|BS_PUSHBUTTON,0,0,0,0,window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),instance,nullptr);
@@ -217,6 +317,20 @@ void CreateSettingsWriteControls(HWND window,HINSTANCE instance){
     settings_confirm_button=button(L"書き込む（1回だけ）",407);
     settings_discard_button=button(L"やめる",408);
     settings_reread_button=button(L"設定を読み直す",409);
+    // The settings panel (#416, ADR-0041): its buttons share the bottom row with the confirmation's (they are never shown together).
+    settings_panel_open_button=button(L"カメラの設定",kPanelOpenButtonId);
+    settings_panel_close_button=button(L"設定の画面を閉じる",kPanelCloseButtonId);
+    settings_panel_cancel_button=button(L"変更を取り消す",kPanelCancelButtonId);
+    settings_panel_write_button=button(L"0 件を書き込む…",kPanelWriteButtonId);
+    for(int item=0;item<static_cast<int>(kD810ChoiceItemCount);++item){
+        settings_panel_same_buttons[item]=button(L"A と同じにする",kPanelSameBaseId+item);
+        for(int camera=0;camera<2;++camera){
+            HWND combo=CreateWindowExW(0,L"COMBOBOX",L"",WS_CHILD|WS_TABSTOP|WS_VSCROLL|CBS_DROPDOWNLIST,0,0,0,0,window,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kPanelComboBaseId+camera*static_cast<int>(kD810ChoiceItemCount)+item)),instance,nullptr);
+            if(!combo)throw std::runtime_error("create settings panel drop-down failed");EnableWindow(combo,FALSE);
+            settings_panel_combos[camera][item]=combo;
+        }
+    }
     // A build that contains the write path says so in its title.
     std::wstring title(512,L'\0');title.resize(static_cast<std::size_t>(GetWindowTextW(window,title.data(),static_cast<int>(title.size()))));
     SetWindowTextW(window,(title+L" ／ 設定の書き込みあり（開発用・#416 段B）").c_str());
@@ -227,6 +341,7 @@ void LayoutSettingsWriteButtons(const RECT& rect){
     if(settings_reread_button)MoveWindow(settings_reread_button,252,y,170,28,TRUE);
     if(settings_confirm_button)MoveWindow(settings_confirm_button,kD810ConfirmButtonLeft,y,kD810ConfirmButtonWidth,kD810ConfirmButtonHeight,TRUE);
     if(settings_discard_button)MoveWindow(settings_discard_button,642,y,110,28,TRUE);
+    LayoutSettingsPanel(rect);
 }
 // The button's own WS_VISIBLE (IsWindowVisible also depends on the parent, which a smoke never shows).
 bool SettingsWriteButtonShown(HWND button){return button && (GetWindowLongW(button,GWL_STYLE)&WS_VISIBLE)!=0;}
@@ -257,7 +372,24 @@ template<class Shutter>int RunCaptureOnce(Shutter&& shutter){
 }
 // The buttons. Each handler checks the conditions again (the button state is not trusted).
 bool HandleSettingsWriteCommand(int id,WORD code,HWND control){
-    if(!settings_write || code!=BN_CLICKED)return false;
+    if(!settings_write)return false;
+    // A pick in a drop-down of the panel: the draft only. A refused pick goes back to the value shown.
+    if(settings_write && code==CBN_SELCHANGE && id>=kPanelComboBaseId && id<kPanelComboBaseId+2*static_cast<int>(kD810ChoiceItemCount)){
+        const int slot=id-kPanelComboBaseId,camera=slot/static_cast<int>(kD810ChoiceItemCount),item=slot%static_cast<int>(kD810ChoiceItemCount);
+        if(control!=settings_panel_combos[camera][item])return false;
+        auto& screen=*settings_write->screen;
+        const int index=static_cast<int>(SendMessageW(control,CB_GETCURSEL,0,0));
+        const auto& values=settings_panel_values[camera][item];
+        bool accepted=false;
+        if(index>=0 && index<static_cast<int>(values.size()) && values[static_cast<std::size_t>(index)])
+            accepted=screen.PanelPick(SettingsPanelCamera(camera),static_cast<D810ChoiceItem>(item),*values[static_cast<std::size_t>(index)]);
+        if(accepted)++settings_panel_picks;
+        Log(std::string("settings_write_ui_pick item=")+D810WriteItemOf(D810ChoiceWriteItem(static_cast<D810ChoiceItem>(item))).name+" camera="+D810CameraAlias(SettingsPanelCamera(camera))+
+            " accepted="+std::to_string(accepted)+" setting_writes=0 camera_operations=0");
+        SyncSettingsPanelSelection(true);
+        capture_status=screen.PanelSummaryText();
+        return true;
+    }
     auto& screen=*settings_write->screen;
     const bool ready=CanReadSettings();
     if(id==406 && control==settings_copy_button){
@@ -280,7 +412,29 @@ bool HandleSettingsWriteCommand(int id,WORD code,HWND control){
     }
     if(id==408 && control==settings_discard_button){screen.DiscardPlan();capture_status=screen.StatusLine();return true;}
     if(id==409 && control==settings_reread_button){
-        if(screen.RequestReread(ready)){review_visible=false;capture_status=screen.OfferText(ready);}
+        if(screen.PanelOpen() ? screen.RequestPanelReread(ready) : screen.RequestReread(ready)){review_visible=false;capture_status=screen.OfferText(ready);}
+        return true;
+    }
+    if(id==kPanelOpenButtonId && control==settings_panel_open_button){
+        if(screen.RequestPanelOpen(ready)){review_visible=false;capture_status=screen.OfferText(ready);}
+        else capture_status=screen.OfferText(ready);
+        return true;
+    }
+    if(id==kPanelCloseButtonId && control==settings_panel_close_button){
+        if(screen.PanelCloseOffered()){screen.ClosePanel();capture_status=screen.StatusLine();}
+        return true;
+    }
+    if(id==kPanelCancelButtonId && control==settings_panel_cancel_button){
+        const auto dropped=screen.PanelCancelAll();SyncSettingsPanelSelection(true);
+        capture_status=dropped?L"変更予定 "+std::to_wstring(dropped)+L" 件を取り消しました。何も書いていません。":screen.PanelSummaryText();
+        return true;
+    }
+    if(id>=kPanelSameBaseId && id<kPanelSameBaseId+static_cast<int>(kD810ChoiceItemCount) && control==settings_panel_same_buttons[id-kPanelSameBaseId]){
+        const auto item=static_cast<D810ChoiceItem>(id-kPanelSameBaseId);
+        const bool accepted=screen.PanelPickSameAsA(item);
+        Log(std::string("settings_write_ui_pick_same_as_a item=")+D810WriteItemOf(D810ChoiceWriteItem(item)).name+" accepted="+std::to_string(accepted)+" setting_writes=0 camera_operations=0");
+        if(accepted){++settings_panel_picks;SyncSettingsPanelSelection(true);}
+        capture_status=screen.PanelSummaryText();
         return true;
     }
     return false;
@@ -302,6 +456,28 @@ void SettingsWriteTimer(){
     ShowSettingsWriteButton(settings_reread_button,shown,screen.RereadOffered(ready));
     ShowSettingsWriteButton(settings_confirm_button,shown && confirming,screen.ConfirmOffered(ready) && SettingsWriteConfirmPressable(GetParent(settings_confirm_button)));
     ShowSettingsWriteButton(settings_discard_button,shown && confirming,confirming && !screen.Busy());
+    {   // The settings panel: its buttons (never together with the confirmation's), its drop-downs and the picks they show.
+        const bool panel=screen.PanelOpen(),panel_shown=shown && panel;
+        ShowSettingsWriteButton(settings_panel_open_button,shown && !panel,screen.PanelOpenOffered(ready));
+        ShowSettingsWriteButton(settings_panel_close_button,panel_shown && !confirming,screen.PanelCloseOffered());
+        ShowSettingsWriteButton(settings_panel_cancel_button,panel_shown && !confirming,screen.PanelEditable() && screen.PanelEntryCount()>0);
+        // The confirmation that "N 件を書き込む…" opens is not built yet in this part: the button is shown and not offered.
+        ShowSettingsWriteButton(settings_panel_write_button,panel_shown && !confirming,false);
+        if(panel_shown){
+            if(screen.PanelSerial()!=settings_panel_built_serial){RebuildSettingsPanelCombos();settings_panel_built_serial=screen.PanelSerial();SyncSettingsPanelSelection(true);settings_panel_synced_serial=screen.DraftSerial();}
+            else if(screen.DraftSerial()!=settings_panel_synced_serial){SyncSettingsPanelSelection(false);settings_panel_synced_serial=screen.DraftSerial();}
+            const std::wstring write_text=SettingsPanelWriteButtonText();
+            wchar_t shown_text[64]{};GetWindowTextW(settings_panel_write_button,shown_text,64);
+            if(write_text!=shown_text)SetWindowTextW(settings_panel_write_button,write_text.c_str());
+        }
+        const auto* model=screen.Panel();
+        for(int camera=0;camera<2;++camera)for(int item=0;item<static_cast<int>(kD810ChoiceItemCount);++item){
+            const bool editable=panel_shown && model && screen.PanelEditable() && model->At(SettingsPanelCamera(camera),static_cast<D810ChoiceItem>(item)).Editable();
+            ShowSettingsWriteButton(settings_panel_combos[camera][item],panel_shown,editable);
+        }
+        for(int item=0;item<static_cast<int>(kD810ChoiceItemCount);++item)
+            ShowSettingsWriteButton(settings_panel_same_buttons[item],panel_shown,panel_shown && screen.PanelSameAsAOffered(static_cast<D810ChoiceItem>(item)));
+    }
     if(review_button && screen.View())EnableWindow(review_button,FALSE); // the view (confirmation or result) is drawn before a picture
     if(screen.Busy() || !screen.Status().capture_allowed){
         for(auto button:capture_buttons)if(button)EnableWindow(button,FALSE);
@@ -519,6 +695,30 @@ int RunSettingsWriteUiSmoke(){
     check(opens->load()==2 && screen->Status().block==D810CaptureBlock::Unconfirmed && !screen->AdmitCapture()); // A and B asked, neither opened
     check(screen->View() && screen->View()->title.find(L"読み直しを最後まで終えられませんでした")!=std::wstring::npos);
     check(drawn_in(960/2+88,960/2+130)>50); // the result in place of C
+
+    // 3b. The settings panel with no camera: it asks for the cameras, none opens, no panel stands, and the buttons that
+    //     only a panel has are not shown. (The product table's panel itself is drawn by the confirmation test build.)
+    {
+        check(SettingsWriteButtonShown(settings_panel_open_button) && IsWindowEnabled(settings_panel_open_button)!=FALSE && !SettingsWriteButtonShown(settings_panel_close_button) &&
+            !SettingsWriteButtonShown(settings_panel_write_button) && !SettingsWriteButtonShown(settings_panel_cancel_button) && !SettingsWriteButtonShown(settings_panel_combos[0][0]));
+        const int opens_then=opens->load();
+        click(kPanelOpenButtonId,settings_panel_open_button);
+        check(wait_idle());
+        check(opens->load()==opens_then+1 && !SettingsPanelOpen() && !screen->Panel() && screen->View() && screen->View()->title.find(L"設定の画面は開きません")!=std::wstring::npos);
+        tick();
+        check(SettingsWriteButtonShown(settings_panel_open_button) && !SettingsWriteButtonShown(settings_panel_close_button) && !SettingsWriteButtonShown(settings_panel_combos[1][0]) && CanRestartPreview());
+        // A pick notification with no panel does nothing.
+        const auto picks=settings_panel_picks;
+        SendMessageW(window,WM_COMMAND,MAKEWPARAM(kPanelComboBaseId,CBN_SELCHANGE),reinterpret_cast<LPARAM>(settings_panel_combos[0][0]));
+        click(kPanelWriteButtonId,settings_panel_write_button);click(kPanelCancelButtonId,settings_panel_cancel_button);
+        check(settings_panel_picks==picks && !SettingsWriteBusy() && opens->load()==opens_then+1);
+        // While Live runs the panel cannot be opened.
+        run_live();tick();
+        check(!SettingsWriteButtonShown(settings_panel_open_button));
+        click(kPanelOpenButtonId,settings_panel_open_button);
+        check(!SettingsWriteBusy() && opens->load()==opens_then+1);
+        stop_live();tick();
+    }
 
     // 4. A reread that has not ended (its Open waits): the cameras are held against everything that could ask for
     //    them. The backend and the restart are counting stand-ins, so that a missing guard cannot reach a camera.
@@ -886,6 +1086,207 @@ int RunSettingsWriteConfirmSmoke(){
     std::filesystem::remove_all(folder,ignored);
     stopping=true;
     Log("settings_write_confirm_checks="+std::to_string(checks)+" failures="+std::to_string(failures)+" camera_operations=0 camera_opens_attempted="+std::to_string(opens->load()));
+    return failures?1:0;
+}
+// --- Camera-free contract of the settings panel (#416, ADR-0041): the window's own code, with a table of the test's own ---
+// Like the confirmation smoke: only this test build has a controller that takes a table. The bodies are synthetic
+// snapshots taken as the panel's read; the camera access opens nothing. Everything after that is the preview's: the
+// timer's button state, the drop-down notifications, Paint and the buttons' handlers.
+// CAM-B and CAM-A rows of the five items an operator may pick, with chosen values on.
+D810WriteTable SmokeChosenTable(){
+    auto table=SmokeConfirmTable();
+    for(auto& row:table.rows)
+        row.enabled=row.item==D810WriteItem::Iso || row.item==D810WriteItem::ShutterSpeed || row.item==D810WriteItem::Aperture ||
+            row.item==D810WriteItem::WhiteBalance || row.item==D810WriteItem::Metering;
+    table.chosen_values=true;table.verified_firmware_a="V0";
+    return table;
+}
+// The text of the entry `index` of a drop-down.
+std::wstring SmokeComboText(HWND combo,int index){
+    if(index<0)return {};
+    const int length=static_cast<int>(SendMessageW(combo,CB_GETLBTEXTLEN,static_cast<WPARAM>(index),0));
+    if(length<=0)return {};
+    std::wstring text(static_cast<std::size_t>(length)+1,L'\0');
+    SendMessageW(combo,CB_GETLBTEXT,static_cast<WPARAM>(index),reinterpret_cast<LPARAM>(text.data()));
+    text.resize(static_cast<std::size_t>(length));return text;
+}
+int RunSettingsWriteChosenSmoke(){
+    Log("settings_write_chosen_smoke=1 camera_operations=0 test_table=1");
+    unsigned checks{},failures{};const auto check=[&](bool ok,int line=__builtin_LINE()){++checks;if(!ok){++failures;Log("settings_write_chosen_failed_check="+std::to_string(checks)+" source_line="+std::to_string(line));}};
+    wchar_t temp[MAX_PATH]{};if(!GetTempPathW(MAX_PATH,temp))return 2;
+    const auto folder=std::filesystem::path(temp)/(L"a0-settings-write-chosen-smoke-"+std::to_wstring(GetCurrentProcessId()));
+    std::error_code ignored;std::filesystem::remove_all(folder,ignored);
+    settings_write_min_size_enabled=false;
+    HINSTANCE instance{};
+    HWND window=CreateSettingsWriteSmokeWindow(L"A0SettingsWriteChosenSmoke",instance);
+    if(!window)return 2;
+    review_button=CreateWindowExW(0,L"BUTTON",L"x",WS_CHILD,0,0,200,28,window,reinterpret_cast<HMENU>(401),instance,nullptr);
+    ShowWindow(window,SW_SHOWNOACTIVATE);
+    auto opens=std::make_shared<std::atomic<int>>(0);
+    const auto factory=[opens]{return std::make_unique<NoCameraSettingsAccess>(opens);};
+    const auto tick=[&]{SendMessageW(window,WM_TIMER,1,0);};
+    const auto click=[&](int id,HWND button){SendMessageW(window,WM_COMMAND,MAKEWPARAM(id,BN_CLICKED),reinterpret_cast<LPARAM>(button));};
+    const auto resize=[&](int client_width,int client_height){
+        RECT frame{0,0,client_width,client_height};AdjustWindowRectEx(&frame,WS_OVERLAPPEDWINDOW,FALSE,0);
+        SetWindowPos(window,nullptr,0,0,frame.right-frame.left,frame.bottom-frame.top,SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);
+        RECT client{};GetClientRect(window,&client);return client.right==client_width && client.bottom==client_height;
+    };
+    for(auto& camera:cameras){camera->done=true;camera->stopped=true;camera->closed=true;}preview_joined=true;stopping=true; // both Live sessions joined
+    check(resize(kD810WriteMinClientWidth,kD810WriteMinClientHeight));
+    const auto shown=[&](HWND control){return SettingsWriteButtonShown(control);};
+    const auto enabled=[&](HWND control){return shown(control) && IsWindowEnabled(control)!=FALSE;};
+    const auto combo_ok=[&](int camera,int item){return settings_panel_combos[camera][item];};
+    // Picks a value of a drop-down by its text, as the operator does: the selection, then the notification.
+    const auto choose=[&](int camera,int item,const std::wstring& text){
+        HWND combo=combo_ok(camera,item);
+        const int count=static_cast<int>(SendMessageW(combo,CB_GETCOUNT,0,0));
+        for(int i=0;i<count;++i)if(SmokeComboText(combo,i)==text){
+            SendMessageW(combo,CB_SETCURSEL,static_cast<WPARAM>(i),0);
+            SendMessageW(window,WM_COMMAND,MAKEWPARAM(kPanelComboBaseId+camera*static_cast<int>(kD810ChoiceItemCount)+item,CBN_SELCHANGE),reinterpret_cast<LPARAM>(combo));
+            return true;
+        }
+        return false;
+    };
+    const auto selected=[&](int camera,int item){HWND combo=combo_ok(camera,item);return SmokeComboText(combo,static_cast<int>(SendMessageW(combo,CB_GETCURSEL,0,0)));};
+    const auto read_of=[&](bool b_verified,bool a_verified){
+        D810PlanRead read;read.complete=true;read.verified={a_verified,b_verified};
+        read.snapshots[0]=SmokeBody(250,800,200,4,3);
+        read.snapshots[1]=SmokeBody(500,560,100,2,2);
+        return read;
+    };
+    constexpr int kIso=static_cast<int>(D810ChoiceItem::Iso),kShutter=static_cast<int>(D810ChoiceItem::ShutterSpeed),kWb=static_cast<int>(D810ChoiceItem::WhiteBalance);
+    D810SettingsWriteScreen* screen=nullptr;
+
+    // 1. The product table: the panel opens on a read, shows both cameras, and no drop-down can be used.
+    InitSettingsWrite(std::make_unique<D810SettingsFileJournal>(folder),factory);
+    screen=settings_write->screen.get();
+    tick();
+    check(resize(kD810WriteMinClientWidth,kD810WriteMinClientHeight) && CanReadSettings());
+    check(shown(settings_panel_open_button) && enabled(settings_panel_open_button) && !shown(settings_panel_close_button) && !shown(settings_panel_write_button) && !shown(combo_ok(0,kIso)));
+    click(kPanelOpenButtonId,settings_panel_open_button); // a read with no camera: it fails and no panel opens
+    for(int i=0;i<400 && SettingsWriteBusy();++i){tick();std::this_thread::sleep_for(std::chrono::milliseconds(5));}
+    check(!SettingsPanelOpen() && opens->load()>=1 && screen->View() && screen->View()->title.find(L"設定の画面は開きません")!=std::wstring::npos);
+    check(!shown(combo_ok(0,kIso)) && !shown(settings_panel_close_button) && enabled(settings_panel_open_button));
+    screen->TakePanelReadForTest(read_of(true,false)); // the product table's flags: CAM-A's body is not verified
+    tick();
+    check(SettingsPanelOpen() && screen->Panel() && PanelHoldsLive());
+    check(!CanRestartPreview() && !shown(settings_panel_open_button) && enabled(settings_panel_close_button) && shown(settings_panel_write_button) && !enabled(settings_panel_write_button));
+    {
+        bool all_locked=true,all_shown=true;
+        for(int camera=0;camera<2;++camera)for(int item=0;item<static_cast<int>(kD810ChoiceItemCount);++item){
+            all_shown=all_shown && shown(combo_ok(camera,item));all_locked=all_locked && !enabled(combo_ok(camera,item));
+        }
+        check(all_shown && all_locked);
+        for(int item=0;item<static_cast<int>(kD810ChoiceItemCount);++item)check(shown(settings_panel_same_buttons[item]) && !enabled(settings_panel_same_buttons[item]));
+    }
+    check(selected(0,kIso)==L"200" && selected(1,kIso)==L"100" && selected(0,kShutter).find(L"1/40")!=std::wstring::npos);
+    // A notification of a locked drop-down (a stand-in for a key or the wheel): nothing is picked and the value comes back.
+    {
+        const auto picks=settings_panel_picks;
+        check(choose(1,kIso,L"200") && settings_panel_picks==picks && screen->PanelDirty()==0 && selected(1,kIso)==L"100");
+        click(kPanelSameBaseId+kIso,settings_panel_same_buttons[kIso]);
+        check(settings_panel_picks==picks && screen->PanelEntryCount()==0);
+        click(kPanelWriteButtonId,settings_panel_write_button);
+        check(!SettingsWriteBusy() && screen->Step()==D810WriteScreenStep::Idle && opens->load()<=2);
+    }
+    {   // The panel is drawn: the title, the grid, the notes (amber) and the line under it.
+        check(resize(kD810WriteMinClientWidth,kD810WriteMinClientHeight));
+        SettingsWriteSmokeFrame frame(kD810WriteMinClientWidth,kD810WriteMinClientHeight);
+        check(frame.Lit(kPanelTitleY,kPanelTitleY+22)>100 && frame.Lit(SettingsPanelRowY(1),SettingsPanelRowY(8))>400);
+        check(frame.Count(SettingsPanelRowY(3),SettingsPanelRowY(8),RGB(255,200,90))>200); // the cells say why they are locked
+    }
+    check(!enabled(settings_confirm_button) && !CanRestartPreview());
+    click(kPanelCloseButtonId,settings_panel_close_button);
+    tick();
+    check(!SettingsPanelOpen() && !screen->Panel() && !shown(combo_ok(0,kIso)) && !shown(settings_panel_close_button) && enabled(settings_panel_open_button) && CanRestartPreview());
+    check(capture_status.find(L"設定の画面を閉じました")!=std::wstring::npos);
+
+    // 2. A table of the test's own: the drop-downs work, a pick is a draft and sends nothing.
+    settings_write.reset();std::filesystem::remove_all(folder,ignored);capture_status.clear();
+    InitSettingsWriteWithTable(SmokeChosenTable(),std::make_unique<D810SettingsFileJournal>(folder),factory);
+    screen=settings_write->screen.get();
+    tick();
+    screen->TakePanelReadForTest(read_of(true,true));
+    tick();
+    check(SettingsPanelOpen() && screen->Panel() && screen->PanelEditable());
+    {
+        bool all_enabled=true;
+        for(int camera=0;camera<2;++camera)for(int item=0;item<static_cast<int>(kD810ChoiceItemCount);++item)all_enabled=all_enabled && enabled(combo_ok(camera,item));
+        check(all_enabled);
+    }
+    check(!enabled(settings_panel_cancel_button) && !enabled(settings_panel_write_button));
+    wchar_t text[64]{};GetWindowTextW(settings_panel_write_button,text,64);check(std::wstring(text)==L"0 件を書き込む…");
+    // The entries of a drop-down: what the camera offers, the one it reads selected.
+    {
+        HWND combo=combo_ok(1,kIso);
+        check(static_cast<int>(SendMessageW(combo,CB_GETCOUNT,0,0))==3 && SmokeComboText(combo,0)==L"100" && selected(1,kIso)==L"100");
+    }
+    {
+        const auto picks=settings_panel_picks;
+        check(choose(1,kIso,L"400") && settings_panel_picks==picks+1 && screen->PanelDirty()==1 && selected(1,kIso)==L"400");
+        tick();
+        GetWindowTextW(settings_panel_write_button,text,64);check(std::wstring(text)==L"1 件を書き込む…");
+        check(enabled(settings_panel_cancel_button) && !SettingsWriteBusy() && screen->Step()==D810WriteScreenStep::Idle && opens->load()<=2 && screen->Status().plan_pending==false);
+        check(capture_status.find(L"変更予定 1 件（まだ何も書いていません）")!=std::wstring::npos);
+        // CAM-B follows CAM-A in the shutter speed (A reads 1/40, B reads 1/20).
+        check(enabled(settings_panel_same_buttons[kShutter]));
+        click(kPanelSameBaseId+kShutter,settings_panel_same_buttons[kShutter]);
+        tick();
+        check(screen->PanelDirty()==2 && selected(1,kShutter)==selected(0,kShutter) && settings_panel_picks==picks+2);
+        // The same value as the one read is not a change.
+        check(choose(0,kWb,selected(0,kWb)) && screen->PanelDirty()==2);
+        // CAM-A picks an ISO: CAM-B's pick stays its own.
+        check(choose(0,kIso,L"100") && screen->PanelDirty()==3 && selected(0,kIso)==L"100" && selected(1,kIso)==L"400");
+    }
+    {   // Paint with picks up: the picks are marked.
+        SettingsWriteSmokeFrame frame(kD810WriteMinClientWidth,kD810WriteMinClientHeight);
+        check(frame.Count(SettingsPanelRowY(3),SettingsPanelRowY(4)+kPanelRowHeight,RGB(255,200,90))>100);
+    }
+    // The grid fits its columns: every note, label and heading at the width the window gives it.
+    {
+        HDC dc=CreateCompatibleDC(nullptr);
+        int widest_note=0,widest_label=0;std::wstring which_note;
+        if(dc){
+            const auto width_of=[&](const std::wstring& value){RECT r{0,0,0,0};DrawTextW(dc,value.c_str(),-1,&r,DT_CALCRECT|DT_LEFT|DT_SINGLELINE|DT_NOPREFIX);return static_cast<int>(r.right);};
+            for(const char* reason:{"unreadable","not_writable","chosen_values_disabled","row_disabled","code_unconfirmed","body_not_verified","exposure_mode_not_manual","iso_auto_not_off","no_options"}){
+                const auto note=D810PanelLockText(reason);const int w=width_of(note);if(w>widest_note){widest_note=w;which_note=note;}
+            }
+            for(const auto& note:{std::wstring(L"＊変更予定"),std::wstring(L"＊変更予定（A と同じ）"),std::wstring(L"本体を M に"),std::wstring(L"本体で OFF に")})
+                widest_note=std::max(widest_note,width_of(note));
+            for(const auto& row:screen->PanelRows())widest_label=std::max(widest_label,width_of(row.label));
+            // The heading of each column and the cell of a read-only row.
+            int widest_cell=0;
+            for(const auto& value:{std::wstring(L"CAM-A（左・基準）"),std::wstring(L"CAM-B（右）"),std::wstring(L"M（読むだけ）"),std::wstring(L"読めません（読むだけ）"),std::wstring(L"Automatic（読むだけ）")})widest_cell=std::max(widest_cell,width_of(value));
+            std::string utf8;
+            if(!which_note.empty()){
+                const int bytes=WideCharToMultiByte(CP_UTF8,0,which_note.c_str(),static_cast<int>(which_note.size()),nullptr,0,nullptr,nullptr);
+                if(bytes>0){utf8.assign(static_cast<std::size_t>(bytes),'\0');WideCharToMultiByte(CP_UTF8,0,which_note.c_str(),static_cast<int>(which_note.size()),utf8.data(),bytes,nullptr,nullptr);}
+            }
+            Log("settings_write_panel_widest_note_px="+std::to_string(widest_note)+" column_px="+std::to_string(kPanelNoteWidth)+" widest_label_px="+std::to_string(widest_label)+
+                " label_column_px="+std::to_string(kPanelLabelWidth)+" widest_cell_px="+std::to_string(widest_cell)+" cell_column_px="+std::to_string(kPanelComboWidth)+" widest_note="+utf8);
+            check(widest_note<=kPanelNoteWidth && widest_label<=kPanelLabelWidth && widest_cell<=kPanelComboWidth);
+            DeleteDC(dc);
+        }else check(false);
+        // The columns lie inside the smallest window, and the heights inside the Live area of its smallest height.
+        check(kPanelSameX+kPanelSameWidth<=kD810WriteMinClientWidth-12 && kPanelBNoteX+kPanelNoteWidth<=kPanelSameX);
+        check(SettingsPanelRowY(kPanelFirstChoiceRow+static_cast<int>(kD810ChoiceItemCount))+kPanelRowHeight+24<=kD810WriteMinClientHeight/2-8);
+    }
+    // Cancel, and closing with picks up: the count is said, nothing is left.
+    click(kPanelCancelButtonId,settings_panel_cancel_button);
+    check(screen->PanelDirty()==0 && screen->PanelEntryCount()==0 && selected(1,kIso)==L"100" && capture_status.find(L"3 件を取り消しました")!=std::wstring::npos);
+    tick();
+    check(!enabled(settings_panel_cancel_button));
+    check(choose(1,kIso,L"200") && screen->PanelDirty()==1);
+    click(kPanelCloseButtonId,settings_panel_close_button);tick();
+    check(!SettingsPanelOpen() && capture_status.find(L"書いていない変更 1 件を捨てて")!=std::wstring::npos && screen->PanelDirty()==0);
+    check(opens->load()<=2); // the panel was put up with a read made without a camera: nothing was opened for any pick
+
+    FinishSettingsWrite();
+    if(IsWindow(window))DestroyWindow(window);
+    settings_write.reset();
+    std::filesystem::remove_all(folder,ignored);
+    stopping=true;
+    Log("settings_write_chosen_checks="+std::to_string(checks)+" failures="+std::to_string(failures)+" camera_operations=0 camera_opens_attempted="+std::to_string(opens->load()));
     return failures?1:0;
 }
 #endif
