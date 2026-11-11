@@ -966,10 +966,10 @@ public:
     // keeps no session open: the plan is then built with PlanCopy from these
     // snapshots, and nothing is open while the operator decides.
     D810PlanRead ReadForPlan(D810SettingsCameraAccess& access, const D810WriteRunOptions& options) {
+        last_read_.reset(); // a plan of picked values is made from the last complete read only, so an earlier read is gone whatever this one does
         D810PlanRead out;
         if (!options.may_continue || !options.may_cleanup) { out.reason = "invalid_options"; return out; }
         if (!owner_.TryAcquire(D810CameraUse::Settings)) { out.reason = "cameras_busy"; return out; }
-        last_read_.reset(); // a plan of picked values is made from the last complete read only
         out.id = NextReadId();
         struct Release { D810CameraOwnership& owner; ~Release() { owner.Release(D810CameraUse::Settings); } } release{owner_};
         for (const auto camera : {D810Camera::A, D810Camera::B}) {

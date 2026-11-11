@@ -1574,7 +1574,7 @@ int RunSettingsWriteChosenSmoke(){
         screen->TakeRunForTest(run,D810PlanSource::Chosen);
         const auto* view=screen->View();
         check(view && !view->confirmation && view->lines.size()==7 && view->lines.size()<=D810WriteViewMaxLines() && D810WriteViewFits(*view,kD810WriteMinClientHeight));
-        check(view && view->title.find(L"選んだ値を書きました: 一致（10 項目")!=std::wstring::npos);
+        check(view && view->title.find(L"選んだ値を書きました: 一致（5 項目・10 件")!=std::wstring::npos);
         paint();tick();
         SettingsWriteSmokeFrame frame(kD810WriteMinClientWidth,kD810WriteMinClientHeight);
         check(frame.Lit(kD810WriteMinClientHeight/2+88,kD810WriteMinClientHeight/2+130)>50 && !confirm_enabled());

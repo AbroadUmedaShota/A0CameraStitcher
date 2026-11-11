@@ -170,6 +170,7 @@ inline const wchar_t* D810ChosenReasonText(std::string_view what) {
     static constexpr Entry kEntries[] = {
         {"chosen_values_disabled", L"この版では、選んだ値を書くことはできません"},
         {"no_choice", L"書く値が選ばれていません"},
+        {"plan_changed", L"確定のあとに、書く相手の本体の値が変わりました。もう一度「N 件を書き込む…」から作り直してください"},
         {"read_not_current", L"書く前の読み取りが古いか、最後まで終わっていないため、計画を作りませんでした。もう一度「N 件を書き込む…」を押してください"},
         {"item_not_choosable", L"この項目は、選んで書く対象ではありません"},
         {"same_as_a_on_cam_a", L"CAM-A を「A と同じ」にはできません"},
@@ -489,7 +490,9 @@ public:
         case D810WriteScreenStep::ReadingForPanel: return L"両台の設定を読んでいます（読み取りのみ。A を閉じてから B を開きます）…";
         case D810WriteScreenStep::ReadingForChosen: return L"書く前に、両台の設定をもう一度読んでいます（読み取りのみ）…";
         case D810WriteScreenStep::Rereading: return L"両台を読み直しています（読み取りのみ）…";
-        case D810WriteScreenStep::Confirming: return L"自動では元に戻りません。写す内容を確かめて、「書き込む（1回だけ）」か「やめる」を押してください。";
+        case D810WriteScreenStep::Confirming:
+            if (plan_ && plan_->source == D810PlanSource::Chosen) return L"自動では元に戻りません。書く内容を確かめて、「書き込む（1回だけ）」か「やめる」を押してください。";
+            return L"自動では元に戻りません。写す内容を確かめて、「書き込む（1回だけ）」か「やめる」を押してください。";
         case D810WriteScreenStep::Idle: break;
         }
         if (close_failed_) return L"カメラとの接続を閉じられませんでした。この画面を閉じて、本体・USB接続を確認してください。";
@@ -536,10 +539,11 @@ public:
     }
     void DiscardPlan() {
         if (step_ != D810WriteScreenStep::Confirming) return;
+        const bool run_source_chosen_plan = plan_ && plan_->source == D810PlanSource::Chosen;
         controller_.Discard();
         plan_.reset();
         step_ = D810WriteScreenStep::Idle;
-        Finish(L"写すのをやめました。何も書いていません。", {});
+        Finish(run_source_chosen_plan ? L"書くのをやめました。何も書いていません。" : L"写すのをやめました。何も書いていません。", {});
         Say("settings_write_ui_plan_discarded=1 setting_writes=0");
     }
     // "設定を読み直す": read both (read-only); releases the capture block when
@@ -864,7 +868,14 @@ private:
     void Apply(const Outcome& outcome) {
         if (!outcome.error.empty()) {
             plan_.reset();
-            Finish(L"設定の処理を最後まで終えられませんでした。", {D810WriteReasonText(outcome.error)});
+            std::vector<std::wstring> lines{D810WriteReasonText(outcome.error)};
+            if (outcome.step == D810WriteScreenStep::Writing) {
+                // The run may have sent before it failed: no plan stays up, and the panel does not say that nothing was written.
+                controller_.Discard();
+                MarkPanelOld();
+                lines.push_back(L"書き込みの途中で止まった可能性があります。書いたかもしれないので、「設定を読み直す」で確かめてください。");
+            }
+            Finish(L"設定の処理を最後まで終えられませんでした。", std::move(lines));
             Say("settings_write_ui_failure reason=" + outcome.error);
             return;
         }
@@ -979,16 +990,19 @@ private:
         status_line_ = L"写す内容を確かめてください（まだ何も書いていません）。";
         SetView(std::move(view));
     }
+    // The cameras may have been written: the panel's values are old and its picks are used up (or, after a copy, dropped).
+    // Returns the number of changes the picks stood for.
+    std::size_t MarkPanelOld() {
+        if (!panel_open_ || !model_) return 0;
+        const auto dropped = draft_.Discard(*model_);
+        panel_stale_ = true;
+        ++panel_serial_;
+        ++draft_serial_;
+        return dropped;
+    }
     void ApplyRun(const D810WriteRun& run) {
         plan_.reset();
-        // The cameras were written: the panel's values are old and its picks are used up (or, after a copy, dropped).
-        std::size_t dropped_picks = 0;
-        if (panel_open_ && model_) {
-            dropped_picks = draft_.Discard(*model_);
-            panel_stale_ = true;
-            ++panel_serial_;
-            ++draft_serial_;
-        }
+        const std::size_t dropped_picks = MarkPanelOld();
         Say("settings_write_ui_result verdict=" + std::string(D810WriteVerdictToken(run.verdict)) + " sent=" + std::to_string(run.sent) +
             " reason=" + (run.reason.empty() ? std::string("none") : run.reason));
         const bool chosen = run_source_ == D810PlanSource::Chosen;
@@ -1010,10 +1024,18 @@ private:
         if (dropped_picks && !chosen) lines.push_back(L"設定の画面で選んでいた、書いていない変更 " + std::to_wstring(dropped_picks) + L" 件は捨てました。");
         std::wstring title;
         const std::wstring who = chosen ? L"選んだ値" : L"CAM-B";
+        // A picked-value run counts steps (an item on a camera), so its title says both the items and the steps.
+        std::wstring counted = std::to_wstring(run.sent) + L" 件";
+        if (chosen) {
+            std::vector<D810WriteItem> sent_items;
+            for (const auto& outcome : run.steps)
+                if (outcome.sent && std::find(sent_items.begin(), sent_items.end(), outcome.step.item) == sent_items.end()) sent_items.push_back(outcome.step.item);
+            counted = std::to_wstring(sent_items.size()) + L" 項目・" + counted;
+        }
         switch (run.verdict) {
-        case D810WriteVerdict::Match: title = (chosen ? L"選んだ値を書きました" : L"CAM-B に書きました") + std::wstring(L": 一致（") + std::to_wstring(run.sent) + L" 項目、読み戻した値が書いた値と同じ）"; break;
-        case D810WriteVerdict::Mismatch: title = who + (chosen ? L"の書き込み" : L"への書き込み") + L": 不一致（送った項目 " + std::to_wstring(run.sent) + L"）"; break;
-        case D810WriteVerdict::Unknown: title = who + (chosen ? L"の書き込み" : L"への書き込み") + L": 不明（結果を確かめられません。送った項目 " + std::to_wstring(run.sent) + L"）"; break;
+        case D810WriteVerdict::Match: title = (chosen ? L"選んだ値を書きました" : L"CAM-B に書きました") + std::wstring(L": 一致（") + (chosen ? counted : std::to_wstring(run.sent) + L" 項目") + L"、読み戻した値が書いた値と同じ）"; break;
+        case D810WriteVerdict::Mismatch: title = who + (chosen ? L"の書き込み" : L"への書き込み") + L": 不一致（送った" + (chosen ? L" " + counted : L"項目 " + std::to_wstring(run.sent)) + L"）"; break;
+        case D810WriteVerdict::Unknown: title = who + (chosen ? L"の書き込み" : L"への書き込み") + L": 不明（結果を確かめられません。送った" + (chosen ? L" " + counted : L"項目 " + std::to_wstring(run.sent)) + L"）"; break;
         case D810WriteVerdict::NotSent: title = L"何も書いていません"; break;
         }
         Finish(std::move(title), std::move(lines));

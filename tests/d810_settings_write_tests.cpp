@@ -4356,7 +4356,7 @@ void ScreenChosenFlow() {
         check(Shows(view, L"よければ「書き込む（1回だけ）」") && screen.PanelOpen() && !screen.PanelEditable() && !screen.PanelPick(B, Item::Metering, 2) && !screen.PanelCloseOffered(), "chosen: the panel waits behind the confirmation");
         check(s.Confirm(), "chosen: confirmed and run");
         check(screen.Step() == D810WriteScreenStep::Idle && s.bench.b.props[0x500f].current == 200 && s.bench.a.write_begins == 0 && s.bench.Writes() == 1 && NoResend(s.bench.b), "chosen: B written once, A untouched");
-        check(Shows(screen.View(), L"選んだ値を書きました: 一致（1 項目、読み戻した値が書いた値と同じ）") && Shows(screen.View(), L"  ISO感度: CAM-B 一致（読み戻し 200） ／ CAM-A 変えない") &&
+        check(Shows(screen.View(), L"選んだ値を書きました: 一致（1 項目・1 件、読み戻した値が書いた値と同じ）") && Shows(screen.View(), L"  ISO感度: CAM-B 一致（読み戻し 200） ／ CAM-A 変えない") &&
                 Shows(screen.View(), L"再送も、前の値への書き戻しもしていません。"),
             "chosen: the result");
         check(screen.PanelStale() && screen.PanelDirty() == 0 && !screen.ChosenOffered(true) && screen.ChosenOfferText(true).find(L"書き込みのあと") != std::wstring::npos, "chosen: the panel is old after the run");
@@ -4393,7 +4393,7 @@ void ScreenChosenFlow() {
         check(OpenPanel(s) && screen.PanelPick(B, Item::Iso, 200) && screen.PanelPick(A, Item::Iso, 200), "failure: two picks");
         check(screen.RequestChosen(true) && s.WaitIdle() && s.Confirm(), "failure: run");
         check(s.bench.a.write_begins == 0 && s.bench.b.write_begins == 1, "failure: CAM-A was not written");
-        check(Shows(screen.View(), L"  ISO感度: CAM-B 不一致（読み戻し 400） ／ CAM-A 書いていません") && Shows(screen.View(), L"選んだ値の書き込み: 不一致（送った項目 1）") &&
+        check(Shows(screen.View(), L"  ISO感度: CAM-B 不一致（読み戻し 400） ／ CAM-A 書いていません") && Shows(screen.View(), L"選んだ値の書き込み: 不一致（送った 1 項目・1 件）") &&
                 Shows(screen.View(), L"止めた理由: 読み戻した値が書いた値と違いました（不一致）"),
             "failure: the result says what was and was not written");
         check(screen.Status().block == D810CaptureBlock::Mismatch && screen.Status().chosen_history && !screen.Status().capture_allowed, "failure: capture is held, the history is a chosen plan's");
@@ -4502,7 +4502,7 @@ void ScreenChosenRefusals() {
         bool order = s.bench.begin_order.size() == 10;
         for (std::size_t i = 0; order && i < 10; ++i) order = s.bench.begin_order[i].first == (i < 5 ? 1 : 0);
         check(order, "most: five on CAM-B, then five on CAM-A");
-        check(Shows(screen.View(), L"選んだ値を書きました: 一致（10 項目") && screen.View()->lines.size() == 7 && screen.View()->lines.size() <= D810WriteViewMaxLines(), "most: the result in seven lines");
+        check(Shows(screen.View(), L"選んだ値を書きました: 一致（5 項目・10 件") && screen.View()->lines.size() == 7 && screen.View()->lines.size() <= D810WriteViewMaxLines(), "most: the result in seven lines");
     }
     {
         // The symbols of a release by the values written, as lines; a symbol that is not known is shown as it is.
@@ -4516,6 +4516,33 @@ void ScreenChosenRefusals() {
         check(has("iso:CAM-B:something_new", L"差の符号: iso:CAM-B:something_new") && has("something_new", L"差の符号: something_new") && has("iso", L"差の符号: iso"), "difference: an unknown symbol is shown as it is");
     }
     {
+        // The words of a flow of picked values are not those of a copy.
+        ScreenBench s(kChosenTable);
+        auto& screen = *s.screen;
+        check(OpenPanel(s) && screen.PanelPick(D810Camera::B, D810ChoiceItem::Iso, 200) && screen.RequestChosen(true) && s.WaitIdle() && screen.ConfirmationShown(), "words: a confirmation of picks");
+        const auto confirming = screen.OfferText(true);
+        check(confirming.find(L"書く内容を確かめて") != std::wstring::npos && confirming.find(L"写す") == std::wstring::npos && screen.StatusLine().find(L"書く内容") != std::wstring::npos, "words: the confirmation says write, not copy");
+        screen.DiscardPlan();
+        check(Shows(screen.View(), L"書くのをやめました") && !Shows(screen.View(), L"写す"), "words: and so does the discard");
+        check(D810PlanReasonText("plan_changed:CAM-A:changed", true).find(L"N 件を書き込む…") != std::wstring::npos && D810PlanReasonText("plan_changed:CAM-A:changed", true).find(L"「写す」") == std::wstring::npos &&
+                D810WriteReasonText("plan_changed:CAM-B:changed").find(L"「写す」") != std::wstring::npos,
+            "words: the reason of a changed body names the button of the flow");
+    }
+    {
+        // A read that returns early (no options, cameras busy) also makes the earlier read old.
+        Bench bench(kChosenTable);
+        const auto read = bench.controller->ReadForPlan(bench.access, bench.options);
+        check(bench.controller->PlanChosen(read, {PickFor(D810Camera::B, D810WriteItem::Iso, 200)}).Ok(), "early return: the read plans");
+        D810WriteRunOptions none;
+        const auto early = bench.controller->ReadForPlan(bench.access, none);
+        check(!early.complete && early.reason == "invalid_options" && HasReason(bench.controller->PlanChosen(read, {PickFor(D810Camera::B, D810WriteItem::Iso, 200)}), "read_not_current"), "early return: an earlier read is gone after invalid options");
+        const auto again = bench.controller->ReadForPlan(bench.access, bench.options);
+        check(bench.owner.TryAcquire(D810CameraUse::Live), "early return: the cameras are taken");
+        const auto busy = bench.controller->ReadForPlan(bench.access, bench.options);
+        check(busy.reason == "cameras_busy" && HasReason(bench.controller->PlanChosen(again, {PickFor(D810Camera::B, D810WriteItem::Iso, 200)}), "read_not_current"), "early return: an earlier read is gone after cameras_busy");
+        bench.owner.Release(D810CameraUse::Live);
+    }
+    {
         // Words that are not about CAM-B alone, and the block text of a copy stay as they were.
         check(D810PlanReasonText("exposure_mode_not_manual_set_on_body:CAM-B").find(L"CAM-B が M ではなく、露出モードは書けません。B の本体で M にしてください") != std::wstring::npos, "words: the copy's reason");
         check(D810PlanReasonText("value_not_advertised:iso:CAM-A", true).find(L"この台が、その値を受け付けると答えていません") != std::wstring::npos &&
@@ -4527,6 +4554,45 @@ void ScreenChosenRefusals() {
                 D810CaptureBlockText(D810CaptureBlock::Unknown, true) == D810CaptureBlockText(D810CaptureBlock::Unknown),
             "words: only a mismatch of picked values is told differently");
     }
+}
+// An access that throws once told to: the exception comes out of the controller call that runs on the worker.
+struct ThrowingAccess final: D810SettingsCameraAccess {
+    ThrowingAccess(D810SettingsCameraAccess& inner, std::shared_ptr<std::atomic<bool>> throwing): inner_(inner), throwing_(std::move(throwing)) {}
+    D810OpenedCamera Open(D810Camera camera) override {
+        if (throwing_->load()) throw std::runtime_error("open");
+        return inner_.Open(camera);
+    }
+    bool Close(D810Camera camera) override { return inner_.Close(camera); }
+private:
+    D810SettingsCameraAccess& inner_;
+    std::shared_ptr<std::atomic<bool>> throwing_;
+};
+void ScreenChosenWorkerFailure() {
+    using Item = D810ChoiceItem;
+    ScreenBench s(kChosenTable);
+    auto throwing = std::make_shared<std::atomic<bool>>(false);
+    D810SettingsWriteScreen::Options options;
+    options.log = [&s](const std::string& line) { s.log.push_back(line); };
+    options.now = [] { return std::string("2000-01-01T00:00:00Z"); };
+    s.screen = std::make_unique<D810SettingsWriteScreen>(*s.bench.controller, [&s, throwing] { return std::make_unique<ThrowingAccess>(s.bench.access, throwing); }, options);
+    auto& screen = *s.screen;
+    check(OpenPanel(s) && screen.PanelPick(D810Camera::B, Item::Iso, 200) && screen.RequestChosen(true) && s.WaitIdle() && screen.ConfirmationShown(), "worker failure: a confirmation is up");
+    check(screen.Status().plan_pending, "worker failure: a plan waits");
+    throwing->store(true);
+    check(screen.ConfirmShownPlan(true) && s.WaitIdle(), "worker failure: confirmed, the worker ends with an exception");
+    throwing->store(false);
+    check(screen.Step() == D810WriteScreenStep::Idle && Shows(screen.View(), L"設定の処理を最後まで終えられませんでした") && Shows(screen.View(), L"書いたかもしれないので、「設定を読み直す」で確かめてください"),
+        "worker failure: it says that it may have written");
+    check(!screen.Status().plan_pending && !screen.Status().plan_confirmed && !screen.ConfirmOffered(true), "worker failure: no plan stays up");
+    check(screen.PanelStale() && screen.PanelDirty() == 0 && screen.PanelEntryCount() == 0 && !screen.ChosenOffered(true), "worker failure: the panel is old and the picks are used up");
+    const auto summary = screen.PanelSummaryText();
+    check(summary.find(L"書き込みのあと") != std::wstring::npos && summary.find(L"まだ何も書いていません") == std::wstring::npos, "worker failure: the panel does not say that nothing was written");
+    // A read that fails does not make the panel old: nothing was sent.
+    check(screen.RequestPanelReread(true) && s.WaitIdle() && !screen.PanelStale(), "worker failure: a reread makes the panel current again");
+    check(screen.PanelPick(D810Camera::B, Item::Iso, 400), "worker failure: a pick");
+    throwing->store(true);
+    check(screen.RequestChosen(true) && s.WaitIdle() && screen.PanelOpen() && !screen.PanelStale() && screen.PanelDirty() == 1, "worker failure: a read that fails leaves the panel and its pick");
+    throwing->store(false);
 }
 void ScreenChosenDeadline() {
     using Item = D810ChoiceItem;
@@ -4545,7 +4611,7 @@ void ScreenChosenDeadline() {
         {A, Item::Iso, 200}, {A, Item::ShutterSpeed, 333}, {A, Item::Aperture, 560}, {A, Item::WhiteBalance, 5}, {A, Item::Metering, 2}};
     for (const auto& [camera, item, value] : picks) check(screen.PanelPick(camera, item, value), "deadline: pick");
     check(screen.RequestChosen(true) && s.WaitIdle() && screen.ConfirmationShown() && s.Confirm(), "deadline: run");
-    check(s.bench.Writes() == 10 && Shows(screen.View(), L"選んだ値を書きました: 一致（10 項目"), "deadline: ten steps run in the longer time");
+    check(s.bench.Writes() == 10 && Shows(screen.View(), L"選んだ値を書きました: 一致（5 項目・10 件"), "deadline: ten steps run in the longer time");
     // Five steps are within the screen's own 30 s.
     check(screen.RequestPanelReread(true) && s.WaitIdle() && screen.PanelEditable(), "deadline: reread");
     check(screen.PanelPick(B, Item::Iso, 100) && screen.PanelPick(B, Item::ShutterSpeed, 500) && screen.RequestChosen(true) && s.WaitIdle() && s.Confirm() && Shows(screen.View(), L"選んだ値を書きました: 一致（2 項目"), "deadline: two steps");
@@ -4957,6 +5023,7 @@ int main() {
     run("ScreenPanelLocksAndFailures", ScreenPanelLocksAndFailures);
     run("ScreenChosenFlow", ScreenChosenFlow);
     run("ScreenChosenRefusals", ScreenChosenRefusals);
+    run("ScreenChosenWorkerFailure", ScreenChosenWorkerFailure);
     run("ScreenChosenDeadline", ScreenChosenDeadline);
     run("ScreenChosenDamagedRecord", ScreenChosenDamagedRecord);
     run("ScreenSkippedShown", ScreenSkippedShown);
