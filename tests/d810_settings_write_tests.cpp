@@ -599,6 +599,23 @@ void ProductTable() {
     check(D810BodyVerified(table, "D810", table.verified_firmware), "a body that reports the named model and firmware is verified");
     check(!D810BodyVerified(table, "D810", "") && !D810BodyVerified(table, "D810", "1.00") && !D810BodyVerified(table, "D850", table.verified_firmware) &&
         !D810BodyVerified(table, "", table.verified_firmware), "any other model or firmware is not");
+    {
+        // The two comparisons are reported apart, and an empty text matches nothing on either side.
+        const auto both = D810CheckBody(table, table.verified_model, table.verified_firmware);
+        const auto model_only = D810CheckBody(table, table.verified_model, "x");
+        const auto firmware_only = D810CheckBody(table, "x", table.verified_firmware);
+        check(both.model_match && both.firmware_match && model_only.model_match && !model_only.firmware_match && !firmware_only.model_match && firmware_only.firmware_match,
+            "the comparisons are apart");
+        auto blank = table;
+        blank.verified_model = "";
+        check(!D810BodyVerified(blank, "", table.verified_firmware) && !D810BodyVerified(blank, table.verified_model, table.verified_firmware), "an empty model in the table verifies no body");
+        blank = table;
+        blank.verified_firmware = "";
+        check(!D810BodyVerified(blank, table.verified_model, "") && !D810BodyVerified(blank, table.verified_model, table.verified_firmware), "an empty version in the table verifies no body");
+        blank.verified_model = nullptr;
+        blank.verified_firmware = nullptr;
+        check(!D810BodyVerified(blank, "", "") && !D810BodyVerified(blank, table.verified_model, "x") && !D810CheckBody(D810DisabledWriteTable(), "", "").Verified(), "no entry in the table verifies no body");
+    }
     // What the product table may ever hold: CAM-B and the five items, no chosen values.
     std::size_t allowed = 0;
     for (std::size_t i = 0; i < table.rows.size(); ++i) {
@@ -1634,6 +1651,71 @@ void ProductRun() {
         check(run.sent == 0 && run.reason == "body_not_verified:CAM-B" && bench.Writes() == 0, "product run: another firmware, nothing sent");
     }
 }
+// The check of the body at the plan's read (not only at the send): a CAM-B that is not the model and firmware the
+// table names gets no plan and no confirmation. The log says which comparison failed, as booleans only.
+void PlanReadChecksTheBody() {
+    const auto joined = [](const std::vector<std::string>& log) {
+        std::string all;
+        for (const auto& line : log) all += line + "\n";
+        return all;
+    };
+    {
+        // A matching body: the read completes, and the log says both comparisons held.
+        Bench bench;
+        const auto read = bench.controller->ReadForPlan(bench.access, bench.options);
+        check(read.complete && read.reason.empty(), "plan read: a matching body completes");
+        check(Contains(joined(bench.log), "CAM-B settings_write_body_check model_match=1 firmware_match=1 setting_writes=0"), "plan read: both comparisons held");
+    }
+    // The table of this bench names the body; the bodies below report that, a different one, or nothing readable.
+    const std::string model = kAdr38Table.verified_model, firmware = kAdr38Table.verified_firmware, other = "other-text";
+    struct Case { const char* what; std::string model; std::string firmware; const char* expect; };
+    const std::vector<Case> cases{
+        {"firmware differs", model, other, "model_match=1 firmware_match=0"},
+        {"model differs", other, firmware, "model_match=0 firmware_match=1"},
+        {"both differ", other, other, "model_match=0 firmware_match=0"},
+        {"model could not be read", "", firmware, "model_match=0 firmware_match=1"},
+        {"firmware could not be read", model, "", "model_match=1 firmware_match=0"},
+    };
+    for (const auto& c : cases) {
+        Bench bench;
+        bench.access.model[1] = c.model;
+        bench.access.firmware[1] = c.firmware;
+        const auto read = bench.controller->ReadForPlan(bench.access, bench.options);
+        const std::string n = c.what;
+        check(!read.complete && read.reason == "body_not_verified:CAM-B", (n + ": no plan read, the reason names the body").c_str());
+        check(bench.a.read_begins > 0 && bench.b.read_begins == 0 && bench.b.trace.empty(), (n + ": CAM-A was read, nothing reached CAM-B").c_str());
+        check(bench.access.opens[1] == 1 && bench.access.closes[1] == 1 && !bench.access.overlap && bench.Writes() == 0, (n + ": CAM-B opened and closed once, nothing written").c_str());
+        const auto log = joined(bench.log);
+        check(Contains(log, std::string("CAM-B settings_write_body_check ") + c.expect + " setting_writes=0"), (n + ": the log says which comparison failed").c_str());
+        // Booleans only: neither the table's strings nor the body's are in the log.
+        check(!Contains(log, model) && !Contains(log, firmware) && !Contains(log, other) && !HasIdentifierShape(log), (n + ": the log has no model or version").c_str());
+        check(!bench.controller->Status().plan_pending && bench.controller->CaptureAllowed(), (n + ": no plan, no block").c_str());
+    }
+    {
+        // CAM-A is only read: its model and version do not stop the plan's read, and are not logged.
+        Bench bench;
+        bench.access.model[0] = other;
+        bench.access.firmware[0] = other;
+        const auto read = bench.controller->ReadForPlan(bench.access, bench.options);
+        check(read.complete && !Contains(joined(bench.log), "CAM-A settings_write_body_check"), "plan read: CAM-A's version does not matter");
+    }
+    {
+        // The reread releases a block whatever the bodies report: it is read-only and is not gated by the version.
+        Bench bench(kAdr38Table, -1, true);
+        bench.b = Body(1667, 800, 64); // the two bodies read the same
+        bench.access.firmware[1] = other;
+        const auto result = bench.controller->Reread(bench.access, bench.options);
+        check(result.complete && result.check.released && bench.b.read_begins > 0, "reread: not gated by the version");
+    }
+    {
+        // The product entry: a body whose version is not the table's gets no plan.
+        Bench bench(kProduct);
+        const auto read = bench.controller->ReadForPlan(bench.access, bench.options);
+        check(!read.complete && read.reason == "body_not_verified:CAM-B" && bench.b.read_begins == 0, "product entry: another version, no plan read");
+        bench.access.firmware[1] = kD810ProductWriteTable.verified_firmware;
+        check(bench.controller->ReadForPlan(bench.access, bench.options).complete, "product entry: the table's version completes");
+    }
+}
 void BodyAndConfirmation() {
     {
         // A target body that is not the verified model or firmware: nothing sent.
@@ -2438,6 +2520,11 @@ void ScreenRefusals() {
         check(s.screen->Status().enabled_rows == 1 && s.screen->CopyOffered(true) && !s.screen->CopyOffered(false), "screen: product table, copy offered when ready");
         const auto text = s.screen->OfferText(true);
         check(text.find(L"書ける項目がありません") == std::wstring::npos && text.find(L"番号（code）") == std::wstring::npos, "screen: product table, not the no-row reason");
+        // What is read and what is written are told apart: the writable items are named from the table.
+        check(text.find(L"読みます") != std::wstring::npos && text.find(L"CAM-B に書くのは ISO感度 だけで、ほかは読むだけです") != std::wstring::npos &&
+                text.find(L"確定の前に表示します") != std::wstring::npos,
+            "screen: product table, the offer names the one writable item");
+        check(s.screen->Status().writable_items == std::vector<D810WriteItem>{D810WriteItem::Iso}, "screen: product table, writable items");
         check(s.bench.access.opens[0] + s.bench.access.opens[1] == 0 && s.bench.Writes() == 0, "screen: product table, nothing opened by looking");
     }
     {
@@ -2474,6 +2561,27 @@ void ScreenRefusals() {
         ScreenBench s;
         s.bench.access.open_fail[1] = true;
         check(s.Copy() && Shows(s.screen->View(), L"読めませんでした") && s.bench.Writes() == 0, "screen: B not opened");
+    }
+}
+// The body is checked when the plan is read: on the screen no confirmation is put up for a CAM-B the table does not name.
+void ScreenBodyNotVerified() {
+    {
+        ScreenBench s;
+        s.bench.access.firmware[1] = "other-text";
+        check(s.Copy() && s.screen->Step() == D810WriteScreenStep::Idle && !s.screen->ConfirmationShown(), "screen: no confirmation for a body the table does not name");
+        check(s.screen->View() && !s.screen->View()->confirmation && Shows(s.screen->View(), L"機種・版が表と違います") && Shows(s.screen->View(), L"body_not_verified:CAM-B"),
+            "screen: the reason is shown");
+        check(!s.screen->ConfirmOffered(true) && !s.screen->Status().plan_pending && !s.screen->ConfirmShownPlan(true) && s.bench.Writes() == 0, "screen: nothing to confirm, nothing written");
+        check(s.bench.b.read_begins == 0 && s.screen->AdmitCapture(), "screen: nothing reached CAM-B, capture is not held");
+        check(std::any_of(s.log.begin(), s.log.end(), [](const auto& line) { return line.find("settings_write_body_check model_match=1 firmware_match=0 setting_writes=0") != std::string::npos; }),
+            "screen: the check is logged as booleans");
+        check(std::any_of(s.log.begin(), s.log.end(), [](const auto& line) { return line.find("settings_write_ui_plan_read_incomplete=1 reason=body_not_verified:CAM-B") != std::string::npos; }),
+            "screen: the failed read is logged");
+    }
+    {
+        // The same screen with the matching version puts the confirmation up.
+        ScreenBench s;
+        check(s.Copy() && s.screen->ConfirmationShown(), "screen: a matching body gets its confirmation");
     }
 }
 void ScreenSkippedShown() {
@@ -2692,6 +2800,8 @@ void ScreenRevision() {
         check(Shows(s.screen->View(), L"ホワイトバランス: 表で無効の項目です") && s.bench.Writes() == 0, "disabled rows: left out with the table's reason");
         s.screen->DiscardPlan();
         check(s.screen->OfferText(true).find(L"ホワイトバランス・測光") != std::wstring::npos, "the offer text names white balance and metering");
+        check(s.screen->OfferText(true).find(L"CAM-B に書くのは 露出モード・ISO感度自動制御・ISO感度・シャッター速度・絞り だけで") != std::wstring::npos,
+            "the offer text names the five writable items of this table");
     }
     {
         // Out of A's reach: the words for the two new tokens.
@@ -2812,6 +2922,7 @@ int main() {
     run("OtherGatesStillRefuseWrites", OtherGatesStillRefuseWrites);
     run("HappyCopy", HappyCopy);
     run("ProductRun", ProductRun);
+    run("PlanReadChecksTheBody", PlanReadChecksTheBody);
     run("BodyAndConfirmation", BodyAndConfirmation);
     run("RecordMustBeWrittenFirst", RecordMustBeWrittenFirst);
     run("PlanChangedAfterConfirm", PlanChangedAfterConfirm);
@@ -2828,6 +2939,7 @@ int main() {
     run("BudgetSweep", BudgetSweep);
     run("ScreenCopyFlow", ScreenCopyFlow);
     run("ScreenRefusals", ScreenRefusals);
+    run("ScreenBodyNotVerified", ScreenBodyNotVerified);
     run("ScreenSkippedShown", ScreenSkippedShown);
     run("ScreenBlockAndReread", ScreenBlockAndReread);
     run("ScreenPartialFailure", ScreenPartialFailure);

@@ -837,8 +837,10 @@ struct D810WriteStatus {
     bool write_allowed{};
     bool plan_pending{};
     bool plan_confirmed{};
-    // Rows the fixed table enables (1 in the product: ISO on CAM-B).
+    // Rows the fixed table enables.
     std::size_t enabled_rows{};
+    // The items a copy may write to CAM-B with this table, in table order (the screen names them).
+    std::vector<D810WriteItem> writable_items;
 };
 
 // --- What the write path reads --------------------------------------------------------
@@ -920,6 +922,7 @@ public:
         status.block = Block();
         status.capture_allowed = status.block == D810CaptureBlock::None;
         status.enabled_rows = D810EnabledRowCount(table_);
+        status.writable_items = D810CopyWritableItems(table_);
         status.write_allowed = table_valid_ && status.enabled_rows > 0 && WriteAllowed(status.block) && owner_.Current() == D810CameraUse::None;
         status.plan_pending = pending_.has_value();
         status.plan_confirmed = confirmed_.has_value();
@@ -935,7 +938,16 @@ public:
         if (!owner_.TryAcquire(D810CameraUse::Settings)) { out.reason = "cameras_busy"; return out; }
         struct Release { D810CameraOwnership& owner; ~Release() { owner.Release(D810CameraUse::Settings); } } release{owner_};
         for (const auto camera : {D810Camera::A, D810Camera::B}) {
-            auto read = ReadCamera(access, camera, options);
+            // CAM-B is the body that would be written: when it is not the model and firmware the table names, no
+            // plan is made and nothing is shown to confirm. CAM-A is only read, so its version does not matter.
+            const bool target = camera == D810Camera::B;
+            auto read = ReadCamera(access, camera, options, target);
+            if (target && read.opened) {
+                if (options.log)
+                    options.log(std::string(D810CameraAlias(camera)) + " settings_write_body_check model_match=" + (read.body.model_match ? "1" : "0") +
+                        " firmware_match=" + (read.body.firmware_match ? "1" : "0") + " setting_writes=0");
+                if (!read.verified) { out.reason = std::string("body_not_verified:") + D810CameraAlias(camera); return out; }
+            }
             if (!read.ok) { out.reason = std::string("read_incomplete:") + D810CameraAlias(camera); return out; }
             out.snapshots[static_cast<std::size_t>(camera)] = std::move(read.read.readings);
         }
@@ -1047,16 +1059,26 @@ private:
     struct CameraRead {
         D810CameraSettingsRead read;
         bool ok{};
+        bool opened{};
         bool verified{};
+        D810BodyCheck body;
     };
     // Open, read every table code with the read-only session, Close. After the
     // watchdog's flag nothing more reaches the transport, not even an END, and
     // what was answered before it is not trusted: the read is not complete.
-    CameraRead ReadCamera(D810SettingsCameraAccess& access, D810Camera camera, const D810WriteRunOptions& options) const {
+    // `only_if_verified`: a body that is not the model and firmware the table names
+    // is closed without a request (`opened` and `body` say what was found, `ok` is false).
+    CameraRead ReadCamera(D810SettingsCameraAccess& access, D810Camera camera, const D810WriteRunOptions& options, bool only_if_verified = false) const {
         CameraRead out;
         auto opened = access.Open(camera);
         if (!opened.transport) return out;
-        out.verified = D810BodyVerified(table_, opened.model, opened.firmware);
+        out.opened = true;
+        out.body = D810CheckBody(table_, opened.model, opened.firmware);
+        out.verified = out.body.Verified();
+        if (only_if_verified && !out.verified) {
+            access.Close(camera);
+            return out;
+        }
         const auto cancelled = opened.cancelled;
         bool complete = false;
         try {

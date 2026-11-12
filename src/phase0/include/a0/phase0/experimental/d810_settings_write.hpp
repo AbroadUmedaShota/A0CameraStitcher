@@ -282,6 +282,18 @@ constexpr std::size_t D810EnabledRowCount(const D810WriteTable& table) {
     for (const auto& row : table.rows) count += row.enabled;
     return count;
 }
+// The items a copy from CAM-A may write to CAM-B with this table: the items whose CAM-B row is enabled, in table
+// order. What the screen names as writable comes from here, not from a fixed sentence.
+inline std::vector<D810WriteItem> D810CopyWritableItems(const D810WriteTable& table) {
+    std::vector<D810WriteItem> items;
+    if (!table.copy_a_to_b) return items;
+    for (const auto& spec : kD810WriteItems) {
+        if (spec.scope == D810ItemScope::Adr41) continue;
+        const auto* row = table.Row(spec.item, D810Camera::B);
+        if (row && row->enabled && row->code != 0) items.push_back(spec.item);
+    }
+    return items;
+}
 // The product table. The stage A read on the real bodies confirmed ISO auto at
 // 0xD054 (not 0xD16A) and shutter speed at 0x500D (not 0xD100). Both are
 // recorded here with their rows disabled: the plan reads them for its
@@ -317,6 +329,7 @@ constexpr bool D810ProductTableIsIsoOnCamB(const D810WriteTable& table) {
 constexpr bool D810TextPresent(const char* text) { return text != nullptr && text[0] != '\0'; }
 static_assert(D810ProductTableProblem(kD810ProductWriteTable) == nullptr, "the product write table is outside ADR-0038");
 static_assert(D810ProductTableIsIsoOnCamB(kD810ProductWriteTable), "the product table enables exactly ISO on CAM-B and confirms ISO auto 0xD054 and shutter speed 0x500D");
+static_assert(D810TextPresent(kD810ProductWriteTable.verified_model), "the product table names the camera model it was confirmed on");
 static_assert(D810TextPresent(kD810ProductWriteTable.verified_firmware), "the product table names the firmware version it was confirmed on");
 static_assert(!kD810Adr38RevisionAccepted, "white balance and metering stay disabled until the ADR-0038 revision is accepted");
 
@@ -335,9 +348,23 @@ inline const char* D810RowRefusal(const D810WriteTable& table, D810WriteItem ite
     if (row->code == 0) return "code_unconfirmed";
     return nullptr;
 }
+// The two comparisons of a body's identity with the table, kept apart so that a log can say which one failed
+// (booleans only: the strings themselves are never logged). An empty text never matches, on either side: a
+// body whose model or version could not be read does not match an empty entry of a table.
+struct D810BodyCheck {
+    bool model_match{};
+    bool firmware_match{};
+    bool Verified() const { return model_match && firmware_match; }
+};
+inline D810BodyCheck D810CheckBody(const D810WriteTable& table, std::string_view model, std::string_view firmware) {
+    D810BodyCheck check;
+    check.model_match = D810TextPresent(table.verified_model) && !model.empty() && model == table.verified_model;
+    check.firmware_match = D810TextPresent(table.verified_firmware) && !firmware.empty() && firmware == table.verified_firmware;
+    return check;
+}
 // A body may be written only when it reports the model and firmware the table names.
 inline bool D810BodyVerified(const D810WriteTable& table, std::string_view model, std::string_view firmware) {
-    return table.verified_model && table.verified_firmware && model == table.verified_model && firmware == table.verified_firmware;
+    return D810CheckBody(table, model, firmware).Verified();
 }
 // Items whose equality on both cameras releases a capture block: the five of
 // ADR-0038, and every additional item with an enabled row (white balance and

@@ -296,7 +296,16 @@ public:
         if (!WriteAllowedByBlock(status_.block)) return D810CaptureBlockText(status_.block);
         if (!status_.write_allowed) return L"「A の設定を B に写す」は今は押せません（書き込みの表が正しくないか、カメラを別の処理が使っています）。";
         if (!screen_ready) return L"「A の設定を B に写す」は、両台のライブを止めて切断を確かめた後に押せます（撮影中・読み取り中は押せません）。";
-        return L"「A の設定を B に写す」: CAM-A の露出の 5 項目と、ホワイトバランス・測光を読み、CAM-B に書く内容を確定の前に表示します。";
+        // What is read and what can be written are different: both bodies' exposure items and white balance and
+        // metering are read; only the items the table enables for CAM-B are written, and they are named from it.
+        std::wstring writable;
+        for (const auto item : status_.writable_items) {
+            if (!writable.empty()) writable += L"・";
+            writable += D810WriteItemLabel(item);
+        }
+        if (writable.empty()) writable = L"（なし）";
+        return L"「A の設定を B に写す」: 両台の露出の 5 項目とホワイトバランス・測光を読みます。CAM-B に書くのは " + writable +
+               L" だけで、ほかは読むだけです。書く内容は確定の前に表示します。";
     }
 
     // "A の設定を B に写す": read both (read-only), then show the plan. Sends no write.
