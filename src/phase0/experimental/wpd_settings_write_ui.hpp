@@ -1080,6 +1080,7 @@ D810WriteTable SmokeConfirmTable(){
         if(row.item==D810WriteItem::ShutterSpeed)row.code=0x500d;
         row.enabled=row.camera==D810Camera::B && D810WriteItemOf(row.item).scope!=D810ItemScope::Adr41;
     }
+    table.chosen_values=false;table.verified_firmware_a=nullptr; // the copy table of the confirmation smoke: picked values and CAM-A stay off whatever the product table opens
     return table;
 }
 // How many buttons (and drop-downs) that are shown overlap the window rectangle of `target`, other than `target` itself. A
@@ -1471,7 +1472,8 @@ int RunSettingsWriteChosenSmoke(){
     D810SettingsWriteScreen* screen=nullptr;
     unsigned restarts{};const auto saved_override=preview_restart_override;preview_restart_override=[&]{++restarts;}; // a Live restart is a counter here
 
-    // 1. The product table: the panel opens on a read, shows both cameras, and no drop-down can be used.
+    // 1. The product table: the panel opens on a read and shows both cameras. CAM-A's body is read as not verified, so none of CAM-A's
+    //    drop-downs can be used (the table's row or the body check locks them); CAM-B's follow the table's rows.
     InitSettingsWrite(std::make_unique<D810SettingsFileJournal>(folder),factory);
     screen=settings_write->screen.get();
     tick();
@@ -1481,25 +1483,27 @@ int RunSettingsWriteChosenSmoke(){
     for(int i=0;i<400 && SettingsWriteBusy();++i){tick();std::this_thread::sleep_for(std::chrono::milliseconds(5));}
     check(!SettingsPanelOpen() && opens->load()>=1 && screen->View() && screen->View()->title.find(L"設定の画面は開きません")!=std::wstring::npos);
     check(!shown(combo_ok(0,kIso)) && !shown(settings_panel_close_button) && enabled(settings_panel_open_button));
-    screen->TakePanelReadForTest(read_of(true,false)); // the product table's flags: CAM-A's body is not verified
+    screen->TakePanelReadForTest(read_of(true,false)); // CAM-A's body is not verified
     tick();
     check(SettingsPanelOpen() && screen->Panel() && PanelHoldsLive());
     check(!CanRestartPreview() && !shown(settings_panel_open_button) && enabled(settings_panel_close_button) && shown(settings_panel_write_button) && !enabled(settings_panel_write_button));
     {
-        bool all_locked=true,all_shown=true;
+        bool all_shown=true,a_locked=true,b_follows_table=true;
         for(int camera=0;camera<2;++camera)for(int item=0;item<static_cast<int>(kD810ChoiceItemCount);++item){
-            all_shown=all_shown && shown(combo_ok(camera,item));all_locked=all_locked && !enabled(combo_ok(camera,item));
+            const bool b_row_on=D810RowRefusal(kD810ProductWriteTable,D810ChoiceWriteItem(static_cast<D810ChoiceItem>(item)),D810Camera::B,D810PlanSource::Chosen)==nullptr;
+            all_shown=all_shown && shown(combo_ok(camera,item));
+            if(camera==0)a_locked=a_locked && !enabled(combo_ok(camera,item));
+            else b_follows_table=b_follows_table && enabled(combo_ok(camera,item))==b_row_on;
         }
-        check(all_shown && all_locked);
-        for(int item=0;item<static_cast<int>(kD810ChoiceItemCount);++item)check(shown(settings_panel_same_buttons[item]) && !enabled(settings_panel_same_buttons[item]));
+        check(all_shown && a_locked && b_follows_table);
+        // Same-as-A makes a pick on CAM-B: it is offered only where CAM-B's cell can be picked.
+        for(int item=0;item<static_cast<int>(kD810ChoiceItemCount);++item)check(shown(settings_panel_same_buttons[item]) && (!enabled(settings_panel_same_buttons[item]) || enabled(combo_ok(1,item))));
     }
     check(selected(0,kIso)==L"200" && selected(1,kIso)==L"100" && selected(0,kShutter).find(L"1/40")!=std::wstring::npos);
     // A notification of a locked drop-down (a stand-in for a key or the wheel): nothing is picked and the value comes back.
     {
         const auto picks=settings_panel_picks;
-        check(choose(1,kIso,L"200") && settings_panel_picks==picks && screen->PanelDirty()==0 && selected(1,kIso)==L"100");
-        click(kPanelSameBaseId+kIso,settings_panel_same_buttons[kIso]);
-        check(settings_panel_picks==picks && screen->PanelEntryCount()==0);
+        check(choose(0,kIso,L"400") && settings_panel_picks==picks && screen->PanelDirty()==0 && selected(0,kIso)==L"200");
         click(kPanelWriteButtonId,settings_panel_write_button);
         check(!SettingsWriteBusy() && screen->Step()==D810WriteScreenStep::Idle && opens->load()<=2);
     }

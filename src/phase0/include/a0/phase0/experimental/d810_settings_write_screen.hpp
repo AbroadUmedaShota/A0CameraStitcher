@@ -715,8 +715,8 @@ public:
     }
     // "N 件を書き込む…" may be pressed: the panel's values are current, there is at least one change, nothing runs
     // and no confirmation is up, the preview is ready, and the table lets a plan be made and run (a block that is a
-    // known mismatch lets one through, as for a copy). With the product table no cell can be picked, so there is never
-    // a change and this is false.
+    // known mismatch lets one through, as for a copy). A cell the product table keeps closed cannot be picked, so a
+    // change exists only where the table opens a row.
     bool ChosenOffered(bool screen_ready) const {
         return screen_ready && !Busy() && !close_failed_ && PanelEditable() && status_.write_allowed && PanelDirty() > 0;
     }

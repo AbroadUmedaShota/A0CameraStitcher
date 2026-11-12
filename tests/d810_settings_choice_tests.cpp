@@ -2,6 +2,7 @@
 // property description, display names, panel cells and the draft of picks. Pure data: no device, no camera, no
 // Windows API, and nothing here reaches a plan, a gate or an execution path.
 #include "a0/phase0/experimental/d810_settings_choice.hpp"
+#include "d810_product_stage.hpp"
 #include <algorithm>
 #include <iostream>
 #include <set>
@@ -384,13 +385,14 @@ void CellLockReasons() {
             if (row.item == D810WriteItem::Iso && row.camera == D810Camera::B) row.code = 0;
         check(Locked(cell_of(no_code, Snapshot())) == "code_unconfirmed", "row on without a code");
     }
-    // Product table: nothing can be picked while chosen values are off.
+    // Product table: a cell can be picked exactly where the stage opens its row (tests/d810_product_stage.hpp).
     {
         const auto product = kD810ProductWriteTable;
         for (const auto camera : {D810Camera::A, D810Camera::B})
             for (const auto item : kD810ChoiceItems) {
                 const auto cell = BuildD810PanelCell(product, camera, item, Snapshot(), true);
-                check(!cell.Editable() && Locked(cell) == "chosen_values_disabled", "the product table opens no cell");
+                const bool opens = product_stage::Opens(camera, D810ChoiceWriteItem(item));
+                check(cell.Editable() == opens && (opens || Locked(cell) == "row_disabled"), "the product table opens the cells of the stage and no other");
                 check(!cell.options.empty(), "the product table still lists the values");
             }
     }
@@ -665,11 +667,14 @@ void NoWritePath() {
     std::size_t editable = 0;
     for (const auto camera : {A::A, A::B})
         for (const auto item : kD810ChoiceItems) editable += model.At(camera, item).Editable();
-    check(editable == 0, "no cell of the product table is editable");
+    check(editable == product_stage::kEnabledRows, "the editable cells of the product table are the stage's rows");
     D810PanelDraft draft(1);
     for (const auto camera : {A::A, A::B})
-        for (const auto item : kD810ChoiceItems) check(!draft.Pick(model, camera, item, 100), "no pick on the product table");
-    check(!draft.PickSameAsA(model, I::Iso) && draft.EntryCount() == 0, "no entry on the product table");
+        for (const auto item : kD810ChoiceItems)
+            if (!product_stage::Opens(camera, D810ChoiceWriteItem(item))) check(!draft.Pick(model, camera, item, 100), "no pick where the stage opens no row");
+    for (const auto item : kD810ChoiceItems)
+        if (!product_stage::Opens(A::B, D810ChoiceWriteItem(item))) check(!draft.PickSameAsA(model, item), "no same-as-A where the stage opens no CAM-B row");
+    check(draft.EntryCount() == 0, "no entry from the refused picks");
 }
 } // namespace
 

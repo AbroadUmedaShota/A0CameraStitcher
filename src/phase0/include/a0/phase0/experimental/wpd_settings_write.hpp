@@ -912,7 +912,8 @@ static_assert(D810WriteReadSetCovers(kD810ProductWriteTable), "every code the pr
 // defines A0_SETTINGS_WRITE_TEST_TABLES; there the controller also accepts the
 // tables the tests build (the ADR-0041 code paths included). Everywhere else
 // it is built from kD810ProductWriteTable alone, and that table must also pass
-// the product rules (CAM-B and the five ADR-0038 items only, no chosen values).
+// the product rules (D810ProductTableProblem: CAM-B rows of the accepted items, and CAM-A rows only with
+// the chosen-values switch).
 #if defined(A0_SETTINGS_WRITE_TEST_TABLES)
 inline constexpr bool kD810ControllerTestTables = true;
 #else

@@ -3,6 +3,7 @@
 // value objects and files in a temporary folder. No device, no camera.
 #include "a0/phase0/experimental/wpd_settings_write.hpp"
 #include "a0/phase0/experimental/d810_settings_write_screen.hpp"
+#include "d810_product_stage.hpp"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -244,7 +245,7 @@ D810SettingsSnapshot WritePathSnapshot(FakeWriteBody& body, const char* alias) {
 
 // --- Tables ----------------------------------------------------------------------------
 // The product table with CAM-B's five rows enabled and a synthetic firmware
-// version: the most ADR-0038 allows. The product table itself enables one row.
+// version, picked values and CAM-A's version off: the most ADR-0038 allows (a copy).
 constexpr D810WriteTable Adr38Table() {
     auto table = kD810ProductWriteTable;
     for (auto& row : table.rows) {
@@ -253,6 +254,8 @@ constexpr D810WriteTable Adr38Table() {
         row.enabled = row.camera == D810Camera::B && D810WriteItemOf(row.item).scope == D810ItemScope::Adr38;
     }
     table.verified_firmware = "1.00";
+    table.chosen_values = false; // the ADR-0038 table is copy only, whatever the product table has switched on
+    table.verified_firmware_a = nullptr;
     return table;
 }
 constexpr D810WriteTable kAdr38Table = Adr38Table();
@@ -308,8 +311,8 @@ constexpr D810WriteTable Adr41Table() {
 constexpr D810WriteTable kAdr41Table = Adr41Table();
 static_assert(D810WriteTableProblem(kAdr41Table) == nullptr && D810ProductTableProblem(kAdr41Table) != nullptr, "ADR-0041 table");
 // The table of the per-camera tests: chosen values on and the rows of the five items an operator may pick enabled on both
-// cameras, with the firmware version of each camera. What a product table could hold once ADR-0041 is accepted (a test
-// table here, because the flag is not set).
+// cameras, with the firmware version of each camera. What the product table holds once the last stage is open (a test
+// table here: the product table opens only what its stage says, see ProductStage).
 constexpr D810WriteTable ChosenTable() {
     auto table = Adr38Table();
     for (auto& row : table.rows) {
@@ -322,7 +325,7 @@ constexpr D810WriteTable ChosenTable() {
 }
 constexpr D810WriteTable kChosenTable = ChosenTable();
 static_assert(D810WriteTableProblem(kChosenTable) == nullptr, "the per-camera test table is consistent");
-static_assert(D810ProductTableProblem(kChosenTable) != nullptr, "it is not a product table while ADR-0041 is not accepted");
+static_assert(D810ProductTableProblem(kChosenTable, kD810Adr38RevisionAccepted, false) != nullptr, "it is not a product table without the ADR-0041 flag");
 static_assert(D810ProductTableProblem(kChosenTable, true, true) == nullptr, "it would be one if ADR-0041 were accepted");
 static_assert(D810EnabledRowCount(kChosenTable) == 10, "five items on two cameras");
 // A pick of a value, and "same as CAM-A", as the panel draft hands them to the plan.
@@ -655,25 +658,25 @@ void DescriptionRules() {
 void ProductTable() {
     const auto& table = kD810ProductWriteTable;
     check(D810ProductTableProblem(table) == nullptr, "product table valid");
-    // The enabled set is exactly this: ISO, white balance and metering on CAM-B. Changing the product table makes this check fail on purpose.
-    std::set<std::pair<int, int>> enabled;
+    // The enabled set is exactly the one tests/d810_product_stage.hpp names for this stage. Changing the product table makes this check fail on purpose.
+    std::set<std::pair<int, int>> enabled, expected_enabled;
     for (const auto& row : table.rows)
         if (row.enabled) enabled.insert({static_cast<int>(row.camera), static_cast<int>(row.item)});
-    const int cam_b = static_cast<int>(D810Camera::B);
-    check(enabled == std::set<std::pair<int, int>>{{cam_b, static_cast<int>(D810WriteItem::Iso)}, {cam_b, static_cast<int>(D810WriteItem::ShutterSpeed)}, {cam_b, static_cast<int>(D810WriteItem::Aperture)},
-                         {cam_b, static_cast<int>(D810WriteItem::WhiteBalance)}, {cam_b, static_cast<int>(D810WriteItem::Metering)}},
-        "the product table enables exactly ISO, shutter speed, aperture, white balance and metering on CAM-B");
-    check(D810EnabledRowCount(table) == 5 && kExpectedProductItems.size() == 5, "five enabled rows");
+    for (const auto camera : {D810Camera::A, D810Camera::B})
+        for (const auto& spec : kD810WriteItems)
+            if (product_stage::Opens(camera, spec.item)) expected_enabled.insert({static_cast<int>(camera), static_cast<int>(spec.item)});
+    check(enabled == expected_enabled, "the product table enables exactly the rows of its stage");
+    check(D810EnabledRowCount(table) == product_stage::kEnabledRows && kExpectedProductItems.size() == 5, "the number of enabled rows is the stage's");
     check(D810CopyWritableItems(table) == kExpectedProductItems, "the writable items are the expected ones, in table order");
     // The codes the table confirms: ISO auto and shutter speed on both cameras. ISO auto's rows are disabled; shutter speed is enabled on CAM-B only.
     for (const auto camera : {D810Camera::A, D810Camera::B}) {
         const auto* iso_auto = table.Row(D810WriteItem::IsoAuto, camera);
         const auto* shutter = table.Row(D810WriteItem::ShutterSpeed, camera);
         check(iso_auto && !iso_auto->enabled && iso_auto->code == 0xd054, "ISO auto: code 0xD054, disabled");
-        check(shutter && shutter->enabled == (camera == D810Camera::B) && shutter->code == 0x500d, "shutter speed: code 0x500D, enabled on CAM-B only");
+        check(shutter && shutter->enabled == product_stage::Opens(camera, D810WriteItem::ShutterSpeed) && shutter->code == 0x500d, "shutter speed: code 0x500D, enabled where the stage says");
     }
     check(table.Code(D810WriteItem::IsoAuto) == 0xd054 && table.Code(D810WriteItem::ShutterSpeed) == 0x500d, "confirmed codes");
-    check(table.copy_a_to_b && !table.chosen_values, "copy only");
+    check(table.copy_a_to_b && table.chosen_values, "copy and picked values are on (stage T1 and later)");
     check(std::string(table.verified_model) == "D810" && table.verified_firmware != nullptr && table.verified_firmware[0] != '\0', "model and firmware named");
     check(D810BodyVerified(table, D810Camera::B, "D810", table.verified_firmware), "a body that reports the named model and firmware is verified");
     check(!D810BodyVerified(table, D810Camera::B, "D810", "") && !D810BodyVerified(table, D810Camera::B, "D810", "1.00") && !D810BodyVerified(table, D810Camera::B, "D850", table.verified_firmware) &&
@@ -711,8 +714,8 @@ void ProductTable() {
     for (const auto item : {D810WriteItem::WhiteBalance, D810WriteItem::Metering}) {
         for (const auto camera : {D810Camera::A, D810Camera::B}) {
             const auto* row = table.Row(item, camera);
-            check(row && row->enabled == (camera == D810Camera::B) && row->code == (item == D810WriteItem::WhiteBalance ? 0x5005 : 0x500b),
-                "revision rows: CAM-B enabled, CAM-A disabled, code from the public table");
+            check(row && row->enabled == product_stage::Opens(camera, item) && row->code == (item == D810WriteItem::WhiteBalance ? 0x5005 : 0x500b),
+                "revision rows: enabled where the stage says, code from the public table");
         }
         auto probe = Adr38Table();
         for (auto& row : probe.rows) if (row.camera == D810Camera::B && row.item == item) row.enabled = true;
@@ -734,7 +737,7 @@ void ProductTable() {
     check(!D810ItemInProductScope(D810WriteItemOf(D810WriteItem::ExposureCompensation)) && D810WriteItemOf(D810WriteItem::ExposureCompensation).scope == D810ItemScope::Adr41, "compensation stays ADR-0041");
     auto chosen = Adr38Table();
     chosen.chosen_values = true;
-    check(std::string(D810ProductTableProblem(chosen)) == "chosen_values_before_adr0041", "chosen values not allowed");
+    check(std::string(D810ProductTableProblem(chosen, kD810Adr38RevisionAccepted, false)) == "chosen_values_before_adr0041", "chosen values are not allowed without the ADR-0041 flag");
     // Consistency rules.
     auto bad = Adr38Table();
     bad.rows[1].code = 0xd055;
@@ -764,7 +767,8 @@ void ProductTable() {
 void ControllerTables() {
     static_assert(kD810ControllerTestTables, "the contract tests build the test-table constructor");
     check(D810ControllerTableProblem(kD810ProductWriteTable, false) == nullptr && D810ControllerTableProblem(kAdr38Table, false) == nullptr, "product rules: product-shaped tables pass");
-    check(std::string(D810ControllerTableProblem(kAdr41Table, false)) == "chosen_values_before_adr0041", "product rules: chosen values refused");
+    check(std::string(D810ProductTableProblem(kAdr41Table, kD810Adr38RevisionAccepted, false)) == "chosen_values_before_adr0041", "product rules: chosen values refused without the ADR-0041 flag");
+    check(std::string(D810ControllerTableProblem(kAdr41Table, false)) == "cam_a_row_not_choosable", "product rules: a table with every row on is refused (CAM-A exposure mode)");
     auto cam_a = kAdr38Table;
     for (auto& row : cam_a.rows) if (row.camera == D810Camera::A && row.item == D810WriteItem::Iso) row.enabled = true;
     cam_a.verified_firmware_a = "1.00";
@@ -780,7 +784,7 @@ void ControllerTables() {
     {
         // The product entry point holds the product table.
         Bench bench(kProduct);
-        check(bench.controller->Status().enabled_rows == 5, "product entry: five rows");
+        check(bench.controller->Status().enabled_rows == product_stage::kEnabledRows, "product entry: the stage's rows");
         check(bench.controller->Status().write_allowed && bench.controller->Status().capture_allowed, "rows enabled, no block: copying is offered");
         auto none = kAdr38Table;
         for (auto& row : none.rows) row.enabled = false;
@@ -789,7 +793,7 @@ void ControllerTables() {
         const auto copy = bench.Copy();
         check(copy.Ok() && PlanStepItems(copy) == ExpectedProductSteps({D810WriteItem::Iso, D810WriteItem::ShutterSpeed, D810WriteItem::Aperture}) && PlanStepsAllCamB(copy) && bench.Writes() == 0,
             "product entry: only the enabled items, on CAM-B, can be planned");
-        check(bench.Restarted().Status().enabled_rows == 5, "product entry after a restart");
+        check(bench.Restarted().Status().enabled_rows == product_stage::kEnabledRows, "product entry after a restart");
     }
     {
         // The table is held by value: a temporary does not dangle.
@@ -815,10 +819,10 @@ void FilesEnableNothing() {
         "product copy: the enabled items on CAM-B and nothing else, whatever the files and the variable say");
     for (const auto camera : {D810Camera::A, D810Camera::B}) {
         check(!bench.Chosen({PickFor(camera, D810WriteItem::Iso, 200)}).Ok(), "product chosen refused");
-        check(!bench.Chosen({PickFor(camera, D810WriteItem::Iso, 200)}, {true, true}).Ok(), "product chosen refused whatever the body check says");
+        check(bench.Chosen({PickFor(camera, D810WriteItem::Iso, 200)}, {true, true}).Ok() == product_stage::Opens(camera, D810WriteItem::Iso), "product chosen: planned only where the stage opens the row, whatever the files say");
     }
-    check(!bench.Chosen({FollowA(D810WriteItem::Iso)}, {true, true}).Ok(), "product chosen: same as CAM-A refused");
-    check(bench.controller->Status().enabled_rows == 5, "status: five rows");
+    check(bench.Chosen({FollowA(D810WriteItem::Iso)}, {true, true}).Ok() == product_stage::Opens(D810Camera::B, D810WriteItem::Iso), "product chosen: same as CAM-A follows the stage");
+    check(bench.controller->Status().enabled_rows == product_stage::kEnabledRows, "status: the stage's rows");
     SetEnvironmentVariableW(L"A0_SETTINGS_WRITE_ENABLE", nullptr);
     check(bench.Writes() == 0 && bench.a.write_datas + bench.b.write_datas == 0 && bench.a.forbidden + bench.b.forbidden == 0, "only reads, no write");
 }
@@ -1153,11 +1157,11 @@ void ChosenPlans() {
         };
         Bench adr38;
         sweep(adr38);
-        Bench product(kProduct);
+        // The product table with the switch off (the product table itself is at the stage ProductStage describes).
+        auto switched_off = kD810ProductWriteTable;
+        switched_off.chosen_values = false;
+        Bench product(switched_off);
         sweep(product);
-        // The product table, by the rules a product table must keep.
-        check(!kD810Adr41Accepted && !kD810ProductWriteTable.chosen_values && !D810TextPresent(kD810ProductWriteTable.verified_firmware_a), "product table: ADR-0041 is not accepted, no chosen values, no CAM-A version");
-        for (const auto& row : kD810ProductWriteTable.rows) check(!row.enabled || row.camera == B, "product table: no CAM-A row is enabled");
     }
     {
         // Order: every CAM-B step first, every CAM-A step last, the item table's order within a camera, whatever order the
@@ -1362,8 +1366,8 @@ void ChosenPlans() {
         }
         // The product table: no body is verified as CAM-A, whatever it reports.
         const auto& product = kD810ProductWriteTable;
-        check(!D810BodyVerified(product, A, product.verified_model, product.verified_firmware) && !D810BodyVerified(product, A, product.verified_model, "") &&
-            D810BodyVerified(product, B, product.verified_model, product.verified_firmware), "product table: CAM-A cannot be verified");
+        check(D810BodyVerified(product, A, product.verified_model, product.verified_firmware) == product_stage::kCamAVersionNamed && !D810BodyVerified(product, A, product.verified_model, "") &&
+            D810BodyVerified(product, B, product.verified_model, product.verified_firmware), "product table: CAM-A is verified only when the table names its version");
         // Product-table rules once ADR-0041 would be accepted: CAM-A rows need the chosen values, never the exposure mode or ISO auto.
         check(D810ProductTableProblem(kChosenTable, true, true) == nullptr, "an accepted ADR-0041 would allow this table");
         auto a_without_chosen = kChosenTable;
@@ -2386,9 +2390,11 @@ void ProductShutter() {
         }
         auto a_row = kD810ProductWriteTable;
         for (auto& row : a_row.rows) if (row.item == D810WriteItem::ShutterSpeed && row.camera == D810Camera::A) row.enabled = true;
+        a_row.verified_firmware_a = nullptr;
         check(std::string(D810ProductTableProblem(a_row)) == "cam_a_version_unconfirmed", "shutter speed: CAM-A's row needs CAM-A's version in the table");
         a_row.verified_firmware_a = "1.00";
-        check(std::string(D810ProductTableProblem(a_row)) == "cam_a_row_enabled", "shutter speed: CAM-A's row cannot be enabled");
+        a_row.chosen_values = false;
+        check(std::string(D810ProductTableProblem(a_row)) == "cam_a_row_enabled", "shutter speed: CAM-A's row needs the picked-values switch");
     }
 }
 // The check of the body at the plan's read (not only at the send): a CAM-B that is not the model and firmware the
@@ -2815,6 +2821,145 @@ void ChosenReadToken() {
         check(bench.Copy().Ok(), "stale: the copy plan still takes two snapshots");
     }
 }
+// --- What the product table lets a plan of picked values do at this stage (tests/d810_product_stage.hpp) -----------------
+// Both bodies report the model and version the product table names for them (CAM-A's only once the table names one).
+void PrepareStageBench(Bench& bench) {
+    PrepareProductBench(bench);
+    if (product_stage::kCamAVersionNamed) {
+        bench.access.model[0] = kD810ProductWriteTable.verified_model;
+        bench.access.firmware[0] = kD810ProductWriteTable.verified_firmware_a;
+    }
+}
+struct StagePick { D810WriteItem item; std::int64_t value; std::uint16_t code; };
+// A value each pickable item can take on both bodies of the product bench, and differs from what either body holds.
+const StagePick kStagePicks[] = {{D810WriteItem::Iso, 200, 0x500f}, {D810WriteItem::ShutterSpeed, 500, 0x500d}, {D810WriteItem::Aperture, 1100, 0x5007},
+    {D810WriteItem::WhiteBalance, 5, 0x5005}, {D810WriteItem::Metering, 4, 0x500b}};
+void ProductStage() {
+    namespace stage = product_stage;
+    using Item = D810WriteItem;
+    const auto A = D810Camera::A, B = D810Camera::B;
+    const auto& product = kD810ProductWriteTable;
+    // The table is at this stage, row by row, and the switches are what the stage says.
+    for (const auto& row : product.rows) check(row.enabled == stage::Opens(row.camera, row.item), "stage: a row is enabled exactly where the stage opens it");
+    check(D810EnabledRowCount(product) == stage::kEnabledRows, "stage: the number of enabled rows");
+    check(kD810Adr41Accepted && product.chosen_values, "stage: picked values are switched on");
+    check(D810TextPresent(product.verified_firmware_a) == stage::kCamAVersionNamed, "stage: CAM-A's version is named exactly when the stage says");
+    check(product.verified_firmware_a == nullptr || product.verified_firmware_a == product.verified_firmware, "stage: CAM-A's version is CAM-B's entry, by reference");
+    check(D810ProductTableProblem(product) == nullptr && D810ControllerTableProblem(product, false) == nullptr, "stage: the product rules hold");
+    // A body is verified as CAM-A only when the table names a version for it.
+    check(D810BodyVerified(product, A, product.verified_model, product.verified_firmware) == stage::kCamAVersionNamed, "stage: CAM-A is verified with CAM-B's version only when the table names it");
+    check(!D810BodyVerified(product, A, product.verified_model, "") && !D810BodyVerified(product, A, product.verified_model, "other-text") && !D810BodyVerified(product, A, "", product.verified_firmware),
+        "stage: nothing else verifies as CAM-A");
+    check(D810BodyVerified(product, B, product.verified_model, product.verified_firmware), "stage: CAM-B is verified");
+
+    // Each pick on each camera: planned and written once exactly where the stage opens it; refused with nothing sent elsewhere.
+    for (const auto camera : {A, B})
+        for (const auto& pick : kStagePicks) {
+            Bench bench(kProduct);
+            PrepareStageBench(bench);
+            bench.TraceBegins();
+            const auto plan = bench.Chosen({PickFor(camera, pick.item, pick.value)});
+            const bool opens = stage::Opens(camera, pick.item);
+            check(plan.Ok() == opens, "stage: a pick is planned exactly where the stage opens it");
+            if (!opens) {
+                check(!plan.reasons.empty() && bench.Writes() == 0 && bench.begin_order.empty(), "stage: a pick the stage does not open is refused with a reason and nothing is sent");
+                continue;
+            }
+            const auto run = bench.Run(plan);
+            const auto& own = camera == A ? bench.a : bench.b;
+            const auto& other = camera == A ? bench.b : bench.a;
+            check(run.verdict == D810WriteVerdict::Match && run.sent == 1 && own.write_begins == 1 && other.write_begins == 0, "stage: the opened pick is written once, to its own camera only");
+            check(own.props.at(pick.code).current == pick.value && bench.begin_order == BeginOrder{{static_cast<int>(camera), pick.code}}, "stage: the value arrived at its code, nothing else was begun");
+            check(NoResend(bench.a) && NoResend(bench.b) && bench.a.forbidden == 0 && bench.b.forbidden == 0 && !bench.access.overlap, "stage: once, nothing else, one body at a time");
+        }
+
+    // Items no stage opens, on either camera.
+    for (const auto camera : {A, B})
+        for (const auto item : {Item::ExposureMode, Item::IsoAuto, Item::ExposureCompensation}) {
+            Bench bench(kProduct);
+            PrepareStageBench(bench);
+            check(!bench.Chosen({PickFor(camera, item, 1)}).Ok() && bench.Writes() == 0, "stage: exposure mode, ISO auto and compensation are never picked");
+        }
+
+    // One plan with everything the stage opens runs through, CAM-B's steps first and CAM-A's last; with a step the stage does
+    // not open added to it, the whole plan is refused and not even CAM-B is written.
+    {
+        std::vector<D810CameraChoice> opened, closed;
+        for (const auto camera : {A, B})
+            for (const auto& pick : kStagePicks) (stage::Opens(camera, pick.item) ? opened : closed).push_back(PickFor(camera, pick.item, pick.value));
+        Bench bench(kProduct);
+        PrepareStageBench(bench);
+        bench.TraceBegins();
+        const auto plan = bench.Chosen(opened);
+        check(plan.Ok() && plan.plan->steps.size() == opened.size(), "stage: everything the stage opens is one plan");
+        const auto run = bench.Run(plan);
+        check(run.verdict == D810WriteVerdict::Match && run.sent == opened.size() && bench.Writes() == static_cast<int>(opened.size()), "stage: that plan is written step by step and matches");
+        bool b_before_a = true, seen_a = false;
+        for (const auto& begun : bench.begin_order) {
+            if (begun.first == static_cast<int>(A)) seen_a = true;
+            else if (seen_a) b_before_a = false;
+        }
+        check(b_before_a && bench.begin_order.size() == opened.size(), "stage: CAM-B's steps are sent before CAM-A's");
+        check(bench.controller->CaptureAllowed(), "stage: matched, capture is allowed");
+        for (const auto& extra : closed) {
+            Bench refused(kProduct);
+            PrepareStageBench(refused);
+            auto choices = opened;
+            choices.push_back(extra);
+            const auto plan_with = refused.Chosen(choices);
+            check(!plan_with.Ok() && refused.Writes() == 0, "stage: one step the stage does not open refuses the whole plan");
+        }
+    }
+
+    // The key to a CAM-A session follows the table: open exactly for a plan whose CAM-A steps the stage opens, with CAM-A's version named.
+    {
+        Bench reference(kChosenTable);
+        const auto only_b = reference.Chosen({PickFor(B, Item::Iso, 400)});
+        check(only_b.Ok() && D810CamAKeyOpen(*only_b.plan, product) == stage::kCamAVersionNamed, "stage: the key for a plan with no CAM-A step follows CAM-A's version");
+        Bench second(kChosenTable);
+        const auto a_iso = second.Chosen({PickFor(A, Item::Iso, 200)});
+        check(a_iso.Ok() && D810CamAKeyOpen(*a_iso.plan, product) == (stage::Opens(A, Item::Iso) && stage::kCamAVersionNamed), "stage: the key for a CAM-A ISO step");
+        Bench third(kChosenTable);
+        const auto a_all = third.Chosen({PickFor(A, Item::Iso, 200), PickFor(A, Item::ShutterSpeed, 500), PickFor(A, Item::Aperture, 1100), PickFor(A, Item::WhiteBalance, 5), PickFor(A, Item::Metering, 4)});
+        bool all_open = true;
+        for (const auto& pick : kStagePicks) all_open = all_open && stage::Opens(A, pick.item);
+        check(a_all.Ok() && D810CamAKeyOpen(*a_all.plan, product) == (all_open && stage::kCamAVersionNamed), "stage: the key for CAM-A's five steps");
+        auto copy = *a_iso.plan;
+        copy.source = D810PlanSource::CopyAToB;
+        check(!D810CamAKeyOpen(copy, product), "stage: no key for a copy");
+    }
+
+    // The read for a plan reports how CAM-A's body compared (booleans only) once a CAM-A row is enabled, and not before.
+    {
+        Bench bench(kProduct);
+        PrepareStageBench(bench);
+        (void)bench.Chosen({PickFor(B, Item::Iso, 400)});
+        std::string all;
+        for (const auto& line : bench.log) all += line + "\n";
+        const bool reported = Contains(all, "CAM-A settings_write_body_check model_match=");
+        check(reported == (stage::kCamAItems != 0), "stage: CAM-A's body check is reported exactly when a CAM-A row is enabled");
+        if (reported)
+            check(Contains(all, std::string("CAM-A settings_write_body_check model_match=1 firmware_match=") + (stage::kCamAVersionNamed ? "1" : "0") + " setting_writes=0"), "stage: the report says whether CAM-A's version is the table's");
+        check(!Contains(all, product.verified_firmware), "stage: the report carries no version text");
+    }
+    // A CAM-A body whose version is not the table's: nothing is sent to CAM-A, nor to CAM-B in the same plan.
+    if (stage::kCamAVersionNamed) {
+        Bench bench(kProduct);
+        PrepareStageBench(bench);
+        bench.access.firmware[0] = "other-text";
+        const auto plan = bench.Chosen({PickFor(B, Item::Iso, 400), PickFor(A, Item::Iso, 200)});
+        check(!plan.Ok() && HasReason(plan, "body_not_verified:CAM-A") && bench.Writes() == 0, "stage: a CAM-A body of another version is refused, nothing is sent");
+        // The same body changes between the plan and the run: stopped before the first send.
+        Bench later(kProduct);
+        PrepareStageBench(later);
+        const auto good = later.Chosen({PickFor(B, Item::Iso, 400), PickFor(A, Item::Iso, 200)});
+        check(good.Ok(), "stage: both bodies are the table's at the plan");
+        later.access.firmware[0] = "other-text";
+        const auto run = later.Run(good);
+        check(run.sent == 0 && run.reason == "body_not_verified:CAM-A" && later.Writes() == 0, "stage: CAM-A's version changed before the run, nothing is sent");
+    }
+}
+
 void ChosenRuns() {
     using Item = D810WriteItem;
     const auto A = D810Camera::A, B = D810Camera::B;
@@ -4169,9 +4314,9 @@ void ScreenRefusals() {
         check(s.bench.access.opens[0] + s.bench.access.opens[1] == 0 && s.bench.Writes() == 0, "screen: no enabled row, nothing opened");
     }
     {
-        // The product table has one row: copy is offered, and the no-row reason is not the text shown.
+        // The product table has rows: copy is offered, and the no-row reason is not the text shown.
         ScreenBench s(kProduct);
-        check(s.screen->Status().enabled_rows == 5 && s.screen->CopyOffered(true) && !s.screen->CopyOffered(false), "screen: product table, copy offered when ready");
+        check(s.screen->Status().enabled_rows == product_stage::kEnabledRows && s.screen->CopyOffered(true) && !s.screen->CopyOffered(false), "screen: product table, copy offered when ready");
         const auto text = s.screen->OfferText(true);
         check(text.find(L"書ける項目がありません") == std::wstring::npos && text.find(L"番号（code）") == std::wstring::npos, "screen: product table, not the no-row reason");
         // What is read and what is written are told apart: the writable items are named from the table.
@@ -4298,9 +4443,9 @@ bool PanelAllEditable(const D810SettingsWriteScreen& screen) {
     return true;
 }
 void ScreenPanelProductTable() {
-    // The product table: the panel opens and shows both cameras, and no cell can be picked.
+    // The product table: the panel opens and shows both cameras, and a cell can be picked exactly where the stage opens its row.
     ScreenBench s(kProduct);
-    PrepareProductBench(s.bench);
+    PrepareStageBench(s.bench);
     auto& screen = *s.screen;
     check(screen.PanelOpenOffered(true) && !screen.PanelOpenOffered(false) && !screen.PanelOpen() && !screen.Panel(), "panel, product: offered when ready, not open");
     check(!screen.RequestPanelOpen(false) && s.bench.access.opens[0] + s.bench.access.opens[1] == 0, "panel, product: not ready, nothing read");
@@ -4308,23 +4453,47 @@ void ScreenPanelProductTable() {
     check(screen.OfferText(true).find(L"読んでいます") != std::wstring::npos, "panel, product: the offer says it reads");
     check(s.WaitIdle() && screen.PanelOpen() && screen.Panel() && screen.Step() == D810WriteScreenStep::Idle && !screen.View(), "panel, product: open, no view");
     check(s.bench.access.opens[0] == 1 && s.bench.access.opens[1] == 1 && !s.bench.access.overlap && s.bench.Writes() == 0, "panel, product: read only, one body at a time");
-    check(PanelAllLocked(screen, "chosen_values_disabled") && screen.PanelEditable(), "panel, product: every cell is locked by the table");
-    // Nothing can be picked, not even a value the cell offers.
-    std::size_t tried = 0;
+    bool cells_follow_stage = screen.PanelEditable();
     for (const auto camera : {D810Camera::A, D810Camera::B})
-        for (const auto item : kD810ChoiceItems)
-            for (const auto& option : screen.Panel()->At(camera, item).options) {
+        for (const auto item : kD810ChoiceItems) {
+            const auto& cell = screen.Panel()->At(camera, item);
+            const bool opens = product_stage::Opens(camera, D810ChoiceWriteItem(item));
+            cells_follow_stage = cells_follow_stage && cell.Editable() == opens && (opens || Refusal(cell.locked_reason) == "row_disabled");
+        }
+    check(cells_follow_stage, "panel, product: a cell is editable exactly where the stage opens its row, and the others are locked by the table");
+    // Nothing can be picked where the row is closed, not even a value the cell offers.
+    std::size_t tried = 0, picked = 0;
+    for (const auto camera : {D810Camera::A, D810Camera::B})
+        for (const auto item : kD810ChoiceItems) {
+            const bool opens = product_stage::Opens(camera, D810ChoiceWriteItem(item));
+            const auto& cell = screen.Panel()->At(camera, item);
+            for (const auto& option : cell.options) {
+                if (opens) {
+                    if (option.value != cell.current && picked < 1000 && screen.PanelPick(camera, item, option.value)) { ++picked; break; }
+                    continue;
+                }
                 ++tried;
-                check(!screen.PanelPick(camera, item, option.value), "panel, product: a pick is refused");
+                check(!screen.PanelPick(camera, item, option.value), "panel, product: a pick is refused where the row is closed");
             }
-    for (const auto item : kD810ChoiceItems) check(!screen.PanelPickSameAsA(item) && !screen.PanelSameAsAOffered(item), "panel, product: same-as-A is refused");
-    check(tried > 20 && screen.PanelEntryCount() == 0 && screen.PanelDirty() == 0 && screen.PanelPlanned().empty(), "panel, product: no pick, no change");
+        }
+    const auto opened_cells = product_stage::kEnabledRows;
+    check(picked == opened_cells && screen.PanelDirty() == static_cast<int>(opened_cells), "panel, product: one pick in each opened cell is a draft");
+    check(screen.PanelCancelAll() == static_cast<int>(opened_cells) && screen.PanelDirty() == 0 && screen.PanelPlanned().empty(), "panel, product: the drafts are cancelled");
+    if (product_stage::kCamAItems == 0) check(tried > 10, "panel, product: the closed cells were tried");
+    for (const auto item : kD810ChoiceItems)
+        if (!product_stage::Opens(D810Camera::B, D810ChoiceWriteItem(item))) check(!screen.PanelPickSameAsA(item) && !screen.PanelSameAsAOffered(item), "panel, product: same-as-A is refused where the CAM-B row is closed");
+    check(screen.PanelEntryCount() == 0, "panel, product: no entry left");
     const auto rows = screen.PanelRows();
     check(rows.size() == 7 && !rows[0].choosable && !rows[1].choosable && rows[0].label == L"露出モード" && rows[1].label == L"ISO感度自動制御", "panel, product: two read-only rows and five to pick");
     bool noted = true;
-    for (std::size_t i = 2; i < rows.size(); ++i) noted = noted && rows[i].choosable && rows[i].note[0] == L"この版では選べません" && rows[i].note[1] == L"この版では選べません";
-    check(noted, "panel, product: each cell says why it cannot be picked");
-    check(screen.PanelSummaryText().find(L"値を選んで書くことはできません") != std::wstring::npos, "panel, product: the line under the panel says it is read only");
+    for (std::size_t i = 2; i < rows.size(); ++i) {
+        const auto item = D810ChoiceWriteItem(kD810ChoiceItems[i - 2]);
+        noted = noted && rows[i].choosable;
+        for (const auto camera : {D810Camera::A, D810Camera::B})
+            noted = noted && (rows[i].note[static_cast<std::size_t>(camera)] == D810PanelLockText("row_disabled")) == !product_stage::Opens(camera, item);
+    }
+    check(noted, "panel, product: a cell says why it cannot be picked exactly where its row is closed");
+    check(screen.PanelSummaryText().find(L"値を選ぶと") != std::wstring::npos, "panel, product: the line under the panel says a pick is a draft");
     check(screen.PanelCancelAll() == 0 && screen.PanelCloseOffered(), "panel, product: nothing to cancel, can close");
     check(screen.ClosePanel() == 0 && !screen.PanelOpen() && !screen.Panel() && s.bench.Writes() == 0, "panel, product: closed, nothing written");
 }
@@ -5231,6 +5400,7 @@ int main() {
     run("ProductRevisionItems", ProductRevisionItems);
     run("ProductAperture", ProductAperture);
     run("ProductShutter", ProductShutter);
+    run("ProductStage", ProductStage);
     run("PlanReadChecksTheBody", PlanReadChecksTheBody);
     run("BodyAndConfirmation", BodyAndConfirmation);
     run("RecordMustBeWrittenFirst", RecordMustBeWrittenFirst);
