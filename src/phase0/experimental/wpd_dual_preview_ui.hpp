@@ -1174,10 +1174,27 @@ int RunFixedCUiSmoke(){
     if(!dc || !bitmap){DestroyWindow(window);return 2;}
     auto old=SelectObject(dc,bitmap);SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(240,240,240));
     const RECT client{0,0,1400,960};
-    // Pink pixels over the picture of C in the lower half; a picture has none of its own here.
+    // Pink pixels over the picture of C in the lower half; a picture has none of its own here. Counted in the memory of the
+    // DIB section (top-down, 32 bit) after GdiFlush, not one GetPixel call per pixel: a scan that slow outlasts the two
+    // seconds a frame stays fresh, and C is then not drawn and the pair capture is refused.
     const auto pink=[&](const PixelRect& rect){unsigned count{};
-        for(int y=rect.top;y<rect.top+rect.height;++y)for(int x=rect.left;x<rect.left+rect.width;++x)if(GetPixel(dc,x,y)==kSeamLineColor)++count;return count;};
-    const auto paint=[&]{refresh();Paint(dc,client);GdiFlush();};
+        const auto* pixels=static_cast<const std::uint32_t*>(bits);
+        const std::uint32_t target=((kSeamLineColor&0xFFu)<<16)|(kSeamLineColor&0xFF00u)|((kSeamLineColor>>16)&0xFFu); // COLORREF 0x00BBGGRR to 0x00RRGGBB
+        for(int y=std::max(rect.top,0);y<std::min(rect.top+rect.height,960);++y)for(int x=std::max(rect.left,0);x<std::min(rect.left+rect.width,1400);++x)
+            if((pixels[static_cast<size_t>(y)*1400+x]&0x00FFFFFFu)==target)++count;
+        return count;};
+    // The merge worker publishes the pair it last saw. Refresh until the pair it holds is under one second old, so that "the
+    // last frame is under two seconds old" still holds for what is read next if the machine stalls for a while. When the
+    // worker does not publish in time the next check fails, as it should.
+    const auto publish_fresh=[&]{
+        for(int i=0;i<100;++i){
+            refresh();std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            std::lock_guard lock(merged.mutex);const auto now=Clock::now();
+            if(merged.source_a.time_since_epoch().count()>0 && merged.source_b.time_since_epoch().count()>0 && now-merged.source_a<std::chrono::seconds(1) && now-merged.source_b<std::chrono::seconds(1))return true;
+        }
+        return false;
+    };
+    const auto paint=[&]{publish_fresh();refresh();Paint(dc,client);GdiFlush();};
     const auto start_worker_wait=[&](auto ready){
         for(int i=0;i<100;++i){refresh();std::this_thread::sleep_for(std::chrono::milliseconds(50));{std::lock_guard lock(merged.mutex);if(ready())return true;}}
         return false;
@@ -1187,7 +1204,7 @@ int RunFixedCUiSmoke(){
     const auto press=[&](int id){SendMessageW(window,WM_COMMAND,MAKEWPARAM(id,BN_CLICKED),reinterpret_cast<LPARAM>(id==404?seam_button:merge_buttons[id-300]));};
     // The pair capture must stay admitted whenever C was decided: the saved pair needs no picture of C.
     const auto capture_admitted=[&]{
-        capture_pending.reset();RequestCapture(2);const bool admitted=capture_pending.has_value() && *capture_pending==2;
+        publish_fresh();refresh();capture_pending.reset();RequestCapture(2);const bool admitted=capture_pending.has_value() && *capture_pending==2;
         capture_pending.reset();return admitted;
     };
     const auto rearm=[&]{stopping=false;capture_stop_requested=false;capture_pending.reset();};
