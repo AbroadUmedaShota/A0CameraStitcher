@@ -296,10 +296,10 @@ inline std::vector<D810WriteItem> D810CopyWritableItems(const D810WriteTable& ta
     return items;
 }
 // The product table. The stage A read on the real bodies confirmed ISO auto at
-// 0xD054 (not 0xD16A) and shutter speed at 0x500D (not 0xD100). Both are
-// recorded here with their rows disabled: the plan reads them for its
-// preconditions and its refusals, but nothing writes them. The enabled rows are
-// CAM-B's ISO, aperture, white balance and metering mode (stages 1 and 2), and
+// 0xD054 (not 0xD16A) and shutter speed at 0x500D (not 0xD100). ISO auto is
+// recorded with its rows disabled: the plan reads it for its preconditions and
+// its refusals, but nothing writes it. The enabled rows are CAM-B's ISO,
+// shutter speed, aperture, white balance and metering mode (stages 1 to 3), and
 // the firmware version is the one the stage A read reported for CAM-B.
 // Enabling another row is a reviewed commit to this table, one stage at a time.
 inline constexpr D810WriteTable kD810ProductWriteTable = [] {
@@ -308,6 +308,7 @@ inline constexpr D810WriteTable kD810ProductWriteTable = [] {
         if (row.item == D810WriteItem::IsoAuto) row.code = 0xd054;
         if (row.item == D810WriteItem::ShutterSpeed) row.code = 0x500d;
         if (row.item == D810WriteItem::Iso && row.camera == D810Camera::B) row.enabled = true;
+        if (row.item == D810WriteItem::ShutterSpeed && row.camera == D810Camera::B) row.enabled = true;
         if (row.item == D810WriteItem::Aperture && row.camera == D810Camera::B) row.enabled = true;
         if (row.item == D810WriteItem::WhiteBalance && row.camera == D810Camera::B) row.enabled = true;
         if (row.item == D810WriteItem::Metering && row.camera == D810Camera::B) row.enabled = true;
@@ -337,8 +338,9 @@ constexpr bool D810ProductTableEnablesOnly(const D810WriteTable& table, std::uin
 constexpr bool D810TextPresent(const char* text) { return text != nullptr && text[0] != '\0'; }
 static_assert(D810ProductTableProblem(kD810ProductWriteTable) == nullptr, "the product write table is outside ADR-0038");
 static_assert(D810ProductTableEnablesOnly(kD810ProductWriteTable,
-        D810ItemBit(D810WriteItem::Iso) | D810ItemBit(D810WriteItem::Aperture) | D810ItemBit(D810WriteItem::WhiteBalance) | D810ItemBit(D810WriteItem::Metering)),
-    "the product table enables exactly ISO, aperture, white balance and metering on CAM-B and confirms ISO auto 0xD054 and shutter speed 0x500D");
+        D810ItemBit(D810WriteItem::Iso) | D810ItemBit(D810WriteItem::ShutterSpeed) | D810ItemBit(D810WriteItem::Aperture) | D810ItemBit(D810WriteItem::WhiteBalance) |
+            D810ItemBit(D810WriteItem::Metering)),
+    "the product table enables exactly ISO, shutter speed, aperture, white balance and metering on CAM-B and confirms ISO auto 0xD054 and shutter speed 0x500D");
 static_assert(D810TextPresent(kD810ProductWriteTable.verified_model), "the product table names the camera model it was confirmed on");
 static_assert(D810TextPresent(kD810ProductWriteTable.verified_firmware), "the product table names the firmware version it was confirmed on");
 static_assert(kD810Adr38RevisionAccepted, "the product table enables white balance and metering, which needs the ADR-0038 revision flag");
