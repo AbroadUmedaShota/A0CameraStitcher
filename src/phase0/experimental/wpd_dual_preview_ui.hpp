@@ -42,7 +42,10 @@ struct CaptureUiOutcome {StillCaptureOutcome capture;std::optional<a0::m2::exper
     std::optional<a0::m2::experimental::FixedCompositeSkip> composite_skip;std::string composite_detail;std::array<std::filesystem::path,2> originals;
     // Both originals are saved and the composite step threw (the 180-second window, memory, a size mismatch, the gate). Set with
     // capture.success: the next shot is allowed exactly as after a skip. composite_cleanup is what became of a JPEG without a report.
-    std::optional<CompositeFailureReason> composite_failure;ReportlessCleanup composite_cleanup{};};
+    std::optional<CompositeFailureReason> composite_failure;ReportlessCleanup composite_cleanup{};
+    // The composite and its report are both saved and the 180-second window closed before the writer returned. The composite is kept;
+    // the row says the window was passed.
+    bool deadline_passed{};};
 std::future<CaptureUiOutcome> capture_future;
 using ReviewGeometry=a0::m2::experimental::PreviewReviewGeometry;
 ReviewGeometry pending_geometry;
@@ -769,8 +772,9 @@ CaptureUiOutcome SavePairReview(const std::array<std::wstring,2>& ids,ReviewGeom
             Log("pair_composite_skipped=1 reason="+std::string(m2e::FixedCompositeSkipCode(*skip))+" originals_saved=2 calibrated=0");
             return result;
         }
-        // The composite and its report are both written and verified: a window that closed meanwhile does not undo them.
-        if(Clock::now()>=deadline)Log("pair_review_after_deadline=1 files_retained=1");
+        // The composite and its report are both written and verified: a window that closed meanwhile does not undo them (owner's
+        // decision). The row says the window was passed; the gate is not_run when it had no time.
+        if(result.review->deadline_passed || Clock::now()>=deadline){result.deadline_passed=true;Log("pair_review_after_deadline=1 files_retained=1");}
         result.capture={true,true,result.review->jpeg,std::filesystem::file_size(result.review->jpeg),result.review->sha256,{}};
         evidence.RecordState("pair","UncalibratedReviewReady");
         Log("pair_review_saved=1 width="+std::to_string(result.review->width)+" height="+std::to_string(result.review->height)+" mount_orientation="+a0::m2::experimental::MountOrientationName(geometry.orientation)+" originals_rotated=0 calibrated=0");
@@ -816,6 +820,7 @@ CaptureUiOutcome SavePairReview(const std::array<std::wstring,2>& ids,ReviewGeom
 // the paper surface, the gate, the warnings, the stages the time budget dropped. Every other review has the one line it always had.
 std::wstring SavedCaptureStatus(const CaptureUiOutcome& result){
     std::wstring status=L"保存済み: "+result.capture.path.wstring();
+    if(result.review && result.deadline_passed)status+=L"（制限時間の180秒を過ぎましたが、合成は作れています）";
     if(result.composite_skip)status=L"原画像2枚を保存しました（A: "+result.originals[0].wstring()+L"）。合成はしていません: "+WidenUtf8(a0::m2::experimental::FixedCompositeSkipText(*result.composite_skip));
     if(result.composite_failure){
         // The composite step threw after both originals were saved: not a failed capture. The reason is a few words, never the exception's text.
@@ -938,7 +943,9 @@ int RunPairV3UiSmoke(const std::filesystem::path& fixtures){
 
         // 1. A condition v3: the registered composite and the report v8, the sentences on the status row, the lines in the log.
         const auto v3=ps::MakeSettings(work/"settings-v3",profile,m2e::MountOrientation::normal,raster);
+        const auto first_started=Clock::now();
         const auto first=capture(v3.folder);
+        const auto first_took=Clock::now()-first_started;
         check(first.capture.success && first.capture.closed && first.review && !first.composite_skip,"v3: a composite is made");
         if(first.review){
             check(first.review->fixed_composite_registration && !first.review->fixed_composite_lens && !first.review->fixed_composite,"v3: the review is a registered one");
@@ -1049,6 +1056,59 @@ int RunPairV3UiSmoke(const std::filesystem::path& fixtures){
             const auto composites=composites_under_reviews();
             const auto r=capture(v3.folder);
             check(r.capture.success && r.capture.closed && r.review && !r.composite_failure && composites_under_reviews()==composites+1,"after a failed composite: the next shot makes its composite");
+        }
+        // The window of the next two cases. 7d needs every stage planned (the plan keeps all of them from a little over 90 s: the stage
+        // costs and the tail reserve of the design), so that the gate is dropped by the closed window and not by the first plan. 7e needs
+        // only that the composite and its report are written inside it: four times what the first shot took.
+        const Clock::duration window_all_stages=std::chrono::seconds(100);
+        const auto closing_window=std::max<Clock::duration>(std::chrono::seconds(15),first_took*4);
+        static Clock::time_point window_closes;
+        const auto sleep_until_window_closes=[]{std::this_thread::sleep_until(window_closes+std::chrono::milliseconds(50));};
+        {   // 7d. The window closes after the composite JPEG is saved and verified, before the gate and the report (the owner's decision): the
+            // composite is kept, the gate is not run, the report is written and the row says the window was passed.
+            window_closes=Clock::now()+window_all_stages;
+            a0::m2::detail::SetAfterReviewJpegTestHook(+sleep_until_window_closes);
+            const auto before=captured.str().size();const auto composites=composites_under_reviews();
+            const auto r=capture(v3.folder,m2e::MountOrientation::normal,std::chrono::duration_cast<std::chrono::milliseconds>(window_all_stages));
+            a0::m2::detail::SetAfterReviewJpegTestHook(nullptr);
+            check(r.capture.success && r.capture.closed && r.review && !r.composite_failure && !r.composite_skip,"window closed after the JPEG: the composite is kept");
+            check(r.deadline_passed && r.review && r.review->deadline_passed && Clock::now()>window_closes,"window closed after the JPEG: the outcome says the window was passed");
+            check(composites_under_reviews()==composites+1 && r.review && std::filesystem::exists(r.review->jpeg) && std::filesystem::exists(r.review->report),"window closed after the JPEG: the JPEG and its report are both there");
+            if(r.review){
+                bool loads=false;m2e::SavedStillReview saved;
+                try{saved=m2e::LoadSavedStillReview(r.review->report);loads=true;}catch(const std::exception&){}
+                check(loads && saved.fixed_composite_registration && saved.fixed_composite_registration->registration.gate.state==m2e::registration_gate::GateState::not_run,
+                    "window closed after the JPEG: the report reads back with the gate not run");
+                bool gate_dropped=false;
+                if(loads && saved.fixed_composite_registration)for(const auto& skipped:saved.fixed_composite_registration->registration.time_budget.skipped)gate_dropped=gate_dropped || skipped.stage==m2e::ReviewStage::gate;
+                check(gate_dropped,"window closed after the JPEG: the time budget in the report names the gate as dropped");
+                check(r.review->fixed_composite_registration && r.review->fixed_composite_registration->registration.gate.state==m2e::registration_gate::GateState::not_run,"window closed after the JPEG: the result has the gate not run");
+            }
+            const auto status=SavedCaptureStatus(r);
+            check(status.find(L"保存済み: ")==0 && status.find(L"制限時間")!=std::wstring::npos && status.find(L"合成は作れています")!=std::wstring::npos &&
+                status.find(L"合成は作れませんでした")==std::wstring::npos,"window closed after the JPEG: the row says the window was passed and the composite was made");
+            const auto log=captured.str().substr(before);
+            check(log.find("pair_review_after_deadline=1 files_retained=1")!=std::string::npos && log.find("pair_composite_failed")==std::string::npos && log.find("pair_review_failure")==std::string::npos,
+                "window closed after the JPEG: logged as kept, not as a failure");
+        }
+        {   // 7e. The window closes after the report is saved and before the writer returns: both files stay and the row says the composite was made
+            // (this used to be a failure that left the JPEG and the report in place and told the operator that nothing was made).
+            window_closes=Clock::now()+closing_window;
+            a0::m2::detail::SetBeforeReviewReturnTestHook(+sleep_until_window_closes);
+            const auto before=captured.str().size();const auto composites=composites_under_reviews();
+            const auto r=capture(v3.folder,m2e::MountOrientation::normal,std::chrono::duration_cast<std::chrono::milliseconds>(closing_window));
+            a0::m2::detail::SetBeforeReviewReturnTestHook(nullptr);
+            check(r.capture.success && r.capture.closed && r.review && !r.composite_failure && !r.composite_skip && r.deadline_passed,"window closed after the report: the composite is kept and the window was passed");
+            check(composites_under_reviews()==composites+1 && r.review && std::filesystem::exists(r.review->jpeg) && std::filesystem::exists(r.review->report),"window closed after the report: the JPEG and its report are both there");
+            if(r.review){
+                bool loads=false;m2e::SavedStillReview saved;
+                try{saved=m2e::LoadSavedStillReview(r.review->report);loads=true;}catch(const std::exception&){}
+                check(loads && saved.fixed_composite_registration,"window closed after the report: the report reads back");
+            }
+            const auto status=SavedCaptureStatus(r);
+            check(status.find(L"制限時間")!=std::wstring::npos && status.find(L"合成は作れています")!=std::wstring::npos && status.find(L"合成は作れませんでした")==std::wstring::npos,
+                "window closed after the report: the row says the window was passed and the composite was made");
+            check(captured.str().substr(before).find("pair_composite_failed")==std::string::npos,"window closed after the report: not logged as a failure");
         }
         // 8. The originals themselves are not saved: the failure it always was (no composite step, no 'originals saved').
         {

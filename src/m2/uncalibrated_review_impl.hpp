@@ -374,11 +374,17 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
         }
         ValidateSnapshotHash(decoded,saved,"saved review");
     }
+    // The composite JPEG is saved and verified. From here the deadline no longer undoes it: a window that closes meanwhile is noted
+    // (StillReviewResult::deadline_passed) and the report is still written, so that the JPEG never stays without one. The gate takes
+    // the time that is left (none: it is not run and the report says so); a gate that has begun is finished and kept.
+    bool deadline_passed=false;
+    const auto note_deadline=[&]{if(std::chrono::steady_clock::now()>=r.deadline)deadline_passed=true;};
+    InvokeTestHook(after_review_jpeg_hook);note_deadline();
     // #417: the gate on Omega with the pair the composite was drawn from, now that the JPEG is safe; then the report's record.
     std::optional<SavedFixedCompositeRegistration> reg_record;
     if(reg_prepared){
         MeasureCaptureRegistrationGate(*reg_request,*reg_prepared);
-        a.image={};b.image={};active();
+        a.image={};b.image={};note_deadline();
         const auto& c=*reg_condition;
         RegistrationRecordIdentity id;
         id.condition_sha256=r.fixed_composite_registration->condition_sha256;id.condition_sequence=c.revision.sequence;id.profile_file=c.source.profile_file;
@@ -386,7 +392,7 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
         if(reg_profile->profile_id && !reg_profile->profile_id->empty())id.profile_id=reg_profile->profile_id;
         id.seam_origin=std::string(FixedSeamOriginName(c.seam.origin));
         reg_record=RecordOfCapture(id,*reg_request,*reg_prepared,[](const std::vector<unsigned char>& v){Sha256Provider s;return ToLowerHex(s.Compute(v));});
-    }    ValidateSnapshotHash(a,a_file,"review CAM-A");ValidateSnapshotHash(b,b_file,"review CAM-B");active();
+    }    ValidateSnapshotHash(a,a_file,"review CAM-A");ValidateSnapshotHash(b,b_file,"review CAM-B");note_deadline();
     std::ostringstream report;
     report.imbue(std::locale::classic());report<<std::setprecision(17);
     const bool similarity=r.manual_revision && (r.manual_revision->rotation_degrees!=0 || r.manual_revision->scale!=1);
@@ -435,13 +441,16 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
     else if(seam)WriteSeamBlendJson(report,*seam);
     report<<"}";
     const auto document=report.str();const std::vector<std::uint8_t> report_bytes(document.begin(),document.end());
-    const auto report_partial=job/L"uncalibrated-review.json.partial";active();WriteBytesToNewFile(report_partial,report_bytes);
-    {LockedReadFile saved(report_partial,true,true);if(saved.ReadAll()!=report_bytes)throw std::runtime_error("review report partial changed");active();saved.RenameToWithoutReplace(result.report);}
+    const auto report_partial=job/L"uncalibrated-review.json.partial";note_deadline();WriteBytesToNewFile(report_partial,report_bytes);
+    {LockedReadFile saved(report_partial,true,true);if(saved.ReadAll()!=report_bytes)throw std::runtime_error("review report partial changed");note_deadline();saved.RenameToWithoutReplace(result.report);}
     {LockedReadFile saved(result.report,false,true);if(saved.ReadAll()!=report_bytes)throw std::runtime_error("review report reread failed");}
     result.automatic=std::move(automatic);result.alignment_milliseconds=alignment_milliseconds;
     result.blend=std::move(seam);result.fixed_composite=std::move(fixed_record);result.fixed_composite_lens=std::move(lens_record);result.blend_milliseconds=blend_milliseconds;
     result.fixed_composite_registration=std::move(reg_record);if(reg_prepared)result.registration_milliseconds=reg_prepared->milliseconds;
-    active();return result;
+    // Both files are final. A deadline that closes from here on is reported to the caller, never turned into a failure.
+    InvokeTestHook(before_review_return_hook);note_deadline();
+    result.deadline_passed=deadline_passed;
+    return result;
 }
 StillBlendComparison CompareStillReviewBlends(const SavedStillReview& review,const std::filesystem::path& prefix,std::uint32_t crop_width,std::uint32_t crop_height){
     if(!crop_width || !crop_height)throw std::invalid_argument("comparison crop is empty");

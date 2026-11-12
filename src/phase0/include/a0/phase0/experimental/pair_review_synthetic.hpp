@@ -27,8 +27,12 @@
 
 // The review writer's test hook, defined in the offline stitcher library: runs after the composite JPEG is encoded to its partial and
 // before it is flushed and renamed. Development smoke and tests only (the same declaration as in tests/offline_stitcher_tests.cpp).
+// Two more: after the composite JPEG is saved and verified (before the gate and the report), and after the report is saved (before the
+// writer returns). The smoke closes the deadline there.
 namespace a0::m2::detail {
 void SetBeforePartialFlushTestHook(void (*hook)()) noexcept;
+void SetAfterReviewJpegTestHook(void (*hook)()) noexcept;
+void SetBeforeReviewReturnTestHook(void (*hook)()) noexcept;
 }
 
 namespace a0::phase0::experimental::pair_synthetic {

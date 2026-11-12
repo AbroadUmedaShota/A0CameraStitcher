@@ -418,6 +418,10 @@ struct StillReviewResult {
     // and registration_milliseconds each stage (for the log only: never in the report, addendum 11.25.4).
     std::optional<SavedFixedCompositeRegistration> fixed_composite_registration;
     std::optional<CaptureStageMilliseconds> registration_milliseconds;
+    // True when the request's deadline had passed by the time the writer returned. The writer stops with an exception while the
+    // composite JPEG is not yet saved and verified; after that point it finishes the report and keeps both files (the deadline does
+    // not undo a finished composite), and the caller shows that the deadline was passed. Never written into a report.
+    bool deadline_passed{false};
 };
 // Exists only in the explicitly enabled development preview build. A separate
 // uncalibrated review report, never a successful product StitchJob manifest.

@@ -82,6 +82,10 @@ std::atomic<TestHook> input_locks_held_hook{};
 std::atomic<TestHook> before_encode_hook{};
 std::atomic<TestHook> before_partial_flush_hook{};
 std::atomic<TestHook> before_publish_rename_hook{};
+// The review writer: after the composite JPEG is saved and verified (before the gate and the report), and after the report is saved
+// and read back (before the writer returns). Tests close the deadline there.
+std::atomic<TestHook> after_review_jpeg_hook{};
+std::atomic<TestHook> before_review_return_hook{};
 std::atomic<detail::OfflineStitchFaultPoint> offline_stitch_fault{};
 std::atomic<std::uint32_t> offline_stitch_fault_trigger_count{};
 
@@ -1077,6 +1081,14 @@ void SetBeforePartialFlushTestHook(void (*hook)()) noexcept {
 
 void SetBeforePublishRenameTestHook(void (*hook)()) noexcept {
     before_publish_rename_hook.store(hook, std::memory_order_release);
+}
+
+void SetAfterReviewJpegTestHook(void (*hook)()) noexcept {
+    after_review_jpeg_hook.store(hook, std::memory_order_release);
+}
+
+void SetBeforeReviewReturnTestHook(void (*hook)()) noexcept {
+    before_review_return_hook.store(hook, std::memory_order_release);
 }
 
 void SetOfflineStitchFaultForTest(const OfflineStitchFaultPoint point) noexcept {
