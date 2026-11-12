@@ -2,7 +2,8 @@
 // Camera settings write: item table, the fixed write table, write plans and the
 // operation record format (#416 stage B, ADR-0038; the ADR-0041 extension, values
 // chosen per camera and CAM-A rows, is present as code but disabled by the fixed
-// table and by kD810Adr41Accepted).
+// table and by kD810Adr41Accepted; the stages that switch it on are opened one at a time, see
+// kD810ProductWriteTable).
 //
 // Pure functions only: no Windows headers, no device access, no file I/O. The
 // gate, the session and the files are in wpd_settings_write.hpp.
@@ -52,9 +53,10 @@ enum class D810ItemScope : std::uint8_t { Adr38, Adr38Revision, Adr41 };
 inline constexpr bool kD810Adr38RevisionAccepted = true;
 // ADR-0041 (values chosen per camera, CAM-A rows). While it is false the product table can neither hold a
 // chosen-values flag nor an enabled CAM-A row (D810ProductTableProblem), so nothing can be written to CAM-A and
-// no chosen plan can be made. It is set only by a reviewed commit after the owner accepts ADR-0041.
-inline constexpr bool kD810Adr41Accepted = false;
-static_assert(!kD810Adr41Accepted, "ADR-0041 is not accepted: the commit that sets this flag replaces this assertion with the set of enabled rows");
+// no chosen plan can be made. It is set from stage T1 on, by a reviewed commit; which rows are enabled is a
+// separate matter, fixed by the static_asserts that follow the product table.
+inline constexpr bool kD810Adr41Accepted = true;
+static_assert(kD810Adr41Accepted, "stage T1 and later: the commit that clears this flag closes picked values again, and the static_asserts after the product table say which rows are open");
 // What the target body must read, in the same session and generation, before
 // the item may be armed (ADR-0038 decision 4, M-3).
 enum class D810WritePrecondition : std::uint8_t { LiveOff, ManualMode, ManualModeIsoAutoOff };
@@ -281,8 +283,8 @@ constexpr const char* D810WriteTableProblem(const D810WriteTable& table) {
 }
 // What the product table may hold until ADR-0041 is accepted: rows for CAM-B
 // and the accepted items only (the five of ADR-0038, plus white balance and
-// metering once the ADR-0038 revision is accepted), no chosen values. ADR-0038
-// invariant 2 (CAM-A is never written) holds at compile time.
+// metering once the ADR-0038 revision is accepted), and chosen values only with the ADR-0041 flag. ADR-0038
+// invariant 2 (CAM-A is never written) holds at compile time while the product table opens no CAM-A row.
 //
 // ADR-0041 (`adr41_accepted`: the constant by default, the tests pass the other value to keep the refusals under
 // test): the chosen-values flag and CAM-A rows need it. A CAM-A row is allowed only together with the chosen-values flag
@@ -338,6 +340,7 @@ inline constexpr D810WriteTable kD810ProductWriteTable = [] {
         if (row.item == D810WriteItem::Metering && row.camera == D810Camera::B) row.enabled = true;
     }
     table.copy_a_to_b = true;
+    table.chosen_values = true; // stage T1: picked values can be written to CAM-B; CAM-A has no row and no version below
     table.verified_model = "D810";
     table.verified_firmware = "V1.14";
     return table;
@@ -366,8 +369,8 @@ static_assert(D810ProductTableEnablesOnly(kD810ProductWriteTable,
     "the product table enables exactly ISO, shutter speed, aperture, white balance and metering on CAM-B and confirms ISO auto 0xD054 and shutter speed 0x500D");
 static_assert(D810TextPresent(kD810ProductWriteTable.verified_model), "the product table names the camera model it was confirmed on");
 static_assert(D810TextPresent(kD810ProductWriteTable.verified_firmware), "the product table names the firmware version it was confirmed on");
-static_assert(!D810TextPresent(kD810ProductWriteTable.verified_firmware_a) && !kD810ProductWriteTable.chosen_values,
-    "the product table names no firmware version for CAM-A and has no chosen values: CAM-A is not written (ADR-0041 is not accepted)");
+static_assert(kD810ProductWriteTable.chosen_values && !D810TextPresent(kD810ProductWriteTable.verified_firmware_a),
+    "stage T1: the product table has picked values on and names no firmware version for CAM-A, so CAM-A is not written");
 static_assert(kD810Adr38RevisionAccepted, "the product table enables white balance and metering, which needs the ADR-0038 revision flag");
 
 enum class D810PlanSource : std::uint8_t { CopyAToB, Chosen };
