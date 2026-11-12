@@ -27,6 +27,7 @@
 #if !defined(A0_ENABLE_WPD_SETTINGS_WRITE)
 #error "wpd_settings_write.hpp is only for targets built with A0_BUILD_WPD_SETTINGS_WRITE"
 #endif
+#include "a0/phase0/experimental/d810_settings_plan_chosen.hpp"
 #include "a0/phase0/experimental/d810_settings_write.hpp"
 #include "a0/phase0/experimental/wpd_settings_read.hpp"
 #include <ShlObj.h>
@@ -150,11 +151,19 @@ private:
 // What one camera's session may write: the destination, the confirmed plan's
 // steps for that camera, and the confirmed ISO auto code (read for the
 // precondition).
+//
+// `cam_a_allowed` is the key to a CAM-A session (ADR-0041), closed by default: a
+// configuration for CAM-A without it is invalid and the gate is retired at once.
+// The gate does not know the table; the run opens the key (D810CamAKeyOpen) only for a chosen plan
+// under a table whose chosen-values switch is on, that names CAM-A's firmware and enables the row of every CAM-A step, so a CAM-A session cannot be
+// built from a copy plan or from a table that does not allow it, whatever the
+// plan says. CAM-B needs no key.
 struct D810WriteGateConfig {
     D810Camera camera{D810Camera::B};
     std::vector<D810WriteGateEntry> entries;
     std::uint16_t iso_auto_code{};
     D810OperationLatch* latch{};
+    bool cam_a_allowed{};
 };
 // States. In the words of ADR-0038 decision 9: ReadBegun, ReadOpen and
 // ReadEnding are "ReadOpen"; WriteBegun and WriteOpen are "WriteBegun";
@@ -307,6 +316,7 @@ private:
     struct SeenLive { std::uint64_t generation; unsigned value; };
     bool ValidConfig() const {
         std::set<std::uint16_t> codes;
+        if (config_.camera == D810Camera::A && !config_.cam_a_allowed) return false;
         if (!D810WriteItemHasCode(D810WriteItemOf(D810WriteItem::IsoAuto), config_.iso_auto_code)) return false;
         for (const auto& entry : config_.entries) {
             const auto* spec = FindD810WriteItemByCode(entry.code);
@@ -817,16 +827,33 @@ struct D810WriteRun {
     std::vector<D810StepOutcome> steps;
     D810CaptureBlock block{D810CaptureBlock::None};
 };
+// The one condition under which a block is released by the values a plan of picked values wrote, and not by comparing the
+// two cameras: the history holds such a plan with planned values to check, and no part of the record is damaged.
+inline bool D810ReleasesByPlannedValues(const D810JournalState& state) {
+    return state.chosen_unresolved && !state.history_damaged && !state.expected.empty();
+}
 struct D810RereadResult {
     bool complete{};
     D810ReleaseCheck check;
     D810CaptureBlock block{D810CaptureBlock::None};
     std::string reason;
+    // The rule the check used, read from the record when the check was made: the values the plan wrote (true), or the two
+    // cameras compared (false). `history_damaged`: part of the record could not be read. The screen tells the result by these.
+    bool by_planned_values{};
+    bool history_damaged{};
 };
 // The read step of a copy (ADR-0038 decision 5): both cameras, read-only.
 struct D810PlanRead {
+    // The number of this read, given by the controller that made it (0: not a read of a controller). A plan of picked
+    // values is made only from the last complete read that controller made, which it keeps itself; from the read it is
+    // handed it takes this number and nothing else.
+    std::uint64_t id{};
     bool complete{};
     std::array<D810SettingsSnapshot, 2> snapshots; // CAM-A, CAM-B
+    // Which body reported the model and firmware the table names for it (indexed like `snapshots`; booleans only).
+    // CAM-B's is always true in a complete read (a CAM-B that does not match ends the read); CAM-A's is what a plan
+    // that writes CAM-A needs, and stays false while the table names no firmware for CAM-A.
+    D810BodyFlags verified{};
     std::string reason;
 };
 struct D810WriteStatus {
@@ -837,6 +864,10 @@ struct D810WriteStatus {
     bool write_allowed{};
     bool plan_pending{};
     bool plan_confirmed{};
+    // The history since the capture was last free of a block holds a plan of picked values (a copy only otherwise).
+    bool chosen_history{};
+    // Part of the record since then cannot be read (a damaged line, or steps that do not match their plan line).
+    bool history_damaged{};
     // Rows the fixed table enables.
     std::size_t enabled_rows{};
     // The items a copy may write to CAM-B with this table, in table order (the screen names them).
@@ -914,6 +945,8 @@ public:
         D810SettingsWriteController(AnyTable{}, table, journal, owner) {}
 #endif
 
+    // The table this controller decides every row by (the screen builds its panel from it).
+    const D810WriteTable& Table() const { return table_; }
     // The record on disk is the authority; the in-memory block only adds to it.
     D810CaptureBlock Block() const { return StrongerD810Block(D810JournalBlock(journal_.Read()), memory_block_); }
     bool CaptureAllowed() const { return Block() == D810CaptureBlock::None; }
@@ -926,6 +959,15 @@ public:
         status.write_allowed = table_valid_ && status.enabled_rows > 0 && WriteAllowed(status.block) && owner_.Current() == D810CameraUse::None;
         status.plan_pending = pending_.has_value();
         status.plan_confirmed = confirmed_.has_value();
+        // What the record says about the history since the capture was last free of a block. The block is told in terms of
+        // the values written only when the controller would release it by them (a plan of picked values with planned values
+        // to check, and no part of the record damaged); a damaged part of the record sends it back to the comparison of the
+        // two cameras, and the screen then says that the record is damaged.
+        if (const auto file = journal_.Read(); file.kind == D810TextFile::Kind::Read) {
+            const auto state = ParseD810Journal(file.text);
+            status.history_damaged = state.history_damaged;
+            status.chosen_history = D810ReleasesByPlannedValues(state);
+        }
         return status;
     }
     // The read step of a copy (ADR-0038 decision 5): CAM-A, then CAM-B, each
@@ -933,25 +975,29 @@ public:
     // keeps no session open: the plan is then built with PlanCopy from these
     // snapshots, and nothing is open while the operator decides.
     D810PlanRead ReadForPlan(D810SettingsCameraAccess& access, const D810WriteRunOptions& options) {
+        last_read_.reset(); // a plan of picked values is made from the last complete read only, so an earlier read is gone whatever this one does
         D810PlanRead out;
         if (!options.may_continue || !options.may_cleanup) { out.reason = "invalid_options"; return out; }
         if (!owner_.TryAcquire(D810CameraUse::Settings)) { out.reason = "cameras_busy"; return out; }
+        out.id = NextReadId();
         struct Release { D810CameraOwnership& owner; ~Release() { owner.Release(D810CameraUse::Settings); } } release{owner_};
         for (const auto camera : {D810Camera::A, D810Camera::B}) {
             // CAM-B is the body that would be written: when it is not the model and firmware the table names, no
             // plan is made and nothing is shown to confirm. CAM-A is only read, so its version does not matter.
             const bool target = camera == D810Camera::B;
             auto read = ReadCamera(access, camera, options, target);
-            if (target && read.opened) {
-                if (options.log)
-                    options.log(std::string(D810CameraAlias(camera)) + " settings_write_body_check model_match=" + (read.body.model_match ? "1" : "0") +
-                        " firmware_match=" + (read.body.firmware_match ? "1" : "0") + " setting_writes=0");
-                if (!read.verified) { out.reason = std::string("body_not_verified:") + D810CameraAlias(camera); return out; }
-            }
+            out.verified[static_cast<std::size_t>(camera)] = read.opened && read.verified;
+            // CAM-A's comparison is reported (booleans only) only while the table enables a CAM-A row, and never stops
+            // the read: it tells whether a plan for CAM-A would pass the check before any send.
+            if (read.opened && (target || (camera == D810Camera::A && D810AnyCamARowEnabled(table_))) && options.log)
+                options.log(std::string(D810CameraAlias(camera)) + " settings_write_body_check model_match=" + (read.body.model_match ? "1" : "0") +
+                    " firmware_match=" + (read.body.firmware_match ? "1" : "0") + " setting_writes=0");
+            if (target && read.opened && !read.verified) { out.reason = std::string("body_not_verified:") + D810CameraAlias(camera); return out; }
             if (!read.ok) { out.reason = std::string("read_incomplete:") + D810CameraAlias(camera); return out; }
             out.snapshots[static_cast<std::size_t>(camera)] = std::move(read.read.readings);
         }
         out.complete = true;
+        last_read_ = out;
         return out;
     }
     // Build a plan from two fresh stage A reads. It replaces any plan not yet
@@ -961,10 +1007,24 @@ public:
         if (const auto refusal = PlanRefusal()) return Keep(Refused(refusal));
         return Keep(BuildD810CopyPlan(a, b, table_, only));
     }
-    D810PlanResult PlanChosen(const D810SettingsSnapshot& a, const D810SettingsSnapshot& b, const std::vector<D810WriteChoice>& choices) {
+    // Build a plan of the values picked for each camera (D810PanelDraft::Choices()) from the last complete read this
+    // controller made (ReadForPlan). `read` is only the token of that read: its number must be the last read's, and the
+    // snapshots and the flags of the bodies (which of them the table names) are the ones the controller kept, not what
+    // the caller holds. A read that is not the last one (an older read, one that was not complete, one from elsewhere),
+    // or one that a run or a reread has made old, is refused whole ("read_not_current"). Refused whole too while the
+    // table's chosen-values switch is off (the product table). It replaces any plan not yet run.
+    D810PlanResult PlanChosen(const D810PlanRead& read, const std::vector<D810CameraChoice>& choices) {
         if (const auto refusal = PlanRefusal()) return Keep(Refused(refusal));
-        return Keep(BuildD810ChosenPlan(a, b, choices, table_));
+        if (!last_read_ || !last_read_->complete || read.id == 0 || read.id != last_read_->id) return Keep(Refused("read_not_current"));
+        return Keep(BuildD810PerCameraPlan(last_read_->snapshots[0], last_read_->snapshots[1], last_read_->verified, choices, table_));
     }
+#if defined(A0_SETTINGS_WRITE_TEST_TABLES)
+    // Contract tests only: a read made without a camera becomes the last read (numbered here), as ReadForPlan would leave it.
+    void AcceptReadForTest(D810PlanRead& read) {
+        read.id = NextReadId();
+        last_read_ = read;
+    }
+#endif
     // The operator confirmed the plan shown. Returns the refusal, or nullptr.
     const char* Confirm(std::uint64_t plan_id) {
         if (!pending_ || pending_->id != plan_id) return "plan_not_pending";
@@ -981,12 +1041,15 @@ public:
         const D810WritePlan plan = std::move(*confirmed_);
         confirmed_.reset();
         pending_.reset();
+        last_read_.reset(); // the cameras are about to change: no plan is made from a read before this run
         if (!options.may_continue || !options.may_cleanup || !options.remaining || options.step_budget <= std::chrono::milliseconds::zero()) {
             run.reason = "invalid_options";
             return run;
         }
         if (const auto refusal = PlanRefusal()) { run.reason = refusal; return run; }
-        if (const auto refusal = D810PlanTableRefusal(plan, table_); !refusal.empty()) { run.reason = refusal; return run; }
+        // The order of the steps (CAM-B first, CAM-A last, no item twice), and the table again: this run's time
+        // margin and its latch rely on that order.
+        if (const auto problem = D810PlanProblem(plan, table_); !problem.empty()) { run.reason = problem; return run; }
         if (!owner_.TryAcquire(D810CameraUse::Settings)) { run.reason = "cameras_busy"; return run; }
         struct Release { D810CameraOwnership& owner; ~Release() { owner.Release(D810CameraUse::Settings); } } release{owner_};
         D810OperationLatch latch;
@@ -995,18 +1058,23 @@ public:
         memory_block_ = StrongerD810Block(memory_block_, run.block);
         return run;
     }
-    // Read both cameras with the read-only session and release a block when
-    // every block item reads the same on both. Sends no write.
+    // Read both cameras with the read-only session and release a block. For a
+    // history of copies only, when every block item reads the same on both; for a
+    // history that holds a chosen plan (read from the record, so also after a
+    // restart), when every item the unfinished operations planned reads its
+    // planned value on its own camera, with no comparison of the two cameras.
+    // Sends no write.
     D810RereadResult Reread(D810SettingsCameraAccess& access, const D810WriteRunOptions& options) {
         D810RereadResult result;
         if (!options.may_continue || !options.may_cleanup) { result.reason = "invalid_options"; result.block = Block(); return result; }
         if (!owner_.TryAcquire(D810CameraUse::Settings)) { result.reason = "cameras_busy"; result.block = Block(); return result; }
         struct Release { D810CameraOwnership& owner; ~Release() { owner.Release(D810CameraUse::Settings); } } release{owner_};
+        last_read_.reset(); // a reread follows a change of the cameras
         const auto a = ReadCamera(access, D810Camera::A, options);
         const auto b = ReadCamera(access, D810Camera::B, options);
         result.complete = a.ok && b.ok;
         if (!result.complete) { result.reason = "reread_incomplete"; result.block = Block(); return result; }
-        result.check = CheckD810Release(a.read.readings, b.read.readings, table_);
+        result.check = ReleaseCheck(a.read.readings, b.read.readings, result);
         if (!journal_.Append(FormatD810JournalReread(Now(options), result.check.released))) {
             result.reason = "record_unwritable";
             result.block = Block();
@@ -1022,7 +1090,33 @@ public:
 private:
     D810SettingsWriteController(AnyTable, const D810WriteTable& table, D810SettingsJournal& journal, D810CameraOwnership& owner):
         table_(table), table_valid_(D810ControllerTableProblem(table_, kD810ControllerTestTables) == nullptr), journal_(journal), owner_(owner) {}
+    // Read numbers are unique over the process, so a read of another controller is never taken for this one's.
+    static std::uint64_t NextReadId() {
+        static std::atomic<std::uint64_t> counter{0};
+        return ++counter;
+    }
     static bool WriteAllowed(D810CaptureBlock block) { return block == D810CaptureBlock::None || block == D810CaptureBlock::Mismatch; }
+    // Which comparison releases the block is decided by the record on disk, the authority: a history with a chosen
+    // plan and planned values to check uses them; anything else (copies only, no record, a chosen history whose
+    // step lines gave no value, a chosen history of which part of the record is damaged) compares the two cameras,
+    // the stricter rule. A record that exists but cannot be read releases nothing: which rule applies is not known.
+    D810ReleaseCheck ReleaseCheck(const D810SettingsSnapshot& a, const D810SettingsSnapshot& b, D810RereadResult& rule) const {
+        const auto file = journal_.Read();
+        if (file.kind == D810TextFile::Kind::Error) {
+            D810ReleaseCheck unreadable;
+            unreadable.differences.push_back("record_unreadable");
+            return unreadable;
+        }
+        if (file.kind == D810TextFile::Kind::Read) {
+            const auto state = ParseD810Journal(file.text);
+            rule.history_damaged = state.history_damaged;
+            if (D810ReleasesByPlannedValues(state)) {
+                rule.by_planned_values = true;
+                return CheckD810ReleasePlanned(a, b, state.expected, table_);
+            }
+        }
+        return CheckD810Release(a, b, table_);
+    }
     const char* PlanRefusal() const {
         if (!table_valid_) return "invalid_table";
         if (!WriteAllowed(Block())) return "reread_first";
@@ -1073,7 +1167,7 @@ private:
         auto opened = access.Open(camera);
         if (!opened.transport) return out;
         out.opened = true;
-        out.body = D810CheckBody(table_, opened.model, opened.firmware);
+        out.body = D810CheckBody(table_, camera, opened.model, opened.firmware);
         out.verified = out.body.Verified();
         if (only_if_verified && !out.verified) {
             access.Close(camera);
@@ -1160,12 +1254,14 @@ private:
             config.camera = camera;
             config.iso_auto_code = plan.iso_auto_code;
             config.latch = &latch;
+            // The key to a CAM-A session: only a chosen plan under a table that switches chosen values on.
+            config.cam_a_allowed = camera == D810Camera::A && D810CamAKeyOpen(plan, self.table_);
             for (const auto& step : plan.steps)
                 if (step.camera == camera) config.entries.push_back({step.code, step.value});
             auto opened = access.Open(camera);
             if (!opened.transport) return std::string("open_failed:") + D810CameraAlias(camera);
             std::string stop;
-            if (!D810BodyVerified(self.table_, opened.model, opened.firmware)) stop = std::string("body_not_verified:") + D810CameraAlias(camera);
+            if (!D810BodyVerified(self.table_, camera, opened.model, opened.firmware)) stop = std::string("body_not_verified:") + D810CameraAlias(camera);
             else {
                 try {
                     WpdSettingsWriteSession session(std::move(opened.transport), options.may_continue, options.may_cleanup, std::move(config), opened.cancelled);
@@ -1245,6 +1341,8 @@ private:
     D810SettingsJournal& journal_;
     D810CameraOwnership& owner_;
     std::optional<D810WritePlan> pending_, confirmed_;
+    // The last complete read for a plan (ReadForPlan), kept here: a plan of picked values is made from this, never from what a caller holds.
+    std::optional<D810PlanRead> last_read_;
     D810CaptureBlock memory_block_{D810CaptureBlock::None};
     std::uint64_t counter_{};
 };
