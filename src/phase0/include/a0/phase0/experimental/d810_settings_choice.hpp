@@ -97,10 +97,9 @@ constexpr bool D810ChoiceItemsFollowTable() {
 static_assert(D810ChoiceItemsFollowTable(), "the pickable items follow the order of the item table");
 
 // --- Band ------------------------------------------------------------------------------------------------
-// The ISO values a panel offers. Provisional (※仮): standard range only; the Lo and Hi extended values are
-// not offered, and what the numbers of the body mean is to be confirmed against a real read before these are
-// fixed. Compile-time constants: no run-time input changes them. The shutter speed ceiling is the existing
-// kD810MaxWritableExposureUnits (1 s).
+// The ISO values a panel offers. Decided by the owner: the standard range only (64 to 12800); the Lo and Hi
+// extended values are not offered. Compile-time constants: no run-time input changes them. The shutter speed
+// ceiling is the existing kD810MaxWritableExposureUnits (1 s).
 inline constexpr std::int64_t kD810ChoiceIsoMin = 64;
 inline constexpr std::int64_t kD810ChoiceIsoMax = 12800;
 // The ceiling of the band: widening it (the ISO extension values, an exposure over 1 s) is a decision and a reviewed
