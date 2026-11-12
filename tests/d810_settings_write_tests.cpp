@@ -2851,6 +2851,22 @@ void ProductStage() {
     check(!D810BodyVerified(product, A, product.verified_model, "") && !D810BodyVerified(product, A, product.verified_model, "other-text") && !D810BodyVerified(product, A, "", product.verified_firmware),
         "stage: nothing else verifies as CAM-A");
     check(D810BodyVerified(product, B, product.verified_model, product.verified_firmware), "stage: CAM-B is verified");
+    // The first log line carries the stage: counts and booleans, no version text.
+    check(D810StageMark(product) == std::string("chosen_values=1 cam_a_rows=") + std::to_string(stage::BitCount(stage::kCamAItems)) + " cam_a_version=" + (stage::kCamAVersionNamed ? "1" : "0") &&
+        D810StageMark(product).find(product.verified_firmware) == std::string::npos, "stage: the stage mark says the switch, the number of CAM-A rows and whether CAM-A has a version");
+    check(D810StageMark(kAdr38Table) == "chosen_values=0 cam_a_rows=0 cam_a_version=0", "stage: a copy-only table reads as such");
+    // The firmware text the table names exists once in the table's header (the compiler pools equal literals, so the pointer check above cannot
+    // see a second copy): CAM-A's entry is CAM-B's, not another literal. Looked for next to the tests; nothing is checked when the header is not there.
+    {
+        const auto header = fs::path(__FILE__).parent_path().parent_path() / "src" / "phase0" / "include" / "a0" / "phase0" / "experimental" / "d810_settings_write.hpp";
+        std::error_code ignored;
+        if (fs::is_regular_file(header, ignored)) {
+            const auto text = ReadText(header);
+            std::size_t found = 0;
+            for (auto at = text.find(product.verified_firmware); at != std::string::npos; at = text.find(product.verified_firmware, at + 1)) ++found;
+            check(found == 1, "stage: the table's firmware text is in its header once");
+        }
+    }
 
     // Each pick on each camera: planned and written once exactly where the stage opens it; refused with nothing sent elsewhere.
     for (const auto camera : {A, B})

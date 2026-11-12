@@ -899,7 +899,7 @@ int main(int argc,char** argv){
     try{
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
         // A build that contains the settings write path says so first (#416 stage B). The smoke opens no camera.
-        Log("settings_write_build=1 development_only=1 enabled_rows="+std::to_string(D810EnabledRowCount(kD810ProductWriteTable)));
+        Log("settings_write_build=1 development_only=1 enabled_rows="+std::to_string(D810EnabledRowCount(kD810ProductWriteTable))+" "+D810StageMark(kD810ProductWriteTable));
 #if defined(A0_SETTINGS_WRITE_TEST_TABLES)
         // The confirmation test build (the only one with a table-taking controller): its one camera-free smoke, and
         // nothing else. No other argument reaches a camera, a lease or the window.
