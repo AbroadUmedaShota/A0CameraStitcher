@@ -460,32 +460,68 @@ const wchar_t* SettingLabel(D810SettingId id){
     case D810SettingId::ExposureCompensation:return L"露出補正";
     case D810SettingId::PictureControl:return L"ピクチャーコントロール";
     case D810SettingId::ActiveDLighting:return L"アクティブD-ライティング";
+    case D810SettingId::ColorSpace:return L"色空間";
+    case D810SettingId::VignetteControl:return L"ヴィネットコントロール";
+    case D810SettingId::AutoDistortionControl:return L"自動ゆがみ補正";
+    case D810SettingId::HighIsoNr:return L"高感度ノイズ低減";
+    case D810SettingId::LongExposureNr:return L"長秒時ノイズ低減";
+    case D810SettingId::HdrMode:return L"HDR";
     default:return L"";
     }
 }
-// The side-by-side table of the two bodies' settings (#416). Display only: nothing here sends a command.
+// How the rows of the settings table are laid out below the header. One column of rows at the normal
+// height when they fit; otherwise the compact height; otherwise two blocks side by side at the compact
+// height. Rows that still do not fit are not drawn (`shown` says how many are).
+struct SettingsTableLayout {int row_height{22};int blocks{1};int rows_per_block{0};std::size_t shown{0};};
+inline constexpr int kSettingsRowHeight=22,kSettingsCompactRowHeight=20;
+SettingsTableLayout LayoutSettingsTable(std::size_t count,int available_height){
+    SettingsTableLayout layout;
+    const int available=std::max(0,available_height);
+    const auto fits=[&](int height){return static_cast<long long>(count)*height<=available;};
+    if(fits(kSettingsRowHeight)){layout.rows_per_block=static_cast<int>(count);layout.shown=count;return layout;}
+    layout.row_height=kSettingsCompactRowHeight;
+    if(fits(kSettingsCompactRowHeight)){layout.rows_per_block=static_cast<int>(count);layout.shown=count;return layout;}
+    layout.blocks=2;
+    layout.rows_per_block=std::min(static_cast<int>((count+1)/2),available/kSettingsCompactRowHeight);
+    layout.shown=std::min<std::size_t>(count,static_cast<std::size_t>(layout.rows_per_block)*2);
+    return layout;
+}
+// The side-by-side table of the two bodies' settings (#416, #427). Display only: nothing here sends a command.
 bool DrawSettingsView(HDC dc,RECT client){
     if(!settings_view)return false;
-    const int top=client.bottom/2+88,left=12,label_width=236;
-    const int column=std::max<int>(100,(client.right-2*left-label_width)/3);
+    const int top=client.bottom/2+88,left=12;
     const wchar_t* title=L"両台のカメラ設定（読み取り専用・カメラの設定は変えていません）";
     TextOutW(dc,left,top,title,lstrlenW(title));
+    const int head_y=top+34,first_y=head_y+24;
+    const auto layout=LayoutSettingsTable(settings_view->rows.size(),client.bottom-first_y-4);
+    const int block_width=(client.right-2*left)/layout.blocks;
+    const int label_width=layout.blocks==1?236:std::min(200,block_width/3);
+    const int column=std::max<int>(layout.blocks==1?100:60,(block_width-label_width-12)/3);
+    const int height=layout.row_height;
     const auto cell=[&](int x,int y,const std::wstring& text,int width){
-        RECT area{x,y,x+width-6,y+22};DrawTextW(dc,text.c_str(),-1,&area,DT_LEFT|DT_SINGLELINE|DT_NOPREFIX|DT_END_ELLIPSIS);
+        RECT area{x,y,x+width-6,y+height};DrawTextW(dc,text.c_str(),-1,&area,DT_LEFT|DT_SINGLELINE|DT_NOPREFIX|DT_END_ELLIPSIS);
     };
-    int y=top+34;
-    cell(left,y,L"項目",label_width);cell(left+label_width,y,L"CAM-A（左）",column);cell(left+label_width+column,y,L"CAM-B（右）",column);cell(left+label_width+2*column,y,L"差",column);
-    y+=24;
-    for(const auto& row:settings_view->rows){
+    for(int block=0;block<layout.blocks;++block){
+        const int x0=left+block*block_width;
+        cell(x0,head_y,L"項目",label_width);cell(x0+label_width,head_y,L"CAM-A（左）",column);cell(x0+label_width+column,head_y,L"CAM-B（右）",column);cell(x0+label_width+2*column,head_y,L"差",column);
+    }
+    for(std::size_t i=0;i<layout.shown;++i){
+        const auto& row=settings_view->rows[i];
+        const int block=static_cast<int>(i)/layout.rows_per_block,x0=left+block*block_width;
+        const int y=first_y+(static_cast<int>(i)%layout.rows_per_block)*height;
         const bool differs=row.difference==D810Difference::Different;
         SetTextColor(dc,differs?RGB(255,200,90):RGB(240,240,240));
-        cell(left,y,SettingLabel(row.id),label_width);
-        cell(left+label_width,y,WidenUtf8(row.a_text),column);cell(left+label_width+column,y,WidenUtf8(row.b_text),column);
-        cell(left+label_width+2*column,y,differs?L"差あり":row.difference==D810Difference::Same?L"同じ":L"比較不可",column);
-        y+=22;
+        cell(x0,y,SettingLabel(row.id),label_width);
+        cell(x0+label_width,y,WidenUtf8(row.a_text),column);cell(x0+label_width+column,y,WidenUtf8(row.b_text),column);
+        cell(x0+label_width+2*column,y,differs?L"差あり":row.difference==D810Difference::Same?L"同じ":L"比較不可",column);
     }
     SetTextColor(dc,RGB(240,240,240));
     return true;
+}
+// "一致 N／違う M／読めない K". A row that could not be read on either side is counted as not readable,
+// never as a match.
+std::wstring SettingsCountsText(const D810ComparisonSummary& summary){
+    return L"一致 "+std::to_wstring(summary.same)+L"／違う "+std::to_wstring(summary.different)+L"／読めない "+std::to_wstring(summary.unknown);
 }
 // Folds a finished read into the table and the status line. UI thread only.
 void ApplySettingsOutcome(const SettingsReadOutcome& outcome){
@@ -494,9 +530,14 @@ void ApplySettingsOutcome(const SettingsReadOutcome& outcome){
     SettingsView view;
     view.rows=CompareD810Settings(outcome.cameras[0].read.readings,outcome.cameras[1].read.readings);
     if(settings_close_failed)view.status=L"設定を読んだあとにカメラとの接続を閉じられませんでした。ライブは再開できません。この画面を閉じて、本体・USB接続を確認してください。";
-    else if(outcome.Complete())view.status=L"両台の設定を読みました（読み取りのみ）。差のある項目: "+std::to_wstring(CountD810Differences(view.rows))+L" / 「ライブ再開」を押すと表は消えます。";
-    else{
-        view.status=L"設定の読み取りを途中で止めました。読めた項目だけ表示しています。";
+    else if(outcome.Complete()){
+        const auto summary=SummarizeD810Comparison(view.rows);
+        view.status=L"両台の設定を読みました（読み取りのみ）。"+SettingsCountsText(summary);
+        // Said only when no row is different or unreadable. Only the rows of the table were compared.
+        if(outcome.EverythingMatches(summary))view.status+=L"。左右が全部一致（表の項目だけ。ピクチャーコントロールの調整値・プリセットWBの中身・WBの微調整は読めず、比べていません）";
+        view.status+=L" / 「ライブ再開」を押すと表は消えます。";
+    }else{
+        view.status=L"設定の読み取りを途中で止めました。読めた項目だけ表示しています。"+SettingsCountsText(SummarizeD810Comparison(view.rows))+L"。";
         for(const auto& camera:outcome.cameras)if(!camera.read.Complete())
             view.status+=L" "+WidenUtf8(camera.read.alias)+L": "+WidenUtf8(camera.read.stop_reason);
     }
@@ -1075,12 +1116,14 @@ int RunSettingsUiSmoke(){
     tick();
     check(!settings_future.valid() && !settings_close_failed && settings_view.has_value());
     if(settings_view){
-        check(settings_view->rows.size()==10 && CountD810Differences(settings_view->rows)==3);
+        const auto summary=SummarizeD810Comparison(settings_view->rows);
+        check(settings_view->rows.size()==16 && CountD810Differences(settings_view->rows)==3);
+        check(summary.same==13 && summary.different==3 && summary.unknown==0 && !summary.AllSame());
         for(const auto& row:settings_view->rows)
             if(row.id==D810SettingId::ShutterSpeed)check(row.a_text=="1/6 s" && row.b_text=="1/2 s" && row.difference==D810Difference::Different);
             else if(row.id==D810SettingId::Aperture)check(row.difference==D810Difference::Same);
     }
-    check(capture_status.find(L"差のある項目: 3")!=std::wstring::npos);
+    check(capture_status.find(L"一致 13／違う 3／読めない 0")!=std::wstring::npos && capture_status.find(L"全部一致")==std::wstring::npos);
     tick(); // the buttons follow the state of the previous tick's end
     check(IsWindowEnabled(settings_button)!=FALSE && IsWindowEnabled(session_button)!=FALSE);
     {
@@ -1097,6 +1140,57 @@ int RunSettingsUiSmoke(){
             check(drawn>200);
             SelectObject(dc,old);DeleteObject(bitmap);DeleteDC(dc);
         }
+    }
+
+    // 5b. The counts and the claim that everything matches, from synthetic outcomes (no camera). The claim needs
+    // no different row, no unreadable row, both reads complete and both bodies closed.
+    {
+        const auto outcome_of=[&](bool same){
+            SettingsReadOutcome o;
+            for(int i=0;i<2;++i){
+                o.cameras[i].read.alias=i==0?"CAM-A":"CAM-B";
+                for(const auto& spec:kD810SettingSpecs)o.cameras[i].read.readings.push_back(reading(spec,same?0:i));
+            }
+            return o;
+        };
+        const auto status_has=[&](const wchar_t* text){return capture_status.find(text)!=std::wstring::npos;};
+        auto all_same=outcome_of(true);
+        ApplySettingsOutcome(all_same);
+        check(status_has(L"一致 16／違う 0／読めない 0") && status_has(L"左右が全部一致") && status_has(L"比べていません"));
+        auto one_unreadable=outcome_of(true); // an extended row that B could not read
+        for(auto& r:one_unreadable.cameras[1].read.readings)if(r.id==D810SettingId::HdrMode)r=UnavailableD810Setting(D810SettingId::HdrMode,"type_mismatch");
+        ApplySettingsOutcome(one_unreadable);
+        check(status_has(L"一致 15／違う 0／読めない 1") && !status_has(L"全部一致") && CountD810Differences(settings_view->rows)==0);
+        auto unread_both=outcome_of(true); // the same row unreadable on both sides is still not a match
+        for(auto& camera:unread_both.cameras)for(auto& r:camera.read.readings)if(r.id==D810SettingId::PictureControl)r=UnavailableD810Setting(D810SettingId::PictureControl,"type_mismatch");
+        ApplySettingsOutcome(unread_both);
+        check(status_has(L"一致 15／違う 0／読めない 1") && !status_has(L"全部一致"));
+        auto stopped=outcome_of(true); // every row read, but the read did not end cleanly
+        stopped.cameras[1].read.stop_reason="interrupted";
+        ApplySettingsOutcome(stopped);
+        check(status_has(L"途中で止めました") && status_has(L"一致 16／違う 0／読めない 0") && !status_has(L"全部一致"));
+        auto not_closed=outcome_of(true);
+        not_closed.cameras[1].clean_close=false;
+        ApplySettingsOutcome(not_closed);
+        check(settings_close_failed && !status_has(L"全部一致"));
+        settings_close_failed=false;
+        auto empty_read=outcome_of(true); // nothing read at all: no claim
+        for(auto& camera:empty_read.cameras)MarkSettingsUnread(camera,"not_started");
+        ApplySettingsOutcome(empty_read);
+        check(status_has(L"一致 0／違う 0／読めない 16") && !status_has(L"全部一致"));
+        ApplySettingsOutcome(all_same);
+        check(settings_view.has_value() && !settings_close_failed);
+        // Layout: the sixteen rows fit the test window (1400 x 960) in one column; more rows share two blocks.
+        const auto fit=LayoutSettingsTable(settings_view->rows.size(),960-(960/2+88+58)-4);
+        check(fit.blocks==1 && fit.shown==16 && fit.row_height==kSettingsCompactRowHeight);
+        const auto roomy=LayoutSettingsTable(16,16*kSettingsRowHeight);
+        check(roomy.blocks==1 && roomy.shown==16 && roomy.row_height==kSettingsRowHeight);
+        const auto crowded=LayoutSettingsTable(30,330);
+        check(crowded.blocks==2 && crowded.shown==30 && crowded.rows_per_block==15 && crowded.row_height==kSettingsCompactRowHeight);
+        const auto clipped=LayoutSettingsTable(30,100);
+        check(clipped.blocks==2 && clipped.shown==10 && clipped.rows_per_block==5);
+        const auto none=LayoutSettingsTable(0,0);
+        check(none.shown==0 && LayoutSettingsTable(5,0).shown==0);
     }
 
     // 6. Live restart: the table goes away.
