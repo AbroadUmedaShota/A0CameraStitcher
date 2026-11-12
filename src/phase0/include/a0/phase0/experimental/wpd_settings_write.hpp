@@ -851,8 +851,9 @@ struct D810PlanRead {
     bool complete{};
     std::array<D810SettingsSnapshot, 2> snapshots; // CAM-A, CAM-B
     // Which body reported the model and firmware the table names for it (indexed like `snapshots`; booleans only).
-    // CAM-B's is always true in a complete read (a CAM-B that does not match ends the read); CAM-A's is what a plan
-    // that writes CAM-A needs, and stays false while the table names no firmware for CAM-A.
+    // CAM-B's is always true in a complete read (a CAM-B that does not match ends the read); CAM-A's is true only when
+    // CAM-A matched too, which a plan that writes CAM-A needs, and it stays false while the table names no firmware
+    // for CAM-A.
     D810BodyFlags verified{};
     std::string reason;
 };
@@ -984,7 +985,8 @@ public:
         struct Release { D810CameraOwnership& owner; ~Release() { owner.Release(D810CameraUse::Settings); } } release{owner_};
         for (const auto camera : {D810Camera::A, D810Camera::B}) {
             // CAM-B is the body that would be written: when it is not the model and firmware the table names, no
-            // plan is made and nothing is shown to confirm. CAM-A is only read, so its version does not matter.
+            // plan is made and nothing is shown to confirm. CAM-A's result does not end the read; a plan with a
+            // CAM-A step is made only when CAM-A matched too (PlanChosen), and a copy never writes CAM-A.
             const bool target = camera == D810Camera::B;
             auto read = ReadCamera(access, camera, options, target);
             out.verified[static_cast<std::size_t>(camera)] = read.opened && read.verified;
@@ -1013,7 +1015,8 @@ public:
     // snapshots and the flags of the bodies (which of them the table names) are the ones the controller kept, not what
     // the caller holds. A read that is not the last one (an older read, one that was not complete, one from elsewhere),
     // or one that a run or a reread has made old, is refused whole ("read_not_current"). Refused whole too while the
-    // table's chosen-values switch is off (the product table). It replaces any plan not yet run.
+    // table's chosen-values switch is off, and when a pick falls on a row the table does not enable. It replaces any
+    // plan not yet run.
     D810PlanResult PlanChosen(const D810PlanRead& read, const std::vector<D810CameraChoice>& choices) {
         if (const auto refusal = PlanRefusal()) return Keep(Refused(refusal));
         if (!last_read_ || !last_read_->complete || read.id == 0 || read.id != last_read_->id) return Keep(Refused("read_not_current"));
