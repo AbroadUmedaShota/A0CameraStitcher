@@ -2974,6 +2974,45 @@ void ProductStage() {
         const auto run = later.Run(good);
         check(run.sent == 0 && run.reason == "body_not_verified:CAM-A" && later.Writes() == 0, "stage: CAM-A's version changed before the run, nothing is sent");
     }
+    // Stage T3: CAM-A's four remaining items are one plan, and CAM-B is not part of it. They are sent in the table's order; the first
+    // result that is not a match stops the rest.
+    if (stage::Opens(A, Item::ShutterSpeed) && stage::Opens(A, Item::Aperture) && stage::Opens(A, Item::WhiteBalance) && stage::Opens(A, Item::Metering)) {
+        const std::vector<D810CameraChoice> four{PickFor(A, Item::ShutterSpeed, 500), PickFor(A, Item::Aperture, 1100), PickFor(A, Item::WhiteBalance, 5), PickFor(A, Item::Metering, 4)};
+        {
+            Bench bench(kProduct);
+            PrepareStageBench(bench);
+            bench.TraceBegins();
+            const auto plan = bench.Chosen(four);
+            check(plan.Ok() && plan.plan->steps.size() == 4, "stage: CAM-A's four remaining items are one plan");
+            const auto run = bench.Run(plan);
+            check(run.verdict == D810WriteVerdict::Match && run.sent == 4 && bench.a.write_begins == 4 && bench.b.write_begins == 0 && bench.access.opens[1] == 0, "stage: the four are written to CAM-A, CAM-B is not opened");
+            check(bench.begin_order == BeginOrder{{0, 0x500d}, {0, 0x5007}, {0, 0x5005}, {0, 0x500b}}, "stage: shutter speed, aperture, white balance, metering, in that order");
+            check(bench.a.props[0x500d].current == 500 && bench.a.props[0x5007].current == 1100 && bench.a.props[0x5005].current == 5 && bench.a.props[0x500b].current == 4, "stage: each item arrived");
+            check(NoResend(bench.a) && bench.a.forbidden == 0 && bench.controller->CaptureAllowed(), "stage: once each, nothing else, capture allowed");
+        }
+        {
+            // The second item does not take: the third and the fourth are not sent, nothing is written back, and capture is held.
+            Bench bench(kProduct);
+            PrepareStageBench(bench);
+            bench.TraceBegins();
+            bench.a.apply_as[0x5007] = 800;
+            const auto run = bench.Run(bench.Chosen(four));
+            check(run.verdict == D810WriteVerdict::Mismatch && run.reason == "readback_mismatch" && run.sent == 2, "stage: a mismatch on the second item");
+            check(bench.begin_order == BeginOrder{{0, 0x500d}, {0, 0x5007}} && bench.a.write_begins == 2 && bench.b.write_begins == 0, "stage: the third and the fourth item are not sent");
+            check(bench.a.props[0x500d].current == 500 && bench.a.props[0x5005].current == 4 && bench.a.props[0x500b].current == 2, "stage: the first stays written, the rest untouched, nothing written back");
+            check(NoResend(bench.a) && !bench.controller->CaptureAllowed() && bench.controller->Block() == D810CaptureBlock::Mismatch && bench.Restarted().Block() == D810CaptureBlock::Mismatch, "stage: capture is held, also after a restart");
+        }
+        {
+            // The third item ends unknown: the fourth is not sent.
+            Bench bench(kProduct);
+            PrepareStageBench(bench);
+            bench.TraceBegins();
+            bench.a.end_reject[0x5005] = 0x2002;
+            const auto run = bench.Run(bench.Chosen(four));
+            check(run.verdict == D810WriteVerdict::Unknown && run.sent == 3 && run.reason == "result_unknown", "stage: unknown on the third item");
+            check(bench.begin_order == BeginOrder{{0, 0x500d}, {0, 0x5007}, {0, 0x5005}} && bench.controller->Block() == D810CaptureBlock::Unknown, "stage: the fourth item is not sent, capture is held");
+        }
+    }
 }
 
 void ChosenRuns() {
@@ -4637,6 +4676,25 @@ std::size_t LineIndex(const D810WriteScreenView* view, const std::wstring& part)
         if (view->lines[i].find(part) != std::wstring::npos) return i;
     return static_cast<std::size_t>(-1);
 }
+// A confirmation of picked values says what the white balance line does not carry over (the line count stays within the window).
+void ScreenChosenWhiteBalanceNote() {
+    using Item = D810ChoiceItem;
+    const auto B = D810Camera::B;
+    {
+        ScreenBench s(kChosenTable);
+        auto& screen = *s.screen;
+        check(OpenPanel(s) && screen.PanelPick(B, Item::WhiteBalance, 4) && screen.RequestChosen(true) && s.WaitIdle() && screen.ConfirmationShown(), "chosen WB: the confirmation is up");
+        const auto* view = screen.View();
+        check(view && Shows(view, L"WB は種類だけを書きます。色まで揃うとは限りません") && view->lines.size() <= D810WriteViewMaxLines(), "chosen WB: the notice is on the column line");
+        check(s.bench.Writes() == 0, "chosen WB: nothing written before the confirm");
+    }
+    {
+        ScreenBench s(kChosenTable);
+        auto& screen = *s.screen;
+        check(OpenPanel(s) && screen.PanelPick(B, Item::Iso, 200) && screen.RequestChosen(true) && s.WaitIdle() && screen.ConfirmationShown(), "chosen WB: an ISO plan is up");
+        check(!Shows(screen.View(), L"WB は種類だけを書きます"), "chosen WB: no notice without a white balance step");
+    }
+}
 void ScreenChosenFlow() {
     using Item = D810ChoiceItem;
     const auto A = D810Camera::A, B = D810Camera::B;
@@ -5451,6 +5509,7 @@ int main() {
     run("ScreenPanelDiscards", ScreenPanelDiscards);
     run("ScreenPanelLocksAndFailures", ScreenPanelLocksAndFailures);
     run("ScreenChosenFlow", ScreenChosenFlow);
+    run("ScreenChosenWhiteBalanceNote", ScreenChosenWhiteBalanceNote);
     run("ScreenChosenRefusals", ScreenChosenRefusals);
     run("ScreenChosenWorkerFailure", ScreenChosenWorkerFailure);
     run("RereadRuleIsTold", RereadRuleIsTold);

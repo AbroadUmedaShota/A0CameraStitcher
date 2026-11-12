@@ -2,7 +2,7 @@
 //
 // Written out here and not read from the table: a row opened early, or by mistake, makes a test fail. The commit that opens
 // the next stage changes this file and the product table together, and nothing else about what the tests expect of the
-// stage. Stage T2: CAM-B can be written with picked values; CAM-A has its ISO row, and the table's entry for CAM-A's firmware version is CAM-B's, by reference.
+// stage. Stage T3: CAM-B and CAM-A can be written with picked values (the five items on each); the table's entry for CAM-A's firmware version is CAM-B's, by reference.
 #pragma once
 
 #include "a0/phase0/experimental/d810_settings_write.hpp"
@@ -26,12 +26,12 @@ constexpr std::size_t BitCount(std::uint32_t bits) {
 
 // The items whose row is enabled, per camera.
 inline constexpr std::uint32_t kCamBItems = ItemBits({D810WriteItem::Iso, D810WriteItem::ShutterSpeed, D810WriteItem::Aperture, D810WriteItem::WhiteBalance, D810WriteItem::Metering});
-inline constexpr std::uint32_t kCamAItems = ItemBits({D810WriteItem::Iso});
+inline constexpr std::uint32_t kCamAItems = ItemBits({D810WriteItem::Iso, D810WriteItem::ShutterSpeed, D810WriteItem::Aperture, D810WriteItem::WhiteBalance, D810WriteItem::Metering});
 // The table names a firmware version for CAM-A (and it is CAM-B's, by reference).
 inline constexpr bool kCamAVersionNamed = true;
 // The enabled rows the first log line reports (`enabled_rows=`).
 inline constexpr std::size_t kEnabledRows = BitCount(kCamBItems) + BitCount(kCamAItems);
-static_assert(kEnabledRows == 6, "stage T2: the five CAM-B rows and CAM-A's ISO");
+static_assert(kEnabledRows == 10, "stage T3: the five rows of each camera");
 
 // True when the product table lets a plan of picked values write `item` to `camera`.
 constexpr bool Opens(D810Camera camera, D810WriteItem item) { return ((camera == D810Camera::A ? kCamAItems : kCamBItems) & D810ItemBit(item)) != 0; }

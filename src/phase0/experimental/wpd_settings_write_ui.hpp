@@ -1390,6 +1390,7 @@ int WidestPossibleChosenLine(HDC dc,std::wstring& which){
     int widest=0;
     const auto width_of=[&](const std::wstring& text){RECT r{0,0,0,0};DrawTextW(dc,text.c_str(),-1,&r,DT_CALCRECT|DT_LEFT|DT_SINGLELINE|DT_NOPREFIX);return static_cast<int>(r.right);};
     const auto note=[&](const std::wstring& text){const int w=width_of(text);if(w>widest){widest=w;which=text;}};
+    note(std::wstring(L"項目: CAM-B の今の値 → 書く値 ／ CAM-A の今の値 → 書く値")+D810ChosenWhiteBalanceNote()); // the column line of a plan with a white balance step
     // The widest of a set of texts: only the ones with the most characters are measured (two characters fewer is never wider here).
     const auto widest_text=[&](const std::vector<std::wstring>& texts){
         std::size_t longest=0;
