@@ -347,6 +347,11 @@ inline constexpr D810WriteTable kD810ProductWriteTable = [] {
         if (row.item == D810WriteItem::WhiteBalance && row.camera == D810Camera::B) row.enabled = true;
         if (row.item == D810WriteItem::Metering && row.camera == D810Camera::B) row.enabled = true;
         if (row.item == D810WriteItem::Iso && row.camera == D810Camera::A) row.enabled = true; // stage T2: CAM-A's ISO
+        // Stage T3: CAM-A's four remaining items.
+        if (row.item == D810WriteItem::ShutterSpeed && row.camera == D810Camera::A) row.enabled = true;
+        if (row.item == D810WriteItem::Aperture && row.camera == D810Camera::A) row.enabled = true;
+        if (row.item == D810WriteItem::WhiteBalance && row.camera == D810Camera::A) row.enabled = true;
+        if (row.item == D810WriteItem::Metering && row.camera == D810Camera::A) row.enabled = true;
     }
     table.copy_a_to_b = true;
     table.chosen_values = true; // stage T1: picked values can be written to CAM-B
@@ -376,13 +381,14 @@ static_assert(D810ProductTableProblem(kD810ProductWriteTable) == nullptr, "the p
 static_assert(D810ProductTableEnables(kD810ProductWriteTable,
         D810ItemBit(D810WriteItem::Iso) | D810ItemBit(D810WriteItem::ShutterSpeed) | D810ItemBit(D810WriteItem::Aperture) | D810ItemBit(D810WriteItem::WhiteBalance) |
             D810ItemBit(D810WriteItem::Metering),
-        D810ItemBit(D810WriteItem::Iso)),
-    "stage T2: the product table enables ISO, shutter speed, aperture, white balance and metering on CAM-B and ISO on CAM-A, and confirms ISO auto 0xD054 and shutter speed 0x500D");
+        D810ItemBit(D810WriteItem::Iso) | D810ItemBit(D810WriteItem::ShutterSpeed) | D810ItemBit(D810WriteItem::Aperture) | D810ItemBit(D810WriteItem::WhiteBalance) |
+            D810ItemBit(D810WriteItem::Metering)),
+    "stage T3: the product table enables ISO, shutter speed, aperture, white balance and metering on both cameras, and confirms ISO auto 0xD054 and shutter speed 0x500D");
 static_assert(D810TextPresent(kD810ProductWriteTable.verified_model), "the product table names the camera model it was confirmed on");
 static_assert(D810TextPresent(kD810ProductWriteTable.verified_firmware), "the product table names the firmware version it was confirmed on");
 static_assert(kD810ProductWriteTable.chosen_values && D810TextPresent(kD810ProductWriteTable.verified_firmware_a) &&
         kD810ProductWriteTable.verified_firmware_a == kD810ProductWriteTable.verified_firmware,
-    "stage T2: picked values are on, and the table's entry for CAM-A's firmware version is the entry for CAM-B's (the same text, by reference)");
+    "stage T2 and later: picked values are on, and the table's entry for CAM-A's firmware version is the entry for CAM-B's (the same text, by reference)");
 static_assert(kD810Adr38RevisionAccepted, "the product table enables white balance and metering, which needs the ADR-0038 revision flag");
 
 enum class D810PlanSource : std::uint8_t { CopyAToB, Chosen };
