@@ -749,7 +749,7 @@ A0CameraStitcher.StillReview --make-fixed-composite-condition-v3 <種類> --sett
 - 層 2 の引数: `--layer-two-falloff-px <L>` と `--layer-two-max-strain <s_max>`（2 つ一緒に渡す。片方だけは引数の誤り）。方針ファイルが層 2（`parallax`）を有効にしているとき、作る時の検査（ひずみの上限 (π/2)·cap/L ≤ s_max）に要る設計定数。コードに既定値は無く、渡されなければ作らない。値は層 2 の設計定数 `kParallaxDesignDraft`（`parallax_correction.hpp`、案）の `weight_falloff_px`（L）と `maximum_strain`（s_max）を使う。案は L = 192、s_max = 0.1。層 2 を無効にした方針（`"parallax": null`）では要らない
 - `--dry-run`: 記録を書く手前まで（方針ファイルの読み込み、profile と領域の検証、作る時の検査）の全部を行い、何も書かない。通れば終了コード 0
 - 引数は 1 回ずつ。その種類に属さない引数、足りない引数、数として読めない値（`nan`・`inf`・先頭の `+`・余分な文字）は終了コード 2 で、理由とこの書き方を出す
-- `manual-adjustment` の `--seam-dx-px`・`--seam-dy-px` は、新しい基準の姿勢が引き起こす B の動き（出力 px、x は右、y は下）を継ぎ目の列の真ん中の行で測った値。符号は「B がどちらへ動くか」（※仮定: 画面の入口 #418 段 2 で操作者の言葉に合わせて見直す）。**量に上限は無い**（所有者の決定 9）。断るのは、新しい基準の姿勢が校正から範囲（`registration.envelope`）の外に出るときだけで、「校正からやり直してください」と返す
+- `manual-adjustment` の `--seam-dx-px`・`--seam-dy-px` は、新しい基準の姿勢が引き起こす B の動き（出力 px、x は右、y は下）を継ぎ目の列の真ん中の行で測った値。符号は「B がどちらへ動くか」（※仮定: 画面の入口 #418 段 2 で操作者の言葉に合わせて見直す）。**量に上限は無い**（所有者の決定 9）。新しい基準の姿勢が校正から範囲（`registration.envelope`）の外に出ても、手直しは書く（所有者の決定）。ただし範囲の外の基準の姿勢は、撮影とライブの C には使われない（条件を読む側が `condition_invalid` で断る）。rollback か新しい校正で内に戻す
 - `rollback` は前の改訂の中身（基準の姿勢と、範囲・線の値、写した方針の hash）を、新しい番号の改訂として書き直す。ファイルは消さず、変えず、名前も変えない。履歴は番号の列そのもの
 - 上書きしない: 同じ番号が既にあれば作らない。`created`・`migrated-from-v2` は改訂が 1 つでもあれば作らない。設定のフォルダに v1・v2 の条件ファイルがあるときも作らない（出どころを 2 つにしないため）。**v2 から切り替えるときは、人が v2 の `wpd-fixed-composite-condition.json` を別の名前へ移してから `migrated-from-v2` を実行し、移した先を `--v2-condition` で渡す**。移した v2 のファイルは読むだけで変えない
 
@@ -777,13 +777,13 @@ A0CameraStitcher.StillReview --make-fixed-composite-condition-v3 <種類> --sett
 | `registration.limits` | 推定の検査 V1〜V6 の閾値 9 値（`brownLoweAlpha`・`brownLoweBeta`・`minimumUniqueBlocks`・`maximumPredictionSigmaPx`・`maximumResidualRmsPx`・`maximumResidualP95Px`・`maximumBinBiasPx`・`convergencePx`・`startAgreementPx`。出力 px、`minimumUniqueBlocks` は個数） | 開発の仮の値（未承認）。ひな形は `registration_probe_main.cpp` の開発用の値（草稿の校正が残す誤差に合わせて緩い） |
 | `registration.geometry` | 遷移帯 Ω の余白 `omegaMarginPx`・Ω から推定の点までの間隔 `guardPx`・帯の半幅 `bandHalfWidthPx`（出力 px、整数）。混ぜ幅は合成の設計 `kSeamBlendDesign` から取り、報告に記録する | 開発の仮の値（未承認）。帯の半幅は重なりの全幅が入る広さ（※仮定） |
 
-- 範囲（`envelope`）の意味: 条件の記録に基準の姿勢 `basePose`（校正に対する 6 自由度。`created`・`migrated-from-v2` は全部 0）を持ち、撮影ごとの推定値と基準の差をこの範囲に当てる（追補 11.19.2）。基準の姿勢そのものも校正からこの範囲の内でなければならず、外なら改訂を作らない
+- 範囲（`envelope`）の意味: 条件の記録に基準の姿勢 `basePose`（校正に対する 6 自由度。`created`・`migrated-from-v2` は全部 0）を持ち、撮影ごとの推定値と基準の差をこの範囲に当てる（追補 11.19.2）。基準の姿勢そのものも校正からこの範囲の内でなければならず、外なら改訂を作らない（手直しの書き込みを除く。範囲の外の手直しは書くが、条件を使う読み手が断る）
 - 紙面の範囲（`surfaceEnvelope`）は、粗の段の探索の半径と作る時の検査の大きさを決める。大きくすると推定の時間と周期の模様の取り違えが増える（追補 11.20.3）。範囲を超えた紙面も、推定が確かなら当てて警告する（`applyBeyondEnvelope` = true）
 - `registration.limits` と `geometry` は撮影の経路の合否の線ではなく、推定器が自分の結果を信用する条件。承認された値ではなく、実写の分析（M1）と所有者の確認を経て置き換える。置き換えは方針ファイルを書き換えて `values` で改訂する
 
 ### 作る時の検査と時間
 
-どの種類でも、記録を書く前に、範囲の端の姿勢のすべてで継ぎ目と外周が保てるかを調べる（追補 11.23）。(a) 継ぎ目の左右に混ぜ幅の半分を足した範囲が、すべての行で A と B の両方に入る。(b) 出力のすべての画素が A か B に覆われる。(c) 層 2 のひずみの最大 (π/2)·cap/L が s_max 以下。(d) 基準の姿勢が校正から範囲の内。紙面の範囲の端で出力の外周が欠ける画素の数は拒否の理由にせず、詳細に数だけ出す。
+どの種類でも、記録を書く前に、範囲の端の姿勢のすべてで継ぎ目と外周が保てるかを調べる（追補 11.23）。(a) 継ぎ目の左右に混ぜ幅の半分を足した範囲が、すべての行で A と B の両方に入る。(b) 出力のすべての画素が A か B に覆われる。(c) 層 2 のひずみの最大 (π/2)·cap/L が s_max 以下。(d) 基準の姿勢が校正から範囲の内（手直しの書き込みを除く）。紙面の範囲の端で出力の外周が欠ける画素の数は拒否の理由にせず、詳細に数だけ出す。
 
 - 領域の大きさと範囲によって数十秒から数分かかる。検査に入るとき `check_started=1 note=…` を出し、30 秒ごとに `check_running seconds=<経過秒>` を出す。終わると `check_seconds=<秒>` を出す
 - 落ちたときは、どの成分のどの端かが文に出る（日本語の前置きに英語の理由が続く）。端の姿勢の 1 つで継ぎ目が覆われないときは `row <行>: … when <成分> is at the <+|-> end of its range (<+|-><量> <単位> from the base pose)`。成分は the x position・the y position（mm）、the x tilt・the y tilt・the rotation（度）、the height（%）、the paper height（mm）、the paper slope in x / y（傾きの tan）。頂点での判定で落ちたときは `row <行>: <検査の名前> does not hold over the range (margin <px> px) at the vertex x position … mm, y position … mm, x tilt … deg, …`（基準の姿勢からのずれ。紙面の欄は紙面の範囲があるときだけ）。ひずみの上限に落ちたときは、計算した値と s_max を並べて出す
@@ -809,7 +809,7 @@ check_seconds=<検査の秒数>
 
 ### 確認
 
-- `still_review_condition_v3_contracts`（`tests/still_review_condition_v3_tests.cpp`、一時フォルダだけ。第 1 引数は共有の rig profile v2 の fixture、第 2 引数は StillReview の exe、第 3 引数はひな形）: 引数の読み取り（全種類の成功、足りない・余分・重複・別の種類の引数、数と領域と DPI の不正、層 2 の片方だけ、手直しの大きな値を断らないこと）、ひな形が厳格な読み手で通り所有者の値と一致すること、進みの出力（30 秒ごとの行が出て、止めた後は出ないこと）、報告の中身（made・checked・dry-run、revision・kind・SHA-256 が書いたファイルと一致すること、パスや profile の名前が出ないこと）、`created` → 再実行の拒否 → `values`（同じ方針は書くものが無い）→ `manual-adjustment`（大きい値は通り、校正の範囲を出る値は断る）→ `rollback`（無い番号と有効な改訂は断る）→ `saved-estimate` の拒否、層 2 の設計定数が無いときの拒否、v2 から切り替える流れ（移していない v2・移した先が無い v2 の拒否、移した v2 を変えないこと）、範囲が広すぎる方針で落ちた成分と端の文、方針ファイルが無い・壊れている・欄が足りないときの拒否と何も書かないこと、そして実際の StillReview の exe を起こして同じ流れ（ウィンドウは開かない）
+- `still_review_condition_v3_contracts`（`tests/still_review_condition_v3_tests.cpp`、一時フォルダだけ。第 1 引数は共有の rig profile v2 の fixture、第 2 引数は StillReview の exe、第 3 引数はひな形）: 引数の読み取り（全種類の成功、足りない・余分・重複・別の種類の引数、数と領域と DPI の不正、層 2 の片方だけ、手直しの大きな値を断らないこと）、ひな形が厳格な読み手で通り所有者の値と一致すること、進みの出力（30 秒ごとの行が出て、止めた後は出ないこと）、報告の中身（made・checked・dry-run、revision・kind・SHA-256 が書いたファイルと一致すること、パスや profile の名前が出ないこと）、`created` → 再実行の拒否 → `values`（同じ方針は書くものが無い）→ `manual-adjustment`（大きい値は通る。校正の範囲を出る値も書くが、条件を使う読み手は断る）→ `rollback`（無い番号と有効な改訂は断る）→ `saved-estimate` の拒否、層 2 の設計定数が無いときの拒否、v2 から切り替える流れ（移していない v2・移した先が無い v2 の拒否、移した v2 を変えないこと）、範囲が広すぎる方針で落ちた成分と端の文、方針ファイルが無い・壊れている・欄が足りないときの拒否と何も書かないこと、そして実際の StillReview の exe を起こして同じ流れ（ウィンドウは開かない）
 - 既存の `m2_fixed_composite_tool_v3_contracts`・`m2_fixed_composite_condition_v3_contracts` は試験のコードを変えずに通る（作る時の検査の拒否の文に、落ちた成分・端・頂点を足した）
 - 未検証: ひな形の値で、個々の設置の領域と DPI の検査が通るか。領域・DPI ごとに、本物の設定のフォルダとは別の候補のフォルダでこの道具を実行して確かめる（通らないときは上の「直し方」）
 

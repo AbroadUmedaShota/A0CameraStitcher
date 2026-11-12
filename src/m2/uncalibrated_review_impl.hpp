@@ -113,7 +113,8 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
             !hash_valid(g.condition_sha256) || g.thread_count>256)
             throw std::invalid_argument("registered fixed composite review is exclusive and needs the condition, its profile and the condition hash");
         reg_condition=g.condition;reg_profile=g.profile;
-        try{ValidateFixedCompositeConditionV3(*reg_condition);}
+        // A capture draws with the condition, so a base pose outside the envelope is refused here whatever the revision's kind.
+        try{ValidateFixedCompositeConditionV3(*reg_condition);RequireFixedCompositeBasePoseInEnvelopeV3(*reg_condition);}
         catch(const std::invalid_argument& error){throw FixedCompositeUnavailable(FixedCompositeSkip::condition_invalid,error.what());}
         if(reg_profile->profile_file_sha256!=reg_condition->source.profile_file_sha256 || reg_profile->profile_fingerprint_sha256!=reg_condition->source.profile_fingerprint_sha256 ||
             !SameLensRaster(reg_profile->parameters.raster,reg_condition->raster))

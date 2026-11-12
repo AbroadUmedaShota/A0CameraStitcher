@@ -256,6 +256,9 @@ std::optional<LoadedFixedCompositeConditionAny> fixed_composite_detail::LoadFixe
             std::error_code error;
             if(std::filesystem::symlink_status(file,error).type()!=std::filesystem::file_type::not_found)
                 Reject("the condition file and a revision of condition v3 are both present: two sources of the condition");
+            // The reader that draws with a condition still holds it to the envelope: a hand adjustment may be written beyond it, but is
+            // not used for a capture or the live view until the base pose is back inside (a rollback, or a new calibration).
+            RequireFixedCompositeBasePoseInEnvelopeV3(active->condition);
             return LoadedFixedCompositeConditionAny{std::move(*active)};
         }
     }
@@ -264,8 +267,11 @@ std::optional<LoadedFixedCompositeConditionAny> fixed_composite_detail::LoadFixe
     if(!found)return {};
     const auto schema=accept_v3?SchemaOfLarge(text):FixedCompositeConditionSchemaOf(text);
     // The v3 branch: one revision file (LoadFixedCompositeConditionV3 refuses a file that is not kept as a revision).
-    if(accept_v3 && schema==kFixedCompositeConditionSchemaV3)
-        return LoadedFixedCompositeConditionAny{LoadFixedCompositeConditionV3(file,hash)};
+    if(accept_v3 && schema==kFixedCompositeConditionSchemaV3){
+        auto loaded=LoadFixedCompositeConditionV3(file,hash);
+        RequireFixedCompositeBasePoseInEnvelopeV3(loaded.condition);
+        return LoadedFixedCompositeConditionAny{std::move(loaded)};
+    }
     if(schema==kFixedCompositeConditionSchema)
         return LoadedFixedCompositeConditionAny{LoadedFixedCompositeCondition{ParseFixedCompositeCondition(text),hash(Bytes(text))}};
     if(schema!=kFixedCompositeConditionSchemaV2)Reject("unknown schema");

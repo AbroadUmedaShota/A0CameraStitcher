@@ -902,13 +902,61 @@ void AnyEntrance(){
 }
 }
 
+// A hand adjustment is not held to registration.envelope when it is written (the owner's decision: its size has no upper bound). It is
+// written, read back and loaded by the tools, and a rollback to an earlier revision works. Every other kind is still refused, and the
+// readers that draw with the condition (LoadFixedCompositeConditionAny, so SelectFixedComposite) still refuse a base pose outside the
+// envelope until a revision brings it back.
+void ManualBeyondEnvelope(){
+    auto chain=MakeSettings("beyond");
+    Append(chain,Change(FixedCompositeRevisionKind::created));
+    const auto beyond_pose=[](FixedCompositeV3Request& r){r.base_pose.tx_mm=3;r.base_pose.ty_mm=4.5;};   // 5.41 mm against a range of 5 mm
+    const auto legacy_name=chain.settings/kFixedCompositeConditionName;
+    // Other kinds with the same base pose are refused as before.
+    {
+        auto request=Request(draft);request.sequence=2;request.parent_sha256=HashOf(chain.texts[0]);request.change=SavedEstimate();beyond_pose(request);
+        REJECT(MakeFixedCompositeConditionV3(request,kCreated,kHash,kAccept));
+        request.change=Change(FixedCompositeRevisionKind::values);
+        REJECT(MakeFixedCompositeConditionV3(request,kCreated,kHash,kAccept));
+        request.change=Rollback(HashOf(chain.texts[0]));
+        REJECT(MakeFixedCompositeConditionV3(request,kCreated,kHash,kAccept));
+    }
+    // The manual adjustment is made, written, and read back (the writer reads its file again and compares).
+    const auto manual=Append(chain,Manual(40,-30,0.2,50),beyond_pose);
+    CHECK(manual.base_pose.tx_mm==3 && manual.base_pose.ty_mm==4.5 && manual.revision.change.kind==FixedCompositeRevisionKind::manual_adjustment);
+    CHECK(FormatFixedCompositeConditionV3(ParseFixedCompositeConditionV3(chain.texts.back()))+"\n"==chain.texts.back());
+    // The tools load it (they need the chain to write the next revision) ...
+    {
+        const auto active=LoadActiveFixedCompositeRevisionV3(chain.revisions,kHash);
+        CHECK(active && active->condition.revision.sequence==2 && active->condition.base_pose.ty_mm==4.5);
+    }
+    // ... the strict check refuses it ...
+    REJECT(RequireFixedCompositeBasePoseInEnvelopeV3(manual));
+    // ... and so does the reader that draws with the condition: no condition, condition-invalid, whichever entrance asks.
+    REJECT(LoadFixedCompositeConditionAny(legacy_name,kHash));
+    REJECT(LoadFixedCompositeConditionAny(chain.revisions/"r000002.json",kHash));
+    {
+        const auto selection=SelectFixedComposite(legacy_name,kHash);
+        CHECK(!selection.loaded && selection.reason==FixedCompositeSkip::condition_invalid && selection.detail.find("registration.envelope")!=std::string::npos);
+    }
+    // A rollback to the first revision brings the base pose back: the reader accepts the chain again.
+    Append(chain,Rollback(HashOf(chain.texts[0])),[&](FixedCompositeV3Request& r){
+        r.registration=chain.records[0].registration;r.base_pose=chain.records[0].base_pose;r.policy_sha256=chain.records[0].source.policy_sha256;});
+    {
+        const auto selection=SelectFixedComposite(legacy_name,kHash);
+        CHECK(selection.IsV3() && std::get<LoadedFixedCompositeConditionV3>(*selection.loaded).condition.revision.sequence==3);
+    }
+    // A base pose inside the range is what it always was for a manual adjustment.
+    CHECK(Throws([&]{RequireFixedCompositeBasePoseInEnvelopeV3(manual);}) && !Throws([&]{RequireFixedCompositeBasePoseInEnvelopeV3(chain.records.back());}));
+    std::error_code ignored;fs::remove_all(chain.settings,ignored);
+}
+
 int main(int argc,char* argv[]){
     try{
         if(argc!=2)throw std::invalid_argument("expected the shared rig profile v2 fixture folder");
         const fs::path fixtures=argv[1];
         draft=ReadAll(fixtures/"calibrated-draft.json");approved=ReadAll(fixtures/"approved.json");blank=ReadAll(fixtures/"template.json");
         if(draft.empty() || approved.empty() || blank.empty())throw std::runtime_error("fixture profiles are missing");
-        Names();MakeAndFormat();KindsRoundTrip();MakeRejects();ParseRejects();PolicyReader();FixtureTexts();Binding();Files();AnyEntrance();
+        Names();MakeAndFormat();KindsRoundTrip();MakeRejects();ParseRejects();PolicyReader();FixtureTexts();Binding();Files();AnyEntrance();ManualBeyondEnvelope();
     }catch(const std::exception& e){++failures;std::cerr<<"unexpected exception: "<<e.what()<<'\n';}
     std::cout<<checks<<" checks, "<<failures<<" failures\n";
     return failures?1:0;

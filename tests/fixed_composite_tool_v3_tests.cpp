@@ -4,6 +4,7 @@
 // Every range, line and limit below is a value of this test; the product code has no default for any of them.
 #include "a0/phase0/experimental/fixed_composite_tool_v3.hpp"
 #include "a0/m2/experimental/fixed_composite_maps.hpp"
+#include "a0/m2/experimental/fixed_composite_selection.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -202,14 +203,10 @@ void Chain(){
             CHECK(c.registration.envelope.position_mm==6 && c.source.policy_sha256==before_manual->condition.source.policy_sha256);
         }
     }
-    // A very large adjustment is not refused for its size; it is refused only when the base pose leaves the pose range, and nothing is written.
+    // An entry that is not a number is refused, and nothing is written. (The size of an entry is not refused, and neither is a base pose
+    // that leaves the pose range: see the end of this function.)
     {
-        const auto listing=Listing(root/kRevisions);
         auto huge=Request(root,Kind::manual_adjustment);
-        huge.entered=m2::FixedCompositeRevisionChangeV3::Entered{4000,0,0};
-        r=px::MakeFixedCompositeConditionV3File(huge,kHash,kNow);
-        CHECK(!r.made && Contains(r.message,"作りません") && Listing(root/kRevisions)==listing);
-        // Not a number: refused.
         huge.entered=m2::FixedCompositeRevisionChangeV3::Entered{std::nan(""),0,0};
         CHECK(!px::MakeFixedCompositeConditionV3File(huge,kHash,kNow).made);
         auto none=Request(root,Kind::manual_adjustment);
@@ -241,6 +238,28 @@ void Chain(){
     auto again=Request(root,Kind::rollback);again.restore_sequence=2;
     CHECK(px::MakeFixedCompositeConditionV3File(again,kHash,kNow).made);
     CHECK(m2::LoadActiveFixedCompositeRevisionV3(root/kRevisions,kHash)->condition.registration.envelope.position_mm==6);
+    // A hand adjustment that takes the base pose out of the pose range (registration.envelope) is written: its size has no upper bound,
+    // not even at the range (the owner's decision). The tools load it, and the reader that draws with the condition refuses it until a
+    // rollback brings the base pose back.
+    {
+        const auto length_before=Listing(root/kRevisions).size();
+        auto beyond=Request(root,Kind::manual_adjustment);
+        beyond.entered=m2::FixedCompositeRevisionChangeV3::Entered{80,0,0};
+        r=px::MakeFixedCompositeConditionV3File(beyond,kHash,kNow);
+        Check(r.made,("manual beyond the range: "+r.message).c_str());
+        CHECK(Listing(root/kRevisions).size()==length_before+1);
+        const auto active=m2::LoadActiveFixedCompositeRevisionV3(root/kRevisions,kHash);
+        CHECK(active && active->condition.revision.change.kind==Kind::manual_adjustment);
+        if(active){
+            const auto& c=active->condition;
+            CHECK(std::hypot(c.base_pose.tx_mm,c.base_pose.ty_mm)>c.registration.envelope.position_mm);
+        }
+        const auto drawn=m2::SelectFixedComposite(root/m2::kFixedCompositeConditionName,kHash);
+        CHECK(!drawn.loaded && drawn.reason==m2::FixedCompositeSkip::condition_invalid);
+        auto restore=Request(root,Kind::rollback);restore.restore_sequence=1;
+        CHECK(px::MakeFixedCompositeConditionV3File(restore,kHash,kNow).made);
+        CHECK(m2::SelectFixedComposite(root/m2::kFixedCompositeConditionName,kHash).IsV3());
+    }
     // A foreign file in the revisions folder stops every later write: the history is not guessed.
     WriteAll(root/kRevisions/"notes.txt","x");
     CHECK(!px::MakeFixedCompositeConditionV3File(Request(root,Kind::values),kHash,kNow).made);

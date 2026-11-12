@@ -342,8 +342,10 @@ FixedCompositeCreationCheckV3 MakeFixedCompositeCreationCheckV3(CreationCheckDet
         if(c.seam.column>=width)Reject("the seam column is outside the raster");
 
         // (d) the base pose lies inside B's range measured from the calibration. ValidateFixedCompositeConditionV3 refuses a record
-        // that breaks it; it is repeated here so that the check does not depend on who validated.
-        {
+        // that breaks it; it is repeated here so that the check does not depend on who validated. A hand adjustment is not held to it
+        // (the owner's decision: its size has no upper bound); the readers that draw with the condition still are
+        // (RequireFixedCompositeBasePoseInEnvelopeV3).
+        if(c.revision.change.kind!=FixedCompositeRevisionKind::manual_adjustment){
             const auto& p=c.base_pose;const auto& e=c.registration.envelope;
             if(std::hypot(p.tx_mm,p.ty_mm)>e.position_mm || std::abs(p.rz_deg)>e.rotation_deg || std::hypot(p.rx_deg,p.ry_deg)>e.tilt_deg || std::abs(p.tz_percent)>e.height_percent)
                 Reject("the base pose is outside B's range measured from the calibration; start again from the calibration");

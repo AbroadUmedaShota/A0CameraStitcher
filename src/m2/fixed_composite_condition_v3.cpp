@@ -219,13 +219,15 @@ void ValidateChange(const FixedCompositeConditionV3& c){
             Reject("basePose of a first revision is not zero");
     }
 }
+}
 // |basePose| against the envelope (design 11.19.2): the base pose must lie inside the range measured from the calibration.
-void RequireBasePoseInEnvelope(const FixedCompositeConditionV3& c){
+void RequireFixedCompositeBasePoseInEnvelopeV3(const FixedCompositeConditionV3& c){
     const auto& p=c.base_pose;const auto& e=c.registration.envelope;
     if(std::hypot(p.tx_mm,p.ty_mm)>e.position_mm || std::abs(p.rz_deg)>e.rotation_deg || std::hypot(p.rx_deg,p.ry_deg)>e.tilt_deg ||
         std::abs(p.tz_percent)>e.height_percent)
         Reject("basePose is outside registration.envelope; start again from the calibration");
 }
+namespace {
 
 // ---- Format pieces ----
 std::string FormatLimits(const RegistrationLimits& l){
@@ -433,7 +435,9 @@ void ValidateFixedCompositeConditionV3(const FixedCompositeConditionV3& c){
     if(c.seam.column>=c.raster.width_pixels)Reject("seam column is outside the output raster");
     ValidateBasePoseFinite(c.base_pose);
     ValidateRegistrationValues(c.registration,c.seam_gate,c.revision_rules);
-    RequireBasePoseInEnvelope(c);
+    // A hand adjustment has no upper bound (the owner's decision): its base pose is not held to the envelope when it is written or parsed.
+    // The readers that draw with the condition apply RequireFixedCompositeBasePoseInEnvelopeV3 themselves.
+    if(c.revision.change.kind!=FixedCompositeRevisionKind::manual_adjustment)RequireFixedCompositeBasePoseInEnvelopeV3(c);
 }
 
 

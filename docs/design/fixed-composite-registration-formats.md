@@ -2,7 +2,7 @@
 
 Issue #417（撮影ごとに図面の中身で左右のカメラの継ぎ目を合わせる）で、複数の実装が同時に書く条件 v3 と報告 v8 の欄を 1 か所に固めた表。設計の正本は `fixed-composite-registration.md` の 11 節（11.9 の配線、11.17 の警告、11.19〜11.22、11.25、11.27）。この文書は欄の名前・型・単位・必須か・埋める担当・予約かを決めるだけで、処理の説明は設計に任せる。実測の値、機体の識別子、パス、作業の日付は書かない。
 
-状態: v3 と v8 は main に入るまで凍結しない。表の中身は、設計の追補（11.16 以降）と所有者の決定（12 項）に合わせてある。
+状態: v3 と v8 は main に入るまで凍結しない。表の中身は、設計の追補（11.16 以降）と所有者の決定（12 項）に合わせてある。所有者の確認済み: 古い試し撮りの記録（この書式より前の v8）は読めなくてよい。版は上げず、欄を省略可にもしない。v3 の `basePose` が `registration.envelope` の内にあることは手直し（`manual-adjustment`）の書き込みと読み込みでは求めず、条件を撮影やライブの C に使う読み手が求める。
 
 ## 1. 欄を足す時の決まり
 
@@ -51,7 +51,7 @@ Issue #417（撮影ごとに図面の中身で左右のカメラの継ぎ目を�
 | `mountOrientation` | `orientation` | `normal`／`rotated-180` | — | 必須 | V3 | |
 | `outputRaster` | `raster` | v2 と同じ（`regionUm{left,top,right,bottom}`・`dpi`・`widthPixels`・`heightPixels`） | µm・DPI・px | 必須 | V3 | |
 | `seam` | `seam` | v2 と同じ（`column`・`origin`） | 出力 px | 必須 | V3 | |
-| `basePose` | `base_pose` | `{rxDeg, ryDeg, rzDeg, txMm, tyMm, tzPercent}` 有限 | 度・mm・% | 必須 | V3 | |
+| `basePose` | `base_pose` | `{rxDeg, ryDeg, rzDeg, txMm, tyMm, tzPercent}` 有限 | 度・mm・% | 必須 | V3 | `registration.envelope` の内。手直しの記録は書く時も外を許し、条件を使う読み手が断る |
 | `registration.envelope` | `registration.envelope` | `{positionMm, rotationDeg, tiltDeg, heightPercent}` 正の有限 | mm・度・度・% | 必須 | V3 | |
 | `registration.limits` | `registration.limits` | 9 値（下の注） | 出力 px・個 | 必須 | V3 | |
 | `registration.geometry` | `registration.geometry` | `{omegaMarginPx, guardPx, bandHalfWidthPx}` 整数 | 出力 px | 必須 | V3 | |

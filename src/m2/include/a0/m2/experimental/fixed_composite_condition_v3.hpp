@@ -141,8 +141,16 @@ struct FixedCompositeConditionV3 {
 
 // Throws std::invalid_argument unless every field is in range: timestamps and hashes well formed, the profile name plain, the
 // raster exact, the seam column inside the raster, the revision's members those of its kind, every range, line and limit set
-// (finite and positive where they are ranges), and the base pose finite. Checks nothing that needs the profile.
+// (finite and positive where they are ranges), and the base pose finite, and, except for a manual adjustment, the base pose inside
+// registration.envelope. Checks nothing that needs the profile.
+//
+// A manual adjustment is not held to the envelope when it is written (the owner's decision: the size of a hand adjustment has no
+// upper bound), so that it can be written, read back, loaded by the tools and rolled back. A reader that uses the condition for a
+// capture or for the live view still refuses a base pose outside the envelope: RequireFixedCompositeBasePoseInEnvelopeV3, which
+// LoadFixedCompositeConditionAny (and so SelectFixedComposite) applies to every record it returns.
 void ValidateFixedCompositeConditionV3(const FixedCompositeConditionV3& c);
+// Throws std::invalid_argument when the base pose is outside registration.envelope, whatever the kind of the revision.
+void RequireFixedCompositeBasePoseInEnvelopeV3(const FixedCompositeConditionV3& c);
 // Canonical text of a validated record, no trailing newline. Always carries "approval":"unapproved".
 [[nodiscard]] std::string FormatFixedCompositeConditionV3(const FixedCompositeConditionV3& c);
 // Strict reader of the format alone (no file access). Rejects malformed JSON, duplicate keys, a different schema, missing or

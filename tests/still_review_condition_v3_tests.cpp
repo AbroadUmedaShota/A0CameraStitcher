@@ -237,12 +237,10 @@ void InProcess(){
     WriteAll(root/"wpd-registration-policy.json",Policy(6));
     std::tie(code,text)=run(WithFolder(L"values",root));
     CHECK(code==0 && Contains(text,"revision=2 kind=values") && Contains(text,"parent_sha256="+HashOf(before)) && Contains(text,"policy_sha256="+HashOf(Policy(6))) && Contains(text,"revision_file=r000002.json"));
-    // manual-adjustment: the size is not refused; the base pose leaving the pose range is ("start again from the calibration").
+    // manual-adjustment: neither the size nor a base pose that leaves the pose range is refused when it is written (the owner's decision).
+    // The reader that draws with the condition refuses the latter (checked in the tool tests); here the next revision is a rollback.
     std::tie(code,text)=run(WithFolder(L"manual-adjustment",root,{L"--seam-dx-px",L"12.5",L"--seam-dy-px",L"-7.25",L"--rotation-deg",L"0.1"}));
     CHECK(code==0 && Contains(text,"revision=3 kind=manual-adjustment") && Contains(text,"maximum_seam_displacement_px="));
-    const auto listing=Listing(root/kRevisions);
-    std::tie(code,text)=run(WithFolder(L"manual-adjustment",root,{L"--seam-dx-px",L"4000",L"--seam-dy-px",L"0",L"--rotation-deg",L"0"}));
-    CHECK(code==1 && Contains(text,"作りません") && Listing(root/kRevisions)==listing);
     // rollback to revision 1; a revision that does not exist, or the one in force, is refused.
     std::tie(code,text)=run(WithFolder(L"rollback",root,{L"--restore-sequence",L"1"}));
     CHECK(code==0 && Contains(text,"revision=4 kind=rollback") && Contains(text,"policy_sha256="+policy_hash));
