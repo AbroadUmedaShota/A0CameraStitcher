@@ -21,6 +21,9 @@ struct FixedCompositeSelection {
     FixedCompositeSkip reason{FixedCompositeSkip::condition_absent};
     std::string detail;
     [[nodiscard]] bool IsV2() const {return loaded && std::holds_alternative<LoadedFixedCompositeConditionV2>(*loaded);}
+    // v3 (#417): the revision in force beside the condition file's name (the revisions folder of the setup). A setup that has
+    // a v1 or v2 file as well is condition_invalid, not v3.
+    [[nodiscard]] bool IsV3() const {return loaded && std::holds_alternative<LoadedFixedCompositeConditionV3>(*loaded);}
 };
 [[nodiscard]] inline FixedCompositeSelection SelectFixedComposite(const std::filesystem::path& file,const FixedCompositeSha256& hash){
     FixedCompositeSelection selection;

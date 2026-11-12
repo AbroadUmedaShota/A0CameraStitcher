@@ -9,6 +9,7 @@
 #include "a0/m2/experimental/fixed_scale_correction.hpp"
 #include "a0/m2/experimental/fixed_scale_correction_v2.hpp"
 #include "a0/m2/experimental/fixed_composite_creation.hpp"
+#include "a0/m2/experimental/fixed_composite_creation_v3.hpp"
 #include "a0/m2/optical_planner.hpp"
 #include "a0/m2/experimental/seam_blend.hpp"
 #include "a0/common/protocol_json.hpp"

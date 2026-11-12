@@ -12,6 +12,7 @@
 #include "a0/m2/experimental/mount_orientation.hpp"
 #include "a0/m2/experimental/overlap_estimation.hpp"
 #include "a0/m2/experimental/seam_blend.hpp"
+#include "a0/m2/experimental/capture_registration.hpp"
 #include <array>
 #include <string_view>
 #include <vector>
@@ -307,6 +308,9 @@ struct SavedFixedCompositeLens {
     bool wide_search{};
     unsigned tiles_searched{},tiles_matched{},tiles_agreed{};
 };
+// What a v8 report records about the registered fixed composite (#417): SavedFixedCompositeRegistration in
+// capture_registration.hpp, with its JSON writer and strict reader.
+
 // How far this capture's B sat from where the condition puts it: the estimate
 // minus the fixed translation, the rotation difference in degrees, the scale
 // as a ratio. Recomputed from recorded values; absent without an estimate.
@@ -318,7 +322,8 @@ inline std::optional<FixedMappingDelta> FixedDiagnosticDelta(const FixedSimilari
 
 struct FixedCompositeCondition; // fixed_composite_condition.hpp
 struct FixedCompositeConditionV2; // fixed_composite_condition_v2.hpp
-struct FixedCompositeProfileBinding; // fixed_composite_condition_v2.hpp
+struct FixedCompositeProfileBinding; // fixed_composite_profile_common.hpp
+struct FixedCompositeConditionV3; // fixed_composite_condition_v3.hpp
 
 struct StillReviewRequest {
     std::filesystem::path camera_a_original,camera_b_original,output_directory;
@@ -358,6 +363,18 @@ struct StillReviewRequest {
         FixedPolicyLimit policy_limit;
     };
     std::optional<FixedCompositeLens> fixed_composite_lens;
+    // #417: compose with the registered fixed composite (condition v3 and the profile it names, read by the caller from the
+    // revision in force). Both are owned by the caller and must outlive the call. Exclusive with fixed_composite,
+    // fixed_composite_lens, manual_revision, automatic_alignment and blend. The report is v8. condition_sha256 is the SHA-256 of
+    // the exact revision file bytes. The originals must be the profile's frame size.
+    struct FixedCompositeRegistration {
+        const FixedCompositeConditionV3* condition{};
+        const FixedCompositeProfileBinding* profile{};
+        std::string condition_sha256;   // LoadedFixedCompositeConditionV3::file_sha256
+        // Threads for the measurer (1..256); 0 is the hardware's count. The composite and the report do not depend on it.
+        unsigned thread_count{};
+    };
+    std::optional<FixedCompositeRegistration> fixed_composite_registration;
 };
 // Why a fixed composite could not be made for a capture. The writer throws it
 // before any output exists, so the caller knows that only the originals remain.
@@ -397,6 +414,10 @@ struct StillReviewResult {
     // v7 only (#405 W4). alignment_milliseconds is then the scale estimate (prior, tiles, decision),
     // blend_milliseconds the composite.
     std::optional<SavedFixedCompositeLens> fixed_composite_lens;
+    // v8 only (#417). alignment_milliseconds is then the estimate (pose, surface, layer 2), blend_milliseconds the composite,
+    // and registration_milliseconds each stage (for the log only: never in the report, addendum 11.25.4).
+    std::optional<SavedFixedCompositeRegistration> fixed_composite_registration;
+    std::optional<CaptureStageMilliseconds> registration_milliseconds;
 };
 // Exists only in the explicitly enabled development preview build. A separate
 // uncalibrated review report, never a successful product StitchJob manifest.
@@ -421,6 +442,10 @@ struct SavedStillReview {
     // (0, 0, 0, 1, empty): the mapping is the profile's. width/height are the condition's raster.
     // A tool that places B by a similarity (re-Merge, the saved-condition maker) must refuse it.
     std::optional<SavedFixedCompositeLens> fixed_composite_lens;
+    // v8 reports only (#417). Like v7, translation_x/y, rotation_degrees, scale and crop carry nothing (0, 0, 0, 1, empty): the
+    // mapping is the profile's with the recorded registration. width/height are the condition's raster. A tool that places B by
+    // a similarity must refuse it.
+    std::optional<SavedFixedCompositeRegistration> fixed_composite_registration;
 };
 // StillReview manual fields (#382). They start at the geometry the report
 // actually rendered, so a re-Merge without edits keeps the parent geometry.

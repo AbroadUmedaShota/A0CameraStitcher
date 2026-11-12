@@ -302,6 +302,30 @@ else()
     target_compile_options(a0_m2_seam_gate PRIVATE -Wall -Wextra -Wpedantic -ffp-contract=off)
 endif()
 
+# Pose of camera B against its calibration (#417): the rigid motion of the document plane in B's camera frame
+# and the homography it gives. Pure computation; shared by the fixed composite maps, the estimator and the probe.
+add_library(a0_m2_registration_pose src/m2/registration_pose.cpp)
+target_include_directories(a0_m2_registration_pose PUBLIC src/m2/include)
+target_link_libraries(a0_m2_registration_pose PUBLIC a0_m2_render)
+a0_defer_to_end_of_configure(a0_assert_no_link_dependency a0_m2_registration_pose)
+if(MSVC)
+    target_compile_options(a0_m2_registration_pose PRIVATE /W4 /permissive- /EHsc /fp:precise)
+else()
+    target_compile_options(a0_m2_registration_pose PRIVATE -Wall -Wextra -Wpedantic -ffp-contract=off)
+endif()
+
+# Registration model probe (#417 P0): fits registration models to the displacement field the seam gate
+# measures on a saved pair. Pure computation; development only and linked by no product target.
+add_library(a0_m2_registration_probe src/m2/registration_probe.cpp)
+target_include_directories(a0_m2_registration_probe PUBLIC src/m2/include)
+target_link_libraries(a0_m2_registration_probe PUBLIC a0_m2_seam_gate a0_m2_registration_pose a0_m2_render)
+a0_defer_to_end_of_configure(a0_assert_no_link_dependency a0_m2_registration_probe)
+if(MSVC)
+    target_compile_options(a0_m2_registration_probe PRIVATE /W4 /permissive- /EHsc /fp:precise)
+else()
+    target_compile_options(a0_m2_registration_probe PRIVATE -Wall -Wextra -Wpedantic -ffp-contract=off)
+endif()
+
 # Pure bounded photometric estimation, no product/profile acceptance gate.
 add_library(a0_m2_color_correction src/m2/color_correction.cpp)
 target_include_directories(a0_m2_color_correction PUBLIC src/m2/include)
@@ -353,14 +377,106 @@ endif()
 # W6 adds the shared output-to-camera mappings (a lens scale of camera B about a
 # fixed centre) and the creation checks that run the mapped fixed seam over every
 # output row.
-add_library(a0_m2_fixed_composite_v2 src/m2/fixed_composite_condition_v2.cpp src/m2/fixed_composite_maps.cpp src/m2/fixed_composite_creation.cpp src/m2/fixed_scale_correction_v2.cpp)
+# The output-to-camera mappings of the lens-aware fixed composite, with the scale and pose corrections of camera B. Pure
+# computation (no hashing, no files), so the estimator (a0_m2_content_registration) can link it.
+add_library(a0_m2_fixed_composite_maps src/m2/fixed_composite_maps.cpp)
+target_include_directories(a0_m2_fixed_composite_maps PUBLIC src/m2/include PRIVATE src/m2)
+target_link_libraries(a0_m2_fixed_composite_maps PUBLIC a0_m2_seam_blend a0_m2_registration_pose a0_m2_render)
+a0_defer_to_end_of_configure(a0_assert_no_link_dependency a0_m2_fixed_composite_maps)
+if(MSVC)
+    target_compile_options(a0_m2_fixed_composite_maps PRIVATE /W4 /permissive- /EHsc /utf-8)
+else()
+    target_compile_options(a0_m2_fixed_composite_maps PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_library(a0_m2_fixed_composite_v2 src/m2/fixed_composite_condition_v2.cpp src/m2/fixed_composite_creation.cpp src/m2/fixed_scale_correction_v2.cpp
+    src/m2/fixed_composite_condition_v3.cpp src/m2/fixed_composite_creation_v3.cpp)
 target_include_directories(a0_m2_fixed_composite_v2 PUBLIC src/m2/include src/common/include PRIVATE src/m2)
-target_link_libraries(a0_m2_fixed_composite_v2 PUBLIC a0_m2_fixed_composite a0_m2_rig_profile_v2 a0_m2_seam_blend a0_m2_render PRIVATE bcrypt)
+target_link_libraries(a0_m2_fixed_composite_v2 PUBLIC a0_m2_fixed_composite a0_m2_rig_profile_v2 a0_m2_seam_blend a0_m2_fixed_composite_maps a0_m2_registration_pose a0_m2_render PRIVATE bcrypt)
 target_compile_definitions(a0_m2_fixed_composite_v2 PRIVATE UNICODE _UNICODE NOMINMAX)
 if(MSVC)
     target_compile_options(a0_m2_fixed_composite_v2 PRIVATE /W4 /permissive- /EHsc /utf-8)
 else()
     target_compile_options(a0_m2_fixed_composite_v2 PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+# Per-capture registration of camera B by the content of the overlap (#417 P2, docs/design/fixed-composite-registration.md):
+# coarse search, the seam gate's point measurer on a sparse lattice, a robust pose fit and the checks. Pure
+# computation: no camera, file or clock.
+add_library(a0_m2_content_registration src/m2/content_registration.cpp)
+target_include_directories(a0_m2_content_registration PUBLIC src/m2/include)
+target_link_libraries(a0_m2_content_registration PUBLIC a0_m2_seam_gate a0_m2_registration_pose a0_m2_fixed_composite_maps a0_m2_render)
+a0_defer_to_end_of_configure(a0_assert_no_link_dependency a0_m2_content_registration)
+if(MSVC)
+    target_compile_options(a0_m2_content_registration PRIVATE /W4 /permissive- /EHsc /fp:precise)
+else()
+    target_compile_options(a0_m2_content_registration PRIVATE -Wall -Wextra -Wpedantic -ffp-contract=off)
+endif()
+
+# Layer 2 of the paper-surface correction (#417): the seam-column regression, the fold and gutter lines. Pure computation: no
+# camera, file or clock, and no hashing (so it links no BCrypt).
+add_library(a0_m2_parallax_correction src/m2/parallax_correction.cpp)
+target_include_directories(a0_m2_parallax_correction PUBLIC src/m2/include)
+target_link_libraries(a0_m2_parallax_correction PUBLIC a0_m2_registration_gate a0_m2_seam_gate a0_m2_registration_pose a0_m2_fixed_composite_maps a0_m2_render)
+a0_defer_to_end_of_configure(a0_assert_no_link_dependency a0_m2_parallax_correction)
+if(MSVC)
+    target_compile_options(a0_m2_parallax_correction PRIVATE /W4 /permissive- /EHsc /fp:precise)
+else()
+    target_compile_options(a0_m2_parallax_correction PRIVATE -Wall -Wextra -Wpedantic -ffp-contract=off)
+endif()
+
+# The fast measurer for layer 2's points (#417, design 11.31): an estimate-only measurer on the output strip. Pure computation. The
+# seam gate and the registration gate do not link it.
+add_library(a0_m2_fast_seam_measurer src/m2/fast_seam_measurer.cpp)
+target_include_directories(a0_m2_fast_seam_measurer PUBLIC src/m2/include)
+target_link_libraries(a0_m2_fast_seam_measurer PUBLIC a0_m2_parallax_correction a0_m2_seam_gate a0_m2_render)
+a0_defer_to_end_of_configure(a0_assert_no_link_dependency a0_m2_fast_seam_measurer)
+if(MSVC)
+    target_compile_options(a0_m2_fast_seam_measurer PRIVATE /W4 /permissive- /EHsc /fp:precise)
+else()
+    target_compile_options(a0_m2_fast_seam_measurer PRIVATE -Wall -Wextra -Wpedantic -ffp-contract=off)
+endif()
+
+# The gate for the registered composite (#417): Omega only, the seam gate unchanged underneath. Pure computation.
+add_library(a0_m2_registration_gate src/m2/registration_gate.cpp)
+target_include_directories(a0_m2_registration_gate PUBLIC src/m2/include)
+target_link_libraries(a0_m2_registration_gate PUBLIC a0_m2_seam_gate a0_m2_seam_blend a0_m2_registration_pose a0_m2_fixed_composite_maps a0_m2_render)
+a0_defer_to_end_of_configure(a0_assert_no_link_dependency a0_m2_registration_gate)
+if(MSVC)
+    target_compile_options(a0_m2_registration_gate PRIVATE /W4 /permissive- /EHsc /fp:precise)
+else()
+    target_compile_options(a0_m2_registration_gate PRIVATE -Wall -Wextra -Wpedantic -ffp-contract=off)
+endif()
+
+# What one capture decides about camera B's registration (#417): the geometry level, the warnings and the assessment, the time
+# plan, the geometry hash. Pure computation; the SHA-256 provider is a parameter, so this links no BCrypt.
+add_library(a0_m2_capture_registration src/m2/capture_registration.cpp)
+target_include_directories(a0_m2_capture_registration PUBLIC src/m2/include PRIVATE src/common/include)
+target_link_libraries(a0_m2_capture_registration PUBLIC a0_m2_content_registration a0_m2_parallax_correction a0_m2_fast_seam_measurer a0_m2_registration_gate
+    a0_m2_fixed_composite_maps a0_m2_render)
+a0_defer_to_end_of_configure(a0_assert_no_link_dependency a0_m2_capture_registration)
+if(MSVC)
+    target_compile_options(a0_m2_capture_registration PRIVATE /W4 /permissive- /EHsc /fp:precise)
+else()
+    target_compile_options(a0_m2_capture_registration PRIVATE -Wall -Wextra -Wpedantic -ffp-contract=off)
+endif()
+
+# Development-only probe of #417 (P0): reads a saved pair and a fixed composite condition v2, measures the
+# B-minus-A displacement field over the overlap band and fits registration models to it. Never part of the
+# product; it composes nothing and uses no camera.
+option(A0_BUILD_REGISTRATION_PROBE "Build the development-only registration model probe (#417)" OFF)
+if(A0_BUILD_REGISTRATION_PROBE)
+    add_executable(A0CameraStitcher.RegistrationModelProbe src/m2/registration_probe_main.cpp)
+    target_include_directories(A0CameraStitcher.RegistrationModelProbe PRIVATE src/common/include)
+    target_link_libraries(A0CameraStitcher.RegistrationModelProbe PRIVATE
+        a0_m2_registration_probe a0_m2_content_registration a0_m2_parallax_correction a0_m2_registration_gate a0_m2_fixed_composite_v2
+        a0_m2_seam_gate a0_m2_render ole32 oleaut32 windowscodecs bcrypt)
+    target_compile_definitions(A0CameraStitcher.RegistrationModelProbe PRIVATE UNICODE _UNICODE NOMINMAX)
+    if(MSVC)
+        target_compile_options(A0CameraStitcher.RegistrationModelProbe PRIVATE /W4 /permissive- /EHsc /fp:precise /utf-8)
+    endif()
+    a0_defer_to_end_of_configure(a0_assert_no_link_dependency A0CameraStitcher.RegistrationModelProbe
+        FORBIDDEN_LIBRARIES a0_m2_offline_stitcher a0_m2_synthetic_pair
+        FORBIDDEN_SOURCES "offline_stitcher" "stitch_job_manifest" "synthetic_pair")
 endif()
 
 add_library(a0_m2_offline_stitcher
@@ -1117,6 +1233,59 @@ if(BUILD_TESTING)
     add_test(NAME preview_fixed_composite_v2_contracts COMMAND a0_fixed_composite_preview_v2_tests
         "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2")
     set_tests_properties(preview_fixed_composite_v2_contracts PROPERTIES TIMEOUT 900)
+    # Live C drawn with the registered fixed composite condition v3 (#417 LC): B's pose and the paper surface in C's grid, the two
+    # faces of B's table, the difference that decides a new bake, and the chain from a scripted estimate to the picture. With the
+    # fixed mapping and a zero base pose it is the v2 C byte for byte.
+    add_executable(a0_fixed_composite_preview_v3_tests tests/fixed_composite_preview_v3_tests.cpp)
+    target_include_directories(a0_fixed_composite_preview_v3_tests PRIVATE src/phase0/include src/common/include)
+    target_link_libraries(a0_fixed_composite_preview_v3_tests PRIVATE a0_m2_fixed_composite_v2 a0_m2_fixed_composite a0_m2_seam_blend a0_m2_render)
+    if(MSVC)
+        target_compile_options(a0_fixed_composite_preview_v3_tests PRIVATE /W4 /permissive- /EHsc /fp:precise /utf-8)
+    endif()
+    add_test(NAME preview_fixed_composite_v3_contracts COMMAND a0_fixed_composite_preview_v3_tests
+        "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2")
+    set_tests_properties(preview_fixed_composite_v3_contracts PROPERTIES TIMEOUT 900)
+    # What the screen before the shot shows about the cameras (#417 LC): A's direction at calibration and B's against A from the
+    # estimator's own orientation (content_registration::OrientationOf), the sentences through TXT and the state of the live C.
+    # Projections are built from known rotations.
+    add_executable(a0_live_registration_display_tests tests/live_registration_display_tests.cpp)
+    target_include_directories(a0_live_registration_display_tests PRIVATE src/phase0/include src/common/include)
+    target_link_libraries(a0_live_registration_display_tests PRIVATE a0_m2_content_registration a0_m2_registration_pose a0_m2_render)
+    if(MSVC)
+        target_compile_options(a0_live_registration_display_tests PRIVATE /W4 /permissive- /EHsc /fp:precise /utf-8)
+    endif()
+    add_test(NAME preview_live_registration_display_contracts COMMAND a0_live_registration_display_tests)
+    set_tests_properties(preview_live_registration_display_contracts PROPERTIES TIMEOUT 120)
+    # The state machine of the live C's registration (#417 LC): start, follow-up, change detection, stale results, holding and
+    # the decision to bake camera B's table again, with a scripted estimator. Header only; no camera, clock or thread.
+    add_executable(a0_live_registration_tracker_tests tests/live_registration_tracker_tests.cpp)
+    target_include_directories(a0_live_registration_tracker_tests PRIVATE src/phase0/include src/common/include)
+    target_link_libraries(a0_live_registration_tracker_tests PRIVATE a0_m2_render)
+    if(MSVC)
+        target_compile_options(a0_live_registration_tracker_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+    endif()
+    add_test(NAME preview_live_registration_tracker_contracts COMMAND a0_live_registration_tracker_tests)
+    set_tests_properties(preview_live_registration_tracker_contracts PROPERTIES TIMEOUT 120)
+    # The worker of the live C (#417 LC): a job when one is due, the bake of B's table when the mapping in force has moved, the swap of the
+    # plan that C draws with and the status that the window shows, on a synthetic rig with a scripted estimator and a moved clock. One test
+    # runs the worker thread itself. No camera, file or window.
+    add_executable(a0_live_registration_runtime_tests tests/live_registration_runtime_tests.cpp)
+    target_include_directories(a0_live_registration_runtime_tests PRIVATE src/phase0/include src/common/include)
+    target_link_libraries(a0_live_registration_runtime_tests PRIVATE a0_m2_fixed_composite_v2 a0_m2_fixed_composite a0_m2_seam_blend a0_m2_content_registration a0_m2_registration_pose a0_m2_render)
+    if(MSVC)
+        target_compile_options(a0_live_registration_runtime_tests PRIVATE /W4 /permissive- /EHsc /fp:precise /utf-8)
+    endif()
+    add_test(NAME preview_live_registration_runtime_contracts COMMAND a0_live_registration_runtime_tests)
+    set_tests_properties(preview_live_registration_runtime_contracts PROPERTIES TIMEOUT 300)
+    # The estimate of the live C on synthetic scenes of the live view's coarseness (camera free; #417 LC).
+    add_executable(a0_live_registration_estimator_tests tests/live_registration_estimator_tests.cpp)
+    target_include_directories(a0_live_registration_estimator_tests PRIVATE src/phase0/include src/common/include tests)
+    target_link_libraries(a0_live_registration_estimator_tests PRIVATE a0_m2_fixed_composite_v2 a0_m2_fixed_composite a0_m2_seam_blend a0_m2_content_registration a0_m2_registration_pose a0_m2_render)
+    if(MSVC)
+        target_compile_options(a0_live_registration_estimator_tests PRIVATE /W4 /permissive- /EHsc /fp:precise /utf-8)
+    endif()
+    add_test(NAME preview_live_registration_estimator_contracts COMMAND a0_live_registration_estimator_tests)
+    set_tests_properties(preview_live_registration_estimator_contracts PROPERTIES TIMEOUT 900)
     add_executable(a0_seam_blend_tests tests/seam_blend_tests.cpp)
     target_link_libraries(a0_seam_blend_tests PRIVATE a0_m2_render a0_m2_seam_blend)
     add_test(NAME m2_seam_blend_contracts COMMAND a0_seam_blend_tests)
@@ -1133,6 +1302,11 @@ if(BUILD_TESTING)
     target_link_libraries(a0_seam_blend_mapped_tests PRIVATE a0_m2_render a0_m2_seam_blend)
     add_test(NAME m2_seam_blend_mapped_contracts COMMAND a0_seam_blend_mapped_tests)
     set_tests_properties(m2_seam_blend_mapped_contracts PROPERTIES TIMEOUT 900)
+    # The thread count of the fixed-seam renders (#417): the same bytes, record and counts for every count.
+    add_executable(a0_seam_blend_threads_tests tests/seam_blend_threads_tests.cpp)
+    target_link_libraries(a0_seam_blend_threads_tests PRIVATE a0_m2_render a0_m2_seam_blend)
+    add_test(NAME m2_seam_blend_threads_contracts COMMAND a0_seam_blend_threads_tests)
+    set_tests_properties(m2_seam_blend_threads_contracts PROPERTIES TIMEOUT 600)
     add_executable(a0_fixed_composite_condition_tests tests/fixed_composite_condition_tests.cpp)
     target_link_libraries(a0_fixed_composite_condition_tests PRIVATE a0_m2_fixed_composite)
     if(MSVC)
@@ -1171,7 +1345,7 @@ if(BUILD_TESTING)
             message(FATAL_ERROR "WPD dual preview requires an SDK-free build")
         endif()
         target_compile_definitions(a0_m2_offline_stitcher PRIVATE A0_ENABLE_UNCALIBRATED_REVIEW=1)
-        target_link_libraries(a0_m2_offline_stitcher PRIVATE a0_m2_overlap_estimation a0_m2_seam_blend a0_m2_fixed_composite a0_m2_fixed_composite_v2)
+        target_link_libraries(a0_m2_offline_stitcher PRIVATE a0_m2_overlap_estimation a0_m2_seam_blend a0_m2_fixed_composite a0_m2_fixed_composite_v2 a0_m2_capture_registration)
         add_executable(a0_still_review_tests tests/still_review_tests.cpp)
         target_link_libraries(a0_still_review_tests PRIVATE a0_m2_offline_stitcher a0_m2_fixed_composite a0_phase0_core ole32 windowscodecs)
         target_compile_definitions(a0_still_review_tests PRIVATE NOMINMAX)
@@ -1193,6 +1367,28 @@ if(BUILD_TESTING)
         add_dependencies(a0_still_review_lens_tests A0CameraStitcher.StillReview)
         add_test(NAME still_review_lens_contracts COMMAND a0_still_review_lens_tests "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2" $<TARGET_FILE:A0CameraStitcher.StillReview>)
         set_tests_properties(still_review_lens_contracts PROPERTIES TIMEOUT 3000)
+        # The JPEG path of the registered fixed composite (#417 J8): a condition v3 revision and its profile, the capture
+        # registration (estimate, layer 2, level, composite, gate), the v8 report. Full-size synthetic frames, no camera, no window.
+        add_executable(a0_still_review_registration_tests tests/still_review_registration_tests.cpp)
+        target_link_libraries(a0_still_review_registration_tests PRIVATE a0_m2_offline_stitcher a0_m2_fixed_composite a0_m2_fixed_composite_v2 a0_m2_capture_registration a0_m2_rig_profile_v2 ole32 windowscodecs)
+        target_compile_definitions(a0_still_review_registration_tests PRIVATE NOMINMAX)
+        if(MSVC)
+            target_compile_options(a0_still_review_registration_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+        endif()
+        add_test(NAME still_review_registration_contracts COMMAND a0_still_review_registration_tests "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2")
+        set_tests_properties(still_review_registration_contracts PROPERTIES TIMEOUT 3000)
+        # The pair capture's composite with a condition v3 and what is said after the shot (#417 J8w): the revision in force, the
+        # registered composite through the function SavePairReview calls, a short window that drops stages, the sentences and log
+        # lines made from a real report. Full-size synthetic frames, no camera, no window.
+        add_executable(a0_pair_review_registration_tests tests/pair_review_registration_tests.cpp)
+        target_include_directories(a0_pair_review_registration_tests PRIVATE src/phase0/include)
+        target_link_libraries(a0_pair_review_registration_tests PRIVATE a0_m2_offline_stitcher a0_m2_fixed_composite a0_m2_fixed_composite_v2 a0_m2_capture_registration a0_m2_rig_profile_v2 ole32 windowscodecs)
+        target_compile_definitions(a0_pair_review_registration_tests PRIVATE NOMINMAX)
+        if(MSVC)
+            target_compile_options(a0_pair_review_registration_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+        endif()
+        add_test(NAME pair_review_registration_contracts COMMAND a0_pair_review_registration_tests "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2")
+        set_tests_properties(pair_review_registration_contracts PROPERTIES TIMEOUT 3000)
         # The seam's top, middle and bottom at native size (#418 stage 0): the row and column decisions, the crops against
         # the composite's pixels, the PNG record, and the inspector (--export-seam-crops, --seam-crops-smoke). No camera.
         add_executable(a0_seam_crops_tests tests/seam_crops_tests.cpp)
@@ -1205,6 +1401,20 @@ if(BUILD_TESTING)
         add_dependencies(a0_seam_crops_tests A0CameraStitcher.StillReview)
         add_test(NAME seam_crops_contracts COMMAND a0_seam_crops_tests $<TARGET_FILE:A0CameraStitcher.StillReview>)
         set_tests_properties(seam_crops_contracts PROPERTIES TIMEOUT 600)
+        # The command line of StillReview that makes and revises the fixed composite condition v3 (#417 SRV): the argument reader, the report,
+        # the progress notice and the real executable on temporary folders; the third argument is the policy file template of docs/examples.
+        # Camera and window free.
+        add_executable(a0_still_review_condition_v3_tests tests/still_review_condition_v3_tests.cpp)
+        target_include_directories(a0_still_review_condition_v3_tests PRIVATE src/phase0/include src/common/include)
+        target_link_libraries(a0_still_review_condition_v3_tests PRIVATE a0_m2_fixed_composite_v2)
+        target_compile_definitions(a0_still_review_condition_v3_tests PRIVATE NOMINMAX)
+        if(MSVC)
+            target_compile_options(a0_still_review_condition_v3_tests PRIVATE /W4 /permissive- /EHsc /fp:precise /utf-8)
+        endif()
+        add_dependencies(a0_still_review_condition_v3_tests A0CameraStitcher.StillReview)
+        add_test(NAME still_review_condition_v3_contracts COMMAND a0_still_review_condition_v3_tests "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2"
+            $<TARGET_FILE:A0CameraStitcher.StillReview> "${CMAKE_SOURCE_DIR}/docs/examples/wpd-registration-policy.example.json")
+        set_tests_properties(still_review_condition_v3_contracts PROPERTIES TIMEOUT 1200)
         add_executable(a0_review_viewport_tests tests/review_viewport_tests.cpp)
         target_include_directories(a0_review_viewport_tests PRIVATE src/m2/include)
         target_link_libraries(a0_review_viewport_tests PRIVATE a0_m2_render)
@@ -1236,7 +1446,7 @@ if(BUILD_TESTING)
         add_dependencies(A0CameraStitcher.WpdDualPreview A0CameraStitcher.StillReview)
         # The libraries the preview's main links; the test binary of the confirmation screen uses the same list, so a library
         # added to the preview is added to both here.
-        set(a0_wpd_dual_preview_link_libraries a0_phase0_core a0_wpd_live_view_transfer a0_m2_render a0_m2_overlap_estimation a0_m2_offline_stitcher a0_m2_fixed_composite a0_m2_fixed_composite_v2 user32 gdi32 windowscodecs ole32 PortableDeviceGuids)
+        set(a0_wpd_dual_preview_link_libraries a0_phase0_core a0_wpd_live_view_transfer a0_m2_render a0_m2_overlap_estimation a0_m2_offline_stitcher a0_m2_fixed_composite a0_m2_fixed_composite_v2 a0_m2_content_registration user32 gdi32 windowscodecs ole32 PortableDeviceGuids)
         target_link_libraries(A0CameraStitcher.WpdDualPreview PRIVATE ${a0_wpd_dual_preview_link_libraries})
         target_compile_definitions(A0CameraStitcher.WpdDualPreview PRIVATE UNICODE _UNICODE NOMINMAX)
         add_test(NAME preview_level_ui_contracts COMMAND A0CameraStitcher.WpdDualPreview --level-ui-smoke)
@@ -1247,9 +1457,17 @@ if(BUILD_TESTING)
         # seam checkbox on synthetic frames and an in-memory condition. No camera, no settings file.
         add_test(NAME preview_fixed_c_ui_contracts COMMAND A0CameraStitcher.WpdDualPreview --fixed-c-ui-smoke)
         set_tests_properties(preview_fixed_c_ui_contracts PROPERTIES TIMEOUT 60)
+        # The registered live C (condition v3, #417 LC): the worker of the live registration beside the merge worker, the plan swap, the two
+        # rows above the picture, with a scripted estimator and an in-memory condition. No camera, no settings file.
+        add_test(NAME preview_live_c_ui_contracts COMMAND A0CameraStitcher.WpdDualPreview --live-c-ui-smoke)
+        set_tests_properties(preview_live_c_ui_contracts PROPERTIES TIMEOUT 180)
         # Read-only settings table (#416 stage A): the real window procedure with a synthetic backend.
         add_test(NAME preview_settings_ui_contracts COMMAND A0CameraStitcher.WpdDualPreview --settings-ui-smoke)
         set_tests_properties(preview_settings_ui_contracts PROPERTIES TIMEOUT 60)
+        # The pair capture's saving path with the conditions of a setup (#417 J8w): the real SavePairReview and the status row on a
+        # synthetic pair and temporary folders. A condition v3, a damaged chain, a v2 file with a revision, v2 alone, none, the other mounting.
+        add_test(NAME preview_pair_v3_ui_contracts COMMAND A0CameraStitcher.WpdDualPreview --pair-v3-ui-smoke "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2")
+        set_tests_properties(preview_pair_v3_ui_contracts PROPERTIES TIMEOUT 1800)
         # Camera settings write (#416 stage B, ADR-0038). OFF by default and separate from the preview option: only with
         # it ON may the preview include wpd_settings_write.hpp (the header refuses to compile otherwise), so an OFF build
         # carries neither the write channel nor a copy button. Keep it OFF in any build used on the real bodies until
@@ -1661,6 +1879,76 @@ if(BUILD_TESTING)
     # Full-size timing (7360x4912 pair); Release only, it is not a contract.
     add_test(NAME m2_seam_gate_timing CONFIGURATIONS Release COMMAND m2_seam_gate_contracts --timing)
     set_tests_properties(m2_seam_gate_timing PROPERTIES TIMEOUT 1800)
+    # Registration model probe (#417 P0): pose algebra, model fits on synthetic fields, and a rendered
+    # synthetic pair with a known pose change of camera B. Camera and file free.
+    add_executable(m2_registration_probe_contracts tests/registration_probe_tests.cpp)
+    target_link_libraries(m2_registration_probe_contracts PRIVATE a0_m2_registration_probe a0_m2_seam_gate a0_m2_render)
+    a0_defer_to_end_of_configure(a0_assert_no_link_dependency m2_registration_probe_contracts)
+    if(MSVC)
+        target_compile_options(m2_registration_probe_contracts PRIVATE /W4 /permissive- /EHsc /fp:precise)
+    endif()
+    add_test(NAME m2_registration_probe_contracts COMMAND m2_registration_probe_contracts)
+    set_tests_properties(m2_registration_probe_contracts PROPERTIES TIMEOUT 1800)
+    # Content registration (#417 P2): the pose mapping of the fixed composite (bit for bit at the zero pose), the estimator on
+    # rendered synthetic pairs with a known pose of camera B, and the states it must refuse to trust. Camera and file free.
+    add_executable(m2_content_registration_contracts tests/content_registration_tests.cpp)
+    target_link_libraries(m2_content_registration_contracts PRIVATE a0_m2_content_registration a0_m2_fixed_composite_maps a0_m2_seam_blend a0_m2_seam_gate a0_m2_render)
+    a0_defer_to_end_of_configure(a0_assert_no_link_dependency m2_content_registration_contracts)
+    if(MSVC)
+        target_compile_options(m2_content_registration_contracts PRIVATE /W4 /permissive- /EHsc /fp:precise)
+    endif()
+    add_test(NAME m2_content_registration_contracts COMMAND m2_content_registration_contracts)
+    set_tests_properties(m2_content_registration_contracts PROPERTIES TIMEOUT 1800)
+    # The lanes of #417 after the contracts commit (docs/design/fixed-composite-registration.md 11.12, 11.27). Each test source is
+    # an empty stub that returns 77 (Skipped) until the lane that owns it writes the tests; the lane edits only its own source file
+    # and, if it needs another library, its own target_link_libraries line below. tests/parallax_scene_tests.cpp is registered by
+    # its own lane, and the StillReview v8 and preview v3 tests go into the A0_BUILD_WPD_DUAL_PREVIEW block later.
+    macro(a0_add_registration_lane_test name source)
+        add_executable(${name} ${source})
+        if(MSVC)
+            target_compile_options(${name} PRIVATE /W4 /permissive- /EHsc /fp:precise /utf-8)
+        endif()
+        add_test(NAME ${name} COMMAND ${name} ${ARGN})
+        set_tests_properties(${name} PROPERTIES TIMEOUT 1800 SKIP_RETURN_CODE 77)
+    endmacro()
+    a0_add_registration_lane_test(m2_fixed_composite_maps_registration_contracts tests/fixed_composite_maps_registration_tests.cpp)
+    target_link_libraries(m2_fixed_composite_maps_registration_contracts PRIVATE a0_m2_fixed_composite_maps a0_m2_seam_blend a0_m2_registration_pose a0_m2_render)
+    a0_defer_to_end_of_configure(a0_assert_no_link_dependency m2_fixed_composite_maps_registration_contracts)
+    a0_add_registration_lane_test(m2_registration_gate_contracts tests/registration_gate_tests.cpp)
+    target_link_libraries(m2_registration_gate_contracts PRIVATE a0_m2_registration_gate a0_m2_seam_gate a0_m2_seam_blend a0_m2_render)
+    a0_defer_to_end_of_configure(a0_assert_no_link_dependency m2_registration_gate_contracts)
+    a0_add_registration_lane_test(m2_parallax_correction_contracts tests/parallax_correction_tests.cpp)
+    target_link_libraries(m2_parallax_correction_contracts PRIVATE a0_m2_parallax_correction a0_m2_seam_gate a0_m2_registration_pose a0_m2_render)
+    a0_defer_to_end_of_configure(a0_assert_no_link_dependency m2_parallax_correction_contracts)
+    a0_add_registration_lane_test(m2_fast_seam_measurer_contracts tests/fast_seam_measurer_tests.cpp)
+    target_link_libraries(m2_fast_seam_measurer_contracts PRIVATE a0_m2_fast_seam_measurer a0_m2_parallax_correction a0_m2_seam_gate a0_m2_render)
+    a0_defer_to_end_of_configure(a0_assert_no_link_dependency m2_fast_seam_measurer_contracts)
+    a0_add_registration_lane_test(m2_fixed_composite_condition_v3_contracts tests/fixed_composite_condition_v3_tests.cpp
+        "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2")
+    target_link_libraries(m2_fixed_composite_condition_v3_contracts PRIVATE a0_m2_fixed_composite_v2)
+    a0_add_registration_lane_test(m2_fixed_composite_tool_v3_contracts tests/fixed_composite_tool_v3_tests.cpp
+        "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2")
+    target_include_directories(m2_fixed_composite_tool_v3_contracts PRIVATE src/phase0/include src/common/include)
+    target_link_libraries(m2_fixed_composite_tool_v3_contracts PRIVATE a0_m2_fixed_composite_v2)
+    a0_add_registration_lane_test(m2_capture_registration_contracts tests/capture_registration_tests.cpp)
+    target_link_libraries(m2_capture_registration_contracts PRIVATE a0_m2_capture_registration a0_m2_fixed_composite_v2)
+    a0_add_registration_lane_test(m2_fixed_composite_registration_text_contracts tests/fixed_composite_registration_text_tests.cpp)
+    target_include_directories(m2_fixed_composite_registration_text_contracts PRIVATE src/phase0/include)
+    target_link_libraries(m2_fixed_composite_registration_text_contracts PRIVATE a0_m2_capture_registration)
+
+    # Parallax scene generator (#417 S3, docs/design/fixed-composite-registration.md, parallax correction 11.10): paper-height
+    # fields to the raw images of A and B and their truth, and the checks of the generator itself. Test-only (tests/parallax_scene.hpp
+    # is not included by product code). It links the render types and the pose model only: never the estimator, the seam gate or the
+    # fixed-composite mappings. Camera and file free.
+    add_executable(m2_parallax_scene_contracts tests/parallax_scene_tests.cpp)
+    target_link_libraries(m2_parallax_scene_contracts PRIVATE a0_m2_registration_pose a0_m2_render)
+    a0_defer_to_end_of_configure(a0_assert_no_link_dependency m2_parallax_scene_contracts
+        FORBIDDEN_LIBRARIES ole32 windowscodecs bcrypt a0_m2_content_registration a0_m2_seam_gate a0_m2_fixed_composite_maps)
+    if(MSVC)
+        target_compile_options(m2_parallax_scene_contracts PRIVATE /W4 /permissive- /EHsc /fp:precise)
+    endif()
+    add_test(NAME m2_parallax_scene_contracts COMMAND m2_parallax_scene_contracts)
+    set_tests_properties(m2_parallax_scene_contracts PROPERTIES TIMEOUT 1800)
     add_executable(m2_stitch_correction_job_contracts tests/stitch_correction_job_tests.cpp)
     target_link_libraries(m2_stitch_correction_job_contracts PRIVATE a0_m2_stitch_correction_job)
     if(MSVC)

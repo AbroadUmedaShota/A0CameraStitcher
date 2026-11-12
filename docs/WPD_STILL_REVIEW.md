@@ -726,3 +726,150 @@ A0CameraStitcher.StillReview --export-seam-crops <結果のフォルダ> <出力
   - 実際に書いた `seam-cut` の報告を読み直した切り出しと書き出し、`StillReview --export-seam-crops` の成功・上書き拒否・報告が無いフォルダの拒否
   - `StillReview --report <報告> --seam-crops-smoke`: 初期は全体表示、押すと 3 枚が並び、各枚の (0,0)・(幅−1, 高さ−1)・中心の 3 点の画素を画面（GDI）から読み戻して一致すること、全画素が合成と一致すること、継ぎ目の線が切り出しに描かれること、戻すと全体表示になること、ボタンが窓に収まり、要約・説明・対応点の説明の行（最も長い形）がどのボタンの下にも潜らないこと、切り出し中に「対応点を追加」・100%・差分・継ぎ目へを押すとそれぞれ全体表示に戻ること（対応点の追加ではその後のクリックが全体表示の画面として扱われる）、切り出し中のクリックでは点を記録しないこと
 - 未検証: 実機の撮影サイズ（出力が数千画素の合成）の保存結果での見え方と、拡大率の違う画面（DPI 125%・150%）での 1 画素＝1 画素。Windows のスケール設定は per-monitor DPI aware v2 で解除している（既存の StillReview と同じ）
+
+## 固定の合成条件 v3 を作る・改訂する入口 (#417 SRV)
+
+新しい合わせ方（撮影ごとの推定・紙面の高さと傾き・継ぎ目沿いの補正）は、設定のフォルダに条件 v3 の記録があるときだけ働く。v2 の条件しかないフォルダでは働かない。その v3 を、開発者が StillReview のコマンドラインから作る・改訂する。画面（ボタン）は増やしていない。ウィンドウもカメラも使わず（`camera_operations=0`）、人が明示して実行したときだけ動く。設計は [固定の合成条件 v3 の設計](design/fixed-composite-registration.md) の追補 11.19（改訂）・11.20（方針ファイル）・11.23（作る時の検査）、欄は [書式](design/fixed-composite-registration-formats.md) の 3 節。道具の本体は `MakeFixedCompositeConditionV3File`（`fixed_composite_tool_v3.hpp`）で、コマンドラインの読み取りと出力は `fixed_composite_cli_v3.hpp`。
+
+### 書き方
+
+```
+A0CameraStitcher.StillReview --make-fixed-composite-condition-v3 <種類> --settings-folder <フォルダ> [種類ごとの引数] [層 2 の引数] [--dry-run]
+```
+
+| 種類 | 何をするか | 種類ごとの引数 |
+|---|---|---|
+| `created` | draft の rig profile から r000001 を作る | `--profile <draft rig profile> --region-um <left,top,right,bottom> --dpi <整数>` |
+| `migrated-from-v2` | 今の v2 の条件と、それが指す profile から r000001 を作る | `--v2-condition <人が別の名前へ移した v2 の条件ファイル>` |
+| `values` | 方針ファイルを読み直し、範囲と線を入れ替えた次の改訂を書く | なし |
+| `manual-adjustment` | 面内の 3 成分の手直し（基準の姿勢を動かす）を次の改訂に書く | `--seam-dx-px <数> --seam-dy-px <数> --rotation-deg <数>` |
+| `rollback` | 前の改訂の中身をそのまま写した次の改訂を書く | `--restore-sequence <戻す先の改訂の番号>` |
+| `saved-estimate` | 報告 v8 の推定の姿勢を基準にする。**今は断る**（報告 v8 の読み手が撮影の経路の側に出るまで） | `--report <保存した報告>` |
+
+- 層 2 の引数: `--layer-two-falloff-px <L>` と `--layer-two-max-strain <s_max>`（2 つ一緒に渡す。片方だけは引数の誤り）。方針ファイルが層 2（`parallax`）を有効にしているとき、作る時の検査（ひずみの上限 (π/2)·cap/L ≤ s_max）に要る設計定数。コードに既定値は無く、渡されなければ作らない。値は層 2 の設計定数 `kParallaxDesignDraft`（`parallax_correction.hpp`、案）の `weight_falloff_px`（L）と `maximum_strain`（s_max）を使う。案は L = 192、s_max = 0.1。層 2 を無効にした方針（`"parallax": null`）では要らない
+- `--dry-run`: 記録を書く手前まで（方針ファイルの読み込み、profile と領域の検証、作る時の検査）の全部を行い、何も書かない。通れば終了コード 0
+- 引数は 1 回ずつ。その種類に属さない引数、足りない引数、数として読めない値（`nan`・`inf`・先頭の `+`・余分な文字）は終了コード 2 で、理由とこの書き方を出す
+- `manual-adjustment` の `--seam-dx-px`・`--seam-dy-px` は、新しい基準の姿勢が引き起こす B の動き（出力 px、x は右、y は下）を継ぎ目の列の真ん中の行で測った値。符号は「B がどちらへ動くか」（※仮定: 画面の入口 #418 段 2 で操作者の言葉に合わせて見直す）。**量に上限は無い**（所有者の決定 9）。断るのは、新しい基準の姿勢が校正から範囲（`registration.envelope`）の外に出るときだけで、「校正からやり直してください」と返す
+- `rollback` は前の改訂の中身（基準の姿勢と、範囲・線の値、写した方針の hash）を、新しい番号の改訂として書き直す。ファイルは消さず、変えず、名前も変えない。履歴は番号の列そのもの
+- 上書きしない: 同じ番号が既にあれば作らない。`created`・`migrated-from-v2` は改訂が 1 つでもあれば作らない。設定のフォルダに v1・v2 の条件ファイルがあるときも作らない（出どころを 2 つにしないため）。**v2 から切り替えるときは、人が v2 の `wpd-fixed-composite-condition.json` を別の名前へ移してから `migrated-from-v2` を実行し、移した先を `--v2-condition` で渡す**。移した v2 のファイルは読むだけで変えない
+
+### 方針ファイル `wpd-registration-policy.json`
+
+作る・改訂するときの範囲と線は、設定のフォルダの `wpd-registration-policy.json`（`"schema": "a0.wpd-registration-policy.v1"`）から条件 v3 へ写す。撮影の経路はこのファイルを読まない（設計 11.20.1）。値を変えるには、ファイルを書き換えてから `values` の改訂を 1 つ書く。改訂は履歴に残り、`rollback` で前へ戻せる。**値はコードの既定にしない**。ファイルに人が書く。`wpd-merge-policy.json`（v2 の倍率の上限）とは別のファイルで、v3 は倍率の上限を持たない。
+
+厳格な読み手で、16 KiB まで。欄の重複・未知の欄・欠けた欄・型の違いは断る（作らない）。ひな形は [`docs/examples/wpd-registration-policy.example.json`](examples/wpd-registration-policy.example.json)。次の表の「値の例」はひな形の値で、「所有者」と書いてあるものは所有者が決めた値、「開発の仮の値」は未承認の案。
+
+| 欄 | 意味・単位 | 値の例 |
+|---|---|---|
+| `registration.envelope.positionMm` | B の位置（tx, ty）の範囲。基準の姿勢からの距離の上限（mm） | 10（所有者） |
+| `registration.envelope.rotationDeg` | B の回転 rz の範囲（度） | 2（所有者） |
+| `registration.envelope.tiltDeg` | B の傾き（rx, ry）の範囲（度） | 1（所有者） |
+| `registration.envelope.heightPercent` | B の高さ tz の範囲（%） | 1（所有者） |
+| `registration.surfaceEnvelope.heightMm` | 紙面の高さの範囲（mm）。`surfaceEnvelope` が `null` なら層 1（紙面の高さと傾き）を当てない | 40（設計の案。厚い冊子が入る値。所有者の決定 6） |
+| `registration.surfaceEnvelope.tiltDeg` | 紙面の傾きの範囲（度） | 8（同上） |
+| `registration.parallax.maxLiftMm` | 紙の浮き（層 2）の警告の線（mm）。`parallax` が `null` なら層 2 を当てない | 1.0（所有者の決定 3） |
+| `registration.applyBeyondEnvelope` | 範囲を超えても推定が確かなら当てる | true（所有者の決定 2。超えた分は警告で出す） |
+| `registration.surfaceScaleWarnPercent` | 縮尺の狂いの警告の線（%）。`null` で警告なし | null（所有者の決定 10） |
+| `registration.live` | ライブの C の閾値。ライブの C の担当が使うまで予約 | null |
+| `seamGate.limitPx` | 継ぎ目の合格線（出力 px） | 1.0（所有者） |
+| `seamGate.guardBandPx` | 守りの幅（出力 px） | 0.2（所有者） |
+| `revisionRules.manualAdjustmentMaxSeamPx` | 手直しの上限（出力 px）。`null` で上限なし | null（所有者の決定 9。上限で断る処理は無い） |
+| `registration.limits` | 推定の検査 V1〜V6 の閾値 9 値（`brownLoweAlpha`・`brownLoweBeta`・`minimumUniqueBlocks`・`maximumPredictionSigmaPx`・`maximumResidualRmsPx`・`maximumResidualP95Px`・`maximumBinBiasPx`・`convergencePx`・`startAgreementPx`。出力 px、`minimumUniqueBlocks` は個数） | 開発の仮の値（未承認）。ひな形は `registration_probe_main.cpp` の開発用の値（草稿の校正が残す誤差に合わせて緩い） |
+| `registration.geometry` | 遷移帯 Ω の余白 `omegaMarginPx`・Ω から推定の点までの間隔 `guardPx`・帯の半幅 `bandHalfWidthPx`（出力 px、整数）。混ぜ幅は合成の設計 `kSeamBlendDesign` から取り、報告に記録する | 開発の仮の値（未承認）。帯の半幅は重なりの全幅が入る広さ（※仮定） |
+
+- 範囲（`envelope`）の意味: 条件の記録に基準の姿勢 `basePose`（校正に対する 6 自由度。`created`・`migrated-from-v2` は全部 0）を持ち、撮影ごとの推定値と基準の差をこの範囲に当てる（追補 11.19.2）。基準の姿勢そのものも校正からこの範囲の内でなければならず、外なら改訂を作らない
+- 紙面の範囲（`surfaceEnvelope`）は、粗の段の探索の半径と作る時の検査の大きさを決める。大きくすると推定の時間と周期の模様の取り違えが増える（追補 11.20.3）。範囲を超えた紙面も、推定が確かなら当てて警告する（`applyBeyondEnvelope` = true）
+- `registration.limits` と `geometry` は撮影の経路の合否の線ではなく、推定器が自分の結果を信用する条件。承認された値ではなく、実写の分析（M1）と所有者の確認を経て置き換える。置き換えは方針ファイルを書き換えて `values` で改訂する
+
+### 作る時の検査と時間
+
+どの種類でも、記録を書く前に、範囲の端の姿勢のすべてで継ぎ目と外周が保てるかを調べる（追補 11.23）。(a) 継ぎ目の左右に混ぜ幅の半分を足した範囲が、すべての行で A と B の両方に入る。(b) 出力のすべての画素が A か B に覆われる。(c) 層 2 のひずみの最大 (π/2)·cap/L が s_max 以下。(d) 基準の姿勢が校正から範囲の内。紙面の範囲の端で出力の外周が欠ける画素の数は拒否の理由にせず、詳細に数だけ出す。
+
+- 領域の大きさと範囲によって数十秒から数分かかる。検査に入るとき `check_started=1 note=…` を出し、30 秒ごとに `check_running seconds=<経過秒>` を出す。終わると `check_seconds=<秒>` を出す
+- 落ちたときは、どの成分のどの端かが文に出る（日本語の前置きに英語の理由が続く）。端の姿勢の 1 つで継ぎ目が覆われないときは `row <行>: … when <成分> is at the <+|-> end of its range (<+|-><量> <単位> from the base pose)`。成分は the x position・the y position（mm）、the x tilt・the y tilt・the rotation（度）、the height（%）、the paper height（mm）、the paper slope in x / y（傾きの tan）。頂点での判定で落ちたときは `row <行>: <検査の名前> does not hold over the range (margin <px> px) at the vertex x position … mm, y position … mm, x tilt … deg, …`（基準の姿勢からのずれ。紙面の欄は紙面の範囲があるときだけ）。ひずみの上限に落ちたときは、計算した値と s_max を並べて出す
+- 直し方: 落ちた成分の範囲（`envelope`・`surfaceEnvelope`・`maxLiftMm`）を狭める、出力の領域（`--region-um`）を内側へ寄せる、層 2 を使うなら L を大きくするか `maxLiftMm` を小さくする。方針ファイルの値は人が決める値で、この道具は自動で変えない
+
+### 出力と終了コード
+
+標準出力に `key=value` の事実を 1 行ずつ出す（パスと機体の識別子は出さない。profile の写しの名前も出さない）。
+
+```
+fixed_composite_condition_v3_made=<0|1> checked=<0|1> dry_run=<0|1> camera_operations=0
+<結果の文（日本語）>
+revision=<番号> kind=<種類>
+revision_file=r000001.json              （書いたときだけ。ファイル名のみ）
+condition_sha256=<書いた記録の SHA-256>   （書いたときだけ）
+parent_sha256=<親の改訂の SHA-256>        （r000001 以外）
+policy_sha256=<写した方針ファイルの SHA-256>
+check_seconds=<検査の秒数>
+<検査の事実の行（k_px_per_mm=…、raster_dpi=…、pose_and_surface_range=…、surface_range_outer_edge_uncovered=… など）>
+```
+
+終了コード: 書いた 0、`--dry-run` で検査が通った 0、書かなかった 1、引数の誤り 2（`fixed_composite_condition_v3_made=0` の行、`error=<理由>`、書き方の順）。書いたファイルは `<設定のフォルダ>/wpd-fixed-composite-revisions/r<6 桁>.json` と、`created`・`migrated-from-v2` のときの profile の写し（設定のフォルダ）。
+
+### 確認
+
+- `still_review_condition_v3_contracts`（`tests/still_review_condition_v3_tests.cpp`、一時フォルダだけ。第 1 引数は共有の rig profile v2 の fixture、第 2 引数は StillReview の exe、第 3 引数はひな形）: 引数の読み取り（全種類の成功、足りない・余分・重複・別の種類の引数、数と領域と DPI の不正、層 2 の片方だけ、手直しの大きな値を断らないこと）、ひな形が厳格な読み手で通り所有者の値と一致すること、進みの出力（30 秒ごとの行が出て、止めた後は出ないこと）、報告の中身（made・checked・dry-run、revision・kind・SHA-256 が書いたファイルと一致すること、パスや profile の名前が出ないこと）、`created` → 再実行の拒否 → `values`（同じ方針は書くものが無い）→ `manual-adjustment`（大きい値は通り、校正の範囲を出る値は断る）→ `rollback`（無い番号と有効な改訂は断る）→ `saved-estimate` の拒否、層 2 の設計定数が無いときの拒否、v2 から切り替える流れ（移していない v2・移した先が無い v2 の拒否、移した v2 を変えないこと）、範囲が広すぎる方針で落ちた成分と端の文、方針ファイルが無い・壊れている・欄が足りないときの拒否と何も書かないこと、そして実際の StillReview の exe を起こして同じ流れ（ウィンドウは開かない）
+- 既存の `m2_fixed_composite_tool_v3_contracts`・`m2_fixed_composite_condition_v3_contracts` は試験のコードを変えずに通る（作る時の検査の拒否の文に、落ちた成分・端・頂点を足した）
+- 未検証: ひな形の値で、個々の設置の領域と DPI の検査が通るか。領域・DPI ごとに、本物の設定のフォルダとは別の候補のフォルダでこの道具を実行して確かめる（通らないときは上の「直し方」）
+
+## 条件 v3 の両台撮影の保存の流れとログ (#417 J8w)
+
+> 設計は [固定の合成条件に紙面と姿勢を足す設計](design/fixed-composite-registration.md) の 11.9（JPEG の経路の順）、追補の 11.19.4（改訂の置き方）・11.25（180 秒の期限）。開発用プレビューの「両台撮影」（`SavePairReview`）が、設定のフォルダに条件 v3 の改訂があるとき、報告 v8 を書く経路に入る。撮影の手順（シャッター、取り込み、180 秒の期限、原画像の保存と hash）は変えていない。
+
+### どの条件で合成するか
+
+撮影のたびに `SelectFixedComposite`（`experimental/fixed_composite_selection.hpp`）が設定のフォルダを読む。条件 v3 は `wpd-fixed-composite-revisions\r<6 桁>.json` の改訂の列で、**有効な改訂**（番号の最も大きい改訂。`r000001` から途切れず、各改訂の `parentSha256` が 1 つ前のファイルの SHA-256 と一致する）が使われる。`LoadFixedCompositeConditionAny` は `wpd-fixed-composite-condition.json` を指されたとき、このフォルダを先に見る（`kLoadAnyReturnsV3` が `true`）。
+
+| 設定のフォルダの状態 | 撮影の結果 |
+|---|---|
+| 有効な改訂だけ | 新しい経路。報告は v8 |
+| v2 の条件だけ | 今までの経路。報告は v7（動作・ログ・報告のバイトは変えていない） |
+| v1 の条件だけ | 今までの経路。報告は v6（同上） |
+| 条件が無い（改訂のフォルダが無い、または改訂が 1 つも無い） | 合成しない。原画像 2 枚を残す。理由 `condition-absent` |
+| v1 または v2 の条件と、改訂が両方ある | 合成しない。原画像 2 枚を残す。理由 `condition-invalid`（出どころが 2 つ）。ログに `pair_fixed_composite_condition_unusable reason=condition-invalid detail=…` |
+| 改訂の番号の途切れ、親の hash の不一致、改訂でない名前のファイル、書式の誤り | 同じく `condition-invalid`（推測しない。`.partial` で終わる名前は数えない） |
+| 改訂が指す profile が設定のフォルダに無い・一致しない | 合成しない。`profile-absent` / `profile-differs` |
+| 取付の向きが撮影と違う、原画像が profile の大きさでない、継ぎ目が重なりの外 | 合成しない。それぞれ `orientation-differs` / `size-differs` / `seam-outside-overlap`（v7 と同じ符号。書き手が何も作る前に断る） |
+| どの段も推定できない | 合成する。G4（条件のままの写像）。理由と警告が行とログに出る |
+
+v2 から v3 への切り替えは人が行う: v2 のファイルを別の名前へ移してから、道具（`StillReview --make-fixed-composite-condition-v3`）で `r000001` を作る。戻すには、改訂のフォルダを別の名前へ移し、v2 のファイルを元の名前に戻す。
+
+### 保存の流れ（v3）
+
+1. 両台のシャッター、原画像の取り込みと保存（変わらない）。
+2. 条件を読む（上の表）。使えなければ、原画像 2 枚を残して理由を画面とログに出して終わる。
+3. 原画像 2 枚を同時に復号する。ゲートが終わるまで持ち続ける（7360×4912 の 2 枚で約 217 MB）。
+4. 姿勢と紙面の推定 → 層 2 → 段（G1〜G4）の選び → 合成 → 符号化・JPEG の書き込みと読み直し → Ω のゲート → 報告 v8（追補 11.25 の順。合成を先に書き、ゲートは後）。
+5. **基準外でも合成は保存する**。警告は画面の状態の行・ログ・報告に出るが、「書き出せません」とは言わない。
+
+**期限は延ばさない。** 期限は撮影の要求から 180 秒（`RequestCapture`）で、そのままの時刻を書き手の `StillReviewRequest::deadline` に渡す。書き手は復号の後に残りの時間を測り、`PlanReviewStages` が回す段を決める（落とす順は追補 11.25.3: 広い探索の診断 → 帯の全域の測定 → 層 2 → 折り目の当て直し → 細の段と当てはめ → 粗の段 → ゲート。合成・符号化・書き込み・報告は落とさない）。落とした段は報告の `timeBudget`・状態の行・ログに出る。時刻で変わるのは回す段だけで、回した段の値は時刻に依らない。
+
+### 画面の状態の行
+
+保存した後、状態の行（画面の中ほど。4 行まで）に、保存した JPEG の道筋の下へ 1 文ずつ並ぶ。文は `fixed_composite_registration_text.hpp` が報告の値から作る。
+
+```
+保存済み: <JPEG のパス>
+位置合わせを G1（姿勢・紙面・紙の浮きを補正）で行いました
+B の傾き 0.4°（許容 1°）、回転 0.8°（許容 2°）、高さ +3 mm（許容 ±10 mm）、位置 2 mm（許容 5 mm）。紙面の高さ 1.5 mm、傾き 0.3°
+継ぎ目のズレ: 基準内（最大 0.4 px）。二方向の点の最大 0.4 px
+位置合わせの確認: 基準外の項目があります。警告 2 件（基準外 1、確かめられていません 0、お知らせ 1）。【基準外】…（全件は記録とログにあります）
+時間が足りなかったため、次の処理を省きました: 細かい位置合わせ        ← 省いた段があるときだけ
+```
+
+上は文の形の例で、数値は説明用。G2 以下では 2 行目の後ろに理由（「上の段に必要な推定が確かでないか、使えなかったため」など）が付く。長い文は折り返され、4 行を超えた分は画面では切れる。全文はログと報告にある。確認画面（#418）が警告の一覧を出す。
+
+### ログの読み方
+
+ログ（標準出力）の行は `key=value` で、機体の識別子と道筋は出さない（警告の文にも含まれない）。v8 の撮影では次の行が `pair_review_saved` と `pair_review_blend method=fixed-seam` の後に続く。
+
+| 行の先頭 | 中身 |
+|---|---|
+| `pair_review_registration level=G1` | 段（`G1`〜`G4`）、`estimate=`（姿勢の推定の状態: `verified`・`out_of_envelope`・`undetermined`）、`surface=`（`estimated`・`not-estimated`・`disabled`）、`layer2=`（`applied`・`not-applied`・`disabled`）、`applied_pose/surface/parallax=`（その段で写像に入れた物）、`gate=`（`pass`・`fail`・`undetermined`・`not-run`）と `gate_cause=`、`gate_maximum_px=`（ゲートの最大。無ければ `none`）、`assessment=`（`within-criteria`・`outside-criteria`・`not-judged`）、警告の数（`warnings=`、うち `exceeded=`・`unverified=`・`notices=`）、`condition_sequence=`（使った改訂の番号）、`geometry_hash=`、`quality_accepted=0` |
+| `pair_review_registration_pose` | 推定した姿勢の 4 成分を `成分=値/許容`（許容を超えたものは末尾に `!`）と、`surface_height_mm=`・`surface_tilt_deg=`（紙面）、`text=`（画面と同じ文） |
+| `pair_review_registration_gate text=` | ゲートの状態と最大の文 |
+| `pair_review_registration_warning index=N class=… code=…` | 警告 1 件ごと。`class=` は `exceeded`・`unverified`・`notice`、`code=` は報告の符号、`applied=` は補正を写像に入れたか、`text=` が画面と同じ文（基準外、確かめられていません、お知らせの順は報告の符号の順） |
+| `pair_review_registration_ms estimate_ms=…` | 段ごとの時間（ミリ秒。ログだけで、報告には書かない）。`estimate_ms` は推定・層 2、`composite_ms` は合成。回した段だけ `<段>_ms=` が並ぶ。`planned=` は回すと決めた段、`skipped=` は時間の都合で落とした段（無ければ `none`） |
+
+読み方の目安: 時間が足りないと `skipped=` に `fine-and-fit` などが並び、`level=` が G3 か G4 に下がる。`gate=not-run` で `skipped=` に `gate` が出ていれば、ゲートまで時間が届かなかった。`level=G4` で `estimate=undetermined` なら、推定が確かでなかった（理由は `pair_review_registration_pose` の `text=`）。

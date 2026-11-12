@@ -9,6 +9,7 @@
 #include "a0/phase0/experimental/fixed_composite_lens_text.hpp"
 #include "a0/phase0/experimental/fixed_composite_tool.hpp"
 #include "a0/phase0/experimental/fixed_composite_tool_v2.hpp"
+#include "a0/phase0/experimental/fixed_composite_cli_v3.hpp"
 #include "a0/phase0/experimental/seam_crops_export.hpp"
 #include "a0/m2/experimental/seam_crops.hpp"
 #include "a0/m2/stitch_job_manifest.hpp"
@@ -912,6 +913,13 @@ int wmain(int argc,wchar_t** argv){
             std::cout<<std::flush;
             return (made.made || (made.checked && request.dry_run))?0:1;
         }
+        if(argc>=2 && std::wstring_view(argv[1])==a0::phase0::experimental::kFixedConditionV3CommandName){
+            // Development entry (#417): makes and revises the fixed composite condition v3 (r000001 from a draft profile or from a moved v2
+            // condition, then values, manual-adjustment and rollback revisions). File-only, no window, never overwrites, never automatic.
+            SetConsoleOutputCP(CP_UTF8);
+            return a0::phase0::experimental::RunFixedConditionV3Command(std::vector<std::wstring>(argv+2,argv+argc),std::cout,
+                [](const std::vector<unsigned char>& bytes){return a0::m2::experimental::FixedCompositeBytesSha256(bytes);},std::chrono::system_clock::now());
+        }
         if(argc==4 && std::wstring_view(argv[1])==L"--export-seam-crops"){
             // #418 stage 0: the seam's top, middle and bottom at native size in one PNG, without a window.
             // File-only; the saved review is not changed and an existing file is never overwritten.
@@ -956,7 +964,7 @@ int wmain(int argc,wchar_t** argv){
         const bool resume_test=argc==4 && std::wstring(argv[3])==L"--resume-smoke";
         const bool crops_test=argc==4 && !from_session && std::wstring(argv[3])==L"--seam-crops-smoke";
         if(argc<3 || argc>4 || (!from_session && std::wstring(argv[1])!=L"--report") || (argc==4 && (from_session?!resume_test:(std::wstring(argv[3])!=L"--smoke" && !crops_test))))
-            throw std::invalid_argument("usage: StillReview --report <explicit report> [--smoke | --seam-crops-smoke | --blend-compare <new output prefix>] | --session <explicit work file> [--resume-smoke] | --make-fixed-composite-condition <explicit report> --settings-folder <folder> | --make-fixed-composite-condition-v2 <draft rig profile> --settings-folder <folder> --region-um <left,top,right,bottom> --dpi <integer> [--dry-run] | --export-seam-crops <result folder> <new .png file>");
+            throw std::invalid_argument("usage: StillReview --report <explicit report> [--smoke | --seam-crops-smoke | --blend-compare <new output prefix>] | --session <explicit work file> [--resume-smoke] | --make-fixed-composite-condition <explicit report> --settings-folder <folder> | --make-fixed-composite-condition-v2 <draft rig profile> --settings-folder <folder> --region-um <left,top,right,bottom> --dpi <integer> [--dry-run] | --make-fixed-composite-condition-v3 <kind> --settings-folder <folder> [kind arguments] [--dry-run] (see docs/WPD_STILL_REVIEW.md) | --export-seam-crops <result folder> <new .png file>");
         // Opt out of Windows bitmap scaling so 100% is one physical display
         // pixel per saved image pixel, including on a scaled desktop.
         if(!SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2))throw std::runtime_error("per-monitor pixel display awareness unavailable");

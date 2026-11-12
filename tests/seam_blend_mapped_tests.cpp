@@ -550,6 +550,15 @@ int main() {
             reject([&] { (void)LegacyMappedSeam(fa, fb, holed, 150, small); }, "mapped: a row with a hole in its overlap fails");
             reject([&] { (void)CanRenderMappedFixedSeam(fa, fb, holed, 150, small); }, "mapped can: a row with a hole in its overlap fails");
             check(MappedFixedSeamBand(fa, fb, holed)[30].first == 100, "the band reports the run that holds the first covered column");
+            // A covered sliver left of the run that holds the coarse scan's first hit (the scan steps by 8 columns and lands in the right run).
+            auto sliver = input;
+            sliver.camera_b = [base = input.camera_b](render::Point p, render::Point& raw) { return !(p.y == 30 && (p.x < 101 || (p.x >= 103 && p.x < 110))) && base(p, raw); };
+            reject([&] { (void)LegacyMappedSeam(fa, fb, sliver, 150, small); }, "mapped: a sliver left of the run fails");
+            reject([&] { (void)CanRenderMappedFixedSeam(fa, fb, sliver, 150, small); }, "mapped can: a sliver left of the run fails");
+            // A hole on the seam's own columns: the column does not fit, which is false, not an error, when the row is one run.
+            auto notch = input;
+            notch.camera_b = [base = input.camera_b](render::Point p, render::Point& raw) { return !(p.y == 30 && p.x >= 100 && p.x < 151) && base(p, raw); };
+            check(!CanRenderMappedFixedSeam(fa, fb, notch, 150, small) && CanRenderMappedFixedSeam(fa, fb, notch, 160, small), "mapped can: a row that starts right of the seam fails the seam column only");
             // Document entry: unsupported layout and kernel, projection that does not validate.
             const render::OutputRaster tiny{{0, 0, 3000, 2000}, 254, 30, 20};
             const render::CameraProjection ok{{1, 1, 0, 0}, {0, 0, 0, 0, 0}, {10, 0, 0, 0, 10, 0, 0, 0, 1}};

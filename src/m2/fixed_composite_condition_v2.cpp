@@ -227,12 +227,45 @@ FixedCompositeConditionV2 MakeFixedCompositeConditionV2(const FixedCompositeV2Re
     return c;
 }
 
+namespace {
+// Whether LoadFixedCompositeConditionAny returns a v3 record (#417). It does since the capture path (the pair capture's
+// SavePairReview) and the live view read the revision in force through it. A v3 record is never read from the condition
+// file itself: it is the revision in force in the revisions folder beside it (see LoadFixedCompositeConditionAnyWith).
+constexpr bool kLoadAnyReturnsV3=true;
+// The "schema" of a text of at most v3's ceiling (FixedCompositeConditionSchemaOf has v2's 4096).
+std::string SchemaOfLarge(std::string_view text){
+    const auto root=json::BasicJsonParser<Failure,kMaximumFixedCompositeConditionV3Bytes>(WithoutBom(text)).Parse();
+    if(root.kind!=JsonKind::object || !root.object.contains("schema"))Reject("no schema");
+    return Str(At(root,"schema"),"schema");
+}
+}
+
 std::optional<LoadedFixedCompositeConditionAny> LoadFixedCompositeConditionAny(const std::filesystem::path& file,const FixedCompositeSha256& hash){
+    return fixed_composite_detail::LoadFixedCompositeConditionAnyWith(file,hash,kLoadAnyReturnsV3);
+}
+
+std::optional<LoadedFixedCompositeConditionAny> fixed_composite_detail::LoadFixedCompositeConditionAnyWith(const std::filesystem::path& file,
+    const FixedCompositeSha256& hash,bool accept_v3){
     if(!hash)Reject("no SHA-256 provider");
+    // The revisions of a condition v3 sit beside the condition file of a setup (addendum 11.19.4). Asked for the condition file
+    // itself, a reader that accepts v3 answers with the revision in force when there is one. A setup has one source: a v1 or v2
+    // file together with a revision is two sources and is refused (condition_invalid), never resolved by a guess; so is a revisions
+    // folder that is not an unbroken chain. A folder without a revision is nothing, and the file is read as before.
+    if(accept_v3 && file.filename()==kFixedCompositeConditionName){
+        if(auto active=LoadActiveFixedCompositeRevisionV3(file.parent_path()/std::string(kFixedCompositeRevisionFolderName),hash)){
+            std::error_code error;
+            if(std::filesystem::symlink_status(file,error).type()!=std::filesystem::file_type::not_found)
+                Reject("the condition file and a revision of condition v3 are both present: two sources of the condition");
+            return LoadedFixedCompositeConditionAny{std::move(*active)};
+        }
+    }
     bool found{};
-    const auto text=ReadRegularFile(file,kMaximumFixedCompositeConditionV2Bytes,"fixed composite condition",found);
+    const auto text=ReadRegularFile(file,accept_v3?kMaximumFixedCompositeConditionV3Bytes:kMaximumFixedCompositeConditionV2Bytes,"fixed composite condition",found);
     if(!found)return {};
-    const auto schema=FixedCompositeConditionSchemaOf(text);
+    const auto schema=accept_v3?SchemaOfLarge(text):FixedCompositeConditionSchemaOf(text);
+    // The v3 branch: one revision file (LoadFixedCompositeConditionV3 refuses a file that is not kept as a revision).
+    if(accept_v3 && schema==kFixedCompositeConditionSchemaV3)
+        return LoadedFixedCompositeConditionAny{LoadFixedCompositeConditionV3(file,hash)};
     if(schema==kFixedCompositeConditionSchema)
         return LoadedFixedCompositeConditionAny{LoadedFixedCompositeCondition{ParseFixedCompositeCondition(text),hash(Bytes(text))}};
     if(schema!=kFixedCompositeConditionSchemaV2)Reject("unknown schema");

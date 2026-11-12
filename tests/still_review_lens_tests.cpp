@@ -628,7 +628,7 @@ void Tamper(const Rig& rig,const Settings& other_profile){
     const auto& k=o.saved.fixed_composite_lens->scale;
     char text[64];
     rejected("a0.uncalibrated-still-review.v7","a0.uncalibrated-still-review.v6");
-    rejected("a0.uncalibrated-still-review.v7","a0.uncalibrated-still-review.v8");
+    rejected("a0.uncalibrated-still-review.v7","a0.uncalibrated-still-review.v9");
     rejected("\"productQualityAccepted\":false","\"productQualityAccepted\":true");
     rejected("\"geometryBasis\":\"fixed-composite-lens\"","\"geometryBasis\":\"fixed-composite\"");
     rejected("\"fixedCompositeLens\":{","\"fixedCompositeLens\":{\"extra\":0,");
