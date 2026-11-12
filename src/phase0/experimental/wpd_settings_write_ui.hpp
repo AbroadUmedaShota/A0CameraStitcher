@@ -4,7 +4,7 @@
 // D810SettingsWriteScreen; this file opens the cameras, draws and hooks the buttons and the capture admission.
 //
 // The controller comes from the product entry point only: this build has no constructor that takes a
-// table, and the fixed product table decides every row (CAM-B rows only; the count is checked below).
+// table, and the fixed product table decides every row (the rows of its stage; the sets are checked by the static_asserts after the table).
 #if defined(A0_SETTINGS_WRITE_TEST_TABLES)
 // The confirmation test build (CMake: a0_preview_settings_write_confirm_tests): the one executable that has the
 // table-taking constructor. Its main runs the camera-free confirmation smoke and nothing else.
@@ -193,7 +193,7 @@ void InstallSettingsWriteHost(std::unique_ptr<SettingsWriteHost> host,D810Settin
     D810SettingsWriteScreen::Options options;options.log=[](const std::string& line){Log(line);};
     host->screen=std::make_unique<D810SettingsWriteScreen>(*host->controller,std::move(access),std::move(options));
     const auto& status=host->screen->Status();
-    Log("settings_write_screen=1 enabled_rows="+std::to_string(status.enabled_rows)+" capture_block="+D810CaptureBlockToken(status.block)+
+    Log("settings_write_screen=1 enabled_rows="+std::to_string(status.enabled_rows)+" "+D810StageMark(host->controller->Table())+" capture_block="+D810CaptureBlockToken(status.block)+
         " capture_allowed="+std::to_string(status.capture_allowed)+" setting_writes=0");
     // A block left by an earlier run (not confirmed, mismatch, unknown) holds capture from the start.
     if(!status.capture_allowed)capture_status=D810CaptureBlockText(status.block,status.chosen_history,status.history_damaged);
@@ -745,11 +745,11 @@ int RunSettingsWriteUiSmoke(){
     wchar_t caption[256]{};GetWindowTextW(window,caption,256);
     check(std::wstring(caption).find(L"設定の書き込みあり")!=std::wstring::npos); // the ON build's mark
 
-    // 1. The product table and an empty record folder: five rows are enabled (ISO, shutter speed, aperture, white balance and metering on CAM-B), capture is free, and copying
+    // 1. The product table and an empty record folder: the table's rows are enabled (the static_asserts after the table fix which), capture is free, and copying
     //    is offered once both Live sessions are joined. The smoke opens no camera (the access counts every Open).
     InitSettingsWrite(std::make_unique<D810SettingsFileJournal>(folder),factory);
     auto* screen=settings_write->screen.get();
-    check(screen->Status().enabled_rows==5 && screen->Status().write_allowed && screen->Status().capture_allowed);
+    check(screen->Status().enabled_rows==D810EnabledRowCount(kD810ProductWriteTable) && screen->Status().write_allowed && screen->Status().capture_allowed);
     tick();
     check(!SettingsWriteButtonShown(settings_copy_button) && !IsWindowEnabled(settings_copy_button)); // Live runs: not shown
     stop_live();tick();

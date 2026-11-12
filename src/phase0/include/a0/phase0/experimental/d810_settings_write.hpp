@@ -284,7 +284,7 @@ constexpr const char* D810WriteTableProblem(const D810WriteTable& table) {
 // What the product table may hold until ADR-0041 is accepted: rows for CAM-B
 // and the accepted items only (the five of ADR-0038, plus white balance and
 // metering once the ADR-0038 revision is accepted), and chosen values only with the ADR-0041 flag. ADR-0038
-// invariant 2 (CAM-A is never written) holds at compile time while the product table opens no CAM-A row.
+// invariant 2 (CAM-A is never written) holds at compile time until a stage opens a CAM-A row; the rows a stage opens are the ones the static_asserts after the product table name.
 //
 // ADR-0041 (`adr41_accepted`: the constant by default, the tests pass the other value to keep the refusals under
 // test): the chosen-values flag and CAM-A rows need it. A CAM-A row is allowed only together with the chosen-values flag
@@ -303,6 +303,13 @@ constexpr const char* D810ProductTableProblem(const D810WriteTable& table, bool 
         if (!D810ItemInProductScope(D810WriteItemOf(row.item), revision_accepted)) return "extra_item_enabled";
     }
     return nullptr;
+}
+// What the first log line of a build says about the stage its table stands at: the picked-values switch, how many CAM-A rows are enabled
+// and whether the table names a firmware version for CAM-A. Counts and booleans only, never the text of a version.
+inline std::string D810StageMark(const D810WriteTable& table) {
+    std::size_t cam_a_rows = 0;
+    for (const auto& row : table.rows) cam_a_rows += row.enabled && row.camera == D810Camera::A;
+    return std::string("chosen_values=") + (table.chosen_values ? "1" : "0") + " cam_a_rows=" + std::to_string(cam_a_rows) + " cam_a_version=" + (D810TextPresent(table.verified_firmware_a) ? "1" : "0");
 }
 constexpr std::size_t D810EnabledRowCount(const D810WriteTable& table) {
     std::size_t count = 0;
@@ -326,7 +333,8 @@ inline std::vector<D810WriteItem> D810CopyWritableItems(const D810WriteTable& ta
 // recorded with its rows disabled: the plan reads it for its preconditions and
 // its refusals, but nothing writes it. The enabled rows are CAM-B's ISO,
 // shutter speed, aperture, white balance and metering mode (stages 1 to 3), and
-// the firmware version is the one the stage A read reported for CAM-B.
+// the firmware version is the one the stage A read reported for CAM-B. From stage T2 of
+// ADR-0041 on, the rows of CAM-A that picked values may use are enabled too, one stage at a time.
 // Enabling another row is a reviewed commit to this table, one stage at a time.
 inline constexpr D810WriteTable kD810ProductWriteTable = [] {
     auto table = D810DisabledWriteTable();
@@ -338,39 +346,43 @@ inline constexpr D810WriteTable kD810ProductWriteTable = [] {
         if (row.item == D810WriteItem::Aperture && row.camera == D810Camera::B) row.enabled = true;
         if (row.item == D810WriteItem::WhiteBalance && row.camera == D810Camera::B) row.enabled = true;
         if (row.item == D810WriteItem::Metering && row.camera == D810Camera::B) row.enabled = true;
+        if (row.item == D810WriteItem::Iso && row.camera == D810Camera::A) row.enabled = true; // stage T2: CAM-A's ISO
     }
     table.copy_a_to_b = true;
-    table.chosen_values = true; // stage T1: picked values can be written to CAM-B; CAM-A has no row and no version below
+    table.chosen_values = true; // stage T1: picked values can be written to CAM-B
     table.verified_model = "D810";
     table.verified_firmware = "V1.14";
+    // Stage T2: CAM-A is expected to report the model and firmware version CAM-B does, so its entry is CAM-B's, by reference (the
+    // version text exists once in the repository). The body check at the plan's read (`CAM-A settings_write_body_check`) tells whether
+    // the real body agrees; when it does not, no CAM-A body passes the check and nothing is sent to CAM-A.
+    table.verified_firmware_a = table.verified_firmware;
     return table;
 }();
 // The enabled set of the product table and the codes it confirms, written out so that a change to either is a
 // compile error here and a reviewed edit of this block.
 constexpr std::uint32_t D810ItemBit(D810WriteItem item) { return 1u << static_cast<unsigned>(item); }
-// True when the only enabled rows are CAM-B's, for exactly the items in `camera_b_items` (a set of D810ItemBit), and the two
-// confirmed codes are the ones above.
-constexpr bool D810ProductTableEnablesOnly(const D810WriteTable& table, std::uint32_t camera_b_items) {
-    std::uint32_t enabled = 0;
+// True when the enabled rows are exactly the items in `camera_b_items` on CAM-B and the items in `camera_a_items` on CAM-A (sets
+// of D810ItemBit), and the two confirmed codes are the ones above.
+constexpr bool D810ProductTableEnables(const D810WriteTable& table, std::uint32_t camera_b_items, std::uint32_t camera_a_items) {
+    std::uint32_t enabled_b = 0, enabled_a = 0;
     for (const auto& row : table.rows) {
-        if (row.enabled) {
-            if (row.camera != D810Camera::B) return false;
-            enabled |= D810ItemBit(row.item);
-        }
+        if (row.enabled) (row.camera == D810Camera::B ? enabled_b : enabled_a) |= D810ItemBit(row.item);
         if (row.item == D810WriteItem::IsoAuto && row.code != 0xd054) return false;
         if (row.item == D810WriteItem::ShutterSpeed && row.code != 0x500d) return false;
     }
-    return enabled == camera_b_items;
+    return enabled_b == camera_b_items && enabled_a == camera_a_items;
 }
 static_assert(D810ProductTableProblem(kD810ProductWriteTable) == nullptr, "the product write table is outside ADR-0038");
-static_assert(D810ProductTableEnablesOnly(kD810ProductWriteTable,
+static_assert(D810ProductTableEnables(kD810ProductWriteTable,
         D810ItemBit(D810WriteItem::Iso) | D810ItemBit(D810WriteItem::ShutterSpeed) | D810ItemBit(D810WriteItem::Aperture) | D810ItemBit(D810WriteItem::WhiteBalance) |
-            D810ItemBit(D810WriteItem::Metering)),
-    "the product table enables exactly ISO, shutter speed, aperture, white balance and metering on CAM-B and confirms ISO auto 0xD054 and shutter speed 0x500D");
+            D810ItemBit(D810WriteItem::Metering),
+        D810ItemBit(D810WriteItem::Iso)),
+    "stage T2: the product table enables ISO, shutter speed, aperture, white balance and metering on CAM-B and ISO on CAM-A, and confirms ISO auto 0xD054 and shutter speed 0x500D");
 static_assert(D810TextPresent(kD810ProductWriteTable.verified_model), "the product table names the camera model it was confirmed on");
 static_assert(D810TextPresent(kD810ProductWriteTable.verified_firmware), "the product table names the firmware version it was confirmed on");
-static_assert(kD810ProductWriteTable.chosen_values && !D810TextPresent(kD810ProductWriteTable.verified_firmware_a),
-    "stage T1: the product table has picked values on and names no firmware version for CAM-A, so CAM-A is not written");
+static_assert(kD810ProductWriteTable.chosen_values && D810TextPresent(kD810ProductWriteTable.verified_firmware_a) &&
+        kD810ProductWriteTable.verified_firmware_a == kD810ProductWriteTable.verified_firmware,
+    "stage T2: picked values are on, and the table's entry for CAM-A's firmware version is the entry for CAM-B's (the same text, by reference)");
 static_assert(kD810Adr38RevisionAccepted, "the product table enables white balance and metering, which needs the ADR-0038 revision flag");
 
 enum class D810PlanSource : std::uint8_t { CopyAToB, Chosen };
