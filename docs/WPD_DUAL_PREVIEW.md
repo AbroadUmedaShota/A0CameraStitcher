@@ -142,7 +142,7 @@ PC-control mode 0/1の明示比較（mode 1後は0復元確認）とWPD event su
 - 足す code は、D810 が返した property の一覧（libgphoto2 の `cameras/nikon-d810.txt`）にある物だけ。code ごとの型・値の出典と、足さなかった code の理由は [PTP_PROTOCOL_REFERENCES.md](../third_party/PTP_PROTOCOL_REFERENCES.md) の「#427」の節。一覧にない code は読まない（本体が知らない property は、sizeが0のbeginの後にENDを拒否してsessionを止めうるため）。
 - 1項目が読めない時（型の不一致、begin の拒否、空の答え、END の拒否＝`mtp_rejected_at_end`）は、その行だけが `unavailable` になり、ほかの行と終わり方は変わらない。本体が知らない property のときの形（size 0 の begin のあとに END の拒否）だけは、その行で止まり、後ろの行は `not_read` になる。再送はしない。広げた6行は10行の後ろにあるので、10行はこの場合も今までどおり読める。
 - 要約は「一致 N／違う M／読めない K」（画面の状態行と `settings_compare same=N different=M unreadable=K all_match=0|1`）。どちらかの台で読めない行は K に数え、一致に数えない。「左右が全部一致」は、M と K がどちらも 0、両台の読み取りが最後まで終わり、両台を正常に閉じた時だけ出す。読めなかった行が1つでもあれば出ない。
-- 比べているのは表の行だけ。ピクチャーコントロールの調整値（輪郭強調・コントラストなど）、プリセットWBの中身、WBの微調整は、この読み取りでは見えず、比べていない（全部一致の文にも書く）。
+- 比べているのは表の行だけ。色温度（K）の値（WB の行が色温度の種類で両台同じなら、K の値が違っても行は「同じ」になる。K は読んでいない）、ピクチャーコントロールの調整値（輪郭強調・コントラストなど）、プリセットWBの中身、WBの微調整は、この読み取りでは見えず、比べていない（全部一致の文にも書く）。
 - 表の行が増えたので、窓の高さに収まらない時は行の高さを詰め、それでも収まらなければ2ブロックに分けて並べる（`LayoutSettingsTable`）。
 
 **送信gate**（`D810SettingsReadGate`。既存の `AllowedD810PreviewRequest` などは広げていない）

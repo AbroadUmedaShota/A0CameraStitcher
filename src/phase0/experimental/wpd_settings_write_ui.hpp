@@ -755,6 +755,17 @@ int RunSettingsWriteUiSmoke(){
     stop_live();tick();
     check(CanReadSettings() && SettingsWriteButtonShown(settings_copy_button) && IsWindowEnabled(settings_copy_button)!=FALSE); // rows enabled: copying is offered
     check(IsWindowEnabled(settings_reread_button)!=FALSE && !SettingsWriteButtonShown(settings_confirm_button) && !SettingsWriteButtonShown(settings_discard_button));
+    {   // The settings table keeps clear of the shown row of buttons: its last row ends above the buttons' top edge (client bottom - kD810ButtonRowGap), at every height.
+        check(SettingsButtonRowReserve()==kD810ButtonRowGap);
+        bool clear=true;
+        for(int bottom=600;bottom<=1400;++bottom)clear=clear && SettingsTableBottom(16,bottom,SettingsButtonRowReserve())<=bottom-kD810ButtonRowGap;
+        check(clear);
+        for(const int bottom:{960,1000,1040}){   // heights at which the last rows used to lie under the buttons
+            check(SettingsTableBottom(16,bottom,SettingsButtonRowReserve())<=bottom-kD810ButtonRowGap);
+            Log("settings_table_clear_of_buttons client_bottom="+std::to_string(bottom)+" last_row_bottom="+std::to_string(SettingsTableBottom(16,bottom,SettingsButtonRowReserve()))+" without_reserve="+std::to_string(SettingsTableBottom(16,bottom,0))+" buttons_top="+std::to_string(bottom-kD810ButtonRowGap));
+        }
+        check(SettingsTableBottom(16,1000,0)>1000-kD810ButtonRowGap);   // without the reserve the table would lie under the buttons
+    }
     const auto offer=screen->OfferText(true);
     // The "no row" text belongs to a table with no enabled row; the product table does not reach it.
     check(offer.find(L"書ける項目がありません")==std::wstring::npos && offer.find(L"番号（code）")==std::wstring::npos && offer.find(L"確定の前に表示します")!=std::wstring::npos);

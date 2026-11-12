@@ -107,6 +107,8 @@ void LogPreviewChoice(const FixedPreviewChoice& choice){
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
 bool SettingsWriteBusy(); // #416 stage B (wpd_settings_write_ui.hpp)
 bool SettingsPanelOpen(); // the settings panel is in the place of the Live area (#416 stage 3)
+int SettingsButtonRowReserve(); // the row of buttons takes room from the bottom of the settings table (defined below)
+int SettingsTableBottom(std::size_t count,int client_bottom,int reserved_bottom); // bottom edge of the last row the table draws
 #endif
 bool CanFocus(Camera& camera){
     std::lock_guard lock(camera.mutex);
@@ -486,14 +488,33 @@ SettingsTableLayout LayoutSettingsTable(std::size_t count,int available_height){
     layout.shown=std::min<std::size_t>(count,static_cast<std::size_t>(layout.rows_per_block)*2);
     return layout;
 }
+// The room the row of buttons takes from the bottom of the table: the buttons of a build with the settings write path
+// start kD810ButtonRowGap above the bottom of the client area. 0 in a build without that path and while none of the
+// buttons that stand in that row is shown.
+int SettingsButtonRowReserve(){
+#if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
+    if(SettingsWriteButtonShown(settings_copy_button) || SettingsWriteButtonShown(settings_reread_button) || SettingsWriteButtonShown(settings_panel_open_button))return kD810ButtonRowGap;
+#endif
+    return 0;
+}
+// Top of the first table row, and the layout of the table for a client area whose bottom reserved_bottom is kept free.
+int SettingsTableFirstRowY(int client_bottom){return client_bottom/2+88+34+24;}
+SettingsTableLayout LayoutSettingsTableIn(std::size_t count,int client_bottom,int reserved_bottom){
+    return LayoutSettingsTable(count,client_bottom-SettingsTableFirstRowY(client_bottom)-4-reserved_bottom);
+}
+// Bottom edge of the last row the table draws.
+int SettingsTableBottom(std::size_t count,int client_bottom,int reserved_bottom){
+    const auto layout=LayoutSettingsTableIn(count,client_bottom,reserved_bottom);
+    return SettingsTableFirstRowY(client_bottom)+layout.rows_per_block*layout.row_height;
+}
 // The side-by-side table of the two bodies' settings (#416, #427). Display only: nothing here sends a command.
 bool DrawSettingsView(HDC dc,RECT client){
     if(!settings_view)return false;
     const int top=client.bottom/2+88,left=12;
     const wchar_t* title=L"両台のカメラ設定（読み取り専用・カメラの設定は変えていません）";
     TextOutW(dc,left,top,title,lstrlenW(title));
-    const int head_y=top+34,first_y=head_y+24;
-    const auto layout=LayoutSettingsTable(settings_view->rows.size(),client.bottom-first_y-4);
+    const int head_y=top+34,first_y=SettingsTableFirstRowY(client.bottom);
+    const auto layout=LayoutSettingsTableIn(settings_view->rows.size(),client.bottom,SettingsButtonRowReserve());
     const int block_width=(client.right-2*left)/layout.blocks;
     const int label_width=layout.blocks==1?236:std::min(200,block_width/3);
     const int column=std::max<int>(layout.blocks==1?100:60,(block_width-label_width-12)/3);
@@ -534,7 +555,7 @@ void ApplySettingsOutcome(const SettingsReadOutcome& outcome){
         const auto summary=SummarizeD810Comparison(view.rows);
         view.status=L"両台の設定を読みました（読み取りのみ）。"+SettingsCountsText(summary);
         // Said only when no row is different or unreadable. Only the rows of the table were compared.
-        if(outcome.EverythingMatches(summary))view.status+=L"。左右が全部一致（表の項目だけ。ピクチャーコントロールの調整値・プリセットWBの中身・WBの微調整は読めず、比べていません）";
+        if(outcome.EverythingMatches(summary))view.status+=L"。左右が全部一致（表の項目だけ。色温度（K）の値・ピクチャーコントロールの調整値・プリセットWBの中身・WBの微調整は読めず、比べていません）";
         view.status+=L" / 「ライブ再開」を押すと表は消えます。";
     }else{
         view.status=L"設定の読み取りを途中で止めました。読めた項目だけ表示しています。"+SettingsCountsText(SummarizeD810Comparison(view.rows))+L"。";
@@ -1156,7 +1177,7 @@ int RunSettingsUiSmoke(){
         const auto status_has=[&](const wchar_t* text){return capture_status.find(text)!=std::wstring::npos;};
         auto all_same=outcome_of(true);
         ApplySettingsOutcome(all_same);
-        check(status_has(L"一致 16／違う 0／読めない 0") && status_has(L"左右が全部一致") && status_has(L"比べていません"));
+        check(status_has(L"一致 16／違う 0／読めない 0") && status_has(L"左右が全部一致") && status_has(L"色温度") && status_has(L"比べていません"));
         auto one_unreadable=outcome_of(true); // an extended row that B could not read
         for(auto& r:one_unreadable.cameras[1].read.readings)if(r.id==D810SettingId::HdrMode)r=UnavailableD810Setting(D810SettingId::HdrMode,"type_mismatch");
         ApplySettingsOutcome(one_unreadable);
@@ -1180,9 +1201,30 @@ int RunSettingsUiSmoke(){
         check(status_has(L"一致 0／違う 0／読めない 16") && !status_has(L"全部一致"));
         ApplySettingsOutcome(all_same);
         check(settings_view.has_value() && !settings_close_failed);
+        {   // The longest status text (it names what was not compared) stays within the two lines of the status area, at the default and at the smallest write-build width.
+            HDC dc=CreateCompatibleDC(nullptr);
+            if(!dc)check(false);
+            else{
+                for(const int width:{1400,1240}){
+                    RECT need{0,0,width-24,0};DrawTextW(dc,capture_status.c_str(),-1,&need,DT_CALCRECT|DT_LEFT|DT_WORDBREAK|DT_NOPREFIX);
+                    check(need.bottom<=44);Log("settings_status_width="+std::to_string(width)+" height="+std::to_string(need.bottom));
+                }
+                DeleteDC(dc);
+            }
+        }
         // Layout: the sixteen rows fit the test window (1400 x 960) in one column; more rows share two blocks.
         const auto fit=LayoutSettingsTable(settings_view->rows.size(),960-(960/2+88+58)-4);
         check(fit.blocks==1 && fit.shown==16 && fit.row_height==kSettingsCompactRowHeight);
+        {   // With no reserve the table keeps its place: the last row ends above the bottom edge, whatever the height.
+            bool inside=true;
+            for(int bottom=600;bottom<=1400;++bottom){
+                const auto layout=LayoutSettingsTableIn(16,bottom,0);
+                if(layout.shown==16 && SettingsTableFirstRowY(bottom)+layout.rows_per_block*layout.row_height>bottom-4)inside=false;
+            }
+            check(inside && SettingsButtonRowReserve()==0);
+            const auto same=LayoutSettingsTableIn(16,960,0);
+            check(same.blocks==fit.blocks && same.shown==fit.shown && same.row_height==fit.row_height);
+        }
         const auto roomy=LayoutSettingsTable(16,16*kSettingsRowHeight);
         check(roomy.blocks==1 && roomy.shown==16 && roomy.row_height==kSettingsRowHeight);
         const auto crowded=LayoutSettingsTable(30,330);
