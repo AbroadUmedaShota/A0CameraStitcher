@@ -255,7 +255,7 @@ CAM-Aの露出の5項目（露出モード・ISO感度自動制御・ISO・シ�
 **試験**
 
 - `d810_settings_write_contracts`: パネルの開閉・選択・下書き・件数・読み直しと閉じる時の件数・製品の表で、段が開く行のセルだけが選べること・版が違う本体のロック・Mでない本体のロック・コピーの後にパネルが古くなること（`ScreenPanel*`）、計画から確定・実行・結果・止めの文・読み直し・拒否・12行・並び（`ScreenChosen*`）。偽の本体への要求の順（CAM-Bの全部→CAM-Aの全部）も見る。
-- `preview_settings_write_chosen_contracts`（ONのbuildだけ。試験専用のtarget `a0_preview_settings_write_confirm_tests` の `--settings-write-chosen-smoke`）: 窓自身のコードで、ドロップダウンの通知・ボタンの状態・描画・確定の画面が描き終えるまで押せないこと・窓が低い／狭い時に押せないこと・最も長い行の幅・結果の画面・閉じた時のLiveの再開と、それをしない場合（撮影の止め・撮影の失敗・窓を閉じる途中・切断の失敗）を確かめる。製品の表（`InitSettingsWrite`）でも同じ窓を通し、CAM-Aを未確認として読ませた時のセルの状態を見る。読み取りは偽の結果を渡す（カメラを開かない）。
+- `preview_settings_write_chosen_contracts`（ONのbuildだけ。試験専用のtarget `a0_preview_settings_write_confirm_tests` の `--settings-write-chosen-smoke`）: 窓自身のコードで、ドロップダウンの通知・ボタンの状態・描画・確定の画面が描き終えるまで押せないこと・窓が低い／狭い時に押せないこと・最も長い行の幅・結果の画面・閉じた時のLiveの再開と、それをしない場合（撮影の止め・撮影の失敗・窓を閉じる途中・切断の失敗）を確かめる。製品の表（`InitSettingsWrite`）でも同じ窓を通し、CAM-Aを未確認として読ませた時はCAM-Aのセルがすべて選べないこと、CAM-Aを一致として読ませた時は表で有効な行のセルだけが選べて無効な行のセルでは選んでも何も起きないこと（製品の表と、CAM-AのISOだけを開いた試験用の表の両方）を見る。読み取りは偽の結果を渡す（カメラを開かない）。
 - `preview_settings_write_ui_contracts`（`--settings-write-ui-smoke`）: 製品のexeで、パネルを頼んでも読めなければ開かず、Liveが動いている時は撮影の止めがあれば自動では止めず、止めが無ければ停止してから読み、撮影の失敗・窓を閉じる途中では読まずに諦めること。
 - 製品のexeには、試験用の表も、`--settings-write-chosen-smoke` の入口も入らない（`preview_settings_write_binary_contracts` と `preview_settings_write_test_binary_contracts`）。AIは、この画面の値の選択と確定のボタンを、UIの自動操作では押さない（偽の本体の試験の中だけ）。
 

@@ -2856,11 +2856,13 @@ void ProductStage() {
         D810StageMark(product).find(product.verified_firmware) == std::string::npos, "stage: the stage mark says the switch, the number of CAM-A rows and whether CAM-A has a version");
     check(D810StageMark(kAdr38Table) == "chosen_values=0 cam_a_rows=0 cam_a_version=0", "stage: a copy-only table reads as such");
     // The firmware text the table names exists once in the table's header (the compiler pools equal literals, so the pointer check above cannot
-    // see a second copy): CAM-A's entry is CAM-B's, not another literal. Looked for next to the tests; nothing is checked when the header is not there.
+    // see a second copy): CAM-A's entry is CAM-B's, not another literal. Looked for next to the tests; a header that is not found is a failure.
     {
         const auto header = fs::path(__FILE__).parent_path().parent_path() / "src" / "phase0" / "include" / "a0" / "phase0" / "experimental" / "d810_settings_write.hpp";
         std::error_code ignored;
-        if (fs::is_regular_file(header, ignored)) {
+        const bool header_found = fs::is_regular_file(header, ignored);
+        check(header_found, "stage: the table's header is found");
+        if (header_found) {
             const auto text = ReadText(header);
             std::size_t found = 0;
             for (auto at = text.find(product.verified_firmware); at != std::string::npos; at = text.find(product.verified_firmware, at + 1)) ++found;
@@ -4534,7 +4536,7 @@ void ScreenPanelProductTable() {
     const auto opened_cells = product_stage::kEnabledRows;
     check(picked == opened_cells && screen.PanelDirty() == static_cast<int>(opened_cells), "panel, product: one pick in each opened cell is a draft");
     check(screen.PanelCancelAll() == static_cast<int>(opened_cells) && screen.PanelDirty() == 0 && screen.PanelPlanned().empty(), "panel, product: the drafts are cancelled");
-    if (product_stage::kCamAItems == 0) check(tried > 10, "panel, product: the closed cells were tried");
+    if constexpr (product_stage::kCamAItems == 0) check(tried > 10, "panel, product: the closed cells were tried");
     for (const auto item : kD810ChoiceItems)
         if (!product_stage::Opens(D810Camera::B, D810ChoiceWriteItem(item))) check(!screen.PanelPickSameAsA(item) && !screen.PanelSameAsAOffered(item), "panel, product: same-as-A is refused where the CAM-B row is closed");
     check(screen.PanelEntryCount() == 0, "panel, product: no entry left");

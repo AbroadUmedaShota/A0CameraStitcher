@@ -1,8 +1,8 @@
 #pragma once
 // Camera settings write: item table, the fixed write table, write plans and the
 // operation record format (#416 stage B, ADR-0038; the ADR-0041 extension, values
-// chosen per camera and CAM-A rows, is present as code but disabled by the fixed
-// table and by kD810Adr41Accepted; the stages that switch it on are opened one at a time, see
+// chosen per camera and CAM-A rows, is switched on by kD810Adr41Accepted and the
+// fixed table; its rows are opened one stage at a time, see
 // kD810ProductWriteTable).
 //
 // Pure functions only: no Windows headers, no device access, no file I/O. The
@@ -220,7 +220,8 @@ struct D810WriteTable {
     // ADR-0038: copy CAM-A's five exposure items to CAM-B (and, once the ADR-0038
     // revision is accepted, white balance and metering).
     bool copy_a_to_b;
-    // ADR-0041 (Proposed): values chosen by the operator.
+    // ADR-0041 (Accepted): values chosen by the operator. The product table has it on;
+    // which rows a chosen plan can use is decided by the rows that are enabled.
     bool chosen_values;
     // The camera model and firmware version the rows were confirmed on. A body
     // that reports anything else is not written; nullptr means none confirmed.
@@ -281,10 +282,10 @@ constexpr const char* D810WriteTableProblem(const D810WriteTable& table) {
             if (!table.Row(spec.item, camera)) return "missing_row";
     return nullptr;
 }
-// What the product table may hold until ADR-0041 is accepted: rows for CAM-B
-// and the accepted items only (the five of ADR-0038, plus white balance and
-// metering once the ADR-0038 revision is accepted), and chosen values only with the ADR-0041 flag. ADR-0038
-// invariant 2 (CAM-A is never written) holds at compile time until a stage opens a CAM-A row; the rows a stage opens are the ones the static_asserts after the product table name.
+// What the product table may hold: rows for the accepted items only (the five of ADR-0038, plus white balance
+// and metering once the ADR-0038 revision is accepted), and chosen values and CAM-A rows only with the
+// ADR-0041 flag. ADR-0038 invariant 2 (CAM-A is never written) holds at compile time unless a stage opens a
+// CAM-A row; the rows a stage opens are the ones the static_asserts after the product table name.
 //
 // ADR-0041 (`adr41_accepted`: the constant by default, the tests pass the other value to keep the refusals under
 // test): the chosen-values flag and CAM-A rows need it. A CAM-A row is allowed only together with the chosen-values flag
@@ -333,8 +334,9 @@ inline std::vector<D810WriteItem> D810CopyWritableItems(const D810WriteTable& ta
 // recorded with its rows disabled: the plan reads it for its preconditions and
 // its refusals, but nothing writes it. The enabled rows are CAM-B's ISO,
 // shutter speed, aperture, white balance and metering mode (stages 1 to 3), and
-// the firmware version is the one the stage A read reported for CAM-B. From stage T2 of
-// ADR-0041 on, the rows of CAM-A that picked values may use are enabled too, one stage at a time.
+// the firmware version is the one the stage A read reported for CAM-B. The rows of CAM-A that
+// picked values may use are enabled too (ADR-0041 stage T2: ISO; stage T3: the other four, the
+// exposure mode and ISO auto control are not choosable).
 // Enabling another row is a reviewed commit to this table, one stage at a time.
 inline constexpr D810WriteTable kD810ProductWriteTable = [] {
     auto table = D810DisabledWriteTable();
@@ -560,7 +562,8 @@ inline std::string D810PlanProblem(const D810WritePlan& plan, const D810WriteTab
 // The key to a CAM-A write session (D810WriteGateConfig::cam_a_allowed), an own guard apart from the plan's checks:
 // open only for a plan of picked values, under a table that switches picked values on, with a CAM-A firmware version
 // named, and when the table enables the row of every CAM-A step of the plan. A switch alone (`chosen_values`) does
-// not open it.
+// not open it. The key is used only when the plan has a CAM-A step: a plan with none also gets true here (when
+// the first three conditions hold), but no CAM-A session is opened for it, so the value is never used.
 inline bool D810CamAKeyOpen(const D810WritePlan& plan, const D810WriteTable& table) {
     if (plan.source != D810PlanSource::Chosen || !table.chosen_values || !D810TextPresent(table.verified_firmware_a)) return false;
     for (const auto& step : plan.steps)

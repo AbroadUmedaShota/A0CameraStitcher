@@ -1,5 +1,5 @@
 #pragma once
-// The plan of the values an operator picked for each camera (#416, ADR-0041 draft).
+// The plan of the values an operator picked for each camera (#416, ADR-0041).
 //
 // Pure functions only: no Windows headers, no device access, no file I/O, and nothing here can send a command.
 // It turns the picks of the panel draft (D810CameraChoice, d810_settings_choice.hpp) and two fresh reads into a
@@ -28,9 +28,12 @@ namespace a0::phase0::experimental {
 //  - Any refusal refuses the whole plan; the reasons are ASCII tokens "<what>:<item>:<CAM-x>" (or the bare token
 //    for a plan-wide reason). No pick is dropped to let the others through.
 //  - `verified` says which bodies matched the model and firmware the table names for them. A camera that gets a
-//    step must be verified, so CAM-A (whose firmware the product table does not name) is never planned there.
+//    step must be verified, so a plan with a CAM-A step is made only when CAM-A matched the model and firmware
+//    the table names for it (the product table names CAM-B's version for CAM-A, by reference); when it did not,
+//    the whole plan is refused with "body_not_verified:CAM-A", CAM-B's steps included.
 //
-// `table.chosen_values` is the switch: while it is false (the product table) every call is refused.
+// `table.chosen_values` is the switch: while it is false (a table without picked values) every call is refused.
+// Which rows a plan can use is decided by the table's enabled rows (D810PlanProblem).
 inline D810PlanResult BuildD810PerCameraPlan(const D810SettingsSnapshot& a, const D810SettingsSnapshot& b, const D810BodyFlags& verified,
     const std::vector<D810CameraChoice>& choices, const D810WriteTable& table) {
     using namespace d810_plan_detail;
