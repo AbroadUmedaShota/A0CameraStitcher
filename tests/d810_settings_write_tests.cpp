@@ -259,7 +259,7 @@ constexpr D810WriteTable kAdr38Table = Adr38Table();
 static_assert(D810ProductTableProblem(kAdr38Table) == nullptr, "the ADR-0038 test table is a valid product table");
 static_assert(D810EnabledRowCount(kAdr38Table) == 5, "five rows");
 // The ADR-0038 revision (Proposed): CAM-B's rows for white balance and metering on top of the five. A valid
-// table for the contract tests, but not a product table while the revision is not accepted.
+// table for the contract tests; it is a product table only while the revision flag is set (the tests also ask with the flag off).
 constexpr D810WriteTable RevisionTable() {
     auto table = Adr38Table();
     for (auto& row : table.rows)
@@ -268,7 +268,17 @@ constexpr D810WriteTable RevisionTable() {
 }
 constexpr D810WriteTable kRevisionTable = RevisionTable();
 static_assert(D810WriteTableProblem(kRevisionTable) == nullptr && D810EnabledRowCount(kRevisionTable) == 7, "seven rows, a valid table");
-static_assert(!kD810Adr38RevisionAccepted && D810ProductTableProblem(kRevisionTable) != nullptr, "not a product table until the owner accepts the revision");
+static_assert(D810ProductTableProblem(kRevisionTable, false) != nullptr && D810ProductTableProblem(kRevisionTable, true) == nullptr, "a product table only while the revision flag is set");
+// What the product table enables, written out here and not read from the table: a row opened early, or by mistake, fails
+// ProductTable. Table order. Each stage that opens a row changes this list in the same commit.
+const std::vector<D810WriteItem> kExpectedProductItems{D810WriteItem::Iso, D810WriteItem::WhiteBalance, D810WriteItem::Metering};
+// The writable items among `differing` (the items that read differently on the two bodies), in table order.
+std::vector<D810WriteItem> ExpectedProductSteps(const std::vector<D810WriteItem>& differing) {
+    std::vector<D810WriteItem> out;
+    for (const auto item : kExpectedProductItems)
+        if (std::find(differing.begin(), differing.end(), item) != differing.end()) out.push_back(item);
+    return out;
+}
 // Everything on, for the ADR-0041 code paths. Not a valid product table.
 constexpr D810WriteTable Adr41Table() {
     auto table = Adr38Table();
@@ -580,13 +590,17 @@ void DescriptionRules() {
 void ProductTable() {
     const auto& table = kD810ProductWriteTable;
     check(D810ProductTableProblem(table) == nullptr, "product table valid");
-    // The enabled set is exactly this: ISO on CAM-B. Changing the product table makes this check fail on purpose.
+    // The enabled set is exactly this: ISO, white balance and metering on CAM-B. Changing the product table makes this check fail on purpose.
     std::set<std::pair<int, int>> enabled;
     for (const auto& row : table.rows)
         if (row.enabled) enabled.insert({static_cast<int>(row.camera), static_cast<int>(row.item)});
-    check(enabled == std::set<std::pair<int, int>>{{static_cast<int>(D810Camera::B), static_cast<int>(D810WriteItem::Iso)}}, "the product table enables exactly ISO on CAM-B");
-    check(D810EnabledRowCount(table) == 1, "one enabled row");
-    // The codes the table confirms: ISO auto and shutter speed on both cameras, rows disabled.
+    const int cam_b = static_cast<int>(D810Camera::B);
+    check(enabled == std::set<std::pair<int, int>>{{cam_b, static_cast<int>(D810WriteItem::Iso)}, {cam_b, static_cast<int>(D810WriteItem::WhiteBalance)},
+                         {cam_b, static_cast<int>(D810WriteItem::Metering)}},
+        "the product table enables exactly ISO, white balance and metering on CAM-B");
+    check(D810EnabledRowCount(table) == 3 && kExpectedProductItems.size() == 3, "three enabled rows");
+    check(D810CopyWritableItems(table) == kExpectedProductItems, "the writable items are the expected ones, in table order");
+    // The codes the table confirms: ISO auto and shutter speed on both cameras, rows disabled (shutter speed stays disabled until its stage).
     for (const auto camera : {D810Camera::A, D810Camera::B}) {
         const auto* iso_auto = table.Row(D810WriteItem::IsoAuto, camera);
         const auto* shutter = table.Row(D810WriteItem::ShutterSpeed, camera);
@@ -625,20 +639,31 @@ void ProductTable() {
         allowed += ok;
         check(ok == (probe.rows[i].camera == D810Camera::B && D810ItemInProductScope(D810WriteItemOf(probe.rows[i].item))), "allowed rows");
     }
-    check(allowed == 5, "CAM-B x five");
-    // White balance and metering (ADR-0038 revision, Proposed): the rows are in the table, disabled, with their codes; the
-    // product table cannot enable one until the owner accepts the revision and a reviewed commit sets the constant.
-    check(!kD810Adr38RevisionAccepted, "the ADR-0038 revision is not accepted");
+    check(allowed == 7, "CAM-B x the five and the two revision items");
+    // White balance and metering (the ADR-0038 revision): CAM-B's rows are enabled with their codes from the public table, CAM-A's rows
+    // are disabled. The product table accepts them only while the revision flag is set (the tests also ask with the flag off).
+    check(kD810Adr38RevisionAccepted, "the ADR-0038 revision flag is set");
     for (const auto item : {D810WriteItem::WhiteBalance, D810WriteItem::Metering}) {
         for (const auto camera : {D810Camera::A, D810Camera::B}) {
             const auto* row = table.Row(item, camera);
-            check(row && !row->enabled && row->code == (item == D810WriteItem::WhiteBalance ? 0x5005 : 0x500b), "revision rows: present, disabled, code from the public table");
+            check(row && row->enabled == (camera == D810Camera::B) && row->code == (item == D810WriteItem::WhiteBalance ? 0x5005 : 0x500b),
+                "revision rows: CAM-B enabled, CAM-A disabled, code from the public table");
         }
         auto probe = Adr38Table();
         for (auto& row : probe.rows) if (row.camera == D810Camera::B && row.item == item) row.enabled = true;
-        check(std::string(D810ProductTableProblem(probe)) == "extra_item_enabled", "revision row refused in the product table");
+        check(D810ProductTableProblem(probe) == nullptr, "revision row accepted in the product table");
+        check(std::string(D810ProductTableProblem(probe, false)) == "extra_item_enabled", "revision row refused without the revision flag");
         check(D810WriteTableProblem(probe) == nullptr, "revision row valid in a test table");
+        auto cam_a = Adr38Table();
+        for (auto& row : cam_a.rows) if (row.camera == D810Camera::A && row.item == item) row.enabled = true;
+        check(std::string(D810ProductTableProblem(cam_a)) == "cam_a_row_enabled", "a CAM-A revision row is refused whatever the flag says");
     }
+    // The items the next stages open stay disabled in the product table until their own commits.
+    for (const auto item : {D810WriteItem::ExposureMode, D810WriteItem::IsoAuto, D810WriteItem::ShutterSpeed, D810WriteItem::Aperture, D810WriteItem::ExposureCompensation})
+        for (const auto camera : {D810Camera::A, D810Camera::B}) {
+            const auto* row = table.Row(item, camera);
+            check(row && !row->enabled, "the other rows are disabled");
+        }
     check(!D810ItemInProductScope(D810WriteItemOf(D810WriteItem::ExposureCompensation)) && D810WriteItemOf(D810WriteItem::ExposureCompensation).scope == D810ItemScope::Adr41, "compensation stays ADR-0041");
     auto chosen = Adr38Table();
     chosen.chosen_values = true;
@@ -677,8 +702,9 @@ void ControllerTables() {
     for (auto& row : cam_a.rows) if (row.camera == D810Camera::A && row.item == D810WriteItem::Iso) row.enabled = true;
     check(std::string(D810ControllerTableProblem(cam_a, false)) == "cam_a_row_enabled", "product rules: a CAM-A row refused");
     auto extra = kAdr38Table;
-    for (auto& row : extra.rows) if (row.camera == D810Camera::B && row.item == D810WriteItem::WhiteBalance) row.enabled = true;
+    for (auto& row : extra.rows) if (row.camera == D810Camera::B && row.item == D810WriteItem::ExposureCompensation) row.enabled = true;
     check(std::string(D810ControllerTableProblem(extra, false)) == "extra_item_enabled", "product rules: an extra item refused");
+    check(D810ControllerTableProblem(kRevisionTable, false) == nullptr, "product rules: white balance and metering rows pass with the revision flag");
     check(D810ControllerTableProblem(kAdr41Table, true) == nullptr, "test tables: the ADR-0041 paths can be built");
     auto broken = kAdr38Table;
     broken.rows[0].code = 0x1234;
@@ -686,8 +712,8 @@ void ControllerTables() {
     {
         // The product entry point holds the product table.
         Bench bench(kProduct);
-        check(bench.controller->Status().enabled_rows == 1, "product entry: one row");
-        check(bench.controller->Status().write_allowed && bench.controller->Status().capture_allowed, "one row enabled, no block: copying is offered");
+        check(bench.controller->Status().enabled_rows == 3, "product entry: three rows");
+        check(bench.controller->Status().write_allowed && bench.controller->Status().capture_allowed, "rows enabled, no block: copying is offered");
         auto none = kAdr38Table;
         for (auto& row : none.rows) row.enabled = false;
         Bench empty(none);
@@ -695,7 +721,7 @@ void ControllerTables() {
         const auto copy = bench.Copy();
         check(copy.Ok() && copy.plan->steps.size() == 1 && copy.plan->steps[0].item == D810WriteItem::Iso && copy.plan->steps[0].camera == D810Camera::B && bench.Writes() == 0,
             "product entry: only ISO on CAM-B can be planned");
-        check(bench.Restarted().Status().enabled_rows == 1, "product entry after a restart");
+        check(bench.Restarted().Status().enabled_rows == 3, "product entry after a restart");
     }
     {
         // The table is held by value: a temporary does not dangle.
@@ -721,7 +747,7 @@ void FilesEnableNothing() {
         "product copy: ISO on CAM-B and nothing else, whatever the files and the variable say");
     for (const auto target : {D810WriteTarget::A, D810WriteTarget::B, D810WriteTarget::Both})
         check(!bench.Chosen({{D810WriteItem::Iso, target, 200}}).Ok(), "product chosen refused");
-    check(bench.controller->Status().enabled_rows == 1, "status: one row");
+    check(bench.controller->Status().enabled_rows == 3, "status: three rows");
     SetEnvironmentVariableW(L"A0_SETTINGS_WRITE_ENABLE", nullptr);
     check(bench.Writes() == 0 && bench.a.write_datas + bench.b.write_datas == 0 && bench.a.forbidden + bench.b.forbidden == 0, "only reads, no write");
 }
@@ -1008,7 +1034,8 @@ void RevisionCopyPlans() {
         const auto seven = D810BlockItems(kRevisionTable);
         check(seven.size() == 7 && std::find(seven.begin(), seven.end(), Item::WhiteBalance) != seven.end() && std::find(seven.begin(), seven.end(), Item::Metering) != seven.end() &&
             std::find(seven.begin(), seven.end(), Item::ExposureCompensation) == seven.end(), "seven block items once the rows are enabled");
-        check(D810BlockItems(kD810ProductWriteTable).size() == 5, "the product table: five block items");
+        check(D810BlockItems(kD810ProductWriteTable) == std::vector<Item>{Item::ExposureMode, Item::IsoAuto, Item::Iso, Item::ShutterSpeed, Item::Aperture, Item::WhiteBalance, Item::Metering},
+            "the product table: the release compares seven items (the five and white balance and metering)");
     }
 }
 void ChosenPlans() {
@@ -1633,22 +1660,192 @@ void HappyCopy() {
     // The plan was consumed.
     check(bench.controller->Execute(0, bench.access, bench.options).reason == "plan_not_confirmed", "plan consumed");
 }
-// The product table end to end on the fakes: one begin, data and END, all on CAM-B's ISO code; the other items are not touched.
+// A product-table bench whose CAM-B reports the table's model and version. A reads differently from B on every writable item
+// (ISO, white balance, metering) and on the two that are not enabled (shutter speed, aperture).
+void PrepareProductBench(Bench& bench) {
+    bench.access.model[1] = kD810ProductWriteTable.verified_model;
+    bench.access.firmware[1] = kD810ProductWriteTable.verified_firmware;
+    bench.a.props[0x5005].current = 4;
+    bench.a.props[0x500b].current = 2;
+}
+// The writes the product table makes, in the order it makes them, written out here (not read from the table): the item, its
+// code on the body, the value A holds and a value B could answer with instead (to fake a mismatch). Table order.
+struct ProductWrite { D810WriteItem item; std::uint16_t code; std::int64_t a_value; std::int64_t other_value; };
+const std::vector<ProductWrite> kExpectedProductWrites{
+    {D810WriteItem::Iso, 0x500f, 64, 200},
+    {D810WriteItem::WhiteBalance, 0x5005, 4, 5},
+    {D810WriteItem::Metering, 0x500b, 2, 4},
+};
+// The product table end to end on the fakes: for every enabled item one begin, data and END, on CAM-B's own code, in the table's
+// order; CAM-A is only read; the items whose rows are not enabled are not touched.
 void ProductRun() {
     {
         Bench bench(kProduct);
-        bench.access.firmware[1] = kD810ProductWriteTable.verified_firmware;
+        PrepareProductBench(bench);
         const auto run = bench.CopyRun();
-        check(run.verdict == D810WriteVerdict::Match && run.sent == 1 && run.reason.empty(), "product run: matched with one write");
-        check(bench.b.props[0x500f].current == 64 && bench.b.props[0x500d].current == 333 && bench.b.props[0x5007].current == 560, "product run: only ISO changed on B");
-        check(bench.b.write_begins == 1 && bench.b.write_datas == 1 && bench.b.write_ends == 1 && bench.b.begins_by_code.size() == 1 && bench.b.begins_by_code.count(0x500f) == 1, "product run: one write, to the ISO code");
+        const auto n = kExpectedProductWrites.size();
+        check(run.verdict == D810WriteVerdict::Match && run.sent == n && run.reason.empty(), "product run: matched, one write per enabled item");
+        check(bench.b.props[0x500d].current == 333 && bench.b.props[0x5007].current == 560, "product run: shutter speed and aperture are left as B has them");
+        for (const auto& write : kExpectedProductWrites)
+            check(bench.b.props[write.code].current == write.a_value && bench.b.begins_by_code[write.code] == 1, "product run: B reads A's value, written once");
+        check(bench.b.write_begins == static_cast<int>(n) && bench.b.write_datas == static_cast<int>(n) && bench.b.write_ends == static_cast<int>(n) && bench.b.begins_by_code.size() == n,
+            "product run: one begin, data and END each, and no other code");
         check(bench.a.write_begins == 0 && bench.a.write_datas == 0 && bench.a.write_ends == 0 && bench.a.forbidden == 0 && bench.b.forbidden == 0, "product run: A is only read");
+        check(bench.a.begins_by_code.empty() && NoResend(bench.b) && !bench.access.overlap, "product run: nothing to A, no resend, never both open");
+        // The order of the writes is the table's order.
+        std::vector<std::uint16_t> order;
+        for (const auto& entry : bench.b.trace)
+            if (entry.size() == 10 && entry.compare(0, 5, "1016(") == 0 && entry[9] == ')') order.push_back(static_cast<std::uint16_t>(std::stoul(entry.substr(5, 4), nullptr, 16)));
+        std::vector<std::uint16_t> expected_order;
+        for (const auto& write : kExpectedProductWrites) expected_order.push_back(write.code);
+        check(order == expected_order, "product run: the write order is the table's");
+        const auto journal = bench.Journal();
+        check(Contains(journal, "ev=step i=0 alias=CAM-B item=iso code=0x500f before=0x0064 value=0x0040") &&
+                Contains(journal, "ev=step i=1 alias=CAM-B item=white_balance code=0x5005 before=0x0002 value=0x0004") &&
+                Contains(journal, "ev=step i=2 alias=CAM-B item=metering code=0x500b before=0x0003 value=0x0002"),
+            "product run: the record names each step");
+        check(Contains(journal, "verdict=match sent=3") && !HasIdentifierShape(journal), "product run: the record ends with a match");
+        check(bench.controller->CaptureAllowed() && bench.Restarted().CaptureAllowed(), "product run: nothing held");
+    }
+    {
+        // A failure or an unknown end at any item: nothing after it is sent, nothing is resent, capture is held across a restart.
+        for (std::size_t k = 0; k < kExpectedProductWrites.size(); ++k) {
+            for (const bool unknown : {true, false}) {
+                Bench bench(kProduct);
+                PrepareProductBench(bench);
+                const auto& failing = kExpectedProductWrites[k];
+                if (unknown) bench.b.begin_reject.insert(failing.code);
+                else bench.b.apply_as[failing.code] = failing.other_value;
+                const auto run = bench.CopyRun();
+                const std::string n = std::string("product run, item ") + std::to_string(k) + (unknown ? " unknown" : " mismatch");
+                check(run.verdict == (unknown ? D810WriteVerdict::Unknown : D810WriteVerdict::Mismatch) && run.sent == k + 1, (n + ": stops there").c_str());
+                bool later_sent = false;
+                for (std::size_t later = k + 1; later < kExpectedProductWrites.size(); ++later) later_sent |= bench.b.begins_by_code.count(kExpectedProductWrites[later].code) != 0;
+                check(!later_sent && NoResend(bench.b) && bench.a.write_begins == 0, (n + ": nothing after it, no resend, nothing to A").c_str());
+                const auto expected = unknown ? D810CaptureBlock::Unknown : D810CaptureBlock::Mismatch;
+                check(!bench.controller->CaptureAllowed() && bench.controller->Block() == expected && bench.Restarted().Block() == expected, (n + ": capture held, also after a restart").c_str());
+            }
+        }
     }
     {
         // A body that reports any other firmware version is not written.
         Bench bench(kProduct);
         const auto run = bench.CopyRun();
         check(run.sent == 0 && run.reason == "body_not_verified:CAM-B" && bench.Writes() == 0, "product run: another firmware, nothing sent");
+    }
+}
+// White balance and metering through the product table: the values a copy cannot carry are never written, and are listed with
+// their reason; the rest of the plan stands. The release of a capture block compares seven items.
+void ProductRevisionItems() {
+    using Item = D810WriteItem;
+    const auto skipped_reason = [](const D810PlanResult& plan, Item item) {
+        if (!plan.Ok()) return std::string("(no plan)");
+        for (const auto& [skipped, reason] : plan.plan->skipped)
+            if (skipped == item) return reason;
+        return std::string("(not listed)");
+    };
+    const auto steps_of = [](const D810PlanResult& plan) {
+        std::vector<Item> items;
+        if (plan.Ok()) for (const auto& step : plan.plan->steps) items.push_back(step.item);
+        return items;
+    };
+    // The kinds that lean on content held in the body: never copied, whatever B reads, and never sent.
+    for (const std::int64_t value : {0x0001LL, 0x0003LL, 0x8012LL, 0x8013LL}) {
+        for (const std::int64_t on_b : {2LL, value}) {
+            Bench bench(kProduct);
+            PrepareProductBench(bench);
+            bench.a.props[0x5005].current = value;
+            bench.b.props[0x5005].current = on_b;
+            const auto plan = bench.Copy();
+            const std::string n = "white balance " + D810Hex(static_cast<std::uint64_t>(value), 4) + " on A" + (on_b == value ? ", the same on B" : "");
+            check(plan.Ok() && skipped_reason(plan, Item::WhiteBalance) == "value_content_dependent", (n + ": listed as content dependent").c_str());
+            check(steps_of(plan) == ExpectedProductSteps({Item::Iso, Item::Metering}), (n + ": the other items stay in the plan").c_str());
+            const auto run = bench.Run(plan);
+            check(run.verdict == D810WriteVerdict::Match && bench.b.begins_by_code.count(0x5005) == 0 && bench.b.props[0x5005].current == on_b && bench.a.write_begins == 0,
+                (n + ": never written, B keeps its own value").c_str());
+        }
+    }
+    {
+        // A value the item does not name.
+        for (const std::int64_t value : {0LL, 8LL, 0x8014LL, 0x8016LL, 0xffffLL}) {
+            Bench bench(kProduct);
+            PrepareProductBench(bench);
+            bench.a.props[0x5005].current = value;
+            const auto plan = bench.Copy();
+            check(plan.Ok() && skipped_reason(plan, Item::WhiteBalance) == "value_not_listed" && steps_of(plan) == ExpectedProductSteps({Item::Iso, Item::Metering}), "white balance: a value without a name is listed, not written");
+        }
+        for (const std::int64_t value : {0LL, 5LL, 0x8010LL, 0xffffLL}) {
+            Bench bench(kProduct);
+            PrepareProductBench(bench);
+            bench.a.props[0x500b].current = value;
+            const auto plan = bench.Copy();
+            check(plan.Ok() && skipped_reason(plan, Item::Metering) == "value_not_listed" && steps_of(plan) == ExpectedProductSteps({Item::Iso, Item::WhiteBalance}), "metering: a mode outside 1 to 4 is listed, not written");
+        }
+    }
+    {
+        // The kinds a copy may carry are all written (B advertises them): Automatic and Fluorescent stay in the list.
+        for (const std::int64_t value : {2LL, 4LL, 5LL, 6LL, 7LL, 0x8010LL}) {
+            Bench bench(kProduct);
+            PrepareProductBench(bench);
+            bench.b.props[0x5005].current = value == 2 ? 4 : 2;
+            bench.a.props[0x5005].current = value;
+            const auto run = bench.CopyRun();
+            check(run.verdict == D810WriteVerdict::Match && bench.b.props[0x5005].current == value && bench.b.begins_by_code[0x5005] == 1, "white balance: a named kind is written once");
+        }
+        for (const std::int64_t value : {1LL, 2LL, 3LL, 4LL}) {
+            Bench bench(kProduct);
+            PrepareProductBench(bench);
+            bench.b.props[0x500b].current = value == 3 ? 2 : 3;
+            bench.a.props[0x500b].current = value;
+            const auto run = bench.CopyRun();
+            check(run.verdict == D810WriteVerdict::Match && bench.b.props[0x500b].current == value && bench.b.begins_by_code[0x500b] == 1, "metering: modes 1 to 4 are written once");
+        }
+    }
+    {
+        // B does not advertise A's value: only that item is left out, with its reason; the rest of the plan stands.
+        Bench bench(kProduct);
+        PrepareProductBench(bench);
+        bench.b.props[0x5005].values = {2, 5};
+        bench.b.props[0x500b].values = {1, 3};
+        const auto plan = bench.Copy();
+        check(plan.Ok() && skipped_reason(plan, Item::WhiteBalance) == "value_not_advertised" && skipped_reason(plan, Item::Metering) == "value_not_advertised" &&
+                steps_of(plan) == ExpectedProductSteps({Item::Iso}),
+            "not advertised by B: left out with the reason, the plan stands");
+        // B cannot write them, or answers another type, or cannot be read.
+        Bench other(kProduct);
+        PrepareProductBench(other);
+        other.b.props[0x5005].get_set = 0;
+        other.b.props[0x500b].type = 6;
+        const auto plan2 = other.Copy();
+        check(plan2.Ok() && skipped_reason(plan2, Item::WhiteBalance) == "not_writable" && skipped_reason(plan2, Item::Metering) == "unreadable" && steps_of(plan2) == ExpectedProductSteps({Item::Iso}),
+            "not writable or another type: left out, the plan stands");
+    }
+    {
+        // The release of a capture block compares seven items: white balance and metering hold a block.
+        Bench bench(kProduct);
+        PrepareProductBench(bench);
+        bench.b.apply_as[0x5005] = 5;
+        const auto run = bench.CopyRun();
+        check(run.verdict == D810WriteVerdict::Mismatch && run.sent == 2 && bench.b.begins_by_code.count(0x500b) == 0, "release: the white balance mismatch stops the run");
+        // B reads A's exposure items now, white balance and metering still differ.
+        bench.b.props[0x500f].current = 64;
+        bench.b.props[0x500d].current = 1667;
+        bench.b.props[0x5007].current = 800;
+        const auto first = bench.controller->Reread(bench.access, bench.options);
+        check(!first.check.released && first.check.differences == std::vector<std::string>{"white_balance", "metering"} && !bench.controller->CaptureAllowed(),
+            "release: white balance and metering are compared and hold the block");
+        bench.b.props[0x5005].current = 4;
+        const auto second = bench.controller->Reread(bench.access, bench.options);
+        check(!second.check.released && second.check.differences == std::vector<std::string>{"metering"}, "release: metering alone still holds it");
+        bench.b.props[0x500b].current = 2;
+        const auto third = bench.controller->Reread(bench.access, bench.options);
+        check(third.check.released && bench.controller->CaptureAllowed() && bench.Restarted().CaptureAllowed(), "release: all seven read the same, the block is released");
+        // A Preset on A is unknown, never a match: the release stays held while the colors cannot be compared.
+        bench.a.props[0x5005].current = 0x8013;
+        bench.b.props[0x5005].current = 0x8013;
+        bench.b.apply_as.clear();
+        const auto preset = bench.controller->Reread(bench.access, bench.options);
+        check(!preset.check.released && preset.check.differences == std::vector<std::string>{"white_balance:content_dependent"}, "release: a Preset is unknown, not a match");
     }
 }
 // The check of the body at the plan's read (not only at the send): a CAM-B that is not the model and firmware the
@@ -2517,14 +2714,14 @@ void ScreenRefusals() {
     {
         // The product table has one row: copy is offered, and the no-row reason is not the text shown.
         ScreenBench s(kProduct);
-        check(s.screen->Status().enabled_rows == 1 && s.screen->CopyOffered(true) && !s.screen->CopyOffered(false), "screen: product table, copy offered when ready");
+        check(s.screen->Status().enabled_rows == 3 && s.screen->CopyOffered(true) && !s.screen->CopyOffered(false), "screen: product table, copy offered when ready");
         const auto text = s.screen->OfferText(true);
         check(text.find(L"書ける項目がありません") == std::wstring::npos && text.find(L"番号（code）") == std::wstring::npos, "screen: product table, not the no-row reason");
         // What is read and what is written are told apart: the writable items are named from the table.
-        check(text.find(L"読みます") != std::wstring::npos && text.find(L"CAM-B に書くのは ISO感度 だけで、ほかは読むだけです") != std::wstring::npos &&
+        check(text.find(L"読みます") != std::wstring::npos && text.find(L"CAM-B に書くのは ISO感度・ホワイトバランス・測光 だけで、ほかは読むだけです") != std::wstring::npos &&
                 text.find(L"確定の前に表示します") != std::wstring::npos,
-            "screen: product table, the offer names the one writable item");
-        check(s.screen->Status().writable_items == std::vector<D810WriteItem>{D810WriteItem::Iso}, "screen: product table, writable items");
+            "screen: product table, the offer names the writable items");
+        check(s.screen->Status().writable_items == kExpectedProductItems, "screen: product table, writable items");
         check(s.bench.access.opens[0] + s.bench.access.opens[1] == 0 && s.bench.Writes() == 0, "screen: product table, nothing opened by looking");
     }
     {
@@ -2582,6 +2779,45 @@ void ScreenBodyNotVerified() {
         // The same screen with the matching version puts the confirmation up.
         ScreenBench s;
         check(s.Copy() && s.screen->ConfirmationShown(), "screen: a matching body gets its confirmation");
+    }
+}
+// The confirmation of the product table: ISO, white balance and metering, the notice of what a white balance copy does not
+// carry on the white balance line, and no more lines than the window's limit.
+void ScreenProductRows() {
+    const std::wstring note = L"（種類だけを写します。微調整・自動の型・蛍光灯の型は写りません）";
+    const auto count_note = [&](const D810WriteScreenView* view) {
+        std::size_t n = 0;
+        if (view) for (const auto& line : view->lines) n += line.find(note) != std::wstring::npos;
+        return n;
+    };
+    {
+        ScreenBench s(kProduct);
+        PrepareProductBench(s.bench);
+        check(s.Copy() && s.screen->ConfirmationShown(), "product screen: the confirmation is up");
+        const auto* view = s.screen->View();
+        // Three notices, the three steps, the heading and the two items left out (shutter speed, aperture), the closing line.
+        check(view && view->lines.size() == 10 && view->lines.size() <= D810WriteViewMaxLines(), "product screen: ten lines, within the window's limit");
+        check(Shows(view, L"ISO感度: CAM-B の今の値 100 → 書く値 64") && Shows(view, L"ホワイトバランス: CAM-B の今の値 Automatic → 書く値 Daylight") &&
+                Shows(view, L"測光: CAM-B の今の値 Multi-pattern → 書く値 Center-weighted"),
+            "product screen: the three items with B's value now and the value to write");
+        check(count_note(view) == 1 && view && view->lines.size() > 4 && view->lines[4].find(L"ホワイトバランス:") != std::wstring::npos && view->lines[4].find(note) != std::wstring::npos,
+            "product screen: the notice is on the white balance line, once");
+        check(Shows(view, L"シャッター速度: 表で無効の項目です") && Shows(view, L"絞り: 表で無効の項目です"), "product screen: shutter speed and aperture are left out with the table's reason");
+        check(s.Confirm() && Shows(s.screen->View(), L"一致") && s.bench.Writes() == 3 && NoResend(s.bench.b) && s.bench.a.write_begins == 0, "product screen: three items written once");
+        check(s.bench.b.props[0x5005].current == 4 && s.bench.b.props[0x500b].current == 2 && s.bench.b.props[0x500d].current == 333 && s.bench.b.props[0x5007].current == 560,
+            "product screen: B reads A's values for the three, the others as before");
+        check(s.screen->OfferText(true).find(L"CAM-B に書くのは ISO感度・ホワイトバランス・測光 だけで") != std::wstring::npos, "product screen: the offer names the three items");
+    }
+    {
+        // A kind a copy cannot carry: no step and no notice for it, listed with what to do; the rest is confirmable.
+        ScreenBench s(kProduct);
+        PrepareProductBench(s.bench);
+        s.bench.a.props[0x5005].current = 0x8013;
+        check(s.Copy() && s.screen->ConfirmationShown(), "product screen, Preset: the confirmation is up");
+        const auto* view = s.screen->View();
+        check(view && view->lines.size() == 10 && count_note(view) == 0, "product screen, Preset: no white balance step, so no notice");
+        check(Shows(view, L"ホワイトバランス: 本体に登録した内容") && Shows(view, L"B の本体で合わせてください") && !Shows(view, L"ホワイトバランス: CAM-B の今の値"), "product screen, Preset: listed with the reason");
+        check(s.Confirm() && s.bench.Writes() == 2 && s.bench.b.begins_by_code.count(0x5005) == 0, "product screen, Preset: written without the white balance");
     }
 }
 void ScreenSkippedShown() {
@@ -2753,7 +2989,7 @@ void ScreenRevision() {
         if (view && view->lines.size() == 11) {
             check(view->lines[0].find(L"自動では元に戻りません") == 0 && view->lines[1].find(L"再送しません") != std::wstring::npos && view->lines[2].find(L"項目:") == 0, "revision screen: the notices come first");
             check(view->lines[8].find(L"ホワイトバランス: CAM-B の今の値 Automatic → 書く値 Daylight") != std::wstring::npos &&
-                view->lines[8].find(L"種類だけを写します") != std::wstring::npos && view->lines[8].find(L"微調整は写りません") != std::wstring::npos, "revision screen: white balance, the kind only");
+                view->lines[8].find(L"種類だけを写します") != std::wstring::npos && view->lines[8].find(L"微調整・自動の型・蛍光灯の型は写りません") != std::wstring::npos, "revision screen: white balance, the kind only");
             check(view->lines[9].find(L"測光: CAM-B の今の値 Multi-pattern → 書く値 Center-weighted") != std::wstring::npos, "revision screen: metering with its name");
             check(view->lines[3].find(L"露出モード:") != std::wstring::npos, "revision screen: the table's order");
         }
@@ -2922,6 +3158,7 @@ int main() {
     run("OtherGatesStillRefuseWrites", OtherGatesStillRefuseWrites);
     run("HappyCopy", HappyCopy);
     run("ProductRun", ProductRun);
+    run("ProductRevisionItems", ProductRevisionItems);
     run("PlanReadChecksTheBody", PlanReadChecksTheBody);
     run("BodyAndConfirmation", BodyAndConfirmation);
     run("RecordMustBeWrittenFirst", RecordMustBeWrittenFirst);
@@ -2940,6 +3177,7 @@ int main() {
     run("ScreenCopyFlow", ScreenCopyFlow);
     run("ScreenRefusals", ScreenRefusals);
     run("ScreenBodyNotVerified", ScreenBodyNotVerified);
+    run("ScreenProductRows", ScreenProductRows);
     run("ScreenSkippedShown", ScreenSkippedShown);
     run("ScreenBlockAndReread", ScreenBlockAndReread);
     run("ScreenPartialFailure", ScreenPartialFailure);

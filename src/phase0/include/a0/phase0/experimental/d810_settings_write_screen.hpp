@@ -141,8 +141,9 @@ inline std::wstring D810WriteReasonText(std::string_view token) {
 inline std::wstring D810WriteStepLine(const D810WriteStep& step) {
     std::wstring line = std::wstring(D810WriteItemLabel(step.item)) + L": CAM-B の今の値 " + D810WriteValueText(step.code, step.before) + L" → 書く値 " +
         D810WriteValueText(step.code, step.value);
-    // The kind only: the fine adjustment of each kind is another property and is not copied.
-    if (step.item == D810WriteItem::WhiteBalance) line += L"（種類だけを写します。微調整は写りません）";
+    // The kind only: the fine adjustment of each kind, the type of Automatic and the type of Fluorescent are other
+    // properties and are not copied. The notice is on the step's own line (the line count of a confirmation is unchanged).
+    if (step.item == D810WriteItem::WhiteBalance) line += L"（種類だけを写します。微調整・自動の型・蛍光灯の型は写りません）";
     return line;
 }
 // One item a plan leaves out, with the reason.

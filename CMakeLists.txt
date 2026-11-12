@@ -1243,8 +1243,8 @@ if(BUILD_TESTING)
         option(A0_BUILD_WPD_SETTINGS_WRITE "Build the camera settings write path into the development preview (#416 stage B)" OFF)
         if(A0_BUILD_WPD_SETTINGS_WRITE)
             message(WARNING "A0_BUILD_WPD_SETTINGS_WRITE=ON: the development preview carries the camera settings write path "
-                "(#416 stage B, ADR-0038; its window title and first log line say so). The fixed product table enables one row (ISO on CAM-B), "
-                "so it can write that one setting, after a confirmation on the screen. Keep this OFF in any build used on the real bodies until "
+                "(#416 stage B, ADR-0038; its window title and first log line say so). The fixed product table enables a few CAM-B rows (see kD810ProductWriteTable), "
+                "so it can write only those settings, after a confirmation on the screen. Keep this OFF in any build used on the real bodies until "
                 "the AGENTS.md exception is in place.")
             target_compile_definitions(A0CameraStitcher.WpdDualPreview PRIVATE A0_ENABLE_WPD_SETTINGS_WRITE=1)
             target_link_libraries(A0CameraStitcher.WpdDualPreview PRIVATE shell32)
