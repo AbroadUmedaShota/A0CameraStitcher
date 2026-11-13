@@ -167,7 +167,9 @@ void LogPreviewChoice(const FixedPreviewChoice& choice){
 bool SettingsWriteBusy(); // #416 stage B (wpd_settings_write_ui.hpp)
 bool SettingsPanelOpen(); // the settings panel is in the place of the Live area (#416 stage 3)
 int SettingsButtonRowReserve(); // the row of buttons takes room from the bottom of the settings table (defined below)
-int SettingsTableBottom(std::size_t count,int client_bottom,int reserved_bottom); // bottom edge of the last row the table draws
+int SettingsTableBottom(std::size_t count,int client_bottom,int reserved_bottom,int lower_shift); // bottom edge of the last row the table draws
+int PreviewLowerShift(int client_width); // how far the rows of buttons push the lower half down (defined below)
+int PreviewTopShift(int client_width); // the same for the two Live panes (defined below)
 #endif
 void CheckButtonLayouts(const std::function<void(bool)>& check); // the button layout checks of the window smokes (defined before them)
 #if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
@@ -621,14 +623,14 @@ int SettingsButtonRowReserve(){
     return 0;
 }
 // Top of the first table row, and the layout of the table for a client area whose bottom reserved_bottom is kept free.
-int SettingsTableFirstRowY(int client_bottom,int lower_shift=0){return client_bottom/2+88+lower_shift+34+24;}
-SettingsTableLayout LayoutSettingsTableIn(std::size_t count,int client_bottom,int reserved_bottom,int lower_shift=0){
+int SettingsTableFirstRowY(int client_bottom,int lower_shift){return client_bottom/2+88+lower_shift+34+24;}
+SettingsTableLayout LayoutSettingsTableIn(std::size_t count,int client_bottom,int reserved_bottom,int lower_shift){
     return LayoutSettingsTable(count,client_bottom-SettingsTableFirstRowY(client_bottom,lower_shift)-4-reserved_bottom);
 }
 // Bottom edge of the last row the table draws.
-int SettingsTableBottom(std::size_t count,int client_bottom,int reserved_bottom){
-    const auto layout=LayoutSettingsTableIn(count,client_bottom,reserved_bottom);
-    return SettingsTableFirstRowY(client_bottom)+layout.rows_per_block*layout.row_height;
+int SettingsTableBottom(std::size_t count,int client_bottom,int reserved_bottom,int lower_shift){
+    const auto layout=LayoutSettingsTableIn(count,client_bottom,reserved_bottom,lower_shift);
+    return SettingsTableFirstRowY(client_bottom,lower_shift)+layout.rows_per_block*layout.row_height;
 }
 // The side-by-side table of the two bodies' settings (#416, #427). Display only: nothing here sends a command.
 bool DrawSettingsView(HDC dc,RECT client){
@@ -1631,7 +1633,7 @@ bool CheckButtonLayoutAt(int width,int height,const std::function<void(bool)>& c
 }
 // Called at the end of a window smoke: the width a window can really have on a narrow screen (about 1000 in the client area) and a wide one.
 void CheckButtonLayouts(const std::function<void(bool)>& check){
-    for(const int width:{1000,1032,1064,1400,1920})if(!CheckButtonLayoutAt(width,1800,check))check(false);
+    for(const int width:{1000,1024,1056,1400,1920})if(!CheckButtonLayoutAt(width,1800,check))check(false);
 }
 #include "wpd_dual_preview_af_smoke.hpp"
 #if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
@@ -1882,8 +1884,8 @@ int RunSettingsUiSmoke(){
         {   // With no reserve the table keeps its place: the last row ends above the bottom edge, whatever the height.
             bool inside=true;
             for(int bottom=600;bottom<=1400;++bottom){
-                const auto layout=LayoutSettingsTableIn(16,bottom,0);
-                if(layout.shown==16 && SettingsTableFirstRowY(bottom)+layout.rows_per_block*layout.row_height>bottom-4)inside=false;
+                const auto layout=LayoutSettingsTableIn(16,bottom,0,PreviewLowerShift(1400));
+                if(layout.shown==16 && SettingsTableFirstRowY(bottom,PreviewLowerShift(1400))+layout.rows_per_block*layout.row_height>bottom-4)inside=false;
             }
             check(inside && SettingsButtonRowReserve()==0);
             const auto same=LayoutSettingsTableIn(16,960,0,PreviewLowerShift(1400));

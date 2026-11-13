@@ -45,7 +45,7 @@ int main(){
         Check(plan.lower_shift==kLowerRowPitch && kLowerSharedTitleRow==kLowerTitleRow+plan.lower_shift,"wide: the content is one row lower than the places before the status text had its own rows"+tag);
     }
     // Narrower windows wrap. Nothing leaves the window, nothing overlaps, and the content under the buttons is pushed below them.
-    for(const int width:{900,1000,1064,1100,1240,1300,1384,1399}){
+    for(const int width:{900,1000,1056,1100,1240,1300,1384,1399}){
         const auto plan=PlanPreviewButtons(width);
         const std::string tag=" width="+std::to_string(width);
         const int pane=width/2;
@@ -67,7 +67,7 @@ int main(){
         Check(plan.lower_shift==0 || bottom==kLowerButtonsTop+kLowerRowPitch*plan.lower_rows-(kLowerRowPitch-kLayoutButtonHeight),"shift equals the rows added"+tag);
     }
     // The status text never meets a button at any width: it ends above the first row of buttons.
-    for(const int width:{900,1000,1032,1064,1100,1240,1384,1399,1400,1920}){
+    for(const int width:{900,1000,1024,1056,1100,1240,1384,1399,1400,1920}){
         const auto plan=PlanPreviewButtons(width);
         const LayoutBox status{12,kLowerStatusTop,width-24,kLowerStatusBottom-kLowerStatusTop,0};
         for(const auto& box:plan.lower)Check(!Overlap(status,box),"status text clear of the buttons width="+std::to_string(width));

@@ -136,15 +136,18 @@ bool SettingsWriteConfirmPressable(HWND window){
     RECT rect{};
     if(!GetClientRect(window,&rect))return false;
     const auto& screen=*settings_write->screen;
-    return D810ConfirmPressable(screen.View(),screen.ViewSerial(),settings_write_drawn_serial,rect.right,rect.bottom);
+    return D810ConfirmPressable(screen.View(),screen.ViewSerial(),settings_write_drawn_serial,rect.right,rect.bottom,PreviewLowerShift(rect.right));
 }
 // The window never gets smaller than the one that holds the longest confirmation (kD810WriteMinClientHeight) and the
 // button row (kD810WriteMinClientWidth), but never more than the work area of the screen it is on. A screen too
 // small for it cannot confirm: the button stays disabled (no row of the confirmation is cut and confirmed).
 bool settings_write_min_size_enabled=true;
+// The confirmation stands under the rows of buttons (PreviewLowerShift), so the window that shows its longest form is taller
+// than kD810WriteMinClientHeight, which is for a window with no wrapped row.
+int SettingsWriteMinClientHeight(){return D810WriteViewMinClientBottom(D810WriteViewMaxLines(),PreviewLowerShift(kD810WriteMinClientWidth));}
 bool SettingsWriteMinTrack(MINMAXINFO* info){
     if(!info || !settings_write_min_size_enabled)return false;
-    RECT frame{0,0,kD810WriteMinClientWidth,kD810WriteMinClientHeight};
+    RECT frame{0,0,kD810WriteMinClientWidth,SettingsWriteMinClientHeight()};
     if(!AdjustWindowRectEx(&frame,WS_OVERLAPPEDWINDOW,FALSE,0))return false;
     int width=frame.right-frame.left,height=frame.bottom-frame.top;
     RECT work{};
@@ -388,10 +391,14 @@ void CreateSettingsWriteControls(HWND window,HINSTANCE instance){
     std::wstring title(512,L'\0');title.resize(static_cast<std::size_t>(GetWindowTextW(window,title.data(),static_cast<int>(title.size()))));
     SetWindowTextW(window,(title+L" ／ 設定の書き込みあり（開発用・#416 段B）").c_str());
 }
-void LayoutSettingsWriteButtons(const RECT& rect){
+// Where the four buttons of the settings write row stand (copy, reread, confirm, discard), from the top of the client area.
+FlowResult SettingsWriteButtonFlow(int client_width,int client_bottom){
     // One row at the bottom; a narrow window wraps the row upward, the same flow as the buttons of the lower half.
-    const int y=std::max(0L,rect.bottom-kD810ButtonRowGap);
-    const auto flow=FlowButtons({{230},{170},{kD810ConfirmButtonWidth},{110}},kLayoutMargin,rect.right-kLayoutMargin,y,-kLowerRowPitch);
+    const int y=std::max(0,client_bottom-kD810ButtonRowGap);
+    return FlowButtons({{230},{170},{kD810ConfirmButtonWidth},{110}},kLayoutMargin,client_width-kLayoutMargin,y,-kLowerRowPitch);
+}
+void LayoutSettingsWriteButtons(const RECT& rect){
+    const auto flow=SettingsWriteButtonFlow(rect.right,rect.bottom);
     const auto place=[&](HWND button,std::size_t index){const auto& box=flow.boxes[index];if(button)MoveWindow(button,box.x,box.y,box.width,box.height,TRUE);};
     place(settings_copy_button,0);place(settings_reread_button,1);place(settings_confirm_button,2);place(settings_discard_button,3);
     LayoutSettingsPanel(rect);
@@ -612,13 +619,27 @@ bool SettingsWriteTextFits(HDC dc,const std::wstring& text,const RECT& area,UINT
 // the last result in place of C (it takes the place of the read-only table while it is shown). A confirmation
 // that is drawn whole (the line above the buttons, the title and every line, none cut at the right edge or the
 // bottom) leaves its serial in settings_write_paint_serial; the window's present makes it the drawn one.
+// Top of the title of a confirmation or result: the place of the read-only table's title, under the rows of buttons.
+int SettingsWriteViewTop(int client_width,int client_bottom){return client_bottom/2+88+PreviewLowerShift(client_width);}
+// The room the lines drawn of a view take (the lines that fit, D810WriteViewVisibleLines): under the title, over the full width.
+RECT SettingsWriteViewLinesRect(int client_width,int client_bottom,std::size_t lines){
+    const int top=SettingsWriteViewTop(client_width,client_bottom)+30;
+    const auto visible=std::min(lines,D810WriteViewVisibleLines(client_bottom,PreviewLowerShift(client_width)));
+    return RECT{12,top,client_width-12,top+static_cast<int>(visible)*22};
+}
+// The room of the title: it may stand on the row of the right-aligned buttons, which leave kLowerTitleReserve of room at its left.
+RECT SettingsWriteViewTitleRect(int client_width,int client_bottom){
+    const int top=SettingsWriteViewTop(client_width,client_bottom);
+    return RECT{12,top,std::min(client_width-12,kLowerTitleReserve),top+30};
+}
 bool DrawSettingsWrite(HDC dc,RECT client){
     settings_write_paint_serial=0;
     if(!settings_write)return false;
     auto& screen=*settings_write->screen;
     auto offer=screen.OfferText(CanReadSettings());
     const auto* view=screen.View();
-    if(view && view->confirmation && !D810WriteViewFits(*view,client.bottom))
+    const int shift=PreviewLowerShift(client.right);
+    if(view && view->confirmation && !D810WriteViewFits(*view,client.bottom,shift))
         offer=L"確認の内容が窓に入りません。窓を大きくすると「書き込む（1回だけ）」を押せます。";
     RECT offer_rect{12,client.bottom-80,client.right-12,client.bottom-44};
     SetTextColor(dc,screen.Status().capture_allowed?RGB(240,240,240):RGB(255,200,90));
@@ -626,13 +647,13 @@ bool DrawSettingsWrite(HDC dc,RECT client){
     SetTextColor(dc,RGB(240,240,240));
     if(!view)return false;
     bool whole=view->confirmation && SettingsWriteTextFits(dc,offer,offer_rect,DT_LEFT|DT_WORDBREAK|DT_NOPREFIX);
-    const int top=client.bottom/2+88;
+    const int top=SettingsWriteViewTop(client.right,client.bottom);   // under the rows of buttons, like the read-only table
     SetTextColor(dc,view->confirmation?RGB(255,200,90):RGB(240,240,240));
     TextOutW(dc,12,top,view->title.c_str(),static_cast<int>(view->title.size()));
     whole=whole && SettingsWriteTextFits(dc,view->title,RECT{12,top,client.right-12,top+30},DT_LEFT|DT_SINGLELINE|DT_NOPREFIX);
     SetTextColor(dc,RGB(240,240,240));
     int y=top+30;
-    const auto visible=std::min(view->lines.size(),D810WriteViewVisibleLines(client.bottom));
+    const auto visible=std::min(view->lines.size(),D810WriteViewVisibleLines(client.bottom,shift));
     for(std::size_t i=0;i<visible;++i){
         RECT area{12,y,client.right-12,y+22};DrawTextW(dc,view->lines[i].c_str(),-1,&area,DT_LEFT|DT_SINGLELINE|DT_NOPREFIX|DT_END_ELLIPSIS);y+=22;
         whole=whole && SettingsWriteTextFits(dc,view->lines[i],area,DT_LEFT|DT_SINGLELINE|DT_NOPREFIX);
@@ -758,13 +779,43 @@ int RunSettingsWriteUiSmoke(){
     {   // The settings table keeps clear of the shown row of buttons: its last row ends above the buttons' top edge (client bottom - kD810ButtonRowGap), at every height.
         check(SettingsButtonRowReserve()==kD810ButtonRowGap);
         bool clear=true;
-        for(int bottom=600;bottom<=1400;++bottom)clear=clear && SettingsTableBottom(16,bottom,SettingsButtonRowReserve())<=bottom-kD810ButtonRowGap;
+        for(int bottom=600;bottom<=1400;++bottom)clear=clear && SettingsTableBottom(16,bottom,SettingsButtonRowReserve(),PreviewLowerShift(1400))<=bottom-kD810ButtonRowGap;
         check(clear);
         for(const int bottom:{960,1000,1040}){   // heights at which the last rows used to lie under the buttons
-            check(SettingsTableBottom(16,bottom,SettingsButtonRowReserve())<=bottom-kD810ButtonRowGap);
-            Log("settings_table_clear_of_buttons client_bottom="+std::to_string(bottom)+" last_row_bottom="+std::to_string(SettingsTableBottom(16,bottom,SettingsButtonRowReserve()))+" without_reserve="+std::to_string(SettingsTableBottom(16,bottom,0))+" buttons_top="+std::to_string(bottom-kD810ButtonRowGap));
+            check(SettingsTableBottom(16,bottom,SettingsButtonRowReserve(),PreviewLowerShift(1400))<=bottom-kD810ButtonRowGap);
+            Log("settings_table_clear_of_buttons client_bottom="+std::to_string(bottom)+" last_row_bottom="+std::to_string(SettingsTableBottom(16,bottom,SettingsButtonRowReserve(),PreviewLowerShift(1400)))+" without_reserve="+std::to_string(SettingsTableBottom(16,bottom,0,PreviewLowerShift(1400)))+" buttons_top="+std::to_string(bottom-kD810ButtonRowGap));
         }
-        check(SettingsTableBottom(16,1000,0)>1000-kD810ButtonRowGap);   // without the reserve the table would lie under the buttons
+        bool under=false;   // without the reserve the table would lie under the buttons at some heights (the rows are whole, so not at every one)
+        for(int bottom=600;bottom<=1400;++bottom)under=under || SettingsTableBottom(16,bottom,0,PreviewLowerShift(1400))>bottom-kD810ButtonRowGap;
+        check(under);
+    }
+    {   // No window: the confirmation or result (title and lines) and the open settings panel never meet a button that can be shown, at any width the
+        // screen can have (kD810WriteMinClientWidth and up) and at the height that shows the longest confirmation.
+        bool view_clear=true,panel_clear=true,write_row_clear=true;
+        for(const int width:{kD810WriteMinClientWidth,1300,1400,1500,1920}){
+            const int bottom=SettingsWriteMinClientHeight(),middle=bottom/2;
+            const auto plan=PlanPreviewButtons(width);
+            const auto overlap=[](const RECT& a,int x,int y,int w,int h){return a.left<x+w && x<a.right && a.top<y+h && y<a.bottom;};
+            const RECT view=SettingsWriteViewLinesRect(width,bottom,D810WriteViewMaxLines()),title=SettingsWriteViewTitleRect(width,bottom);
+            check(D810WriteViewVisibleLines(bottom,PreviewLowerShift(width))>=D810WriteViewMaxLines() || width>kD810WriteMinClientWidth);
+            for(const auto& box:plan.lower)if(overlap(view,box.x,middle+box.y,box.width,box.height) || overlap(title,box.x,middle+box.y,box.width,box.height))view_clear=false;
+            const auto flow=SettingsWriteButtonFlow(width,bottom);
+            for(const auto& box:flow.boxes){
+                if(overlap(view,box.x,box.y,box.width,box.height) || overlap(title,box.x,box.y,box.width,box.height))write_row_clear=false;
+                if(box.y<0 || box.x<0 || box.x+box.width>width)write_row_clear=false;
+            }
+            check(view.bottom<=bottom-84);   // the lines end above the line of the offer text
+            // The panel stands where the Live area stands: the rows of the buttons of the panes do not wrap there, and it ends above the lower half.
+            const RECT panel{kPanelLabelX,kPanelTitleY,kPanelSameX+kPanelSameWidth,SettingsPanelRowY(kPanelFirstChoiceRow+static_cast<int>(kD810ChoiceItemCount))+kPanelRowHeight+24};
+            if(PreviewTopShift(width)!=0)panel_clear=false;
+            for(const auto& pane:plan.pane)for(const auto& box:pane)if(overlap(panel,box.x,box.y,box.width,box.height))panel_clear=false;
+            for(const auto& box:plan.lower)if(overlap(panel,box.x,middle+box.y,box.width,box.height))panel_clear=false;
+            if(panel.bottom>middle+kLowerStatusTop)panel_clear=false;
+            for(const auto& box:flow.boxes)if(overlap(panel,box.x,box.y,box.width,box.height))panel_clear=false;
+        }
+        check(view_clear);check(write_row_clear);check(panel_clear);
+        Log("settings_write_view_clear_of_buttons="+std::to_string(view_clear?1:0)+" write_row_clear="+std::to_string(write_row_clear?1:0)+" panel_clear="+std::to_string(panel_clear?1:0)+
+            " min_client_height="+std::to_string(SettingsWriteMinClientHeight())+" lower_shift_at_min_width="+std::to_string(PreviewLowerShift(kD810WriteMinClientWidth)));
     }
     const auto offer=screen->OfferText(true);
     // The "no row" text belongs to a table with no enabled row; the product table does not reach it.
@@ -788,11 +839,11 @@ int RunSettingsWriteUiSmoke(){
     all_sessions_passed=passed_before;capture_once_alias.reset();
     {   // The window's minimum size: the longest confirmation and the button row, within the screen's work area.
         MINMAXINFO limits{};SendMessageW(window,WM_GETMINMAXINFO,0,reinterpret_cast<LPARAM>(&limits));
-        RECT need{0,0,kD810WriteMinClientWidth,kD810WriteMinClientHeight};AdjustWindowRectEx(&need,WS_OVERLAPPEDWINDOW,FALSE,0);
+        RECT need{0,0,kD810WriteMinClientWidth,SettingsWriteMinClientHeight()};AdjustWindowRectEx(&need,WS_OVERLAPPEDWINDOW,FALSE,0);
         RECT work{};SystemParametersInfoW(SPI_GETWORKAREA,0,&work,0);
         check(limits.ptMinTrackSize.x==std::min<int>(need.right-need.left,work.right-work.left) && limits.ptMinTrackSize.y==std::min<int>(need.bottom-need.top,work.bottom-work.top));
         RECT client{};GetClientRect(window,&client);
-        check(need.bottom-need.top>work.bottom-work.top || client.bottom>=kD810WriteMinClientHeight); // the window was made at least that large
+        check(need.bottom-need.top>work.bottom-work.top || client.bottom>=SettingsWriteMinClientHeight()); // the window was made at least that large
     }
 
     // 2. A restart after a write that never wrote its end line: capture is held from the start.
@@ -831,7 +882,7 @@ int RunSettingsWriteUiSmoke(){
     check(wait_idle());
     check(opens->load()==2 && screen->Status().block==D810CaptureBlock::Unconfirmed && !screen->AdmitCapture()); // A and B asked, neither opened
     check(screen->View() && screen->View()->title.find(L"読み直しを最後まで終えられませんでした")!=std::wstring::npos);
-    check(drawn_in(960/2+88,960/2+130)>50); // the result in place of C
+    check(drawn_in(960/2+88+PreviewLowerShift(1400),960/2+130+PreviewLowerShift(1400))>50); // the result in place of C
 
     // 3b. The settings panel with no camera: it asks for the cameras, none opens, no panel stands, and the buttons that
     //     only a panel has are not shown. (The product table's panel itself is drawn by the confirmation test build.)
@@ -1020,13 +1071,13 @@ int RunSettingsWriteUiSmoke(){
     review_pixels={1,1,{0,0,0,255}};review_visible=true; // a picture asked for while the reread runs
     release_gate();
     check(wait_idle());
-    check(!review_visible && screen->View() && drawn_in(960/2+88,960/2+130)>50); // the result is shown, not the picture
+    check(!review_visible && screen->View() && drawn_in(960/2+88+PreviewLowerShift(1400),960/2+130+PreviewLowerShift(1400))>50); // the result is shown, not the picture
     {   // A picture asked for while a result is up is drawn behind it, not over it (a green picture shows no green).
         review_pixels={8,8,std::vector<BYTE>(8*8*4)};
         for(std::size_t i=0;i<review_pixels.bytes.size();i+=4){review_pixels.bytes[i+1]=255;review_pixels.bytes[i+3]=255;}
         review_visible=true;
         SettingsWriteSmokeFrame frame(1400,960);
-        check(frame.drawn[3]==0 && frame.Count(960/2+80,960,RGB(0,255,0))==0 && frame.Lit(960/2+88,960/2+130)>50);
+        check(frame.drawn[3]==0 && frame.Count(960/2+80,960,RGB(0,255,0))==0 && frame.Lit(960/2+88+PreviewLowerShift(1400),960/2+130+PreviewLowerShift(1400))>50);
     }
     review_visible=false;review_pixels={};
 
@@ -1217,14 +1268,16 @@ int RunSettingsWriteConfirmSmoke(){
         for(std::size_t i=0;i<review_pixels.bytes.size();i+=4){review_pixels.bytes[i+1]=255;review_pixels.bytes[i+3]=255;}
     };
     for(auto& camera:cameras){camera->done=true;camera->stopped=true;camera->closed=true;}preview_joined=true;stopping=true; // both Live sessions joined
-    check(resize(1400,1000));
+    constexpr int kTall=1250;   // tall enough for every confirmation of this test under the rows of buttons, at any width the window can have
+    check(resize(1400,kTall));
     tick();
     check(CanReadSettings() && !screen->View() && SettingsWriteButtonShown(settings_copy_button));
 
     // 1. A confirmation is up and has not been drawn: the button is shown but not pressable, and the handler refuses.
     put_up_plan(false);
     const auto* view=screen->View();
-    const int needed=view?D810WriteViewMinClientBottom(view->lines.size()):0;
+    RECT now{};GetClientRect(window,&now);
+    const int needed=view?D810WriteViewMinClientBottom(view->lines.size(),PreviewLowerShift(now.right)):0;   // the rows of buttons push the view down by PreviewLowerShift
     check(screen->ConfirmationShown() && view && view->confirmation && view->lines.size()==9 && screen->ViewSerial()!=0);
     tick();
     check(SettingsWriteButtonShown(settings_confirm_button) && !IsWindowEnabled(settings_confirm_button));
@@ -1253,18 +1306,19 @@ int RunSettingsWriteConfirmSmoke(){
     // 4. The window gets too narrow for the longest line (cut with an ellipsis): the same.
     const int line_width=widest();
     check(line_width+24>kD810ConfirmButtonLeft+kD810ConfirmButtonWidth); // the lines, not the button, decide the width here
-    check(resize(1400,1000));
-    check(resize(line_width+24-2,1000));paint();tick();
+    check(resize(1400,kTall));
+    const int narrow_height=D810WriteViewMinClientBottom(screen->View()->lines.size(),PreviewLowerShift(line_width+24))+20;   // narrower: more rows of buttons
+    check(resize(line_width+24-2,narrow_height));paint();tick();
     check(settings_write_drawn_serial==0 && !confirm_enabled());
     click(407,settings_confirm_button);
     check(settings_write_confirm_refusals==refusals_before+2 && opens->load()==0 && screen->Step()==D810WriteScreenStep::Confirming);
-    check(resize(line_width+24,1000));paint();tick();
+    check(resize(line_width+24,narrow_height));paint();tick();
     check(settings_write_drawn_serial==screen->ViewSerial() && confirm_enabled());
 
     // 5. Too small for Paint to draw anything: the flag is down after that paint, whatever the window grows to.
     check(resize(150,150));paint();
     check(settings_write_drawn_serial==0);
-    check(resize(1400,1000));tick();
+    check(resize(1400,kTall));tick();
     check(!confirm_enabled());
     paint();tick();
     check(confirm_enabled());
@@ -1285,7 +1339,7 @@ int RunSettingsWriteConfirmSmoke(){
     green_picture();review_visible=true;
     {
         SettingsWriteSmokeFrame frame(1400,960);
-        check(frame.drawn[3]==0 && frame.Count(960/2+80,960,RGB(0,255,0))==0 && frame.Lit(960/2+88,960/2+150)>50);
+        check(frame.drawn[3]==0 && frame.Count(960/2+80,960,RGB(0,255,0))==0 && frame.Lit(960/2+88+PreviewLowerShift(1400),960/2+150+PreviewLowerShift(1400))>50);
     }
     paint();tick();
     check(settings_write_drawn_serial==screen->ViewSerial() && confirm_enabled() && !IsWindowEnabled(review_button));
@@ -1296,7 +1350,7 @@ int RunSettingsWriteConfirmSmoke(){
     review_visible=true;
     {
         SettingsWriteSmokeFrame frame(1400,960);
-        check(frame.drawn[3]==0 && frame.Count(960/2+80,960,RGB(0,255,0))==0 && frame.Lit(960/2+88,960/2+130)>50);
+        check(frame.drawn[3]==0 && frame.Count(960/2+80,960,RGB(0,255,0))==0 && frame.Lit(960/2+88+PreviewLowerShift(1400),960/2+130+PreviewLowerShift(1400))>50);
     }
     tick();
     check(!IsWindowEnabled(review_button) && !SettingsWriteButtonShown(settings_confirm_button));
@@ -1326,7 +1380,7 @@ int RunSettingsWriteConfirmSmoke(){
         read.snapshots[1]=SmokeBody(250,800,100,2,2);
         screen->TakePlanReadForTest(read);
     }
-    check(resize(kD810WriteMinClientWidth,kD810WriteMinClientHeight));
+    check(resize(kD810WriteMinClientWidth,SettingsWriteMinClientHeight()));
     tick();
     const auto* first_view=screen->View();
     check(screen->ConfirmationShown() && first_view && first_view->lines.size()==8); // 3 notices, the ISO step, the heading, 2 left out, the closing line
@@ -1356,12 +1410,12 @@ int RunSettingsWriteConfirmSmoke(){
     {
         const int own_width=widest();
         check(own_width+24>kD810ConfirmButtonLeft+kD810ConfirmButtonWidth);
-        check(resize(own_width+24-2,kD810WriteMinClientHeight));
+        check(resize(own_width+24-2,SettingsWriteMinClientHeight()));
         tick();
         check(settings_write_drawn_serial==0 && !confirm_enabled());
         click(407,settings_confirm_button);
         check(opens->load()==opens_after && screen->Step()==D810WriteScreenStep::Confirming);
-        check(resize(kD810WriteMinClientWidth,kD810WriteMinClientHeight));paint();tick();
+        check(resize(kD810WriteMinClientWidth,SettingsWriteMinClientHeight()));paint();tick();
         check(settings_write_drawn_serial==screen->ViewSerial() && confirm_enabled());
     }
 
@@ -1459,7 +1513,7 @@ int RunSettingsWriteChosenSmoke(){
         RECT client{};GetClientRect(window,&client);return client.right==client_width && client.bottom==client_height;
     };
     for(auto& camera:cameras){camera->done=true;camera->stopped=true;camera->closed=true;}preview_joined=true;stopping=true; // both Live sessions joined
-    check(resize(kD810WriteMinClientWidth,kD810WriteMinClientHeight));
+    check(resize(kD810WriteMinClientWidth,SettingsWriteMinClientHeight()));
     const auto shown=[&](HWND control){return SettingsWriteButtonShown(control);};
     const auto enabled=[&](HWND control){return shown(control) && IsWindowEnabled(control)!=FALSE;};
     const auto combo_ok=[&](int camera,int item){return settings_panel_combos[camera][item];};
@@ -1490,7 +1544,7 @@ int RunSettingsWriteChosenSmoke(){
     InitSettingsWrite(std::make_unique<D810SettingsFileJournal>(folder),factory);
     screen=settings_write->screen.get();
     tick();
-    check(resize(kD810WriteMinClientWidth,kD810WriteMinClientHeight) && CanReadSettings());
+    check(resize(kD810WriteMinClientWidth,SettingsWriteMinClientHeight()) && CanReadSettings());
     check(shown(settings_panel_open_button) && enabled(settings_panel_open_button) && !shown(settings_panel_close_button) && !shown(settings_panel_write_button) && !shown(combo_ok(0,kIso)));
     click(kPanelOpenButtonId,settings_panel_open_button); // a read with no camera: it fails and no panel opens
     for(int i=0;i<400 && SettingsWriteBusy();++i){tick();std::this_thread::sleep_for(std::chrono::milliseconds(5));}
@@ -1521,8 +1575,8 @@ int RunSettingsWriteChosenSmoke(){
         check(!SettingsWriteBusy() && screen->Step()==D810WriteScreenStep::Idle && opens->load()<=2);
     }
     {   // The panel is drawn: the title, the grid, the notes (amber) and the line under it.
-        check(resize(kD810WriteMinClientWidth,kD810WriteMinClientHeight));
-        SettingsWriteSmokeFrame frame(kD810WriteMinClientWidth,kD810WriteMinClientHeight);
+        check(resize(kD810WriteMinClientWidth,SettingsWriteMinClientHeight()));
+        SettingsWriteSmokeFrame frame(kD810WriteMinClientWidth,SettingsWriteMinClientHeight());
         check(frame.Lit(kPanelTitleY,kPanelTitleY+22)>100 && frame.Lit(SettingsPanelRowY(1),SettingsPanelRowY(8))>400);
         check(frame.Count(SettingsPanelRowY(3),SettingsPanelRowY(8),RGB(255,200,90))>200); // the cells say why they are locked
     }
@@ -1656,7 +1710,7 @@ int RunSettingsWriteChosenSmoke(){
         check(choose(0,kIso,L"100") && screen->PanelDirty()==3 && selected(0,kIso)==L"100" && selected(1,kIso)==L"400");
     }
     {   // Paint with picks up: the picks are marked.
-        SettingsWriteSmokeFrame frame(kD810WriteMinClientWidth,kD810WriteMinClientHeight);
+        SettingsWriteSmokeFrame frame(kD810WriteMinClientWidth,SettingsWriteMinClientHeight());
         check(frame.Count(SettingsPanelRowY(3),SettingsPanelRowY(4)+kPanelRowHeight,RGB(255,200,90))>100);
     }
     // The grid fits its columns: every note, label and heading at the width the window gives it.
@@ -1686,7 +1740,7 @@ int RunSettingsWriteChosenSmoke(){
         }else check(false);
         // The columns lie inside the smallest window, and the heights inside the Live area of its smallest height.
         check(kPanelSameX+kPanelSameWidth<=kD810WriteMinClientWidth-12 && kPanelBNoteX+kPanelNoteWidth<=kPanelSameX);
-        check(SettingsPanelRowY(kPanelFirstChoiceRow+static_cast<int>(kD810ChoiceItemCount))+kPanelRowHeight+24<=kD810WriteMinClientHeight/2-8);
+        check(SettingsPanelRowY(kPanelFirstChoiceRow+static_cast<int>(kD810ChoiceItemCount))+kPanelRowHeight+24<=SettingsWriteMinClientHeight()/2-8);
     }
     // Cancel, and closing with picks up: the count is said, nothing is left.
     click(kPanelCancelButtonId,settings_panel_cancel_button);
@@ -1725,7 +1779,7 @@ int RunSettingsWriteChosenSmoke(){
     InitSettingsWriteWithTable(SmokeChosenTable(),std::make_unique<D810SettingsFileJournal>(folder),factory);
     screen=settings_write->screen.get();
     screen->TakePanelReadForTest(read_of(true,true));
-    check(resize(kD810WriteMinClientWidth,kD810WriteMinClientHeight));
+    check(resize(kD810WriteMinClientWidth,SettingsWriteMinClientHeight()));
     tick();
     check(!enabled(settings_panel_write_button) && screen->ChosenOfferText(true).find(L"変更予定がありません")!=std::wstring::npos);
     {   // Ten changes: every item on both cameras.
@@ -1757,7 +1811,7 @@ int RunSettingsWriteChosenSmoke(){
         read.snapshots[1]=SmokeBody(500,560,64,2,2);
         screen->TakeChosenReadForTest(read);
         const auto* view=screen->View();
-        check(screen->ConfirmationShown() && view && view->confirmation && view->lines.size()==12 && view->lines.size()<=D810WriteViewMaxLines() && D810WriteViewFits(*view,kD810WriteMinClientHeight));
+        check(screen->ConfirmationShown() && view && view->confirmation && view->lines.size()==12 && view->lines.size()<=D810WriteViewMaxLines() && D810WriteViewFits(*view,SettingsWriteMinClientHeight(),PreviewLowerShift(kD810WriteMinClientWidth)));
         check(screen->Status().plan_pending && !screen->Status().plan_confirmed && screen->PanelOpen());
         tick();
         // Shown, not drawn: the button is not pressable and the handler refuses.
@@ -1774,11 +1828,11 @@ int RunSettingsWriteChosenSmoke(){
         // Drawn whole by a present of the window: pressable. The window one row too short: not.
         paint();tick();
         check(settings_write_drawn_serial==screen->ViewSerial() && confirm_enabled());
-        check(resize(kD810WriteMinClientWidth,kD810WriteMinClientHeight-1));tick();
+        check(resize(kD810WriteMinClientWidth,SettingsWriteMinClientHeight()-1));tick();
         check(!confirm_enabled());
         paint();
         check(settings_write_drawn_serial==0);
-        check(resize(kD810WriteMinClientWidth,kD810WriteMinClientHeight));paint();tick();
+        check(resize(kD810WriteMinClientWidth,SettingsWriteMinClientHeight()));paint();tick();
         check(settings_write_drawn_serial==screen->ViewSerial() && confirm_enabled());
         // The lines are not cut at the smallest width.
         {
@@ -1792,8 +1846,8 @@ int RunSettingsWriteChosenSmoke(){
         }
         // Drawn: the confirmation under the panel, which stays in the upper part.
         {
-            SettingsWriteSmokeFrame frame(kD810WriteMinClientWidth,kD810WriteMinClientHeight);
-            check(frame.Lit(SettingsPanelRowY(1),SettingsPanelRowY(8))>400 && frame.Lit(kD810WriteMinClientHeight/2+88,kD810WriteMinClientHeight/2+130)>50);
+            SettingsWriteSmokeFrame frame(kD810WriteMinClientWidth,SettingsWriteMinClientHeight());
+            check(frame.Lit(SettingsPanelRowY(1),SettingsPanelRowY(8))>400 && frame.Lit(SettingsWriteMinClientHeight()/2+88+PreviewLowerShift(kD810WriteMinClientWidth),SettingsWriteMinClientHeight()/2+130+PreviewLowerShift(kD810WriteMinClientWidth))>50);
         }
         // "やめる": back to the panel with the picks; a plan is made again from the picks.
         click(408,settings_discard_button);tick();
@@ -1831,11 +1885,11 @@ int RunSettingsWriteChosenSmoke(){
             }
         screen->TakeRunForTest(run,D810PlanSource::Chosen);
         const auto* view=screen->View();
-        check(view && !view->confirmation && view->lines.size()==7 && view->lines.size()<=D810WriteViewMaxLines() && D810WriteViewFits(*view,kD810WriteMinClientHeight));
+        check(view && !view->confirmation && view->lines.size()==7 && view->lines.size()<=D810WriteViewMaxLines() && D810WriteViewFits(*view,SettingsWriteMinClientHeight(),PreviewLowerShift(kD810WriteMinClientWidth)));
         check(view && view->title.find(L"選んだ値を書きました: 一致（5 項目・10 件")!=std::wstring::npos);
         paint();tick();
-        SettingsWriteSmokeFrame frame(kD810WriteMinClientWidth,kD810WriteMinClientHeight);
-        check(frame.Lit(kD810WriteMinClientHeight/2+88,kD810WriteMinClientHeight/2+130)>50 && !confirm_enabled());
+        SettingsWriteSmokeFrame frame(kD810WriteMinClientWidth,SettingsWriteMinClientHeight());
+        check(frame.Lit(SettingsWriteMinClientHeight()/2+88+PreviewLowerShift(kD810WriteMinClientWidth),SettingsWriteMinClientHeight()/2+130+PreviewLowerShift(kD810WriteMinClientWidth))>50 && !confirm_enabled());
         check(ShownChildPairsOverlapping(window)==0); // the result: no shown button or drop-down lies over another
     }
     // The widest line that a confirmation of picks or its result can have fits the smallest window.
