@@ -60,15 +60,29 @@ p_b に大きな値を入れずに profile を作り直す理由: p_b は「校�
 
 ### 確かめられなかった時の扱い（所有者の決定）
 
-上の符号は、呼び手（`recalibration_job.hpp`）が三つに分ける。
+上の符号は、呼び手（`recalibration_job.hpp`）が三つに分ける。「確かめられなかった」は、目印が足りなくて測れなかっただけで、合っていない印が何も見つかっていない時に限る。合っていないと測れた校正、合っていない疑いの印が 1 つでもある校正は確定させない。
 
 | 区分 | 符号 | 扱い |
 |---|---|---|
 | 何も作れなかった | `no-overlap`、`estimate-failed`、`estimate-not-verified`、`stopped` | 確定させない |
-| 確かめて合っていなかった | `tilt-exceeded`、`height-exceeded`、`creation-check-failed`、`raster-too-large`、`raster-outside-sheet`、`profile-invalid`、`reestimate-displacement`、`reestimate-not-verified`（確かめの推定が範囲の外と出た時）、見本のゲートが `fail`（原因が `lift`・`pose`・`displacement`。ずれを測って基準を超えた時） | 確定させない |
-| 確かめられなかった | `reestimate-not-verified`（確かめの推定が `undetermined`）、見本のゲートが `undetermined`・`not-run`、見本のゲートが `fail` で原因が `unmeasurable`（継ぎ目を測れなかった。目印の少ない紙で出る）、見本の推定が `undetermined` | 既定は、警告を見たうえで人が確定できる。定数 `kRecalibrationUnverifiedPolicy` で確定させない側にも切り替えられる |
+| 確かめて合っていなかった・疑いがある | `tilt-exceeded`、`height-exceeded`、`creation-check-failed`、`raster-too-large`、`raster-outside-sheet`、`profile-invalid`、`reestimate-displacement`、`reestimate-not-verified`（確かめの推定が範囲の外と出た時）、`reestimate-doubtful`（確かめの推定が `undetermined` で、理由に「目印が足りない」の組の外が 1 つでもある時）、見本の推定が範囲の外（`sample-estimate-out-of-envelope`）、見本の推定が `undetermined` で理由に組の外がある時（`sample-estimate-doubtful`）、見本のゲートが `fail` で原因が `lift`・`pose`・`displacement`（`gate-fail`）、ゲートの `transition-outside-band`（`gate-transition-outside-band`）、ゲートの知らない符号と、状態が `pass` でないのに符号が無い時（`gate-unknown`） | 確定させない |
+| 確かめられなかった | `reestimate-not-verified`（確かめの推定が `undetermined` で、理由のすべてが「目印が足りない」の組）、見本の推定が `undetermined` で理由のすべてが同じ組（`sample-estimate-undetermined`）、見本のゲートの `nothing-measured`・`content-unmeasured`・`dx-unmeasured`・`placement-unverified`・`gate-undetermined`（符号ごとに `gate-nothing-measured` などの文）、見本のゲートが `not_run`（`gate-not-run`） | 既定は、警告を見たうえで人が確定できる。定数 `kRecalibrationUnverifiedPolicy` で確定させない側にも切り替えられる |
+| 測ったら怪しかった（所有者の答え待ち） | 見本のゲートの `unconfirmed-content`（基準を超えた点が測り直しで確かめられなかった）、`one-sided-content`（片方のカメラにだけ写る所がある） | 既定は確定させない（`gate-unconfirmed-content`、`gate-one-sided-content`）。定数 `kRecalibrationSuspectContentPolicy` を `allow_with_warning` にすると「確かめられなかった」と同じく警告つきで確定できる |
+
+推定（確かめの推定と見本の推定）の「目印が足りない」の組は、`content_registration::AssessEvidenceShortage` が 1 か所で決める。確かめの推定、見本の推定、画面の文がこの関数だけを通る。理由は複数並ぶので、全部がこの組に入る時だけ「確かめられなかった」で、1 つでも外があれば疑いとして確定させない。理由が空の `undetermined` と、知らない符号も疑い。
+
+| 区分 | 理由の符号 |
+|---|---|
+| 目印が足りない | `coarse-no-unique-blocks`、`unique-blocks`、`repeating-only`、`too-few-points`、`prediction-uncertain`、`too-dark`、`brown-lowe`（inlier の数が α/(1−β) 以下の時。外れ値が 0 でも通らない数なので、点の少なさが原因と言える。α・β は条件の `registration.limits` の値で、新しい閾値ではない） |
+| 合っていない疑い | `coarse-ambiguous`、`coarse-inconsistent`、`fit-failed`、`not-converged`、`residual-shape`、`starts-disagree`、`no-overlap`、`estimate-failed`、`displacement-failed`、`time-budget`、`brown-lowe`（inlier の数が α/(1−β) を超える時。外れ値が多い）、知らない符号 |
+
+見本のゲートは状態でなく、ゲートの `gate_findings` の符号で分ける（`ClassifyGateFinding`）。状態が `fail` で原因が `unmeasurable` の時と `undetermined` の時が対象で、符号が複数あれば 1 つずつ分け、1 つでも確定させない符号があれば確定させない。基準を超えた（`lift`・`pose`・`displacement`）時は符号を見ずに `gate-fail`。
 
 確かめられないまま確定した改訂は、条件 v3 の書式に印を置く場所が無いので、校正の報告（`recalibration-report.json`）と確定の記録（`confirmation.json`）とログに残る。画面は「未確認の校正」と出す。見本のゲート（GΩ）は確かめの独立した守りなので、結果（測れたか、ずれの値と基準、測れた行の割合）を必ず画面と報告に並べる。
+
+### 範囲の外に出た手直しから始める
+
+有効な改訂の手直し（`manual-adjustment`）の基準の姿勢が範囲の外に出ていると、読み手は `pose_outside_envelope` で断り、「rollback するか、校正をやり直してください」と案内する。校正のやり直しはこの状態からも始められる。呼び手は、改訂の列を範囲を見ずに読み直し（`LoadActiveFixedCompositeRevisionV3`。列・profile・単一の出どころは範囲を見る前に検査済み）、有効な改訂を親にする。出力ラスタの決め方と「位置の変化」の基準は、親の基準の姿勢でなく profile の姿勢（0）にする（`Display::previous_outside_envelope` が立ち、画面に「前の手直しは範囲の外だったため、校正の位置からの変化を出します」と出る）。確定した `recalibrated` は基準の姿勢が 0 なので範囲の内になる。列が壊れている・profile が無い・違う・v1/v2 が並ぶ時は、これまでどおり断る。
 
 継ぎ目のずれのゲートによる確かめ（GΩ）は見本の合成の側（呼び手）で行う。計算の側の確かめ（`VerifyCandidate`）は同じ組での焼き込みの確かめで、精度の独立な確かめではない。
 
