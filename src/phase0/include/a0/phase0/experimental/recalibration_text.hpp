@@ -165,12 +165,17 @@ struct RecalibrationSentence {std::string reason,remedy;};
     }
     if(c=="stopped")return {"中止しました","何も書いていません。前の校正のままです"};
     // The sample and its gate. The first group is "too little to measure": nothing was found wrong. The second is a sign that it does not fit.
-    if(c=="gate-undetermined")return {"継ぎ目のずれを確かめられませんでした","継ぎ目の線の上に文字や線が多い紙で撮り直すと確かめられます"};
+    // The setting that measures the seam is inconsistent: a fault of the check, not of the paper. It is not offered.
+    if(c=="gate-undetermined")return {"継ぎ目のずれを測る設定に食い違いがありました","技術担当へ知らせてください"};
     if(c=="gate-nothing-measured")return {"継ぎ目の上に測れる所が無く、継ぎ目のずれを確かめられませんでした","継ぎ目の線の上に文字や線が多い紙で撮り直すと確かめられます"};
     if(c=="gate-content-unmeasured")return {"継ぎ目の上の文字や線の多くを測れず、継ぎ目のずれを確かめきれませんでした","継ぎ目の線の上に文字や線が多い紙で撮り直すと確かめられます"};
     if(c=="gate-dx-unmeasured")return {"継ぎ目の左右のずれを測れる線（縦線）が無く、確かめきれませんでした","縦線や文字がある紙で撮り直すと確かめられます"};
     if(c=="gate-placement-unverified")return {"左右の写真の位置が合っているかを、模様では確かめきれませんでした","模様の多い紙で撮り直すと確かめられます"};
-    if(c=="gate-not-run")return {"継ぎ目のずれの確かめが行われませんでした","撮り直してください"};
+    // The check did not work (the reason is the time budget's or the stage's): it is not offered. A time-out is cured by pressing again (the button of the result screen).
+    if(c=="gate-not-run"){
+        if(r=="time-budget")return {"継ぎ目のずれの確かめが時間内に終わりませんでした","もう一度「撮り直す」を押してください"};
+        return {"継ぎ目のずれの確かめの処理が止まりました","技術担当へ知らせてください"};
+    }
     if(c=="gate-fail")return {"継ぎ目のずれが基準を超えました","紙を替えて撮り直してください"};
     if(c=="gate-unconfirmed-content")return {"基準を超えた所があり、測り直しでは確かめられませんでした","紙を平らに置き直して撮り直してください"};
     if(c=="gate-one-sided-content")return {"片方のカメラにだけ写っている所があります（紙が浮いているか、位置が合っていません）","紙を平らに置き直して撮り直してください"};
@@ -179,7 +184,8 @@ struct RecalibrationSentence {std::string reason,remedy;};
     if(c=="sample-estimate-undetermined")return {"見本の合成で、位置の推定が確かになりませんでした","紙を替えて撮り直すと確かめられます"};
     if(c=="sample-estimate-doubtful"){
         const auto s=RecalibrationEstimateReasonSentence(r);
-        return {"見本の合成で、位置が合っていない疑いが見つかりました（"+s.reason+"）",s.remedy};
+        // The gate may have passed: the line of the seam says "within the line" beside this sentence, so it says that this does not save it.
+        return {"見本の合成で、位置の推定に食い違いの印が見つかりました（"+s.reason+"）。継ぎ目のずれが基準内でも、この校正は使えません",s.remedy};
     }
     if(c=="sample-estimate-out-of-envelope")return {"見本の合成で、位置が範囲の外になりました","撮り直してください"};
     if(c=="sample-skipped")return {"見本を合成できませんでした（今の条件に合いません）","撮り直してください。続く時は技術担当へ知らせてください"};
@@ -257,14 +263,17 @@ inline std::string GateLine(const RecalibrationGateFacts& g){
     std::string inside=maximum;
     if(!maximum.empty() && !line.empty())inside+="、";
     inside+=line;
+    // Only what was measured is said here. Whether the seam was checked, and whether the calibration can be used, is the finding's sentence
+    // (the class comes from the findings, and this line is not a second copy of it).
+    const std::string measured=maximum.empty()?std::string("測れた値はありません"):"測れた所の"+maximum+(line.empty()?std::string{}:"（"+line+"）");
     switch(g.state){
     case S::pass: return "継ぎ目のずれ: 基準内"+(inside.empty()?std::string{}:"（"+inside+"）")+rows;
     case S::fail:
-        // The gate calls a seam that it could not measure a failure too; that is "not checked", not "over the line".
-        if(g.cause==a0::m2::experimental::registration_gate::GateCause::unmeasurable)return "継ぎ目のずれ: 測れない所があり、確かめられませんでした"+rows;
+        // The gate calls a seam that it could not measure a failure too: only a seam over the line is said to be over it.
+        if(g.cause==a0::m2::experimental::registration_gate::GateCause::unmeasurable)return "継ぎ目のずれ: "+measured+rows;
         return "継ぎ目のずれ: 基準を超えました"+(inside.empty()?std::string{}:"（"+inside+"）")+rows;
-    case S::undetermined: return "継ぎ目のずれ: 確かめられませんでした"+rows;
-    case S::not_run: return "継ぎ目のずれ: 確かめが行われませんでした";
+    case S::undetermined: return "継ぎ目のずれ: "+measured+rows;
+    case S::not_run: return "継ぎ目のずれ: 測っていません";
     }
     return {};
 }

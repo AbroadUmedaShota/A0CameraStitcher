@@ -132,18 +132,28 @@ void Sentences() {
     const auto wrong = RecalibrationFindingSentence({FindingClass::rejected, "reestimate-not-verified", {}});
     const auto unchecked = RecalibrationFindingSentence({FindingClass::unverified, "reestimate-not-verified", {}});
     CHECK(wrong.reason != unchecked.reason && Has(wrong.reason, "範囲の外") && Has(unchecked.reason, "確かな値になりませんでした"));
-    CHECK(Has(RecalibrationFindingSentence({FindingClass::unverified, "gate-undetermined", {}}).reason, "確かめられませんでした"));
+    // A gate whose own setting is inconsistent, or that did not run, is a check that did not work: the sentence says so and sends the person on.
+    {
+        const auto undetermined = RecalibrationFindingSentence({FindingClass::rejected, "gate-undetermined", {}});
+        CHECK(Has(undetermined.reason, "食い違い") && Has(undetermined.remedy, "技術担当") && !Has(undetermined.reason, "確かめられませんでした"));
+        const auto timed_out = RecalibrationFindingSentence({FindingClass::rejected, "gate-not-run", "time-budget"});
+        CHECK(Has(timed_out.reason, "時間内に終わりませんでした") && Has(timed_out.remedy, "撮り直す"));
+        for (const char* why : {"stage-failed", ""}) {
+            const auto stopped = RecalibrationFindingSentence({FindingClass::rejected, "gate-not-run", why});
+            CHECK(Has(stopped.reason, "処理が止まりました") && Has(stopped.remedy, "技術担当"));
+        }
+    }
     CHECK(Has(RecalibrationFindingSentence({FindingClass::rejected, "gate-fail", {}}).reason, "基準を超えました"));
     // The codes of the gate's findings each have their own sentence, and the ones that are not "too little to measure" are told apart from them.
     {
-        const char* too_little[] = {"gate-nothing-measured", "gate-content-unmeasured", "gate-dx-unmeasured", "gate-placement-unverified", "gate-undetermined"};
+        const char* too_little[] = {"gate-nothing-measured", "gate-content-unmeasured", "gate-dx-unmeasured", "gate-placement-unverified"};
         std::set<std::string> reasons;
         for (const auto* code : too_little) {
             const auto s = RecalibrationFindingSentence({FindingClass::unverified, code, {}});
             CHECK(Has(s.reason, "確かめ") && Has(s.remedy, "確かめられます"));
             reasons.insert(s.reason);
         }
-        CHECK(reasons.size() == 5);
+        CHECK(reasons.size() == 4);
         const auto unconfirmed = RecalibrationFindingSentence({FindingClass::rejected, "gate-unconfirmed-content", {}});
         CHECK(Has(unconfirmed.reason, "基準を超えた所があり、測り直しでは確かめられませんでした"));
         const auto one_sided = RecalibrationFindingSentence({FindingClass::rejected, "gate-one-sided-content", {}});
@@ -158,13 +168,16 @@ void Sentences() {
     // A check or a sample that is undetermined for a reason beyond "too few marks" says "a sign that it does not fit", with the reason's own words;
     // the same table as the estimate of the pair (one place for the words of a reason).
     for (const char* code : {"reestimate-doubtful", "sample-estimate-doubtful"}) {
+        const std::string head = std::string(code) == "reestimate-doubtful" ? "合っていない疑い" : "食い違いの印";
         const auto sentence = [&](const char* r) { return RecalibrationFindingSentence({FindingClass::rejected, code, r}); };
-        CHECK(Has(sentence("residual-shape").reason, "合っていない疑い") && Has(sentence("residual-shape").reason, "浮いているか") && Has(sentence("residual-shape").remedy, "平らに"));
+        CHECK(Has(sentence("residual-shape").reason, head) && Has(sentence("residual-shape").reason, "浮いているか") && Has(sentence("residual-shape").remedy, "平らに"));
         CHECK(Has(sentence("starts-disagree").reason, "一つに決まりません") && Has(sentence("coarse-ambiguous").reason, "大まかな位置"));
         CHECK(Has(sentence("brown-lowe").reason, "外れていて") && Has(sentence("fit-failed").reason, "当てはめ"));
-        CHECK(Has(sentence("").reason, "合っていない疑い") && Has(sentence("a-code-nobody-knows").reason, "合っていない疑い") && !Has(sentence("a-code-nobody-knows").reason, "nobody"));
+        CHECK(Has(sentence("").reason, head) && Has(sentence("a-code-nobody-knows").reason, head) && !Has(sentence("a-code-nobody-knows").reason, "nobody"));
         CHECK(sentence("residual-shape").reason != RecalibrationFindingSentence({FindingClass::unverified, "reestimate-not-verified", "residual-shape"}).reason);
     }
+    // The sample's estimate shows a sign of misfit while the gate may have passed: the sentence itself says that "within the line" does not save it.
+    CHECK(Has(RecalibrationFindingSentence({FindingClass::rejected, "sample-estimate-doubtful", "residual-shape"}).reason, "継ぎ目のずれが基準内でも、この校正は使えません"));
     CHECK(Has(RecalibrationFindingSentence({FindingClass::rejected, "reestimate-doubtful", "residual-shape"}).reason, "新しい校正で確かめたところ"));
     CHECK(Has(RecalibrationFindingSentence({FindingClass::rejected, "sample-estimate-doubtful", "residual-shape"}).reason, "見本の合成で"));
     // The tilt and the height send the person to the chart, not to a retake.
@@ -264,14 +277,18 @@ void ResultLines() {
     {
         auto f = facts;
         f.gate = Gate(gate::GateState::undetermined);
-        CHECK(HasLine(RecalibrationResultLines(f), "継ぎ目のずれ: 確かめられませんでした。測れた行 86 %"));
+        CHECK(HasLine(RecalibrationResultLines(f), "継ぎ目のずれ: 測れた所の最大 0.4 px（基準 1 px）。測れた行 86 %"));
         f.gate = Gate(gate::GateState::fail);
         CHECK(HasLine(RecalibrationResultLines(f), "継ぎ目のずれ: 基準を超えました（最大 0.4 px、基準 1 px）"));
         f.gate = Gate(gate::GateState::fail);
         f.gate.cause = gate::GateCause::unmeasurable;
-        CHECK(HasLine(RecalibrationResultLines(f), "継ぎ目のずれ: 測れない所があり、確かめられませんでした。測れた行 86 %") && !HasLine(RecalibrationResultLines(f), "基準を超えました"));
+        CHECK(HasLine(RecalibrationResultLines(f), "継ぎ目のずれ: 測れた所の最大 0.4 px（基準 1 px）。測れた行 86 %") && !HasLine(RecalibrationResultLines(f), "基準を超えました"));
+        // The line is a fact and not a verdict: it never says that the seam was or was not checked (the finding says that).
+        f.gate.maximum_px.reset();
+        CHECK(HasLine(RecalibrationResultLines(f), "継ぎ目のずれ: 測れた値はありません。測れた行 86 %"));
+        for (const auto& l : RecalibrationResultLines(f)) CHECK(!Has(l, "確かめられませんでした"));
         f.gate = Gate(gate::GateState::not_run);
-        CHECK(HasLine(RecalibrationResultLines(f), "確かめが行われませんでした"));
+        CHECK(HasLine(RecalibrationResultLines(f), "継ぎ目のずれ: 測っていません"));
         f.gate = RecalibrationGateFacts{};
         CHECK(HasLine(RecalibrationResultLines(f), "確かめていません"));
         f.gate = Gate(gate::GateState::pass);
@@ -296,9 +313,10 @@ void Verdicts() {
     // The screen: the verdict first, then why, then the numbers.
     RecalibrationResultFacts facts;
     facts.display = SampleDisplay();
-    facts.gate = Gate(gate::GateState::undetermined);
+    facts.gate = Gate(gate::GateState::fail);
+    facts.gate.cause = gate::GateCause::unmeasurable;
     facts.creation_checked = true;
-    const std::vector<RecalibrationFinding> findings{{FindingClass::unverified, "gate-undetermined", {}}};
+    const std::vector<RecalibrationFinding> findings{{FindingClass::unverified, "gate-nothing-measured", {}}};
     const auto lines = RecalibrationScreenLines(RecalibrationVerdict::usable_unverified, findings, facts);
     CHECK(lines.size() >= 4 && Has(lines.front(), "未確認の校正"));
     CHECK(Has(lines[1], "継ぎ目のずれを確かめられませんでした。"));
@@ -315,11 +333,26 @@ void Verdicts() {
         CHECK(Has(both.front(), "未確認の校正") && HasLine(both, "新しい校正での確かめが、確かな値になりませんでした") && HasLine(both, "継ぎ目のずれ: 基準内"));
         CHECK(!HasLine(both, "継ぎ目のずれを確かめられませんでした"));
         for (const auto& l : both) CHECK(!(Has(l, "確かめられませんでした") && Has(l, "基準内")));
-        // When the gate itself could not decide, the reason line (not the verdict line) says so.
-        passed.gate = Gate(gate::GateState::undetermined);
-        const std::vector<RecalibrationFinding> gate_only{{FindingClass::unverified, "gate-undetermined", {}}};
+        // When the gate could not measure the seam, the reason line (not the verdict line, and not the numbers) says so, once.
+        passed.gate = Gate(gate::GateState::fail);
+        passed.gate.cause = gate::GateCause::unmeasurable;
+        const std::vector<RecalibrationFinding> gate_only{{FindingClass::unverified, "gate-nothing-measured", {}}};
         const auto gate_lines = RecalibrationScreenLines(RecalibrationVerdict::usable_unverified, gate_only, passed);
         CHECK(!Has(gate_lines.front(), "確かめられませんでした") && Has(gate_lines[1], "継ぎ目のずれを確かめられませんでした"));
+        std::size_t said = 0;
+        for (const auto& l : gate_lines) said += Has(l, "確かめられませんでした") ? 1 : 0;
+        CHECK(said == 1);
+        // A gate that did not work and a calibration that is not offered: "can not be used" and "could not be checked" are not on one screen.
+        passed.gate = Gate(gate::GateState::undetermined);
+        const std::vector<RecalibrationFinding> broken{{FindingClass::rejected, "gate-undetermined", {}}};
+        const auto broken_lines = RecalibrationScreenLines(RecalibrationVerdict::unusable, broken, passed);
+        CHECK(broken_lines.front() == "この校正は使えません" && HasLine(broken_lines, "技術担当へ知らせてください"));
+        for (const auto& l : broken_lines) CHECK(!Has(l, "確かめられませんでした"));
+        // The estimate of the sample shows a misfit while the seam is within the line: the sentence says so, and the numbers stay facts.
+        passed.gate = Gate(gate::GateState::pass);
+        const std::vector<RecalibrationFinding> misfit{{FindingClass::rejected, "sample-estimate-doubtful", "starts-disagree"}};
+        const auto misfit_lines = RecalibrationScreenLines(RecalibrationVerdict::unusable, misfit, passed);
+        CHECK(HasLine(misfit_lines, "継ぎ目のずれが基準内でも、この校正は使えません") && HasLine(misfit_lines, "継ぎ目のずれ: 基準内"));
     }
     // A calibration that cannot be used says why in a way the person can act on.
     const auto refused = RecalibrationScreenLines(RecalibrationVerdict::unusable, {{FindingClass::rejected, "tilt-exceeded", {}}}, RecalibrationResultFacts{});
