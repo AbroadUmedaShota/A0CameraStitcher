@@ -877,6 +877,12 @@ void RefusalsFromPose(){
         auto wrong_profile=MakeInputs(active,nullptr,nullptr);wrong_profile.profile_bytes=RigText(true);
         REJECT(rc::ProposeFromPose(wrong_profile,cr::PoseParameters{},fit,"{}"));
         REJECT(rc::ProposeRecalibration(MakeInputs(active,nullptr,nullptr)));   // images are required
+        // The time of the new revision and, when the condition enables layer two, its strain-bound constants are the caller's to give.
+        auto no_time=MakeInputs(active,nullptr,nullptr);no_time.now={};
+        REJECT(rc::ProposeFromPose(no_time,cr::PoseParameters{},fit,"{}"));
+        auto no_layer=MakeInputs(active,nullptr,nullptr);no_layer.layer_two.reset();
+        CHECK(active.condition.registration.parallax.has_value());
+        REJECT(rc::ProposeFromPose(no_layer,cr::PoseParameters{},fit,"{}"));
     }
     std::error_code ignored;fs::remove_all(active.settings,ignored);
 }

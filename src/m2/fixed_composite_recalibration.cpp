@@ -179,6 +179,10 @@ void ValidateInputs(const Inputs& in,bool images){
     if(!IsUtcTimestamp(in.measured_at_utc))Reject("the time of the shot is not a UTC time");
     if(!IsLowerHex64(in.active_sha256) || !IsLowerHex64(in.original_a_sha256) || !IsLowerHex64(in.original_b_sha256))Reject("a SHA-256 is not 64 lower-case hex digits");
     if(in.thread_count<1 || in.thread_count>256)Reject("the thread count is outside 1..256");
+    // The time goes into the revision as its creation time: the clock's epoch would be written as a real time. Layer 2's constants are needed
+    // by the creation check when the condition enables layer 2; without them the check would refuse for a reason that is the caller's.
+    if(in.now==std::chrono::system_clock::time_point{})Reject("the time of the new revision is not given");
+    if(in.active.registration.parallax && !in.layer_two)Reject("the condition enables layer two and the design constants of its strain bound are not given");
     if(images){
         if(!in.camera_a || !in.camera_b)Reject("both originals are required");
         for(const auto* image:{in.camera_a,in.camera_b})
