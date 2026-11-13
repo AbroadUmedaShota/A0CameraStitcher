@@ -32,6 +32,7 @@
 #include "a0/phase0/experimental/still_alignment_text.hpp"
 #include "a0/phase0/experimental/fixed_composite_text.hpp"
 #include "a0/phase0/experimental/fixed_composite_preview.hpp"
+#include "a0/phase0/experimental/preview_window_title.hpp"
 #include "a0/phase0/experimental/live_registration_runtime.hpp"
 #include "a0/m2/experimental/overlap_estimation.hpp"
 #include "a0/phase0/experimental/still_pair.hpp"

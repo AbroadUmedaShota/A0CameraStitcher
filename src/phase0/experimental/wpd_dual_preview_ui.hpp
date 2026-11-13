@@ -76,6 +76,13 @@ struct MergeView {
 // thread while no merge worker exists; the merge worker and the UI only read it.
 FixedPreviewSource fixed_source;
 bool FixedConditionPresent(){return fixed_source.Present();}
+// The caption of the window and the label of the pair button say what the Live view read (#432), not what the first build of the window
+// knew. preview_window is set by the window that shows them; the camera-free smokes have none (or a window of their own).
+HWND preview_window{};
+void ApplyCalibrationTexts(){
+    if(preview_window && !closing)SetWindowTextW(preview_window,PreviewWindowTitle(fixed_source).c_str());
+    if(pair_button)SetWindowTextW(pair_button,PairButtonLabel(fixed_source));
+}
 // The live registration of C for a condition v3 (#417 LC). live_runtime is replaced only by PrepareLiveRuntime (or the smoke), on the
 // UI thread while no merge worker exists; the merge worker, its helper thread and Paint only call the runtime's own thread-safe members.
 // live_estimator_override and live_design_override are replaced only by --live-c-ui-smoke, which runs without a camera.
@@ -107,6 +114,7 @@ void LoadFixedSource(){
             <<" orientation="<<a0::m2::experimental::MountOrientationName(c.orientation)<<" revision="<<c.revision.sequence<<" registration_live="<<(c.registration.live?1:0)<<" approval=unapproved";}
     else if(!fixed_source.loaded && fixed_source.reason!=a0::m2::experimental::FixedCompositeSkip::condition_absent)line<<" reason="<<a0::m2::experimental::FixedCompositeSkipCode(fixed_source.reason);
     Log(line.str());
+    ApplyCalibrationTexts(); // every session start reads the condition again; so does the caption
 }
 // The live registration of C (#417 LC): a runtime for a condition v3, made at every preview session start (the condition is read
 // again there). A session that follows a capture asks for its first full estimate with the reason after-capture, and a session whose
@@ -1725,9 +1733,14 @@ int RunFixedCUiSmoke(){
     if(!window)return 2;
     for(int j=0;j<5;++j)merge_buttons[j]=CreateWindowExW(0,L"BUTTON",L"x",WS_CHILD,0,0,10,10,window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(300+j)),instance,nullptr);
     seam_button=CreateWindowExW(0,L"BUTTON",L"x",WS_CHILD|BS_AUTOCHECKBOX,0,0,10,10,window,reinterpret_cast<HMENU>(404),instance,nullptr);
-    bool controls=seam_button!=nullptr;for(const auto button:merge_buttons)controls=controls && button!=nullptr;
+    pair_button=CreateWindowExW(0,L"BUTTON",L"x",WS_CHILD,0,0,10,10,window,reinterpret_cast<HMENU>(400),instance,nullptr);
+    bool controls=seam_button!=nullptr && pair_button!=nullptr;for(const auto button:merge_buttons)controls=controls && button!=nullptr;
     if(!controls){DestroyWindow(window);return 2;}
+    preview_window=window;
     SendMessageW(seam_button,BM_SETCHECK,BST_CHECKED,0);
+    // The caption and the pair button's label as the window shows them (#432): read back from the window itself.
+    const auto caption=[&]{ApplyCalibrationTexts();wchar_t text[256]{};GetWindowTextW(window,text,256);return std::wstring(text);};
+    const auto pair_label=[&]{wchar_t text[64]{};GetWindowTextW(pair_button,text,64);return std::wstring(text);};
     HDC dc=CreateCompatibleDC(nullptr);BITMAPINFO info{};info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);info.bmiHeader.biWidth=1400;info.bmiHeader.biHeight=-960;
     info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;void* bits{};auto bitmap=CreateDIBSection(dc,&info,DIB_RGB_COLORS,&bits,nullptr,0);
     if(!dc || !bitmap){DestroyWindow(window);return 2;}
@@ -1772,6 +1785,7 @@ int RunFixedCUiSmoke(){
     // 1. A condition that applies: C is drawn with it, the seam line is over the picture, and no position request moves C.
     fixed_source={};fixed_source.loaded=m2::LoadedFixedCompositeCondition{condition(mount_orientation),std::string(64,'b')};
     check(FixedConditionPresent());
+    check(caption()==L"A0 A/B Live + C（校正あり・v1） / 撮影・PC保存" && pair_label()==L"両台撮影 → 合成を保存");
     check(start_worker([]{return merged.decided && merged.mode==PreviewCMode::fixed_composite && merged.frames>=3 && !merged.pixels.bytes.empty();}));
     {
         std::lock_guard lock(merged.mutex);
@@ -1824,6 +1838,7 @@ int RunFixedCUiSmoke(){
     };
     fixed_source={};fixed_source.loaded_v2=lens_condition(mount_orientation);
     check(FixedConditionPresent());
+    check(caption()==L"A0 A/B Live + C（校正あり・v2） / 撮影・PC保存" && pair_label()==L"両台撮影 → 合成を保存");
     check(start_worker([]{return merged.decided && merged.mode==PreviewCMode::fixed_composite && merged.frames>=3 && !merged.pixels.bytes.empty();}));
     {
         std::lock_guard lock(merged.mutex);
@@ -1883,6 +1898,7 @@ int RunFixedCUiSmoke(){
     for(const auto reason:{m2::FixedCompositeSkip::condition_invalid,m2::FixedCompositeSkip::profile_absent,m2::FixedCompositeSkip::profile_differs,m2::FixedCompositeSkip::pose_outside_envelope}){
         fixed_source={};fixed_source.reason=reason;
         check(FixedConditionPresent());
+        check(caption()==L"A0 A/B Live + C（校正を読めません） / 撮影・PC保存" && pair_label()==L"両台撮影 → 仮Merge保存");
         check(start_worker([]{return merged.decided && merged.mode==PreviewCMode::unavailable && merged.rendered_revision==merged.revision && merged.source_a.time_since_epoch().count()>0;}));
         {
             std::lock_guard lock(merged.mutex);
@@ -1900,6 +1916,7 @@ int RunFixedCUiSmoke(){
     // 4. No condition: the uncalibrated C stays, its position requests work, and no seam line is drawn.
     fixed_source={};
     check(!FixedConditionPresent());
+    check(caption()==L"A0 A/B Live + C（校正なし・仮Merge） / 撮影・PC保存" && pair_label()==L"両台撮影 → 仮Merge保存");
     check(start_worker([]{return merged.decided && merged.mode==PreviewCMode::uncalibrated && !merged.pixels.bytes.empty();}));
     paint();check(pink(picture_rect())==0);
     {
@@ -1915,6 +1932,7 @@ int RunFixedCUiSmoke(){
     stop_worker();rearm();ClearMerge();
 
     SelectObject(dc,old);DeleteObject(bitmap);DeleteDC(dc);DestroyWindow(window);
+    preview_window=nullptr;pair_button=nullptr;
     fixed_source={};stopping=true;
     Log("fixed_c_ui_checks="+std::to_string(checks)+" failures="+std::to_string(failures)+" camera_operations=0");return failures?1:0;
 }
@@ -2178,6 +2196,8 @@ int RunLiveCUiSmoke(){
 
     // 3. The reasons of the first full estimate of a session: a start, a session after a capture, a condition read again.
     fixed_source={};fixed_source.loaded_v3=condition(true,std::string(64,'1'));
+    // The caption of a condition v3 names its revision (#432); the smoke's revision is 1.
+    check(PreviewWindowTitle(fixed_source)==L"A0 A/B Live + C（校正あり・改訂 1） / 撮影・PC保存" && std::wstring(PairButtonLabel(fixed_source))==L"両台撮影 → 合成を保存");
     live_captures_seen=captures_saved;live_condition_sha.clear();
     PrepareLiveRuntime();
     check(live_runtime && live_runtime->Status().view.full_reason==LiveFullReason::session_start);
@@ -2238,8 +2258,9 @@ int RunPreviewWindow(const std::array<std::wstring,2>& ids){
     for(int i=0;i<2;++i){cameras[i]=std::make_unique<Camera>();cameras[i]->alias=i==0?"CAM-A":"CAM-B";}
     auto instance=GetModuleHandleW(nullptr);WNDCLASSW wc{};wc.lpfnWndProc=WindowProc;wc.hInstance=instance;wc.lpszClassName=L"A0WpdDualPreview";wc.hCursor=LoadCursor(nullptr,IDC_ARROW);
     if(!RegisterClassW(&wc))throw std::runtime_error("register window failed");
-    HWND window=CreateWindowExW(0,wc.lpszClassName,L"A0 A/B Live + C 仮Merge（未校正） / 撮影・PC保存",WS_OVERLAPPEDWINDOW|WS_VISIBLE|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,1400,960,nullptr,nullptr,instance,nullptr);
+    HWND window=CreateWindowExW(0,wc.lpszClassName,PreviewWindowTitle(fixed_source).c_str(),WS_OVERLAPPEDWINDOW|WS_VISIBLE|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,1400,960,nullptr,nullptr,instance,nullptr);
     if(!window)throw std::runtime_error("create window failed");
+    preview_window=window; // the caption follows the condition that StartPreview reads (#432)
     constexpr std::array<const wchar_t*,3> labels{L"AF",L"近くへ微調整",L"遠くへ微調整"};
     for(int i=0;i<2;++i){
         for(int j=0;j<3;++j){focus_buttons[i][j]=CreateWindowExW(0,L"BUTTON",labels[j],WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,0,0,0,0,window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(100+i*10+j)),instance,nullptr);if(!focus_buttons[i][j])throw std::runtime_error("create focus button failed");EnableWindow(focus_buttons[i][j],FALSE);}
