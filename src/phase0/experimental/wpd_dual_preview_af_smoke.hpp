@@ -318,19 +318,20 @@ int RunAfPointUiSmoke(){
     {
         for(const auto& camera:cameras){std::lock_guard lock(camera->mutex);camera->af.request.reset();}
         unsigned tables_one_block{},tables_two_blocks{};
-        for(const SIZE size:{SIZE{1400,960},SIZE{1280,800},SIZE{1000,700},SIZE{1920,1080},SIZE{1100,500},SIZE{800,420}}){
+        for(const SIZE size:{SIZE{1400,960},SIZE{1280,800},SIZE{1000,700},SIZE{1920,1080},SIZE{1100,500},SIZE{800,560}}){
             const RECT area{0,0,size.cx,size.cy};const int middle=area.bottom/2;
-            const auto layout=LayoutSettingsTableIn(16,area.bottom,SettingsButtonRowReserve());
+            const int lower_shift=PreviewLowerShift(area.right);
+            const auto layout=LayoutSettingsTableIn(16,area.bottom,SettingsButtonRowReserve(),lower_shift);
             (layout.blocks==1?tables_one_block:tables_two_blocks)+=1;
             for(int i=0;i<2;++i){
                 PixelRect p;{std::lock_guard lock(cameras[i]->mutex);p=PanePictureRect(area,i,cameras[i]->pixels);}
                 check(p.width>0 && p.height>0);
                 const int bottom=p.top+p.height;
-                check(p.top>=174 && bottom<=middle-8);                                  // the upper half only
+                check(p.top>=174+PreviewTopShift(area.right) && bottom<=middle-8);        // the upper half only, under the rows of buttons of the pane (#437)
                 check(bottom<=middle+4);                                                // above the status text
-                check(bottom<=middle+52);                                               // above the buttons of C
-                check(bottom<=SettingsTableFirstRowY(area.bottom));                     // above the first row of the settings table
-                check(SettingsTableBottom(16,area.bottom,SettingsButtonRowReserve())>=SettingsTableFirstRowY(area.bottom));
+                check(bottom<=middle+kLowerButtonsTop);                                 // above the buttons of C
+                check(bottom<=SettingsTableFirstRowY(area.bottom,lower_shift));                     // above the first row of the settings table
+                check(SettingsTableBottom(16,area.bottom,SettingsButtonRowReserve(),lower_shift)>=SettingsTableFirstRowY(area.bottom,lower_shift));
                 check(bottom<=middle+140+kLiveRowsHeight);                              // above C and its two rows
                 check(p.left>=i*(area.right/2)+12 && p.left+p.width<=(i+1)*(area.right/2)-12); // inside its own pane
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
@@ -339,7 +340,7 @@ int RunAfPointUiSmoke(){
                 // The same rectangle answers a click: inside it the camera, outside it (below, in the table) nothing.
                 const int cx=p.left+p.width/2,cy=p.top+(p.height-kAfStripHeight)/2;
                 check(AfPictureAt(area,cx,cy)==i);
-                check(AfPictureAt(area,cx,bottom)==-1 && AfPictureAt(area,cx,middle+90)==-1 && AfPictureAt(area,cx,SettingsTableFirstRowY(area.bottom)+4)==-1);
+                check(AfPictureAt(area,cx,bottom)==-1 && AfPictureAt(area,cx,middle+90)==-1 && AfPictureAt(area,cx,SettingsTableFirstRowY(area.bottom,lower_shift)+4)==-1);
             }
         }
         check(tables_one_block>0 && tables_two_blocks>0); // both table layouts were covered
@@ -364,6 +365,7 @@ int RunAfPointUiSmoke(){
         for(const auto& camera:cameras){std::lock_guard lock(camera->mutex);camera->af.request.reset();}
     }
     SelectObject(dc,old);DeleteObject(bitmap);DeleteDC(dc);stopping=true;
+    CheckButtonLayouts([&](bool ok){check(ok);}); // #437: the buttons at the width of a narrow screen and at a wide one
     Log("af_point_ui_checks="+std::to_string(checks)+" failures="+std::to_string(failures)+" camera_operations=0");return failures?1:0;
 }
 // The settings panel (#416) against the AF frame (#426). Only in the confirmation test build, the one build with a

@@ -214,8 +214,8 @@ int RunRecalibrationUiSmoke(const std::filesystem::path& fixtures,const std::fil
             for(const auto& r:rects)inside=inside && r.left>=0 && r.top>=0 && r.right<=area.right && r.bottom<=area.bottom && r.right>r.left && r.bottom>r.top;
             for(size_t i=0;i<rects.size();++i)for(size_t j=i+1;j<rects.size();++j){
                 RECT overlap{};if(IntersectRect(&overlap,&rects[i],&rects[j]))apart=false;}
-            // The flow row is under the row of the Live buttons (its bottom is 116 below the middle).
-            for(int i=0;i<kRecalFlowCount;++i)if(shown(i))apart=apart && client_rect(recal_flow_buttons[i]).top>=area.bottom/2+116;
+            // The flow row is under the rows of the lower buttons (the title row of the lower half is lower by PreviewLowerShift, and the flow row is 36 under it).
+            for(int i=0;i<kRecalFlowCount;++i)if(shown(i))apart=apart && client_rect(recal_flow_buttons[i]).top>=area.bottom/2+kRecalRowTop+PreviewLowerShift(area.right);
             check(inside,what);check(apart,what);
         };
         // What the window held before this change and does not hold at this width (information for the report; not a failure).

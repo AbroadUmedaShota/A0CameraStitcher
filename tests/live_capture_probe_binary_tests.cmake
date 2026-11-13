@@ -1,0 +1,45 @@
+# Whether the development preview binary carries the Live-open capture probe (#426 stage 4, ADR-0044).
+# -DBINARY=<the preview exe> -DEXPECT=absent|present
+# A build with A0_BUILD_WPD_LIVE_CAPTURE_PROBE=OFF must carry no entry of the probe: not a log key, not the smoke
+# argument, not the record folder name and not the Japanese text of its button and window title. A build with it ON
+# must carry them, so that the check itself is seen to find them. Reads the file only; runs nothing.
+if(NOT DEFINED BINARY OR NOT EXISTS "${BINARY}")
+    message(FATAL_ERROR "live capture probe binary check: missing BINARY")
+endif()
+if(NOT EXPECT STREQUAL "absent" AND NOT EXPECT STREQUAL "present")
+    message(FATAL_ERROR "live capture probe binary check: EXPECT must be absent or present")
+endif()
+# ASCII entries: log keys, the camera-free smoke argument, the record folder. The probe's Japanese button text is UTF-16
+# in the binary and is looked for below, because file(STRINGS) sees ASCII only.
+file(STRINGS "${BINARY}" hits REGEX "live_capture_probe|live-capture-probe-ui-smoke|wpd-live-capture-probes|wpd-live-capture-probe-development")
+list(LENGTH hits count)
+# UTF-16LE of the button text prefix (63A2 308A 003A 0020) and of the window title word (63A2 308A "build").
+file(READ "${BINARY}" hex HEX)
+set(button_hex "a2638a303a002000")
+set(title_hex "a2638a306200750069006c006400")
+string(FIND "${hex}" "${button_hex}" button_at)
+string(FIND "${hex}" "${title_hex}" title_at)
+set(japanese 0)
+if(NOT button_at EQUAL -1)
+    math(EXPR japanese "${japanese} + 1")
+endif()
+if(NOT title_at EQUAL -1)
+    math(EXPR japanese "${japanese} + 1")
+endif()
+if(EXPECT STREQUAL "absent")
+    if(count GREATER 0)
+        message(FATAL_ERROR "live capture probe binary check: an OFF build carries ${count} probe strings")
+    endif()
+    if(japanese GREATER 0)
+        message(FATAL_ERROR "live capture probe binary check: an OFF build carries ${japanese} probe Japanese texts")
+    endif()
+endif()
+if(EXPECT STREQUAL "present")
+    if(count EQUAL 0)
+        message(FATAL_ERROR "live capture probe binary check: an ON build carries no probe string")
+    endif()
+    if(NOT japanese EQUAL 2)
+        message(FATAL_ERROR "live capture probe binary check: an ON build carries ${japanese} of the 2 probe Japanese texts")
+    endif()
+endif()
+message(STATUS "live capture probe binary check: expect=${EXPECT} ascii_strings=${count} japanese_texts=${japanese}")

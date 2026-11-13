@@ -1,6 +1,7 @@
 #include "wpd_still_fake.hpp"
 #include <algorithm>
 #include <iostream>
+#include <memory>
 using namespace a0::phase0::experimental;
 namespace {
 int checks{},failures{};
@@ -178,6 +179,150 @@ int main(){
         {Fake f;f.reject_shutter=true;size_t partial=0;Reject([&]{AcquireWpdStillPayload(f,[]{return true;},[&](auto c){partial+=c.size();});});Check(f.shutters==1 && !f.CaptureConfirmed() && f.object_reads==1 && partial==f.jpeg.size());}
         {Fake f;f.admitted=false;Reject([&]{AcquireWpdStillPayload(f,[]{return true;},[](auto){});});Check(f.shutters==0);}
         {Fake f;f.owned=false;Reject([&]{f.ShutterOnce();});Check(f.shutters==0);}
+
+        // #430 C1: every notice of every preflight read is counted by code, whether or not the
+        // preflight passes, and before the ledger judges the batch. The judgement is unchanged:
+        // it stops at the first rejected notice. Parameters (object handles) are never counted.
+        {Fake f;WpdStillPreflightRecord record;ReadWpdStillPreflight(f,[]{return true;},&record);
+            Check(record.polls==2 && record.codes.Empty() && record.codes.Describe()=="none" && !record.refresh);}
+        {std::vector<WpdStillEvent> queue{{0xc102,0},{0xc101,0x7b},{0x4006,5}};
+            Fake f;f.camera_queue=&queue;WpdStillPreflightRecord record;
+            const auto what=RejectedEvent([&]{ReadWpdStillPreflight(f,[]{return true;},&record);},0xc102,false);
+            Check(what=="pending capture completion code=0xc102 phase=before_shutter"); // The reason is still the first rejected notice.
+            Check(record.polls==1 && record.codes.Describe()=="0x4006:1,0xc101:1,0xc102:1" && !record.refresh);
+            Check(!Contains(record.codes.Describe(),"7b") && !Contains(record.codes.Describe(),"123") && queue.empty());
+            Check(f.shutters==0 && f.object_reads==0);}
+        {std::vector<WpdStillEvent> queue{{0x4005,0},{0x4004,9}};
+            Fake f;f.camera_queue=&queue;WpdStillPreflightRecord record;
+            RejectedEvent([&]{ReadWpdStillPreflight(f,[]{return true;},&record);},0x4005,false);
+            Check(record.polls==1 && record.codes.Describe()=="0x4004:1,0x4005:1");
+            // The leftover was read, so the next preflight passes.
+            WpdStillPreflightRecord again;ReadWpdStillPreflight(f,[]{return true;},&again);Check(again.polls==2 && again.codes.Empty());}
+        // A refresh is recorded, and the counts add up across the reads before and after it.
+        {Fake f;f.preflight_event=0x4004;WpdStillPreflightRecord record;ReadWpdStillPreflight(f,[]{return true;},&record);
+            Check(record.polls==4 && record.refresh && record.codes.Describe()=="0x4004:1" && f.profile_reads==2);}
+        {Fake f;f.preflight_event=0x4004;f.repeat_preflight_event=true;WpdStillPreflightRecord record;bool typed=false;
+            try{ReadWpdStillPreflight(f,[]{return true;},&record);}
+            catch(const WpdStillStateRefused& e){typed=e.Reason()==WpdStillStateRefusal::NotSettled;Check(std::string(e.what())=="camera state did not settle after capture profile refresh");}
+            Check(typed && record.refresh && record.polls==4 && record.codes.Describe()=="0x4004:4");}
+        // The camera-state refusals are typed, with the text they always had.
+        {Fake f;f.live_on=true;WpdStillPreflightRecord record;bool typed=false;
+            try{ReadWpdStillPreflight(f,[]{return true;},&record);}catch(const WpdStillStateRefused& e){typed=e.Reason()==WpdStillStateRefusal::LiveViewOn && std::string(e.what())=="capture requires Live View off";}
+            Check(typed && record.polls==0);}
+        {Fake f;f.bad_quality=true;bool typed=false;
+            try{ReadWpdStillPreflight(f,[]{return true;});}catch(const WpdStillStateRefused& e){typed=e.Reason()==WpdStillStateRefusal::Quality && std::string(e.what())=="capture requires JPEG Fine only; camera settings unchanged";}
+            Check(typed);}
+        {Fake f;f.wrong_size=true;bool typed=false;
+            try{ReadWpdStillPreflight(f,[]{return true;});}catch(const WpdStillStateRefused& e){typed=e.Reason()==WpdStillStateRefusal::Size && std::string(e.what())=="capture requires FX JPEG L; camera settings unchanged";}
+            Check(typed);}
+        // A deadline or stop is not a camera-state refusal.
+        {Fake f;bool state=false,other=false;
+            try{ReadWpdStillPreflight(f,[]{return false;});}catch(const WpdStillStateRefused&){state=true;}catch(const std::exception&){other=true;}
+            Check(!state && other);}
+
+        // #430 C3: a body whose shutter was dispatched but whose capture failed before the
+        // completion wait (here OutOfFocus at the first readiness check) polls its notices once
+        // before Close. It reads 0x90C7 only, never an object, and changes no result.
+        const auto object_operations=[](const std::vector<std::string>& trace){for(const auto& entry:trace)if(Contains(entry,":1008(") || Contains(entry,":1009("))return true;return false;};
+        // Tests that expect the notice to arrive on a later poll use a long bound, so that a loaded machine cannot turn
+        // them into a timeout; the tests that expect a timeout pass kShortWait.
+        const WpdStillCompletionWait kObserveWait{std::chrono::milliseconds(5000),std::chrono::milliseconds(2)};
+        const auto failed_run=[&](Fake& f,WpdStillCaptureObservation& observed,std::function<bool()> admission=[]{return true;},WpdStillCompletionWait wait=WpdStillCompletionWait{std::chrono::milliseconds(5000),std::chrono::milliseconds(2)}){
+            auto run=std::make_unique<WpdStillCaptureRun>(f,std::move(admission),[](auto){},&observed,wait);
+            run->Preflight();run->Shutter();
+            bool typed=false;try{run->Collect();}catch(const WpdStillOutOfFocus&){typed=true;}
+            Check(typed);return run;};
+        {Fake f;f.out_of_focus_after_shutter=true;f.use_script=true;f.post_script={{},{},{{0xc102,0}}};std::vector<std::string> trace;f.trace=&trace;
+            WpdStillCaptureObservation observed;auto run=failed_run(f,observed);
+            Check(f.post_reads==0 && !observed.complete_event && observed.failure.result==WpdStillFailureObservationResult::NotRun); // Collect read no notice.
+            run->ObserveCompletionBeforeClose();
+            Check(observed.failure.result==WpdStillFailureObservationResult::Seen && observed.complete_event && observed.complete_event_code==0xc102);
+            Check(f.post_reads==3 && f.shutters==1 && f.object_reads==0 && !object_operations(trace) && !observed.failure.late_object_event && observed.failure.rejected_code==0);
+            Check(observed.failure.waited_ms>0 && observed.failure.waited_ms<kObserveWait.max.count() && observed.failure.max_ms==5000);
+            Check(DescribeWpdStillCaptureObservation(observed)=="shutter_attempted=1 complete_event=1 complete_event_code=0xc102");
+            Check(Contains(DescribeWpdStillFailureObservation(observed.failure),"result=seen waited_ms=") &&
+                Contains(DescribeWpdStillFailureObservation(observed.failure)," max_ms=5000 late_object_event=0 rejected_code=none codes=0xc102:1"));
+            run->ObserveCompletionBeforeClose(); // Called twice: the second does not read again.
+            Check(f.post_reads==3);}
+        // Without the observation the completion stays in the camera (what the next press found).
+        {Fake f;f.out_of_focus_after_shutter=true;f.use_script=true;f.post_script={{},{},{{0xc102,0}}};
+            WpdStillCaptureObservation observed;auto run=failed_run(f,observed);
+            Check(f.post_reads==0 && !observed.complete_event);}
+        // The completion arrives only after the bound: timeout, recorded, not a failure.
+        {Fake f;f.out_of_focus_after_shutter=true;f.use_script=true;f.post_script.assign(1000,{});f.post_script.push_back({{0xc102,0}});
+            WpdStillCaptureObservation observed;auto run=failed_run(f,observed,[]{return true;},kShortWait);
+            const auto started=std::chrono::steady_clock::now();run->ObserveCompletionBeforeClose();
+            const auto took=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-started);
+            Check(observed.failure.result==WpdStillFailureObservationResult::TimedOut && !observed.complete_event && observed.failure.waited_ms>=kShortWait.max.count() && took<std::chrono::milliseconds(3000));
+            Check(Contains(DescribeWpdStillFailureObservation(observed.failure),"result=timeout") && observed.failure.codes.Empty());}
+        // An image notice: recorded, nothing read or authorized, the observation stops.
+        {Fake f;f.out_of_focus_after_shutter=true;f.use_script=true;f.post_script={{},{{0xc101,123}},{{0xc102,0}}};std::vector<std::string> trace;f.trace=&trace;
+            WpdStillCaptureObservation observed;auto run=failed_run(f,observed);run->ObserveCompletionBeforeClose();
+            Check(observed.failure.result==WpdStillFailureObservationResult::ObjectEvent && observed.failure.late_object_event && !observed.complete_event);
+            Check(f.post_reads==2 && f.object_reads==0 && !object_operations(trace) && f.shutters==1);
+            Check(Contains(DescribeWpdStillFailureObservation(observed.failure),"late_object_event=1") && Contains(DescribeWpdStillFailureObservation(observed.failure),"codes=0xc101:1"));}
+        // The image notice and the completion in one batch: both recorded; still no object read.
+        {Fake f;f.out_of_focus_after_shutter=true;f.use_script=true;f.post_script={{{0xc101,123},{0xc102,0}}};std::vector<std::string> trace;f.trace=&trace;
+            WpdStillCaptureObservation observed;auto run=failed_run(f,observed);run->ObserveCompletionBeforeClose();
+            Check(observed.failure.result==WpdStillFailureObservationResult::Seen && observed.failure.late_object_event && observed.complete_event && !object_operations(trace));}
+        // A rejected notice (storage removed) during the observation is recorded and ends it; nothing escapes.
+        {Fake f;f.out_of_focus_after_shutter=true;f.use_script=true;f.post_script={{},{{0x4005,0},{0xc102,0}}};
+            WpdStillCaptureObservation observed;auto run=failed_run(f,observed);run->ObserveCompletionBeforeClose();
+            Check(observed.failure.result==WpdStillFailureObservationResult::Rejected && observed.failure.rejected_code==0x4005 && !observed.complete_event && !observed.failure.late_object_event);
+            Check(Contains(DescribeWpdStillFailureObservation(observed.failure),"rejected_code=0x4005 codes=0x4005:1,0xc102:1") && f.object_reads==0);}
+        // An image notice in one batch with a notice the ledger refuses is still recorded, whichever comes first.
+        for(const auto& batch:std::vector<std::vector<WpdStillEvent>>{{{0xc101,123},{0x4005,0}},{{0x4005,0},{0xc101,123}}}){
+            Fake f;f.out_of_focus_after_shutter=true;f.use_script=true;f.post_script={batch};std::vector<std::string> trace;f.trace=&trace;
+            WpdStillCaptureObservation observed;auto run=failed_run(f,observed);run->ObserveCompletionBeforeClose();
+            Check(observed.failure.result==WpdStillFailureObservationResult::Rejected && observed.failure.late_object_event && !observed.complete_event);
+            Check(Contains(DescribeWpdStillFailureObservation(observed.failure),"late_object_event=1") && f.object_reads==0 && !object_operations(trace));}
+        // An image notice followed by a duplicate completion in one batch: rejected on the duplicate, still flagged.
+        {Fake f;f.out_of_focus_after_shutter=true;f.use_script=true;f.post_script={{{0xc101,123},{0xc102,0},{0xc102,0}}};std::vector<std::string> trace;f.trace=&trace;
+            WpdStillCaptureObservation observed;auto run=failed_run(f,observed);run->ObserveCompletionBeforeClose();
+            Check(observed.failure.result==WpdStillFailureObservationResult::Rejected && observed.failure.rejected_code==0xc102 && observed.failure.late_object_event && f.object_reads==0 && !object_operations(trace));}
+        // A second image notice after an image was already retrieved is ambiguous: rejected, flagged.
+        {Fake f;f.use_script=true;f.jpeg.clear();f.post_script={{{0xc101,123}},{{0xc101,200}}};WpdStillCaptureObservation observed;
+            WpdStillCaptureRun run(f,[]{return true;},[](auto){},&observed,kShortWait);run.Preflight();run.Shutter();
+            Reject([&]{run.Collect();}); // The object information is refused, so no image is read.
+            run.ObserveCompletionBeforeClose();
+            Check(observed.failure.result==WpdStillFailureObservationResult::Rejected && observed.failure.rejected_code==0xc101 && observed.failure.late_object_event && f.object_reads==0);}
+        // A transfer whose end was refused retires the channel: the observation cannot read, says so, and throws nothing.
+        {Fake f;f.use_script=true;f.reject_object_end=true;f.post_script={{{0xc101,123}},{{0xc102,0}}};WpdStillCaptureObservation observed;
+            WpdStillCaptureRun run(f,[]{return true;},[](auto){},&observed,kShortWait);run.Preflight();run.Shutter();
+            Reject([&]{run.Collect();});
+            run.ObserveCompletionBeforeClose();
+            Check(observed.failure.result==WpdStillFailureObservationResult::ReadFailed && !observed.complete_event && f.object_reads==1);}
+        // The deadline, a stop or a cancel before or during the observation: no I/O, aborted.
+        {Fake f;f.out_of_focus_after_shutter=true;f.use_script=true;f.post_script={{},{},{{0xc102,0}}};bool admitted=true;
+            WpdStillCaptureObservation observed;auto run=failed_run(f,observed,[&]{return admitted;});admitted=false;
+            run->ObserveCompletionBeforeClose();
+            Check(observed.failure.result==WpdStillFailureObservationResult::Aborted && f.post_reads==0 && !observed.complete_event);}
+        {Fake f;f.out_of_focus_after_shutter=true;f.use_script=true;f.post_script={{},{},{},{},{{0xc102,0}}};
+            WpdStillCaptureObservation observed;auto run=failed_run(f,observed,[&]{return f.post_reads<=1;});
+            run->ObserveCompletionBeforeClose();
+            Check(observed.failure.result==WpdStillFailureObservationResult::Aborted && f.post_reads==2 && !observed.complete_event);}
+        // A read that fails while admitted is recorded, not thrown.
+        {Fake f;f.out_of_focus_after_shutter=true;WpdStillCaptureObservation observed;auto run=failed_run(f,observed);
+            f.owned=false; // The cleanup admission ends: every transport call is refused.
+            run->ObserveCompletionBeforeClose();
+            Check(observed.failure.result==WpdStillFailureObservationResult::ReadFailed && !observed.complete_event);}
+        // Where it must not run: no shutter dispatched, or the success path already waited.
+        {Fake f;f.use_script=true;f.post_script={{{0xc102,0}}};WpdStillCaptureObservation observed;
+            WpdStillCaptureRun run(f,[]{return true;},[](auto){},&observed,kShortWait);run.Preflight();
+            run.ObserveCompletionBeforeClose();
+            Check(f.post_reads==0 && f.shutters==0 && observed.failure.result==WpdStillFailureObservationResult::NotRun);}
+        {Fake f;WpdStillCaptureObservation observed;WpdStillCaptureRun run(f,[]{return true;},[](auto){},&observed,kShortWait);
+            run.Preflight();run.Shutter();(void)run.Collect();
+            const auto reads=f.post_reads;run.ObserveCompletionBeforeClose();
+            Check(observed.failure.result==WpdStillFailureObservationResult::NotRun && observed.completion_wait==WpdStillCompletionWaitResult::AlreadySeen && reads==f.post_reads);}
+        {Fake f;f.use_script=true;f.post_script={{{0xc101,123}}};WpdStillCaptureObservation observed;
+            WpdStillCaptureRun run(f,[]{return true;},[](auto){},&observed,kShortWait);run.Preflight();run.Shutter();(void)run.Collect();
+            const auto reads=f.post_reads;run.ObserveCompletionBeforeClose();
+            Check(observed.completion_wait==WpdStillCompletionWaitResult::TimedOut && observed.failure.result==WpdStillFailureObservationResult::NotRun && f.post_reads==reads);}
+        // The three keys of the capture_completion line keep their format on the failure path too.
+        {Fake f;f.out_of_focus_after_shutter=true;f.use_script=true;f.post_script={{}};WpdStillCaptureObservation observed;auto run=failed_run(f,observed,[]{return true;},kShortWait);run->ObserveCompletionBeforeClose();
+            Check(DescribeWpdStillCaptureObservation(observed)=="shutter_attempted=1 complete_event=0 complete_event_code=none" &&
+                DescribeWpdStillCompletionWait(observed,kShortWait)=="result=not_reached waited_ms=0 max_ms=60");}
     }
     CoUninitialize();std::cout<<checks<<" checks, "<<failures<<" failures\n";return failures?1:0;
 }

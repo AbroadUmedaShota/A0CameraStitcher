@@ -226,11 +226,11 @@ std::vector<RecalibrationFlowButton> RecalibrationFlowButtons(){
     }
     return shown;
 }
-// The entrance stands in the row of the Live buttons, to the left of them (right-aligned like them, so that it is on the screen at any
-// width where those are). The flow buttons stand in one row under that row, and go to the next row when the window is narrow.
+// The entrance is one of the lower buttons (preview_button_layout.hpp, kLowerRecal; placed by LayoutButtons). The flow buttons stand in
+// the area that the lower half keeps for C (under the rows of buttons, PreviewLowerShift), in one row, and go to the next row when the
+// window is narrow.
 void LayoutRecalibrationButtons(const RECT& rect){
-    if(recal_enter_button)MoveWindow(recal_enter_button,std::max(12L,rect.right-860),rect.bottom/2+88,200,kRecalButtonHeight,TRUE);
-    const int top=rect.bottom/2+kRecalRowTop;
+    const int top=rect.bottom/2+kRecalRowTop+PreviewLowerShift(rect.right);
     int x=12,row=0;
     for(const auto& flow:RecalibrationFlowButtons()){
         const int width=kRecalFlowWidths[flow.index];
@@ -339,7 +339,7 @@ void PrepareRecalibrationPictures(){
 struct RecalibrationPictureLayout {RECT thumbnail{},crops{};int captions_y{};};
 RecalibrationPictureLayout LayoutRecalibrationPictures(const RECT& client){
     RecalibrationPictureLayout layout;
-    const int top=176,bottom=client.bottom/2-8,left=12,right=client.right-12;   // under the texts that the stopped panes still draw (the level note ends at y=170)
+    const int top=176+PreviewTopShift(client.right),bottom=client.bottom/2-8,left=12,right=client.right-12;   // under the texts that the stopped panes still draw (the level note ends at y=170, lower by the wrapped rows of buttons)
     layout.captions_y=top;
     const int picture_top=top+24;
     const int height=std::max(0,bottom-picture_top),width=std::max(0,right-left);
@@ -387,7 +387,7 @@ bool DrawRecalibrationScreen(HDC dc,const RECT& client){
     const int left=12,width=client.right-24;
     const int limit=client.bottom-6-SettingsButtonRowReserve();
     // The text starts under the row of buttons; while the shot is taken there is no button.
-    int y=client.bottom/2+kRecalRowTop+(r.phase==RecalPhase::capturing?0:r.button_rows*kRecalRowPitch)+6;
+    int y=client.bottom/2+kRecalRowTop+PreviewLowerShift(client.right)+(r.phase==RecalPhase::capturing?0:r.button_rows*kRecalRowPitch)+6;
     const auto line=[&](const std::wstring& text,COLORREF color=kRecalTextColor){y=DrawRecalibrationText(dc,text,left,y,width,limit,color);};
     const auto utf8=[](const std::string& text){return WidenUtf8(text);};
     switch(r.phase){

@@ -259,13 +259,16 @@ struct D810WriteScreenView {
     bool confirmation{};
 };
 // How many lines of a view fit under its title in a window whose client area is `client_bottom` high (22 px a
-// line, from 30 px under the title to 84 px above the bottom, the title at the middle of the window plus 88 px).
+// line, from 30 px under the title to 84 px above the bottom, the title at the middle of the window plus 88 px plus
+// `lower_shift`, the distance the wrapped rows of buttons push the lower half down; 0 for a window wide enough not to wrap).
 // The preview draws this many and offers the confirm button only when every line of a confirmation fits.
-constexpr std::size_t D810WriteViewVisibleLines(int client_bottom) {
-    const int first = client_bottom / 2 + 88 + 30, bottom = client_bottom - 84;
+constexpr std::size_t D810WriteViewVisibleLines(int client_bottom, int lower_shift = 0) {
+    const int first = client_bottom / 2 + 88 + lower_shift + 30, bottom = client_bottom - 84;
     return bottom < first ? 0 : static_cast<std::size_t>((bottom - first) / 22);
 }
-inline bool D810WriteViewFits(const D810WriteScreenView& view, int client_bottom) { return view.lines.size() <= D810WriteViewVisibleLines(client_bottom); }
+inline bool D810WriteViewFits(const D810WriteScreenView& view, int client_bottom, int lower_shift = 0) {
+    return view.lines.size() <= D810WriteViewVisibleLines(client_bottom, lower_shift);
+}
 // The most lines a confirmation can have: the three opening lines, one line per step, the skipped heading with one
 // line per skipped item, and the closing line. Every item the copy plan walks (all but the chosen-value item) is
 // either a step or a skipped one, so that is 5 + (the number of those items) at most.
@@ -276,9 +279,9 @@ constexpr std::size_t D810WriteViewMaxLines() {
     return 5 + items;
 }
 // The smallest client height at which `lines` lines are visible (the inverse of D810WriteViewVisibleLines).
-constexpr int D810WriteViewMinClientBottom(std::size_t lines) {
+constexpr int D810WriteViewMinClientBottom(std::size_t lines, int lower_shift = 0) {
     for (int bottom = 0; bottom < 8000; ++bottom)
-        if (D810WriteViewVisibleLines(bottom) >= lines) return bottom;
+        if (D810WriteViewVisibleLines(bottom, lower_shift) >= lines) return bottom;
     return 8000;
 }
 // The window's smallest client area when a row is enabled: the height shows the longest confirmation, the width holds
@@ -297,9 +300,9 @@ constexpr bool D810ConfirmButtonInside(int client_width, int client_bottom) {
 // and a failed present all leave it different); every line still fits the height of the window as it is now; and the
 // button is inside the window. Anything else is not pressable (fail closed).
 inline bool D810ConfirmPressable(const D810WriteScreenView* view, std::uint64_t view_serial, std::uint64_t drawn_serial,
-    int client_width, int client_bottom) {
+    int client_width, int client_bottom, int lower_shift = 0) {
     if (!view || !view->confirmation || view_serial == 0 || drawn_serial != view_serial) return false;
-    return D810WriteViewFits(*view, client_bottom) && D810ConfirmButtonInside(client_width, client_bottom);
+    return D810WriteViewFits(*view, client_bottom, lower_shift) && D810ConfirmButtonInside(client_width, client_bottom);
 }
 // --- Words and lines of a plan of picked values (#416, ADR-0041) -----------------------------------------------------
 inline std::wstring D810WidenUtf8(std::string_view text) {

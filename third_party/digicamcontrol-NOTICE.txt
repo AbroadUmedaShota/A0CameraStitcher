@@ -37,6 +37,8 @@ in NikonD600Base.cs, ChangeAfArea 0x9205 with two UINT32 values (NikonBase.cs, F
 click-to-image-space conversion in CameraControl/ViewModel/LiveViewViewModel.cs, all at the same fixed commit.
 No upstream driver class, retry loop or implementation is copied; the details are in PTP_PROTOCOL_REFERENCES.md.
 
+The development Live-open capture probe (#426 stage 4, ADR-0044) uses only the public sequence facts in CameraControl/ViewModel/LiveViewViewModel.cs (pause frame reads, wait, no-AF capture, Live restart on capture) and NikonBase.cs (CapturePhotoNoAf, StartLiveView, GetLiveViewImage, the event handler, the Live View prohibition bits) at the same fixed commit. No upstream driver class, timer, retry or restart loop is copied.
+
 digiCamControl - DSLR camera remote control open source software Copyright (C) 2014 Duka Istvan
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
