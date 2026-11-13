@@ -50,6 +50,8 @@ public:
     bool fail_live_read = false, bad_info = false, shutter_throws = false;
     int busy_before = 0, busy_after = 0;
     DWORD ready_before = 0x2001, ready_after = 0x2001, shutter_response = 0x2001;
+    DWORD ready_at_import = 0; // when set, the second DeviceReady after the shutter (the one before the import) answers with it
+    int ready_calls_after{};
     std::vector<std::vector<WpdStillEvent>> pre, post{std::vector<WpdStillEvent>{{0xc101, 0x0badf00d}, {0xc102, 0}}}; // batches for successive reads before / after the shutter (default: one object and its completion)
     DWORD handle = 0x0badf00d;
     std::vector<unsigned char> jpeg{0xff, 0xd8, 7, 8, 9, 10, 0xff, 0xd9};
@@ -95,6 +97,7 @@ protected:
             DWORD response = 0x2001;
             int& busy = shutters ? busy_after : busy_before;
             if (busy > 0) { --busy; response = 0x2019; } else response = shutters ? ready_after : ready_before;
+            if (shutters && ++ready_calls_after == 2 && ready_at_import) response = ready_at_import;
             auto result = Reply(true);
             result->SetUnsignedIntegerValue(WPD_PROPERTY_MTP_EXT_RESPONSE_CODE, response);
             return {S_OK, result};
@@ -337,6 +340,13 @@ int main() {
         Check(o.live_after == 1u && o.out_of_focus == false && !o.sdram_may_remain, "clean: Live read on after the shot, nothing left in the camera");
         Check(o.sequence_clean && o.anomaly == "none" && o.live_after_state == "read" && run.IndexOf("live_capture_probe_anomaly") < 0, "clean: the sequence is marked clean and no anomaly line is written");
         Check(f.profile_reads == 2 && CountAfter(f, "1015") == 1, "clean: Live state read once after the shot");
+        Check(o.import_ready_attempted && o.import_ready == 0x2001 && CountAfter(f, "90c8") == 2 && run.IndexOf("live_capture_probe_import_ready=0x2001") >= 0, "clean: DeviceReady is sent once more just before the import and recorded");
+        {
+            // The order on the wire: shutter, Ready, events, Ready, object info, object data, events, Live state.
+            const auto& t = f.after_trace;
+            const auto info_at = std::find(t.begin(), t.end(), "1008");
+            Check(info_at != t.begin() && info_at != t.end() && *(info_at - 1) == "90c8", "clean: the import DeviceReady is the command right before the object info");
+        }
         Check(o.object_events == 1 && o.completion_events == 1 && o.unexpected == 0 && o.after_events == "0xc101:1,0xc102:1", "clean: event counts");
         Check(Count(f, "90c0") == 1 && f.ends >= 5, "clean: one 0x90c0 and every transfer ended");
         // The lines are in the planned order and carry codes and numbers only.
@@ -452,7 +462,16 @@ int main() {
             Check(!o.sequence_clean && o.anomaly == "after_shutter_not_ready" && !o.live_after && o.live_after_state == "not_read" && f.profile_reads == 1 && CountAfter(f, "1015") == 0, "a not-ready answer after the shutter: the Live state is not read again");
             Check(o.completion.completion_wait == WpdStillCompletionWaitResult::NotReached && f.post_event_reads == 1, "a not-ready answer after the shutter: the completion event is not waited for");
             Check(run.partial == f.jpeg && f.info_reads == 1 && f.object_reads == 1 && !o.sdram_may_remain, "a not-ready answer after the shutter: the one attributed object is still imported to a partial");
-            Check(run.IndexOf("live_capture_probe_anomaly reason=after_shutter_not_ready not_sent=completion_wait,live_state_read,frame_read") >= 0, "the log names the anomaly and what was not sent");
+            Check(run.IndexOf("live_capture_probe_anomaly reason=after_shutter_not_ready not_sent=completion_wait,import_ready,live_state_read,frame_read") >= 0, "the log names the anomaly and what was not sent");
+            Check(!o.import_ready_attempted && CountAfter(f, "90c8") == 1, "after an anomaly the DeviceReady before the import is not sent");
+        }
+        {   // The DeviceReady before the import is only recorded: a busy or refusing answer changes nothing.
+            ProbeFake f; f.ready_at_import = 0x2019;
+            const auto run = Go(f);
+            Check(run.out.import_ready_attempted && run.out.import_ready == 0x2019 && run.out.published == "original" && run.saved == 1 && run.out.sequence_clean && run.out.result == WpdLiveProbeResult::Observed, "a busy answer before the import is recorded and decides nothing");
+            ProbeFake g; g.ready_at_import = 0xa002;
+            const auto refused = Go(g);
+            Check(refused.out.import_ready == 0xa002 && refused.out.published == "original" && refused.out.sequence_clean, "a refusal before the import is recorded and decides nothing");
         }
         {   // The camera stays busy after the shutter: waited, recorded, the image is a partial only.
             ProbeFake f; f.busy_after = 3;

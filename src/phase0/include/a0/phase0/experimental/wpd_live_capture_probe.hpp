@@ -268,6 +268,10 @@ struct WpdLiveProbeOutcome {
     std::optional<unsigned> live_after;
     // "read", "unreadable" (tried, or no longer admitted) or "not_read" (an anomaly stopped the run before it).
     std::string live_after_state{"not_read"};
+    // DeviceReady sent once just before the import of a clean run, so that a busy camera does not refuse the import and
+    // leave the image in the camera. It is recorded and never used to decide anything. A run with an anomaly sends none.
+    bool import_ready_attempted{};
+    DWORD import_ready{};
     // The image may still be in the camera's memory (the import did not finish): Live View may be refused until a power cycle.
     bool sdram_may_remain{};
     // True only when the shutter was confirmed and nothing outside the expected sequence happened. The window asks for
@@ -435,7 +439,7 @@ inline WpdLiveProbeOutcome RunLiveCaptureProbe(WpdLiveCaptureProbeChannel& chann
         return out;
     }
     bool imported = false;
-    bool skipped_completion = false;
+    bool skipped_completion = false, skipped_import_ready = false;
 
     // ---- After the shutter: ready state, events, the one object, completion.
     WpdLiveProbeEventLedger ledger;
@@ -482,6 +486,16 @@ inline WpdLiveProbeOutcome RunLiveCaptureProbe(WpdLiveCaptureProbeChannel& chann
             out.attributed = true;
             try {
                 channel.AuthorizeObject(*ledger.Handle());
+                // Once, in a clean run only: after an anomaly the import adds no new kind of command.
+                if (anomaly) skipped_import_ready = true;
+                else if (channel.Admitted()) {
+                    out.import_ready_attempted = true;
+                    try {
+                        const auto r = channel.Ready();
+                        out.import_ready = r.Ok() ? 0x2001 : r.error == WpdLiveViewResultError::MtpRejected ? r.mtp_response : 0;
+                    } catch (const std::exception&) {}
+                    log("live_capture_probe_import_ready=" + Hex(out.import_ready, 4));
+                }
                 WpdStillObjectInfo info{};
                 try { info = ParseWpdStillObjectInfo(channel.Read(WpdStillOperation::ObjectInfo, 4096)); }
                 catch (const std::runtime_error&) { out.object_reason = "object_info_invalid"; throw; }
@@ -564,7 +578,8 @@ inline WpdLiveProbeOutcome RunLiveCaptureProbe(WpdLiveCaptureProbeChannel& chann
         log("live_capture_probe_live_after value=" + (out.live_after ? Hex(*out.live_after, 2) : std::string("unreadable")));
     } else {
         log("live_capture_probe_live_after value=not_read reason=" + out.anomaly);
-        log("live_capture_probe_anomaly reason=" + out.anomaly + " not_sent=" + std::string(skipped_completion ? "completion_wait," : "") + "live_state_read,frame_read");
+        log("live_capture_probe_anomaly reason=" + out.anomaly + " not_sent=" + std::string(skipped_completion ? "completion_wait," : "") +
+            (skipped_import_ready ? "import_ready," : "") + "live_state_read,frame_read");
     }
     out.sequence_clean = confirmed && !anomaly;
     if (out.sequence_clean && imported && out.live_after) out.result = WpdLiveProbeResult::Observed;
