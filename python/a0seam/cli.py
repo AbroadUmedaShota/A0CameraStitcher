@@ -9,9 +9,8 @@ Exit codes:
 import argparse
 import os
 import sys
-import tempfile
 
-from . import record, rowfield, windows
+from . import jsonio, record, rowfield, windows
 from .errors import InputError
 from .request import load_request
 
@@ -33,19 +32,6 @@ def estimate(req):
     return record.build_record(req, found, knots, req.load_default_row_gain())
 
 
-def _write_atomic(path, text):
-    folder = os.path.dirname(os.path.abspath(path))
-    fd, tmp = tempfile.mkstemp(dir=folder, prefix=".seam-row-gain-", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
-            f.write(text)
-        os.replace(tmp, path)
-    except BaseException:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
-        raise
-
-
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="a0seam.estimate", description="Estimate the seam row-gain record.")
     parser.add_argument("request", help="path of the request JSON")
@@ -55,7 +41,7 @@ def main(argv=None):
     try:
         req = load_request(args.request)
         rec = estimate(req)
-        _write_atomic(out, record.dumps(rec))
+        jsonio.write_atomic(out, record.dumps(rec))
     except InputError as e:
         print(f"input error: {e}", file=sys.stderr)
         return EXIT_BAD_INPUT

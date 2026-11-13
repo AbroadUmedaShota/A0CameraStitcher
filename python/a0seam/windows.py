@@ -13,9 +13,65 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from .errors import need
+
+# --- Window constants -------------------------------------------------------
+# Proposals from the design study, not approved values. The plan carries the
+# values actually used, and a request may override them (see request.py).
+STEP_PX = 8                  # lattice step of window centres
+MEAN_RADIUS_PX = 10          # half width of the colour mean window (21 x 21)
+FLAT_RADIUS_PX = 22          # half width of the flatness window (45 x 45)
+FLAT_STD_DN = 3.0            # luminance standard deviation limit inside the flatness window
+SEAM_HALF_WIDTH_PX = 96      # windows are taken at most this far from the seam column
+MIN_LEVEL_DN = 1.0           # guard (not in the design): a window mean below this cannot give a ratio
+MAX_LEVEL_DN = 254.0         # guard (not in the design): a window mean above this is clipped
+# -----------------------------------------------------------------------------
+
 MISSING = 65535
 _LUMA_BGR = (0.114, 0.587, 0.299)
 _LUMA_CENTRE = 128.0
+
+
+@dataclass(frozen=True)
+class WindowDesign:
+    """The tunables of the window search."""
+    step_px: int = STEP_PX
+    mean_radius_px: int = MEAN_RADIUS_PX
+    flat_radius_px: int = FLAT_RADIUS_PX
+    flat_std_dn: float = FLAT_STD_DN
+    seam_half_width_px: int = SEAM_HALF_WIDTH_PX
+    min_level_dn: float = MIN_LEVEL_DN
+    max_level_dn: float = MAX_LEVEL_DN
+
+    @property
+    def reach(self):
+        """How far from the seam column the strip must extend on each side."""
+        return (self.seam_half_width_px // self.step_px) * self.step_px + self.flat_radius_px
+
+    def window_problems(self):
+        """Reasons these window tunables cannot be used; empty when acceptable."""
+        out = []
+        need(out, 1 <= self.step_px <= 1024, "stepPx must be 1..1024")
+        need(out, 1 <= self.mean_radius_px <= self.flat_radius_px <= 1024,
+             "radii must satisfy 1 <= meanRadiusPx <= flatRadiusPx <= 1024")
+        need(out, 0 <= self.seam_half_width_px <= 4096, "seamHalfWidthPx must be 0..4096")
+        need(out, 0.0 <= self.flat_std_dn <= 255.0, "flatStdDn must be 0..255")
+        need(out, 0.0 <= self.min_level_dn < self.max_level_dn <= 255.0,
+             "level guards must satisfy 0 <= minLevelDn < maxLevelDn <= 255")
+        return out
+
+
+# JSON name -> WindowDesign field.
+WINDOW_DESIGN_KEYS = {
+    "stepPx": "step_px",
+    "meanRadiusPx": "mean_radius_px",
+    "flatRadiusPx": "flat_radius_px",
+    "flatStdDn": "flat_std_dn",
+    "seamHalfWidthPx": "seam_half_width_px",
+    "minLevelDn": "min_level_dn",
+    "maxLevelDn": "max_level_dn",
+}
+WINDOW_INT_FIELDS = {"step_px", "mean_radius_px", "flat_radius_px", "seam_half_width_px"}
 
 
 @dataclass(frozen=True)

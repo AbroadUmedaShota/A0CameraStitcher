@@ -19,22 +19,21 @@ defaultRowGain file: height x 3 little-endian float32, the total per-row gain
 (B, G, R) the renderer would apply without this estimate.
 """
 import hashlib
-import json
 import math
 import os
 from dataclasses import dataclass, replace
 
 import numpy as np
 
+from . import jsonio
 from .errors import InputError
-from .rowfield import DEFAULT_DESIGN, DESIGN_KEYS
+from .rowfield import DEFAULT_DESIGN, DESIGN_INT_FIELDS, DESIGN_KEYS
 
 SCHEMA = "a0.seam-estimate-request.v1"
-MAX_REQUEST_BYTES = 1 << 20
+MAX_REQUEST_BYTES = jsonio.MAX_JSON_BYTES
 MAX_DIMENSION = 100000
 _TOP_KEYS = {"schema", "output", "seamColumn", "globalGainBgr", "strip", "defaultRowGain", "design"}
-_INT_FIELDS = {"step_px", "mean_radius_px", "flat_radius_px", "seam_half_width_px",
-               "row_radius_rows", "knot_spacing_rows", "min_windows"}
+_STRIP_KEYS = {"file", "sha256", "firstColumn", "width"}
 
 
 @dataclass(frozen=True)
@@ -68,19 +67,6 @@ class Request:
         return raw.reshape(self.height, 3).astype(np.float64)
 
 
-def _reject_constant(name):
-    raise InputError(f"request contains {name}")
-
-
-def _no_duplicates(pairs):
-    out = {}
-    for k, v in pairs:
-        if k in out:
-            raise InputError(f"request repeats the key {k!r}")
-        out[k] = v
-    return out
-
-
 def _is_int(v):
     return isinstance(v, int) and not isinstance(v, bool)
 
@@ -99,43 +85,6 @@ def _obj(parent, key, allowed):
     return v
 
 
-def _sha_of_file(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def _data_file(base_dir, spec, label, expected_size):
-    """Resolve, size-check and hash-check a data file named in the request."""
-    if not isinstance(spec.get("file"), str) or not spec["file"]:
-        raise InputError(f"{label}.file must be a file name")
-    name = spec["file"]
-    if os.path.isabs(name) or os.path.splitdrive(name)[0]:
-        raise InputError(f"{label}.file must be relative to the request")
-    root = os.path.realpath(base_dir)
-    path = os.path.realpath(os.path.join(root, name))
-    try:
-        inside = os.path.commonpath([root, path]) == root
-    except ValueError:
-        inside = False
-    if not inside:
-        raise InputError(f"{label}.file leaves the request folder")
-    if not os.path.isfile(path):
-        raise InputError(f"{label}.file does not exist")
-    size = os.path.getsize(path)
-    if size != expected_size:
-        raise InputError(f"{label}.file has {size} bytes, expected {expected_size}")
-    digest = spec.get("sha256")
-    if not isinstance(digest, str) or len(digest) != 64 or digest != digest.lower() \
-            or any(c not in "0123456789abcdef" for c in digest):
-        raise InputError(f"{label}.sha256 must be 64 lowercase hex digits")
-    if _sha_of_file(path) != digest:
-        raise InputError(f"{label}.file does not match its sha256")
-    return path
-
-
 def _design(raw):
     if raw is None:
         return DEFAULT_DESIGN
@@ -146,12 +95,12 @@ def _design(raw):
         field = DESIGN_KEYS.get(key)
         if field is None:
             raise InputError(f"design has an unknown key {key!r}")
-        if field in _INT_FIELDS:
+        if field in DESIGN_INT_FIELDS:
             if not _is_int(value):
                 raise InputError(f"design.{key} must be an integer")
         elif not _is_number(value):
             raise InputError(f"design.{key} must be a number")
-        changes[field] = value if field in _INT_FIELDS else float(value)
+        changes[field] = value if field in DESIGN_INT_FIELDS else float(value)
     design = replace(DEFAULT_DESIGN, **changes)
     problems = design.problems()
     if problems:
@@ -159,20 +108,26 @@ def _design(raw):
     return design
 
 
+def read_strip_spec(doc, base_dir, height, width, seam, reach):
+    """Check the strip entry of a request and return (path, firstColumn, strip width).
+
+    The strip holds A and B' (six channels) for all rows and the columns
+    firstColumn .. firstColumn + width - 1 of an output raster of the given
+    height and width; it must cover seam +- reach.
+    """
+    s = _obj(doc, "strip", _STRIP_KEYS)
+    first, strip_width = s.get("firstColumn"), s.get("width")
+    if not _is_int(first) or not _is_int(strip_width) or first < 0 or strip_width < 1 or first + strip_width > width:
+        raise InputError("strip.firstColumn and strip.width must lie inside the output width")
+    if first > seam - reach or first + strip_width - 1 < seam + reach:
+        raise InputError(f"strip must cover the seam column +- {reach} columns")
+    path = jsonio.data_file(base_dir, s, "strip", height * strip_width * 6 * 2)
+    return path, first, strip_width
+
+
 def load_request(path):
     """Read, validate and return a Request. Raises InputError for anything wrong."""
-    try:
-        size = os.path.getsize(path)
-        if size > MAX_REQUEST_BYTES:
-            raise InputError("request file is too large")
-        with open(path, "rb") as f:
-            raw = f.read()
-    except OSError as e:
-        raise InputError(f"cannot read the request: {e.strerror or e}") from e
-    try:
-        doc = json.loads(raw.decode("utf-8"), object_pairs_hook=_no_duplicates, parse_constant=_reject_constant)
-    except (UnicodeDecodeError, json.JSONDecodeError) as e:
-        raise InputError(f"request is not valid JSON: {e}") from e
+    doc, raw = jsonio.read_json_file(path, "request", MAX_REQUEST_BYTES)
     if not isinstance(doc, dict):
         raise InputError("request must be a JSON object")
     if doc.get("schema") != SCHEMA:
@@ -208,18 +163,13 @@ def load_request(path):
     if not isinstance(gain, list) or len(gain) != 3 or not all(_is_number(g) and 0.01 <= g <= 100.0 for g in gain):
         raise InputError("globalGainBgr must be three numbers in 0.01..100")
 
-    s = _obj(doc, "strip", {"file", "sha256", "firstColumn", "width"})
-    first, strip_width = s.get("firstColumn"), s.get("width")
-    if not _is_int(first) or not _is_int(strip_width) or first < 0 or strip_width < 1 or first + strip_width > width:
-        raise InputError("strip.firstColumn and strip.width must lie inside the output width")
-    if first > seam - design.reach or first + strip_width - 1 < seam + design.reach:
-        raise InputError(f"strip must cover the seam column +- {design.reach} columns")
-    strip_path = _data_file(os.path.dirname(os.path.abspath(path)), s, "strip", height * strip_width * 6 * 2)
+    base_dir = os.path.dirname(os.path.abspath(path))
+    strip_path, first, strip_width = read_strip_spec(doc, base_dir, height, width, seam, design.reach)
 
     default_path = None
     if doc.get("defaultRowGain") is not None:
         d = _obj(doc, "defaultRowGain", {"file", "sha256"})
-        default_path = _data_file(os.path.dirname(os.path.abspath(path)), d, "defaultRowGain", height * 3 * 4)
+        default_path = jsonio.data_file(base_dir, d, "defaultRowGain", height * 3 * 4)
         values = np.fromfile(default_path, dtype="<f4")
         if not np.isfinite(values).all() or (values <= 0).any():
             raise InputError("defaultRowGain must hold finite positive gains")

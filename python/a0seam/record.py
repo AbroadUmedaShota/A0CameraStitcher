@@ -6,12 +6,12 @@ seam, global gain included) and slopes are per millimetre, so the record does
 not depend on the raster it was estimated on.
 """
 import hashlib
-import math
 import platform
 
 import numpy as np
 
 from . import __version__
+from .jsonio import FLOAT_DIGITS, dumps  # noqa: F401 - dumps is part of this module's interface
 from .rowfield import DESIGN_KEYS, REASON_BEYOND_LIMIT, REASON_NO_WINDOWS, REASON_TRIMMED
 
 SCHEMA = "a0.seam-row-gain.v1"
@@ -20,7 +20,6 @@ STATE_APPLIED = "applied"
 STATE_DECLINED = "declined"
 REASON_TOO_MANY_UNUSED = "too-many-unused-knots"
 INTERPOLATION = "log-linear"
-FLOAT_DIGITS = 6
 
 
 def environment():
@@ -81,64 +80,6 @@ def build_record(req, windows, knots, default_row_gain):
         "unusedByReason": by_reason,
         "gainRangeBgr": gain_range,
     }
-
-
-def _number(v):
-    if isinstance(v, bool):
-        return "true" if v else "false"
-    if isinstance(v, (int, np.integer)):
-        return str(int(v))
-    f = float(v)
-    if not math.isfinite(f):
-        raise ValueError("record holds a non-finite number")
-    s = f"{f:.{FLOAT_DIGITS}f}"
-    return s[1:] if s.startswith("-") and float(s) == 0.0 else s
-
-
-def _is_scalar_list(v):
-    return isinstance(v, list) and all(not isinstance(i, (dict, list)) for i in v)
-
-
-def _emit(v, indent, out):
-    pad = "  " * indent
-    if v is None:
-        out.append("null")
-    elif isinstance(v, str):
-        out.append('"' + v.replace("\\", "\\\\").replace('"', '\\"') + '"')
-    elif isinstance(v, dict):
-        if not v:
-            out.append("{}")
-            return
-        out.append("{\n")
-        for i, (key, val) in enumerate(v.items()):
-            out.append(f'{pad}  "{key}": ')
-            _emit(val, indent + 1, out)
-            out.append(",\n" if i < len(v) - 1 else "\n")
-        out.append(pad + "}")
-    elif isinstance(v, list) and _is_scalar_list(v):
-        out.append("[" + ", ".join(_inline(i) for i in v) + "]")
-    elif isinstance(v, list):
-        out.append("[\n")
-        for i, val in enumerate(v):
-            out.append(pad + "  ")
-            _emit(val, indent + 1, out)
-            out.append(",\n" if i < len(v) - 1 else "\n")
-        out.append(pad + "]")
-    else:
-        out.append(_number(v))
-
-
-def _inline(v):
-    out = []
-    _emit(v, 0, out)
-    return "".join(out)
-
-
-def dumps(record):
-    """Serialize with fixed key order, two-space indent, 6 decimals and a final newline."""
-    out = []
-    _emit(record, 0, out)
-    return "".join(out) + "\n"
 
 
 def digest_without_environment(record):

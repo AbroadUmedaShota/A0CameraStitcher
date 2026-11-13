@@ -13,23 +13,19 @@ from dataclasses import dataclass, fields
 
 import numpy as np
 
-# --- Design constants -------------------------------------------------------
-# One place for every tunable of the estimator. These are proposals from the
-# design study, not approved values; the record carries the values actually
-# used, and a request may override them (see request.py).
-STEP_PX = 8                  # lattice step of window centres
-MEAN_RADIUS_PX = 10          # half width of the colour mean window (21 x 21)
-FLAT_RADIUS_PX = 22          # half width of the flatness window (45 x 45)
-FLAT_STD_DN = 3.0            # luminance standard deviation limit inside the flatness window
-SEAM_HALF_WIDTH_PX = 96      # windows are taken at most this far from the seam column
+from .errors import need
+from .windows import WINDOW_DESIGN_KEYS, WINDOW_INT_FIELDS, WindowDesign
+
+# --- Fit constants ----------------------------------------------------------
+# Proposals from the design study, not approved values. The window constants
+# are in windows.py. The record carries the values actually used, and a request
+# may override them (see request.py).
 ROW_RADIUS_ROWS = 128        # half width of the triangular row weights
 KNOT_SPACING_ROWS = 32       # knot spacing (180 dpi: 4.52 mm)
 MIN_WINDOWS = 8              # windows (and windows left after trimming) a knot needs
 TRIM_MADS = 3.0              # residuals beyond this many scaled MADs are dropped once
 GAIN_LIMIT = 1.25            # allowed factor between a knot gain and the global gain
 MAX_UNUSED_FRACTION = 0.25   # more unused knots than this: the estimate is declined
-MIN_LEVEL_DN = 1.0           # guard (not in the design): a window mean below this cannot give a ratio
-MAX_LEVEL_DN = 254.0         # guard (not in the design): a window mean above this is clipped
 # -----------------------------------------------------------------------------
 
 _MAD_SCALE = 1.4826
@@ -37,67 +33,56 @@ _MAD_FLOOR = 0.002           # in log units; keeps the trim from collapsing on n
 
 
 @dataclass(frozen=True)
-class Design:
-    step_px: int = STEP_PX
-    mean_radius_px: int = MEAN_RADIUS_PX
-    flat_radius_px: int = FLAT_RADIUS_PX
-    flat_std_dn: float = FLAT_STD_DN
-    seam_half_width_px: int = SEAM_HALF_WIDTH_PX
+class FitDesign:
+    """The tunables of the per-knot fit."""
     row_radius_rows: int = ROW_RADIUS_ROWS
     knot_spacing_rows: int = KNOT_SPACING_ROWS
     min_windows: int = MIN_WINDOWS
     trim_mads: float = TRIM_MADS
     gain_limit: float = GAIN_LIMIT
     max_unused_fraction: float = MAX_UNUSED_FRACTION
-    min_level_dn: float = MIN_LEVEL_DN
-    max_level_dn: float = MAX_LEVEL_DN
 
-    @property
-    def reach(self):
-        """How far from the seam column the strip must extend on each side."""
-        return (self.seam_half_width_px // self.step_px) * self.step_px + self.flat_radius_px
-
-    def problems(self):
-        """Reasons this design cannot be used; empty when it is acceptable."""
+    def fit_problems(self):
+        """Reasons these fit tunables cannot be used; empty when acceptable."""
         out = []
-
-        def need(cond, text):
-            if not cond:
-                out.append(text)
-        need(1 <= self.step_px <= 1024, "stepPx must be 1..1024")
-        need(1 <= self.mean_radius_px <= self.flat_radius_px <= 1024,
-             "radii must satisfy 1 <= meanRadiusPx <= flatRadiusPx <= 1024")
-        need(0 <= self.seam_half_width_px <= 4096, "seamHalfWidthPx must be 0..4096")
-        need(1 <= self.row_radius_rows <= 8192, "rowRadiusRows must be 1..8192")
-        need(1 <= self.knot_spacing_rows <= 8192, "knotSpacingRows must be 1..8192")
-        need(3 <= self.min_windows <= 1000000, "minWindows must be at least 3")
-        need(0.0 <= self.flat_std_dn <= 255.0, "flatStdDn must be 0..255")
-        need(0.0 < self.trim_mads <= 100.0, "trimMads must be positive")
-        need(1.0 < self.gain_limit <= 100.0, "gainLimit must be above 1")
-        need(0.0 <= self.max_unused_fraction <= 1.0, "maxUnusedFraction must be 0..1")
-        need(0.0 <= self.min_level_dn < self.max_level_dn <= 255.0,
-             "level guards must satisfy 0 <= minLevelDn < maxLevelDn <= 255")
+        need(out, 1 <= self.row_radius_rows <= 8192, "rowRadiusRows must be 1..8192")
+        need(out, 1 <= self.knot_spacing_rows <= 8192, "knotSpacingRows must be 1..8192")
+        need(out, 3 <= self.min_windows <= 1000000, "minWindows must be at least 3")
+        need(out, 0.0 < self.trim_mads <= 100.0, "trimMads must be positive")
+        need(out, 1.0 < self.gain_limit <= 100.0, "gainLimit must be above 1")
+        need(out, 0.0 <= self.max_unused_fraction <= 1.0, "maxUnusedFraction must be 0..1")
         return out
 
 
-DEFAULT_DESIGN = Design()
-
-# JSON name -> Design field, in the order the record writes them.
-DESIGN_KEYS = {
-    "stepPx": "step_px",
-    "meanRadiusPx": "mean_radius_px",
-    "flatRadiusPx": "flat_radius_px",
-    "flatStdDn": "flat_std_dn",
-    "seamHalfWidthPx": "seam_half_width_px",
+FIT_DESIGN_KEYS = {
     "rowRadiusRows": "row_radius_rows",
     "knotSpacingRows": "knot_spacing_rows",
     "minWindows": "min_windows",
     "trimMads": "trim_mads",
     "gainLimit": "gain_limit",
     "maxUnusedFraction": "max_unused_fraction",
-    "minLevelDn": "min_level_dn",
-    "maxLevelDn": "max_level_dn",
 }
+FIT_INT_FIELDS = {"row_radius_rows", "knot_spacing_rows", "min_windows"}
+
+
+@dataclass(frozen=True)
+class Design(FitDesign, WindowDesign):
+    """Window and fit tunables of the seam estimate together."""
+
+    def problems(self):
+        """Reasons this design cannot be used; empty when it is acceptable."""
+        return self.window_problems() + self.fit_problems()
+
+
+DEFAULT_DESIGN = Design()
+
+# JSON name -> Design field, in the order the record writes them.
+_RECORD_ORDER = ("stepPx", "meanRadiusPx", "flatRadiusPx", "flatStdDn", "seamHalfWidthPx",
+                 "rowRadiusRows", "knotSpacingRows", "minWindows", "trimMads", "gainLimit",
+                 "maxUnusedFraction", "minLevelDn", "maxLevelDn")
+_ALL_KEYS = {**WINDOW_DESIGN_KEYS, **FIT_DESIGN_KEYS}
+DESIGN_KEYS = {key: _ALL_KEYS[key] for key in _RECORD_ORDER}
+DESIGN_INT_FIELDS = WINDOW_INT_FIELDS | FIT_INT_FIELDS
 assert set(DESIGN_KEYS.values()) == {f.name for f in fields(Design)}
 
 REASON_NO_WINDOWS = "no-windows"
