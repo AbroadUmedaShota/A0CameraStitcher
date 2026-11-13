@@ -277,6 +277,9 @@ inline std::string GateLine(const RecalibrationGateFacts& g){
     const auto& d=facts.display;
     std::vector<std::string> lines;
     const auto add=[&](std::string line){if(!line.empty())lines.push_back(std::move(line));};
+    // The hand adjustment in force was beyond the range (the reader says "roll back, or calibrate again"; this is the second): the changes
+    // below are counted from the profile's own placement, not from that adjustment.
+    if(d.previous_outside_envelope)add("前の手直しは範囲の外だったため、校正の位置からの変化を出します");
     add(MotionLine(d));
     if(d.has_overlap)add("重なりの幅: いちばん狭い行で"+Approx(d.narrowest_overlap_mm,Unit::mm));
     add(SeamLine(d));

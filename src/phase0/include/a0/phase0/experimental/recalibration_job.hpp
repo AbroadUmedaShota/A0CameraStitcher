@@ -497,15 +497,25 @@ inline bool IsCanonicalOriginal(const fs::path& file,const wchar_t* alias){
         if(status.type()!=fs::file_type::not_found){find(FindingClass::no_candidate,"staging-exists");return finish();}
     }
     try{
-        // 1. The condition in force: read only. A v1 or v2 file, a damaged chain or no revision is "no condition (v3)".
+        // 1. The condition in force: read only. A v1 or v2 file, a damaged chain or no revision is "no condition (v3)". A hand adjustment
+        // beyond the envelope (pose_outside_envelope) is not: the chain, the profile and the single source were all checked before the range
+        // was applied, so the revision in force is read again without the range and the calibration may start from it (a recalibrated
+        // revision has base pose 0, which ends that state).
         stage(RecalibrationStage::read_condition);
         const auto selection=m2e::SelectFixedComposite(request.settings_folder/m2e::kFixedCompositeConditionName,request.hash);
         const auto* active=selection.loaded?std::get_if<m2e::LoadedFixedCompositeConditionV3>(&*selection.loaded):nullptr;
+        std::optional<m2e::LoadedFixedCompositeConditionV3> beyond_range;
+        if(!selection.loaded && selection.reason==m2e::FixedCompositeSkip::pose_outside_envelope){
+            try{beyond_range=m2e::LoadActiveFixedCompositeRevisionV3(request.settings_folder/std::string(m2e::kFixedCompositeRevisionFolderName),request.hash);}
+            catch(const std::exception&){out.log_lines.push_back("recalibration_condition_unreadable_beyond_range=1");}
+            if(beyond_range){active=&*beyond_range;out.log_lines.push_back("recalibration_condition_outside_envelope=1");}
+        }
         if(!active){
             find(FindingClass::no_candidate,"no-v3-condition");
             out.log_lines.push_back("recalibration_condition_unusable reason="+(selection.loaded?std::string("not-v3"):std::string(m2e::FixedCompositeSkipCode(selection.reason))));
             return finish();
         }
+        const auto& limits=active->condition.registration.limits;
         out.parent_sha256=active->file_sha256;
         const auto profile_file=request.settings_folder/active->condition.source.profile_file;
         const auto profile_bytes=ReadPlainFile(profile_file,m2e::kMaximumFixedCompositeProfileBytes);

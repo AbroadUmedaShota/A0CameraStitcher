@@ -179,6 +179,9 @@ struct Display {
     OutputFrameDisplay motion;
     content_registration::PoseDisplay pose;
     // The narrowest overlap of A and B over the rows of the new raster (mm), and where.
+    // True when the active revision's hand adjustment is beyond the envelope (pose_outside_envelope): the raster and the motion above are
+    // measured from the profile's own placement (pose 0), not from that base pose.
+    bool previous_outside_envelope{};
     bool has_overlap{};
     double narrowest_overlap_mm{};
     std::uint32_t narrowest_overlap_row{};

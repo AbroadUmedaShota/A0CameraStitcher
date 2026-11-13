@@ -177,6 +177,18 @@ void Sentences() {
     for (const auto* code : lane) CHECK(!Has(RecalibrationFindingSentence({FindingClass::rejected, code, {}}).reason, "B を動かし"));
 }
 
+void PreviousOutsideEnvelope() {
+    RecalibrationResultFacts facts;
+    facts.display = SampleDisplay();
+    facts.gate = Gate(gate::GateState::pass);
+    const auto usual = RecalibrationResultLines(facts);
+    CHECK(!HasLine(usual, "前の手直しは範囲の外だった"));
+    facts.display.previous_outside_envelope = true;
+    const auto lines = RecalibrationResultLines(facts);
+    CHECK(lines.size() == usual.size() + 1 && lines.front() == "前の手直しは範囲の外だったため、校正の位置からの変化を出します" && Plain(lines.front()));
+    CHECK(HasLine(lines, "A に対する B の位置の変化"));
+}
+
 void ResultLines() {
     RecalibrationResultFacts facts;
     facts.display = SampleDisplay();
@@ -343,6 +355,7 @@ int main() {
         Stages();
         Sentences();
         ResultLines();
+        PreviousOutsideEnvelope();
         Verdicts();
         AfterTheDecision();
         Nudge();

@@ -690,6 +690,67 @@ void RefusedBeforeThePlan(const Pair& pair) {
     CHECK(Snapshot(settings) == before);
 }
 
+// A hand adjustment beyond the range (pose_outside_envelope): the reader refuses it ("roll back, or calibrate again"); the calibration may start from it
+// (#434). The recalibrated revision has base pose 0 and ends the state. A chain that cannot be read at all is refused as before.
+void OutsideEnvelope(const Pair& pair) {
+    const auto settings = MakeSettings("settings-outside-range");
+    const m2e::LayerTwoStrainDesignV3 layer{64.0, 0.5};
+    FixedConditionV3Request beyond;
+    beyond.settings_folder = settings; beyond.kind = m2e::FixedCompositeRevisionKind::manual_adjustment; beyond.layer_two = layer;
+    beyond.entered = m2e::FixedCompositeRevisionChangeV3::Entered{120.0, 0.0, 0.0};   // 12 mm at 254 DPI: beyond the 5 mm of this test's range
+    const auto written = MakeFixedCompositeConditionV3File(beyond, kHash, kNow);
+    CHECK(written.made && written.outside_envelope);
+    const auto selection = m2e::SelectFixedComposite(settings / m2e::kFixedCompositeConditionName, kHash);
+    CHECK(!selection.loaded && selection.reason == m2e::FixedCompositeSkip::pose_outside_envelope);
+    const auto active = Active(settings);
+    CHECK(active && active->condition.revision.sequence == 2 && active->condition.revision.change.kind == m2e::FixedCompositeRevisionKind::manual_adjustment);
+    if (!active) return;
+    const auto before = Snapshot(settings);
+
+    auto request = Request(settings, pair, "staging-outside-range", FakeComputation(Fake::ready));
+    const auto o = RunRecalibrationJob(request);
+    // It went on: the parent is the revision beyond the range, the new revision is number 3, nothing was written into the settings.
+    CHECK(!HasCode(o, "no-v3-condition") && o.candidate.has_value() && o.sequence == 3 && o.parent_sha256 == active->file_sha256);
+    CHECK(o.candidate && o.candidate->condition.revision.parent_sha256 == std::optional<std::string>(active->file_sha256) && o.candidate->condition.base_pose.IsZero() &&
+        o.candidate->condition.revision.change.kind == m2e::FixedCompositeRevisionKind::recalibrated);
+    CHECK(Snapshot(settings) == before && HasLine(o.log_lines, "recalibration_condition_outside_envelope=1"));
+    // The changes are counted from the profile's own placement: the same 30 mm as for a calibration that was never adjusted, and the screen says so.
+    CHECK(o.facts.display.previous_outside_envelope && o.facts.display.has_motion && std::abs(o.facts.display.motion.camera_motion_mm.x - 30.0) < 0.5);
+    CHECK(HasLine(o.screen_lines, "前の手直しは範囲の外だったため、校正の位置からの変化を出します") && HasLine(o.screen_lines, "A に対する B の位置の変化: 図面の右へ約 "));
+    CHECK(AllPlain(o.screen_lines) && AllPlain(o.log_lines));
+    // The usual run does not say it.
+    const auto plain_settings = MakeSettings("settings-in-range");
+    const auto usual = RunRecalibrationJob(Request(plain_settings, pair, "staging-in-range", FakeComputation(Fake::ready)));
+    CHECK(usual.candidate && !usual.facts.display.previous_outside_envelope && !HasLine(usual.screen_lines, "前の手直しは範囲の外だった") && !HasLine(usual.log_lines, "outside_envelope"));
+    // Confirmed (an unchecked calibration, with the acknowledgement): revision 3 is written, and the reader that refused revision 2 reads it, inside the range.
+    CHECK(ConfirmRecalibration(o, settings, kHash, {}).reason == "not-acknowledged");
+    const auto confirmed = ConfirmRecalibration(o, settings, kHash, {true});
+    CHECK(confirmed.written && confirmed.sequence == 3);
+    const auto after = m2e::SelectFixedComposite(settings / m2e::kFixedCompositeConditionName, kHash);
+    const auto* v3 = after.loaded ? std::get_if<m2e::LoadedFixedCompositeConditionV3>(&*after.loaded) : nullptr;
+    CHECK(after.IsV3() && v3 && v3->condition.revision.sequence == 3 && v3->file_sha256 == confirmed.revision_sha256 && v3->condition.base_pose.IsZero());
+
+    // What cannot be read at all is refused as before: a file in the revisions folder that is not a revision, a profile that is gone, a v1/v2 file beside.
+    const auto revisions = std::string(m2e::kFixedCompositeRevisionFolderName);
+    const auto broken = [&](const char* name, const std::function<void(const fs::path&)>& spoil) {
+        const auto copy = root / name;
+        CopyFolder(settings, copy);
+        fs::remove(copy / revisions / "r000003.json");   // back to the revision beyond the range, in force again
+        CHECK(m2e::SelectFixedComposite(copy / m2e::kFixedCompositeConditionName, kHash).reason == m2e::FixedCompositeSkip::pose_outside_envelope);
+        spoil(copy);
+        const auto snapshot = Snapshot(copy);
+        auto r = Request(copy, pair, std::string("staging-") + name, FakeComputation(Fake::ready));
+        const auto refused = RunRecalibrationJob(r);
+        CHECK(!refused.ready && !refused.candidate && HasCode(refused, "no-v3-condition") && !fs::exists(r.staging_folder) && Snapshot(copy) == snapshot);
+    };
+    broken("settings-outside-foreign", [&](const fs::path& copy) { std::ofstream(copy / revisions / "notes.txt") << "x"; });
+    broken("settings-outside-noprofile", [&](const fs::path& copy) {
+        const auto name = Active(copy)->condition.source.profile_file;
+        fs::remove(copy / name);
+    });
+    broken("settings-outside-v2", [&](const fs::path& copy) { std::ofstream(copy / "wpd-fixed-composite-condition.json") << "{}"; });
+}
+
 // ---- 3. A whole job with a sample, and the confirmation ----
 void Reports(const RecalibrationJobOutcome& o, const fs::path& staging, const std::string& verdict, const std::string& policy) {
     const auto report = Tree(ReadAll(staging / "recalibration-report.json"));
@@ -1094,6 +1155,7 @@ int main(int argc, char** argv) {
         JobRefusals(pair); lap("refusals");
         StopAfterTheComputation(pair); lap("stop after the computation");
         RefusedBeforeThePlan(pair); lap("refused before the plan");
+        OutsideEnvelope(pair); lap("outside the envelope");
         WholeJob(pair); lap("whole job and confirmation");
         RefusePolicy(pair); lap("refuse policy");
         UncheckedProfile(pair); lap("unchecked profile");
