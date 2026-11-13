@@ -132,23 +132,28 @@ int main(){
         const auto leftover=both(StillPreflightKind::Event,0xc102,StillPreflightKind::Event,0xc102);
         check(contains(leftover,L"撮影前の点検で止めました。A・B どちらもシャッターは切っていません。") &&
             contains(leftover,L"A：前の撮影の『撮影終了』の知らせが本体に残っていました（0xC102）。") && contains(leftover,L"B：前の撮影の『撮影終了』の知らせが本体に残っていました（0xC102）。"));
-        check(contains(leftover,L"この画面を閉じてアプリを起動し直すと、次は通る見込みです") && !contains(leftover,L"この画面を閉じて、担当者に知らせてください。"));
+        check(contains(leftover,L"アプリを閉じて起動し直してください。残っていた知らせは読み取ったので、次は通る見込みです。") && !contains(leftover,L"担当者に知らせてください。"));
         const auto removed=both(StillPreflightKind::None,0,StillPreflightKind::Event,0x4005);
-        check(contains(removed,L"A：点検は通りました。") && contains(removed,L"B：本体から『記録先が外れた』という知らせが届いていました（0x4005）。USB を抜き差しした後に出ることがあります。"));
+        check(contains(removed,L"A：点検は通りました。") && contains(removed,L"B：本体から『記録先が外れた』という知らせが届いていました（0x4005）。USB の抜き差し後に出ることがあります。"));
         const auto image=both(StillPreflightKind::Event,0xc101,StillPreflightKind::Event,0xc102);
         check(contains(image,L"A：PC に取り込んでいない画像が本体にある、という知らせがありました（0xC101）。") && contains(image,L"この画面を閉じて、担当者に知らせてください。") && !contains(image,L"次は通る見込み"));
         const auto unknown=both(StillPreflightKind::Event,0x4fff,StillPreflightKind::NotSettled,0);
         check(contains(unknown,L"A：想定していない知らせがありました（0x4FFF）。") && contains(unknown,L"B：本体の状態が続けて変わったので止めました。"));
         const auto settings=both(StillPreflightKind::Quality,0,StillPreflightKind::Size,0);
-        check(contains(settings,L"A：画質が JPEG Fine になっていません。本体の設定を直してください。") && contains(settings,L"B：画像サイズが L になっていません。本体の設定を直してください。") && contains(settings,L"本体の設定を直し"));
+        check(contains(settings,L"A：画質が JPEG Fine になっていません。") && contains(settings,L"B：画像サイズが L になっていません。") && contains(settings,L"本体の設定を直し、アプリを閉じて起動し直してから"));
         const auto live=both(StillPreflightKind::LiveViewOn,0,StillPreflightKind::NotReady,0);
-        check(contains(live,L"A：ライブビューが止まり切っていませんでした。") && contains(live,L"B：本体が 10 秒たっても準備中のままでした。"));
+        check(contains(live,L"A：ライブビューが止まり切っていませんでした。") && contains(live,L"B：本体が 10 秒たっても準備中のままでした。") && contains(live,L"次は通る見込みです。") && !contains(live,L"本体の設定を直し"));
         const auto focus=both(StillPreflightKind::OutOfFocus,0,StillPreflightKind::None,0);
-        check(contains(focus,L"A：ピントが合っていないと本体が答えました。") && contains(focus,L"AFで確認してください"));
+        check(contains(focus,L"A：ピントが合っていないと本体が答えました。") && contains(focus,L"アプリを閉じて起動し直し、AF で確かめてから撮影してください。") && !contains(focus,L"担当者に知らせてください。"));
+        // A leftover notice and a focus miss share the one sentence (restart, check AF, then shoot).
+        const auto notice_focus=both(StillPreflightKind::OutOfFocus,0,StillPreflightKind::Event,0xc102);
+        check(contains(notice_focus,L"AF で確かめてから撮影してください。") && !contains(notice_focus,L"担当者に知らせてください。") && contains(notice_focus,L"A：ピントが合っていないと") && contains(notice_focus,L"B：前の撮影"));
+        // The next step is the second line, ahead of the per-body lines, so a narrow status row cannot cut it.
+        {const auto first_break=leftover.find(L'\n'),second_break=leftover.find(L'\n',first_break+1);
+            check(first_break!=std::wstring::npos && second_break!=std::wstring::npos && leftover.substr(first_break+1,second_break-first_break-1).find(L"アプリを閉じて起動し直してください。")==0);}
         // Causes that call for different steps get the one general step, so the row stays within four lines.
-        for(const auto& mixed:{both(StillPreflightKind::Event,0xc102,StillPreflightKind::Quality,0),both(StillPreflightKind::OutOfFocus,0,StillPreflightKind::Event,0xc102),
-                both(StillPreflightKind::Size,0,StillPreflightKind::OutOfFocus,0)}){
-            check(contains(mixed,L"この画面を閉じて、担当者に知らせてください。") && !contains(mixed,L"次は通る見込み") && !contains(mixed,L"本体の設定を直し、") && !contains(mixed,L"AFで確認してください"));
+        for(const auto& mixed:{both(StillPreflightKind::Event,0xc102,StillPreflightKind::Quality,0),both(StillPreflightKind::Size,0,StillPreflightKind::OutOfFocus,0)}){
+            check(contains(mixed,L"この画面を閉じて、担当者に知らせてください。") && !contains(mixed,L"次は通る見込み") && !contains(mixed,L"本体の設定を直し、") && !contains(mixed,L"AF で確かめて"));
             check(contains(mixed,L"A：") && contains(mixed,L"B："));}
         // B not checked because A's connection could not be confirmed: said so, and escalated.
         VerifiedStillPair partial;partial.preflight_checked[0]=true;partial.preflight[0].kind=StillPreflightKind::Close;

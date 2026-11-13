@@ -1509,6 +1509,41 @@ int RunLifecycleUiSmoke(){
     // #430: a single-camera capture that failed with an image notice left on the body says so, and the focus sentence is replaced, not stacked.
     {std::promise<CaptureUiOutcome> pending;capture_future=pending.get_future();CaptureUiOutcome failed;failed.capture.out_of_focus=true;failed.capture.late_object_event=true;pending.set_value(std::move(failed));}
     SendMessageW(window,WM_TIMER,1,0);check(capture_status==DescribeStillSingleLateObject() && capture_restart_blocked && !CanRestartPreview());
+    {   // #430: every sentence a stopped pair can show stays within the four lines of the status row, at the default and at a narrow width.
+        HDC dc=CreateCompatibleDC(nullptr);
+        if(!dc)check(false);
+        else{
+            TEXTMETRICW metrics{};GetTextMetricsW(dc,&metrics);
+            struct Body{StillPreflightKind kind;std::uint16_t code;};
+            const std::vector<Body> bodies{{StillPreflightKind::None,0},{StillPreflightKind::Event,0xc102},{StillPreflightKind::Event,0xc101},{StillPreflightKind::Event,0x4005},
+                {StillPreflightKind::Event,0x400d},{StillPreflightKind::Event,0x4fff},{StillPreflightKind::NotSettled,0},{StillPreflightKind::Quality,0},{StillPreflightKind::Size,0},
+                {StillPreflightKind::LiveViewOn,0},{StillPreflightKind::NotReady,0},{StillPreflightKind::OutOfFocus,0},{StillPreflightKind::Identity,0},{StillPreflightKind::Transport,0},
+                {StillPreflightKind::Close,0},{StillPreflightKind::DeadlineStop,0}};
+            std::vector<std::wstring> texts;
+            for(const auto& a:bodies)for(const auto& b:bodies)for(int b_checked=0;b_checked<2;++b_checked){
+                VerifiedStillPair pair;
+                const Body* both[2]{&a,&b};
+                for(int i=0;i<2;++i){
+                    pair.preflight_checked[i]=i==0 || b_checked;pair.preflight[i].closed=true;pair.preflight[i].kind=both[i]->kind;
+                    pair.preflight[i].ready=both[i]->kind==StillPreflightKind::None;if(both[i]->code)pair.preflight[i].event_code=both[i]->code;
+                }
+                const auto text=DescribeStillPairPreflightRefusal(pair);if(!text.empty())texts.push_back(text);
+            }
+            VerifiedStillPair late;late.originals[0].late_object_event=late.originals[1].late_object_event=true;
+            texts.push_back(DescribeStillPairLateObjects(late));texts.push_back(DescribeStillSingleLateObject());
+            check(texts.size()>100);
+            for(const int width:{1400,1064}){
+                LONG worst=0;
+                for(const auto& text:texts){
+                    RECT need{0,0,width-24,0};DrawTextW(dc,text.c_str(),-1,&need,DT_CALCRECT|DT_LEFT|DT_WORDBREAK|DT_NOPREFIX);
+                    worst=(std::max)(worst,need.bottom);
+                }
+                check(worst<=82 && worst<=4*(metrics.tmHeight+metrics.tmExternalLeading));
+                Log("pair_status_width="+std::to_string(width)+" texts="+std::to_string(texts.size())+" worst_height="+std::to_string(worst)+" line_height="+std::to_string(metrics.tmHeight+metrics.tmExternalLeading));
+            }
+            DeleteDC(dc);
+        }
+    }
     // The same failure still ends a finite test, so it cannot hang CI.
     run_seconds=20;SendMessageW(window,WM_TIMER,1,0);check(!IsWindow(window) && closing);
     Log("lifecycle_ui_checks="+std::to_string(checks)+" failures="+std::to_string(failures)+" camera_operations=0");return failures?1:0;
