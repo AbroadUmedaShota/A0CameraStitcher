@@ -159,7 +159,11 @@ int main(){
         check(DescribeStillPairPreflightRefusal(done).empty() && DescribeStillPairPreflightRefusal(VerifiedStillPair{}).empty());
         VerifiedStillPair exposed;exposed.preflight_checked[0]=true;exposed.preflight[0].kind=StillPreflightKind::Event;exposed.shutter_dispatched[0]=true;
         check(DescribeStillPairPreflightRefusal(exposed).empty());
-    }
+        // Late image notices (a body that read 0xC101 while waiting for its completion).
+        VerifiedStillPair late;late.originals[1].late_object_event=true;
+        const auto late_text=DescribeStillPairLateObjects(late);
+        check(contains(late_text,L"B：撮影は完了できませんでしたが、本体に取り込んでいない画像が残っているかもしれません。") && !contains(late_text,L"A：") && contains(late_text,L"担当者に知らせてください。"));
+        check(DescribeStillPairLateObjects(VerifiedStillPair{}).empty());}
     // Exposure recheck refusal: no shutter for either body; every opened body closes.
     for(int refused:{0,1})for(int failure:{0,1,2}){
         Scripted s;if(failure==0)s.prepare_ready[refused]=false;if(failure==1)s.prepare_throws[refused]=true;

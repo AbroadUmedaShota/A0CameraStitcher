@@ -202,6 +202,9 @@ struct Harness {
         };
         steps.rescue=[&](int i){++lane[i].rescues;lane[i].run->RetainUncertainShutterCandidate();};
         steps.close=[&](int i,VerifiedStillOriginal& original){
+            // As StillLane::Finish (#430): a dispatched shutter whose capture did not reach the completion
+            // wait polls its notices once before the session closes.
+            if(lane[i].run && lane[i].fake.shutters>0)lane[i].run->ObserveCompletionBeforeClose();
             events.push_back(std::string("close:")+Name(i));
             if(close_hook)close_hook(i);
             lane[i].closed=true;original.closed=true;
@@ -420,6 +423,48 @@ int main(){
             const auto r=h.Run();CheckSent(h);CheckClosedBoth(h);
             Check(!r.complete && Contains(r.error,"ambiguous SDRAM object") && h.lane[0].persisted && r.originals[0].success);
             Check(!h.lane[1].persisted && h.lane[1].partial==h.lane[1].fake.jpeg);}
+        // #430 C3 in a pair. A is refused OutOfFocus after its shutter while B was already exposed:
+        // B is imported first, and only then does A's session poll its notices once before Close.
+        // A's completion is consumed there; no object of A is read or authorized; no shutter is resent.
+        {Harness h;h.wait={std::chrono::milliseconds(5000),std::chrono::milliseconds(2)}; // Long bound: the notice arrives on the third poll.
+            auto& a=h.lane[0].fake;a.out_of_focus_after_shutter=true;a.use_script=true;a.post_script={{},{},{{0xc102,0}}};
+            const auto r=h.Run();CheckSent(h);CheckClosedBoth(h);
+            Check(!r.complete && r.out_of_focus && !h.lane[0].persisted && h.lane[0].fake.object_reads==0 && h.lane[1].persisted && r.originals[1].success);
+            const auto& observed=h.lane[0].observation;
+            Check(observed.failure.result==WpdStillFailureObservationResult::Seen && observed.complete_event && observed.complete_event_code==0xc102 && !observed.failure.late_object_event);
+            Check(a.post_reads==3 && a.shutters==1 && h.lane[1].fake.shutters==1);
+            const auto b_object=Index(h.trace,"B:1009(0000007b)");
+            size_t a_event=std::string::npos;
+            for(size_t i=Index(h.trace,kShutterA)+1;i<h.trace.size();++i)if(h.trace[i]=="A:90c7"){a_event=i;break;}
+            Check(b_object!=std::string::npos && a_event!=std::string::npos && b_object<a_event);
+            for(const auto& entry:h.trace)Check(!(entry[0]=='A' && IsImageOperation(entry)));
+            Check(h.events==std::vector<std::string>{"preflight:A","preflight:B","open:A","open:B","close:A","close:B"});}
+        // The same, with an image notice instead: recorded as late, nothing read for it, B unaffected.
+        {Harness h;auto& a=h.lane[0].fake;a.out_of_focus_after_shutter=true;a.use_script=true;a.post_script={{{0xc101,123}}};
+            const auto r=h.Run();CheckSent(h);CheckClosedBoth(h);
+            const auto& observed=h.lane[0].observation;
+            Check(!r.complete && observed.failure.result==WpdStillFailureObservationResult::ObjectEvent && observed.failure.late_object_event && !observed.complete_event);
+            for(const auto& entry:h.trace)Check(!(entry[0]=='A' && IsImageOperation(entry)));
+            Check(!h.lane[0].persisted && h.lane[0].partial.empty() && h.lane[1].persisted && r.originals[1].success);}
+        // A completion never comes: the bound passes, the capture fails as it did (OutOfFocus), B is kept.
+        {Harness h;auto& a=h.lane[0].fake;a.out_of_focus_after_shutter=true;
+            a.use_script=true;a.post_script.assign(1000,{});
+            const auto r=h.Run();CheckSent(h);CheckClosedBoth(h);
+            Check(!r.complete && r.out_of_focus && h.lane[0].observation.failure.result==WpdStillFailureObservationResult::TimedOut && !h.lane[0].observation.complete_event);
+            Check(h.lane[1].persisted && r.originals[1].success);}
+        // A stop or the deadline before the observation: no notice is read after the shutter.
+        {Harness h;auto& a=h.lane[0].fake;a.out_of_focus_after_shutter=true;a.use_script=true;a.post_script={{{0xc102,0}}};
+            h.lane[1].fake.on_shutter=[&]{h.deadline_passed=true;};
+            const auto r=h.Run();CheckSent(h);CheckClosedBoth(h);
+            Check(!r.complete && a.post_reads==0 && h.lane[0].observation.failure.result==WpdStillFailureObservationResult::Aborted && !h.lane[0].observation.complete_event);}
+        // A failure that never dispatched a shutter observes nothing.
+        {Harness h;h.lane[1].fake.preflight_event=0x4005;const auto r=h.Run();CheckSent(h);CheckClosedBoth(h);
+            Check(!r.complete && h.lane[0].observation.failure.result==WpdStillFailureObservationResult::NotRun && h.lane[1].observation.failure.result==WpdStillFailureObservationResult::NotRun);}
+        // The success path is unchanged: both completions are read as before and neither body polls again.
+        {Harness h;const auto r=h.Run();CheckSent(h);
+            Check(r.complete && h.lane[0].observation.failure.result==WpdStillFailureObservationResult::NotRun && h.lane[1].observation.failure.result==WpdStillFailureObservationResult::NotRun);
+            Check(h.lane[0].observation.completion_wait==WpdStillCompletionWaitResult::AlreadySeen && h.lane[1].observation.completion_wait==WpdStillCompletionWaitResult::AlreadySeen);}
+
         // #430 C2: one press reads what both bodies hold. A and B each carry a leftover completion:
         // the first transaction stops on both and names both, the second passes.
         {PreflightPair p;p.queue[0]={{0xc102,0}};p.queue[1]={{0xc102,0}};

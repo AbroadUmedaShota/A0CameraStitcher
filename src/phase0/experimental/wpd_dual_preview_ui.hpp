@@ -38,9 +38,10 @@ unsigned pair_smoke_next{},pair_reviews{},review_painted{};
 unsigned captures_saved{},preview_sessions{};
 std::optional<int> capture_once_alias,capture_pending;
 // composite_skip: the originals were saved but no composite was made (#400); the text is shown on screen and in the evidence record.
-// preflight_status: when the preflight stopped the pair, what each body answered and what to do (#430). Empty keeps the screen's earlier text.
+// preflight_status: when the preflight stopped the pair, what each body answered and what to do (#430); late_object_status: a body
+// read an image notice it did not import before it closed. Both empty keep the screen's earlier text.
 struct CaptureUiOutcome {StillCaptureOutcome capture;std::optional<a0::m2::experimental::StillReviewResult> review;bool preflight_refused{};
-    std::wstring preflight_status;
+    std::wstring preflight_status,late_object_status;
     std::optional<a0::m2::experimental::FixedCompositeSkip> composite_skip;std::string composite_detail;std::array<std::filesystem::path,2> originals;
     // Both originals are saved and the composite step threw (the 180-second window, memory, a size mismatch, the gate). Set with
     // capture.success: the next shot is allowed exactly as after a skip. composite_cleanup is what became of a JPEG without a report.
@@ -821,7 +822,7 @@ CaptureUiOutcome SavePairReview(const std::array<std::wstring,2>& ids,ReviewGeom
         auto pair=pair_capture_backend(ids,deadline);
         if(!pair.complete){
             result.capture.out_of_focus=pair.out_of_focus;result.preflight_refused=!pair.shutter_dispatched[0] && !pair.shutter_dispatched[1];
-            result.preflight_status=DescribeStillPairPreflightRefusal(pair);
+            result.preflight_status=DescribeStillPairPreflightRefusal(pair);result.late_object_status=DescribeStillPairLateObjects(pair);
             throw std::runtime_error(pair.error);
         }
         const auto& a=pair.originals[0];const auto& b=pair.originals[1];
@@ -966,6 +967,7 @@ void AdvanceCapture(HWND hwnd){
                 L"合焦を確認できず撮影前に停止しました。A/Bの撮影は0です。この画面を閉じてライブを再起動し、AFで確認してください。":
                 L"合焦できず撮影を完了できませんでした（OutOfFocus）。この画面を閉じてライブを再起動し、AFで確認してください。自動再撮影はしません。";
             if(!result.preflight_status.empty())capture_status=result.preflight_status;
+            if(!result.late_object_status.empty())capture_status+=L"\n"+result.late_object_status;
             Log("ui_capture_failed no_retry=1");
         }
     }
@@ -1235,7 +1237,7 @@ int RunPairV3UiSmoke(const std::filesystem::path& fixtures){
             pair_capture_backend=[](const std::array<std::wstring,2>&,Clock::time_point){VerifiedStillPair pair;pair.complete=false;pair.error="after shutter";pair.shutter_dispatched={true,false};return pair;};
             const auto after=capture(v3.folder);
             pair_capture_backend=good_backend;
-            check(!after.preflight_refused && after.preflight_status.empty(),"stop after a shutter: no preflight text");
+            check(!after.preflight_refused && after.preflight_status.empty() && after.late_object_status.empty(),"stop after a shutter: no preflight text");
         }
     }catch(const std::exception& error){
         ++failures;captured<<"pair_v3_ui_exception: "<<error.what()<<'\n';
@@ -1497,10 +1499,10 @@ int RunLifecycleUiSmoke(){
     check(captures_saved==0 && pair_reviews==0 && !capture_future.valid());check(!CanRestartPreview());
     {std::promise<CaptureUiOutcome> pending;capture_future=pending.get_future();CaptureUiOutcome refused;refused.preflight_refused=true;refused.capture.out_of_focus=true;pending.set_value(std::move(refused));}
     SendMessageW(window,WM_TIMER,1,0);check(capture_status.find(L"A/Bの撮影は0")!=std::wstring::npos);
-    // #430: the per-body preflight text replaces the general sentence; the restart stays blocked.
+    // #430: the per-body preflight text replaces the general sentence, and a late-image line is appended; the restart stays blocked.
     {std::promise<CaptureUiOutcome> pending;capture_future=pending.get_future();CaptureUiOutcome refused;refused.preflight_refused=true;refused.capture.out_of_focus=true;
-        refused.preflight_status=L"per-body text";pending.set_value(std::move(refused));}
-    SendMessageW(window,WM_TIMER,1,0);check(capture_status==L"per-body text");check(capture_restart_blocked && !CanRestartPreview());
+        refused.preflight_status=L"per-body text";refused.late_object_status=L"late image text";pending.set_value(std::move(refused));}
+    SendMessageW(window,WM_TIMER,1,0);check(capture_status==L"per-body text\nlate image text");check(capture_restart_blocked && !CanRestartPreview());
     // The same failure still ends a finite test, so it cannot hang CI.
     run_seconds=20;SendMessageW(window,WM_TIMER,1,0);check(!IsWindow(window) && closing);
     Log("lifecycle_ui_checks="+std::to_string(checks)+" failures="+std::to_string(failures)+" camera_operations=0");return failures?1:0;

@@ -16,6 +16,10 @@ struct VerifiedStillOriginal {
     std::uintmax_t bytes{};
     std::string sha256,error;
     bool out_of_focus{};
+    // An image notification (0xC101) was read after the shutter, but not imported, while the
+    // session waited for the completion notice before Close (#430). The body may still hold an
+    // image that nothing in this transaction retrieved.
+    bool late_object_event{};
 };
 // Why a body's read-only preflight stopped (#430). The first seven kinds are the camera's own
 // state (a notice it still held, a capture setting, readiness, focus): the camera answered and

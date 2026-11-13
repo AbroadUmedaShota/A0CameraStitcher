@@ -242,8 +242,16 @@ public:
         // One line per capture, success or failure: was this capture's completion
         // event read before the session closed (#381). Not a success condition.
         if(acquisition_entered_){
+            // #430: a dispatched shutter whose capture failed before the completion wait still
+            // reads the notice queue once, bounded, so the completion it is about to emit is not
+            // left for the next press. Read-only notices; nothing is imported or resent.
+            if(run_ && shutter_dispatched_ && opened_ && !cancelled_)run_->ObserveCompletionBeforeClose();
             Log(alias_+" capture_completion "+DescribeWpdStillCaptureObservation(observed_));
             if(observed_.shutter_attempted)Log(alias_+" completion_wait "+DescribeWpdStillCompletionWait(observed_));
+            if(observed_.failure.result!=WpdStillFailureObservationResult::NotRun){
+                Log(alias_+" completion_after_failure "+DescribeWpdStillFailureObservation(observed_.failure));
+                outcome_.late_object_event=observed_.failure.late_object_event;
+            }
         }
         if(partial_!=INVALID_HANDLE_VALUE){CloseHandle(partial_);partial_=INVALID_HANDLE_VALUE;}
         if(opened_){

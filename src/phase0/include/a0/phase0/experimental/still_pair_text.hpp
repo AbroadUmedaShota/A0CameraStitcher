@@ -88,4 +88,13 @@ inline std::wstring DescribeStillPairPreflightRefusal(const VerifiedStillPair& p
     else if(focus)text+=L"\nこの画面を閉じてライブを再起動し、AFで確認してください。";
     return text;
 }
+// One line per body that read an image notice it did not import while waiting for the
+// completion before Close, then what to do. Empty when no body did.
+inline std::wstring DescribeStillPairLateObjects(const VerifiedStillPair& pair){
+    std::wstring text;
+    for(int i=0;i<2;++i)
+        if(pair.originals[i].late_object_event)text+=std::wstring(text.empty()?L"":L"\n")+still_pair_text_detail::BodyName(i)+L"：撮影は完了できませんでしたが、本体に取り込んでいない画像が残っているかもしれません。";
+    if(!text.empty())text+=L"\nこの画面を閉じて、担当者に知らせてください。";
+    return text;
+}
 }
