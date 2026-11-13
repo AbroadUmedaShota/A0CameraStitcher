@@ -274,7 +274,7 @@ int RunRecalibrationUiSmoke(const std::filesystem::path& fixtures,const std::fil
 
         // ================= 1. At rest: the entrance, and what takes it away =================
         auto settings=scenario("s1");
-        check(caption()==L"A0 A/B Live + C（校正あり・改訂 1） / 撮影・PC保存","rest: the caption names the revision in force");
+        check(caption()==PreviewTitleFrame(L"校正あり・改訂 1") && PreviewTitleMarksMatch(caption()),"rest: the caption names the revision in force, with the marks of the build");
         check(RecalibrationButtonShown(recal_enter_button) && IsWindowEnabled(recal_enter_button)!=FALSE,"rest: the entrance is offered");
         check(!shown(kRecalStart) && !shown(kRecalAbort) && !shown(kRecalUse) && !shown(kRecalRetake),"rest: no flow button is shown");
         geometry_ok("rest: the entrance is in the client area");

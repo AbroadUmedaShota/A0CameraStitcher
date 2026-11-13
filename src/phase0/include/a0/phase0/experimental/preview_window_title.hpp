@@ -8,6 +8,9 @@
 //   no condition file             校正なし・仮Merge
 //   a file that cannot be read    校正を読めません
 //
+// The marks of the build (a probe build, a build with the settings write) are compile-time constants of this header, so every place that
+// makes the caption, the first one and each one that follows the Live start or a condition read again, carries them with the state.
+//
 // `note` is placed after the state, inside the parentheses. A build that has more to say about the calibration passes it; the default
 // build passes nothing.
 #include "a0/phase0/experimental/fixed_composite_preview.hpp"
@@ -27,8 +30,34 @@ namespace a0::phase0::experimental {
     return state;
 }
 
+#if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
+inline constexpr bool kPreviewProbeBuild=true;
+#else
+inline constexpr bool kPreviewProbeBuild=false;
+#endif
+#if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
+inline constexpr bool kPreviewSettingsWriteBuild=true;
+#else
+inline constexpr bool kPreviewSettingsWriteBuild=false;
+#endif
+inline constexpr const wchar_t* kPreviewProbeMark=L"[探りbuild: ライブを開いたまま1回撮る] ";
+inline constexpr const wchar_t* kPreviewSettingsWriteMark=L" ／ 設定の書き込みあり（開発用・#416 段B）";
+
+// The whole caption for a state text (the part inside the parentheses).
+[[nodiscard]] inline std::wstring PreviewTitleFrame(std::wstring_view state){
+    std::wstring title=L"A0 ";
+    if(kPreviewProbeBuild)title+=kPreviewProbeMark;
+    title+=L"A/B Live + C（";title.append(state);title+=L"） / 撮影・PC保存";
+    if(kPreviewSettingsWriteBuild)title+=kPreviewSettingsWriteMark;
+    return title;
+}
 [[nodiscard]] inline std::wstring PreviewWindowTitle(const FixedPreviewSource& source,std::wstring_view note={}){
-    return L"A0 A/B Live + C（"+PreviewCalibrationState(source,note)+L"） / 撮影・PC保存";
+    return PreviewTitleFrame(PreviewCalibrationState(source,note));
+}
+// True when the caption carries exactly the marks that this build has (and none that it does not have).
+[[nodiscard]] inline bool PreviewTitleMarksMatch(std::wstring_view title){
+    const auto has=[&](const wchar_t* part){return title.find(part)!=std::wstring_view::npos;};
+    return has(kPreviewProbeMark)==kPreviewProbeBuild && has(kPreviewSettingsWriteMark)==kPreviewSettingsWriteBuild;
 }
 
 // A composite that is made with a calibration is not a "provisional" one.

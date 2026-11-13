@@ -13,6 +13,12 @@ int RunLiveCaptureProbeUiSmoke(){
     if(!window)return 2;
     live_probe_button=CreateWindowExW(0,L"BUTTON",LiveProbeButtonLabel(),WS_CHILD,0,0,200,28,window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(kLiveProbeButtonId)),instance,nullptr);
     if(!live_probe_button){DestroyWindow(window);return 2;}
+    {   // the caption after a Live start or a condition read again carries the probe build's mark together with the calibration's state
+        preview_window=window;fixed_source={};ApplyCalibrationTexts();
+        wchar_t caption[256]{};GetWindowTextW(window,caption,256);
+        check(std::wstring(caption).find(L"探りbuild")!=std::wstring::npos && std::wstring(caption).find(L"校正")!=std::wstring::npos && PreviewTitleMarksMatch(caption),"the caption keeps the probe mark with the calibration state");
+        preview_window=nullptr;
+    }
     run_seconds=0;run_start=Clock::now();
     const int target=LiveCaptureProbeCameraIndex(),other=1-target;
     // The synthetic backend plays the probe thread: it borrows the named camera's held session, notes what it saw, and returns it.

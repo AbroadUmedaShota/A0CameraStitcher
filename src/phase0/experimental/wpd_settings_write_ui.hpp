@@ -387,9 +387,7 @@ void CreateSettingsWriteControls(HWND window,HINSTANCE instance){
             settings_panel_combos[camera][item]=combo;
         }
     }
-    // A build that contains the write path says so in its title.
-    std::wstring title(512,L'\0');title.resize(static_cast<std::size_t>(GetWindowTextW(window,title.data(),static_cast<int>(title.size()))));
-    SetWindowTextW(window,(title+L" ／ 設定の書き込みあり（開発用・#416 段B）").c_str());
+    // A build that contains the write path says so in its title: the mark is part of PreviewWindowTitle (preview_window_title.hpp).
 }
 // Where the four buttons of the settings write row stand (copy, reread, confirm, discard), from the top of the client area.
 FlowResult SettingsWriteButtonFlow(int client_width,int client_bottom){
@@ -763,8 +761,13 @@ int RunSettingsWriteUiSmoke(){
     const auto run_live=[&]{stopping=false;preview_joined=false;for(auto& camera:cameras){camera->done=false;camera->stopped=false;camera->closed=false;camera->last=Clock::now();}};
     const auto wait_idle=[&]{for(int i=0;i<400;++i){tick();if(!SettingsWriteBusy())return true;std::this_thread::sleep_for(std::chrono::milliseconds(5));}return false;};
     const auto drawn_in=[&](int top,int bottom){return SettingsWriteSmokeFrame(1400,960).Lit(top,bottom);};
-    wchar_t caption[256]{};GetWindowTextW(window,caption,256);
-    check(std::wstring(caption).find(L"設定の書き込みあり")!=std::wstring::npos); // the ON build's mark
+    // The ON build's mark is in the caption that follows a Live start or a condition read again, together with the state of the calibration.
+    {
+        preview_window=window;fixed_source={};ApplyCalibrationTexts();
+        wchar_t caption[256]{};GetWindowTextW(window,caption,256);
+        check(std::wstring(caption).find(L"設定の書き込みあり")!=std::wstring::npos && std::wstring(caption).find(L"校正")!=std::wstring::npos && PreviewTitleMarksMatch(caption));
+        preview_window=nullptr;
+    }
 
     // 1. The product table and an empty record folder: the table's rows are enabled (the static_asserts after the table fix which), capture is free, and copying
     //    is offered once both Live sessions are joined. The smoke opens no camera (the access counts every Open).

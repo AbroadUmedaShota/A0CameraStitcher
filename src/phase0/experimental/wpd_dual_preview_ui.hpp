@@ -2125,7 +2125,7 @@ int RunFixedCUiSmoke(){
     // 1. A condition that applies: C is drawn with it, the seam line is over the picture, and no position request moves C.
     fixed_source={};fixed_source.loaded=m2::LoadedFixedCompositeCondition{condition(mount_orientation),std::string(64,'b')};
     check(FixedConditionPresent());
-    check(caption()==L"A0 A/B Live + C（校正あり・v1） / 撮影・PC保存" && pair_label()==L"両台撮影 → 合成を保存");
+    check(caption()==PreviewTitleFrame(L"校正あり・v1") && PreviewTitleMarksMatch(caption()) && pair_label()==L"両台撮影 → 合成を保存");
     check(start_worker([]{return merged.decided && merged.mode==PreviewCMode::fixed_composite && merged.frames>=3 && !merged.pixels.bytes.empty();}));
     {
         std::lock_guard lock(merged.mutex);
@@ -2178,7 +2178,7 @@ int RunFixedCUiSmoke(){
     };
     fixed_source={};fixed_source.loaded_v2=lens_condition(mount_orientation);
     check(FixedConditionPresent());
-    check(caption()==L"A0 A/B Live + C（校正あり・v2） / 撮影・PC保存" && pair_label()==L"両台撮影 → 合成を保存");
+    check(caption()==PreviewTitleFrame(L"校正あり・v2") && PreviewTitleMarksMatch(caption()) && pair_label()==L"両台撮影 → 合成を保存");
     check(start_worker([]{return merged.decided && merged.mode==PreviewCMode::fixed_composite && merged.frames>=3 && !merged.pixels.bytes.empty();}));
     {
         std::lock_guard lock(merged.mutex);
@@ -2238,7 +2238,7 @@ int RunFixedCUiSmoke(){
     for(const auto reason:{m2::FixedCompositeSkip::condition_invalid,m2::FixedCompositeSkip::profile_absent,m2::FixedCompositeSkip::profile_differs,m2::FixedCompositeSkip::pose_outside_envelope}){
         fixed_source={};fixed_source.reason=reason;
         check(FixedConditionPresent());
-        check(caption()==L"A0 A/B Live + C（校正を読めません） / 撮影・PC保存" && pair_label()==L"両台撮影 → 仮Merge保存");
+        check(caption()==PreviewTitleFrame(L"校正を読めません") && PreviewTitleMarksMatch(caption()) && pair_label()==L"両台撮影 → 仮Merge保存");
         check(start_worker([]{return merged.decided && merged.mode==PreviewCMode::unavailable && merged.rendered_revision==merged.revision && merged.source_a.time_since_epoch().count()>0;}));
         {
             std::lock_guard lock(merged.mutex);
@@ -2256,7 +2256,7 @@ int RunFixedCUiSmoke(){
     // 4. No condition: the uncalibrated C stays, its position requests work, and no seam line is drawn.
     fixed_source={};
     check(!FixedConditionPresent());
-    check(caption()==L"A0 A/B Live + C（校正なし・仮Merge） / 撮影・PC保存" && pair_label()==L"両台撮影 → 仮Merge保存");
+    check(caption()==PreviewTitleFrame(L"校正なし・仮Merge") && PreviewTitleMarksMatch(caption()) && pair_label()==L"両台撮影 → 仮Merge保存");
     check(start_worker([]{return merged.decided && merged.mode==PreviewCMode::uncalibrated && !merged.pixels.bytes.empty();}));
     paint();check(pink(picture_rect())==0);
     {
@@ -2538,7 +2538,7 @@ int RunLiveCUiSmoke(){
     // 3. The reasons of the first full estimate of a session: a start, a session after a capture, a condition read again.
     fixed_source={};fixed_source.loaded_v3=condition(true,std::string(64,'1'));
     // The caption of a condition v3 names its revision (#432); the smoke's revision is 1.
-    check(PreviewWindowTitle(fixed_source)==L"A0 A/B Live + C（校正あり・改訂 1） / 撮影・PC保存" && std::wstring(PairButtonLabel(fixed_source))==L"両台撮影 → 合成を保存");
+    check(PreviewWindowTitle(fixed_source)==PreviewTitleFrame(L"校正あり・改訂 1") && PreviewTitleMarksMatch(PreviewWindowTitle(fixed_source)) && std::wstring(PairButtonLabel(fixed_source))==L"両台撮影 → 合成を保存");
     live_captures_seen=captures_saved;live_condition_sha.clear();
     PrepareLiveRuntime();
     check(live_runtime && live_runtime->Status().view.full_reason==LiveFullReason::session_start);
