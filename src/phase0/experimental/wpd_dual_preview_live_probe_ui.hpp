@@ -109,7 +109,10 @@ void LiveProbeStartStop(){
     live_probe_phase=LiveProbePhase::Stopping;
 }
 std::wstring LiveProbeFinalText(){
-    std::wstring text=L"探りが済みました。もう撮らないでください。";
+    // The warning about the camera comes first: on a narrow window the end of a long sentence is hidden behind the buttons.
+    std::wstring text;
+    if(live_probe_outcome && live_probe_outcome->sdram_may_remain)text+=L"本体に画像が残っている可能性があります。「ライブ再開」が拒まれたら、本体の電源を入れ直してください。 ";
+    text+=L"探りが済みました。もう撮らないでください。";
     if(!live_probe_outcome)return text;
     const auto& o=*live_probe_outcome;
     if(o.published=="original")text+=L" 画像は探りの保存先に保存しました。ライブ停止後に開いて、撮る前にわざとぼかしたピントが残っているか見てください（残っていれば撮影の時にAFは走っていません）。";
@@ -117,7 +120,6 @@ std::wstring LiveProbeFinalText(){
     else if(o.shutter_sent)text+=L" 画像は取り込めていません。";
     else text+=L" シャッターは送っていません。";
     if(o.shutter_sent && !o.sequence_clean)text+=L" 想定外の事が起きたため、撮影後のライブの状態の読み取りと、ライブの1枚読みは送っていません（原因: "+WidenUtf8(o.anomaly)+L"）。";
-    if(o.sdram_may_remain)text+=L" 本体に画像が残っている可能性があります。「ライブ再開」が拒まれたら、本体の電源を入れ直してください。";
     text+=L" 結果: "+WidenUtf8(WpdLiveProbeResultText(o.result));
     return text;
 }

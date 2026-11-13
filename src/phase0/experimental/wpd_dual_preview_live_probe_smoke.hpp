@@ -205,6 +205,21 @@ int RunLiveCaptureProbeUiSmoke(){
         check(live_probe_frame_result=="skipped" && live_probe_frame_skip_reason=="live_not_on","skipped when Live View is off says why");finish();
     }
 
+    // 3f. The warning about the camera is at the start of the final sentence; an anomaly says what was not sent.
+    reset();
+    {
+        WpdLiveProbeOutcome o;o.shutter_sent=true;o.result=WpdLiveProbeResult::StoppedAfterShutter;o.sdram_may_remain=true;o.anomaly="object_event_timeout";o.stop_reason="object_event_timeout";
+        live_probe_outcome=o;
+        const auto text=LiveProbeFinalText();
+        check(text.find(L"本体に画像が残っている可能性があります")==0,"the warning that the image may remain is the first thing on the screen");
+        check(text.find(L"想定外の事が起きたため")!=std::wstring::npos && text.find(L"object_event_timeout")!=std::wstring::npos && text.find(L"送っていません")!=std::wstring::npos,"an anomaly says what happened and what was not sent");
+        WpdLiveProbeOutcome clean;clean.shutter_sent=true;clean.sequence_clean=true;clean.result=WpdLiveProbeResult::Observed;clean.published="original";
+        live_probe_outcome=clean;
+        const auto fine=LiveProbeFinalText();
+        check(fine.find(L"想定外の事が起きたため")==std::wstring::npos && fine.find(L"本体に画像が残っている")==std::wstring::npos,"a clean run shows neither");
+        live_probe_outcome.reset();
+    }
+
     // 4. A worker that does not answer in time: nothing is sent, the holds are given back, Live runs on.
     reset();
     click();cameras[other]->owner.AcknowledgeHold();tick();
