@@ -310,6 +310,147 @@ int RunAfPointUiSmoke(){
     {std::lock_guard lock(cameras[1]->mutex);cameras[1]->af.request.reset();}
     cameras[1]->focus_mailbox.Disable();fresh();click(spot(1,0.5,0.5));check(!cameras[1]->focus_mailbox.TakeAfPoint() && !mark_of(1));
     DestroyWindow(window);
+    // 12. The picture rectangles and the rest of the window (#417, #427). The pictures stand in the upper half,
+    // from the top of the picture area to 8 pixels above the middle. The rows #417 added (the state rows, C and
+    // its two rows) and the whole settings table (#427: 16 rows, one block or two) stand below the middle, and in
+    // a build with the settings write path so does the row of buttons. Nothing of them reaches a picture, so a
+    // click on a picture is never a click on them and the AF frame is never drawn over them.
+    {
+        for(const auto& camera:cameras){std::lock_guard lock(camera->mutex);camera->af.request.reset();}
+        unsigned tables_one_block{},tables_two_blocks{};
+        for(const SIZE size:{SIZE{1400,960},SIZE{1280,800},SIZE{1000,700},SIZE{1920,1080},SIZE{1100,500},SIZE{800,420}}){
+            const RECT area{0,0,size.cx,size.cy};const int middle=area.bottom/2;
+            const auto layout=LayoutSettingsTableIn(16,area.bottom,SettingsButtonRowReserve());
+            (layout.blocks==1?tables_one_block:tables_two_blocks)+=1;
+            for(int i=0;i<2;++i){
+                PixelRect p;{std::lock_guard lock(cameras[i]->mutex);p=PanePictureRect(area,i,cameras[i]->pixels);}
+                check(p.width>0 && p.height>0);
+                const int bottom=p.top+p.height;
+                check(p.top>=174 && bottom<=middle-8);                                  // the upper half only
+                check(bottom<=middle+4);                                                // above the status text
+                check(bottom<=middle+52);                                               // above the buttons of C
+                check(bottom<=SettingsTableFirstRowY(area.bottom));                     // above the first row of the settings table
+                check(SettingsTableBottom(16,area.bottom,SettingsButtonRowReserve())>=SettingsTableFirstRowY(area.bottom));
+                check(bottom<=middle+140+kLiveRowsHeight);                              // above C and its two rows
+                check(p.left>=i*(area.right/2)+12 && p.left+p.width<=(i+1)*(area.right/2)-12); // inside its own pane
+#if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
+                check(bottom<=area.bottom-kD810ButtonRowGap);                           // above the row of the settings buttons
+#endif
+                // The same rectangle answers a click: inside it the camera, outside it (below, in the table) nothing.
+                const int cx=p.left+p.width/2,cy=p.top+(p.height-kAfStripHeight)/2;
+                check(AfPictureAt(area,cx,cy)==i);
+                check(AfPictureAt(area,cx,bottom)==-1 && AfPictureAt(area,cx,middle+90)==-1 && AfPictureAt(area,cx,SettingsTableFirstRowY(area.bottom)+4)==-1);
+            }
+        }
+        check(tables_one_block>0 && tables_two_blocks>0); // both table layouts were covered
+        // What is drawn: the green and red outlines and the strip of text never leave the pictures. Paint is run on
+        // the full-size bitmap; every green or red pixel of the window lies inside a picture.
+        for(const auto& camera:cameras){std::lock_guard lock(camera->mutex);camera->af.request=PreviewAfMark{200,150,1280,852,Clock::now()};camera->af.frame=reported;}
+        paint();
+        // Counted straight from the bitmap's own pixels (a GetPixel call per pixel of the whole window is slow).
+        const auto* surface=static_cast<const std::uint32_t*>(bits);
+        const auto count_all=[&](COLORREF color,const PixelRect* inside){
+            const std::uint32_t want=(GetRValue(color)<<16)|(GetGValue(color)<<8)|GetBValue(color);unsigned count{};
+            for(int y=0;y<client.bottom;++y)for(int x=0;x<client.right;++x){
+                if(inside && !(x>=inside->left && x<inside->left+inside->width && y>=inside->top && y<inside->top+inside->height))continue;
+                if((surface[static_cast<std::size_t>(y)*client.right+x]&0xffffffu)==want)++count;
+            }
+            return count;
+        };
+        for(const COLORREF color:{kAfReportedColor,kAfRequestColor}){
+            unsigned in_pictures{};for(int i=0;i<2;++i){const auto p=picture_of(i);in_pictures+=count_all(color,&p);}
+            check(in_pictures>0 && count_all(color,nullptr)==in_pictures);
+        }
+        for(const auto& camera:cameras){std::lock_guard lock(camera->mutex);camera->af.request.reset();}
+    }
     SelectObject(dc,old);DeleteObject(bitmap);DeleteDC(dc);stopping=true;
     Log("af_point_ui_checks="+std::to_string(checks)+" failures="+std::to_string(failures)+" camera_operations=0");return failures?1:0;
 }
+// The settings panel (#416) against the AF frame (#426). Only in the confirmation test build, the one build with a
+// controller that takes a table and can be put into the panel state without a camera (the preview itself carries none
+// of this). Synthetic cameras, a temporary record folder and our own memory bitmap: no Discover/Open/Run, no lease.
+#if defined(A0_SETTINGS_WRITE_TEST_TABLES)
+int RunAfPanelUiSmoke(){
+    Log("af_point_panel_ui_synthetic=1 camera_operations=0");
+    ComScope com;
+    unsigned checks{},failures{};const auto check=[&](bool ok){++checks;if(!ok){++failures;Log("af_point_panel_ui_failed_check="+std::to_string(checks));}};
+    const auto gray=[]{Pixels p{640,426,{}};p.bytes.assign(static_cast<size_t>(p.width)*p.height*4,100);return p;};
+    D810AfHeader reported;reported.live_width=640;reported.live_height=426;reported.image_width=1280;reported.image_height=852;
+    reported.frame_width=160;reported.frame_height=120;reported.center_x=640;reported.center_y=426;reported.focus_mark=2;
+    // 13. The settings panel (#416) takes the place of both Live areas. While it is up no picture is selectable
+    // (so the click that raises the window is not eaten and no click is read as a click on a picture) and no AF
+    // frame is drawn over it. It is the condition CanFocus refuses on. The panel is opened on a synthetic read:
+    // no camera, no lease. The same points answer again once it is closed.
+    {
+        settings_write_min_size_enabled=false;
+        wchar_t temp[MAX_PATH]{};
+        const auto folder=std::filesystem::path(GetTempPathW(MAX_PATH,temp)?temp:L".")/(L"a0-af-panel-smoke-"+std::to_wstring(GetCurrentProcessId()));
+        std::error_code ignored;std::filesystem::remove_all(folder,ignored);
+        HINSTANCE panel_instance{};
+        HWND panel_window=CreateSettingsWriteSmokeWindow(L"A0AfPanelUiSmoke",panel_instance); // makes two new synthetic cameras
+        check(panel_window!=nullptr);
+        if(panel_window){
+            ShowWindow(panel_window,SW_SHOWNOACTIVATE);
+            for(auto& camera:cameras){camera->done=true;camera->stopped=true;camera->closed=true;camera->pixels=gray();camera->af.frame=reported;camera->af.frame_at=Clock::now();}
+            preview_joined=true; // both Live sessions joined, as the panel needs
+            unsigned restarts{};const auto saved_override=preview_restart_override;preview_restart_override=[&]{++restarts;};
+            auto opens=std::make_shared<std::atomic<int>>(0);
+            InitSettingsWrite(std::make_unique<D810SettingsFileJournal>(folder),[opens]{return std::make_unique<NoCameraSettingsAccess>(opens);});
+            auto* screen=settings_write->screen.get();
+            const auto tick=[&]{SendMessageW(panel_window,WM_TIMER,1,0);};
+            RECT area{};GetClientRect(panel_window,&area);
+            const auto centre=[&](int i){PixelRect p;{std::lock_guard lock(cameras[i]->mutex);p=PanePictureRect(area,i,cameras[i]->pixels);}
+                return POINT{p.left+p.width/2,p.top+(p.height-kAfStripHeight)/2};};
+            const auto fresh_cameras=[&]{for(const auto& camera:cameras){std::lock_guard lock(camera->mutex);camera->last=Clock::now();++camera->frames;}};
+            // The window's own Paint into a memory bitmap: how many pixels of the reported-frame colour lie in the two picture rectangles.
+            const auto green_in_pictures=[&]{
+                HDC memory=CreateCompatibleDC(nullptr);BITMAPINFO info{};info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);info.bmiHeader.biWidth=area.right;info.bmiHeader.biHeight=-area.bottom;
+                info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;void* raw{};HBITMAP surface=memory?CreateDIBSection(memory,&info,DIB_RGB_COLORS,&raw,nullptr,0):nullptr;
+                unsigned green{};
+                if(memory && surface){
+                    auto before=SelectObject(memory,surface);SetBkMode(memory,TRANSPARENT);
+                    stopping=false;fresh_cameras();Paint(memory,area);GdiFlush();stopping=true; // pictures are drawn only while Live is not stopping
+                    for(int i=0;i<2;++i){PixelRect p;{std::lock_guard lock(cameras[i]->mutex);p=PanePictureRect(area,i,cameras[i]->pixels);}
+                        for(int y=p.top;y<p.top+p.height;++y)for(int x=p.left;x<p.left+p.width;++x)if(GetPixel(memory,x,y)==kAfReportedColor)++green;}
+                    SelectObject(memory,before);
+                }
+                if(surface)DeleteObject(surface);
+                if(memory)DeleteDC(memory);
+                return green;
+            };
+            stopping=true;fresh_cameras(); // as in the settings write smokes: both Live sessions joined
+            // Closed: the points select the cameras, the activating click is eaten, the frame is drawn.
+            check(!SettingsPanelOpen());
+            check(AfPictureAt(area,centre(0).x,centre(0).y)==0 && AfPictureAt(area,centre(1).x,centre(1).y)==1);
+            check(AfMouseActivate(area,HTCLIENT,WM_LBUTTONDOWN,centre(0))==MA_ACTIVATEANDEAT);
+            check(green_in_pictures()>0);
+            // Open: the same points select nothing, the activating click is not eaten, no frame is drawn over the panel.
+            D810PlanRead read;read.complete=true;read.verified={true,true};
+            read.snapshots[0]=SmokeBody(250,800,200,4,3);read.snapshots[1]=SmokeBody(500,560,100,2,2);
+            screen->TakePanelReadForTest(read);tick();
+            check(SettingsPanelOpen() && AfPanelCoversPictures());
+            for(int i=0;i<2;++i){
+                const auto at=centre(i);
+                check(AfPictureAt(area,at.x,at.y)==-1);
+                check(AfMouseActivate(area,HTCLIENT,WM_LBUTTONDOWN,at)==0);
+            }
+            check(green_in_pictures()==0);
+            // A click that reaches the window procedure while the panel is up queues nothing and writes nothing.
+            for(int i=0;i<2;++i){const auto at=centre(i);SendMessageW(panel_window,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(at.x,at.y));}
+            for(int i=0;i<2;++i){std::lock_guard lock(cameras[i]->mutex);check(!cameras[i]->af.request && !cameras[i]->focus_mailbox.TakeAfPoint());}
+            // Closed again: the points answer as before. (Live was joined before the panel opened, so nothing restarts.)
+            SendMessageW(panel_window,WM_COMMAND,MAKEWPARAM(kPanelCloseButtonId,BN_CLICKED),reinterpret_cast<LPARAM>(settings_panel_close_button));tick();
+            check(!SettingsPanelOpen() && !AfPanelCoversPictures() && restarts==0);
+            check(AfPictureAt(area,centre(0).x,centre(0).y)==0 && AfPictureAt(area,centre(1).x,centre(1).y)==1);
+            check(green_in_pictures()>0);
+            preview_restart_override=saved_override;
+            FinishSettingsWrite();
+            DestroyWindow(panel_window);
+            settings_write.reset();
+            std::filesystem::remove_all(folder,ignored);
+            capture_status.clear();
+        }
+    }
+    Log("af_point_panel_ui_checks="+std::to_string(checks)+" failures="+std::to_string(failures)+" camera_operations=0");return failures?1:0;
+}
+#endif

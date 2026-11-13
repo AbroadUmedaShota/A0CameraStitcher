@@ -1506,6 +1506,9 @@ if(BUILD_TESTING)
             # The settings panel (#416, ADR-0041): its drop-downs, picks and buttons in the window's own code, with a table of the test's own.
             add_test(NAME preview_settings_write_chosen_contracts COMMAND a0_preview_settings_write_confirm_tests --settings-write-chosen-smoke)
             set_tests_properties(preview_settings_write_chosen_contracts PROPERTIES TIMEOUT 60)
+            # The AF frame (#426) while the settings panel is up: no picture is selectable and no frame is drawn over the panel.
+            add_test(NAME preview_af_point_panel_contracts COMMAND a0_preview_settings_write_confirm_tests --af-point-panel-smoke)
+            set_tests_properties(preview_af_point_panel_contracts PROPERTIES TIMEOUT 60)
             # The test binary carries its own entries (the preview itself must not: see preview_settings_write_binary_contracts).
             add_test(NAME preview_settings_write_test_binary_contracts
                 COMMAND "${CMAKE_COMMAND}" "-DBINARY=$<TARGET_FILE:a0_preview_settings_write_confirm_tests>" "-DEXPECT=present" "-DTEST_STRINGS=present"

@@ -76,10 +76,21 @@ bool DrawAfOverlay(HDC dc,const Camera& c,const RECT& client,int index){
     DrawTextW(dc,text.c_str(),-1,&strip,DT_LEFT|DT_SINGLELINE|DT_NOPREFIX|DT_VCENTER|DT_END_ELLIPSIS);
     return drawn;
 }
+// While the settings panel stands in the place of the Live area (#416), no picture is there: nothing is
+// selectable, the activating click is not eaten, and the overlay is not drawn. This is the condition that
+// CanFocus also refuses on. A build without the settings write path has no panel.
+bool AfPanelCoversPictures(){
+#if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
+    return SettingsPanelOpen();
+#else
+    return false;
+#endif
+}
 // Which camera's selectable part of the picture holds the client point, or -1. Below the size at which
-// Paint draws nothing there is no picture, so there is nothing to select either.
+// Paint draws nothing there is no picture, so there is nothing to select either; the same while the
+// settings panel is up.
 int AfPictureAt(const RECT& client,int x,int y){
-    if(client.right<200 || client.bottom<240)return -1;
+    if(client.right<200 || client.bottom<240 || AfPanelCoversPictures())return -1;
     for(int i=0;i<2;++i){
         PixelRect picture;
         {std::lock_guard lock(cameras[i]->mutex);picture=PanePictureRect(client,i,cameras[i]->pixels);}

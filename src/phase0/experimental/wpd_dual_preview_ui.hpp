@@ -721,7 +721,7 @@ std::array<std::uint64_t,6> Paint(HDC dc,RECT client){
         if(!panel_over_live && DrawLevel(dc,left,pane-24,c))drawn[4+i]=c.frames;
         if(!panel_over_live && !c.pixels.bytes.empty() && Clock::now()-c.last<std::chrono::seconds(2) && !stopping &&
             DrawPixels(dc,c.pixels,left,top,pane-24,client.bottom/2-top-8))drawn[i]=c.frames;
-        if(drawn[i]==c.frames && !c.pixels.bytes.empty())DrawAfOverlay(dc,c,client,i); // #426: the body's AF frame over the picture
+        if(!panel_over_live && drawn[i]==c.frames && !c.pixels.bytes.empty())DrawAfOverlay(dc,c,client,i); // #426: the body's AF frame over the picture
     }
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
     if(panel_over_live)DrawSettingsPanel(dc,client); // the settings panel takes the place of both Live areas

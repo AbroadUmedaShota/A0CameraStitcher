@@ -921,7 +921,8 @@ int main(int argc,char** argv){
         // nothing else. No other argument reaches a camera, a lease or the window.
         if(argc==2 && std::string(argv[1])=="--settings-write-confirm-smoke")return RunSettingsWriteConfirmSmoke();
         if(argc==2 && std::string(argv[1])=="--settings-write-chosen-smoke")return RunSettingsWriteChosenSmoke();
-        Log("settings_write_test_build=1 only --settings-write-confirm-smoke and --settings-write-chosen-smoke run here; nothing was opened");
+        if(argc==2 && std::string(argv[1])=="--af-point-panel-smoke")return RunAfPanelUiSmoke(); // #426: the AF frame while the settings panel is up
+        Log("settings_write_test_build=1 only --settings-write-confirm-smoke, --settings-write-chosen-smoke and --af-point-panel-smoke run here; nothing was opened");
         return 2;
 #else
         if(argc==2 && std::string(argv[1])=="--settings-write-ui-smoke")return RunSettingsWriteUiSmoke();
