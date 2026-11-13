@@ -27,7 +27,14 @@ bool LiveProbeBusy(){return live_probe_phase!=LiveProbePhase::Idle && live_probe
 bool LiveProbeHoldsWindow(){return live_probe_future.valid() || live_probe_phase==LiveProbePhase::Holding || live_probe_phase==LiveProbePhase::Running || live_probe_phase==LiveProbePhase::AfterFrame;}
 const wchar_t* LiveProbeButtonLabel(){return LiveCaptureProbeCameraIndex()==0?L"探り: Aをライブのまま1回撮る":L"探り: Bをライブのまま1回撮る";}
 // Every condition is checked here, and again inside RequestLiveProbe; the button state is not trusted.
+// A run that opens the cameras by itself (--seconds N>0, or any smoke or capture flag) is an automatic run: the
+// probe's button is never available in it, because a scripted restart or capture could press or follow it.
+bool LiveProbeAutomaticRun(){
+    return run_seconds!=0 || capture_once_alias.has_value() || focus_smoke || capture_smoke || merge_smoke || pair_smoke || level_smoke || restart_smoke ||
+        pair_cycle_smoke || af_prepare_smoke || camera_end_restart_smoke;
+}
 bool LiveProbeCanPress(){
+    if(LiveProbeAutomaticRun())return false;
     if(live_probe_used || cleanup_only || camera_end_restart_smoke || capture_restart_blocked || closing || capture_stop_requested || stopping)return false;
     if(LiveProbeBusy() || preview_joined || !cameras[0] || !cameras[1])return false;
     // Both Live views fresh (frames within 2 s), both focus mailboxes free, no capture, settings read, close or

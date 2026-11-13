@@ -78,6 +78,16 @@ int RunLiveCaptureProbeUiSmoke(){
         closing=true;refused("the window is closing");closing=false;
         stopping=true;refused("Live is stopping");stopping=false;
         live_probe_used=true;refused("the probe was already used");live_probe_used=false;
+        // An automatic diagnostic run (it opens the cameras by itself) never offers the button.
+        run_seconds=30;refused("an automatic run with --seconds N>0");
+        click();check(!live_probe_used && live_probe_phase==LiveProbePhase::Idle,"a click during an automatic run does not use up the press");
+        run_seconds=0;
+        {
+            bool* const flags[]={&focus_smoke,&capture_smoke,&merge_smoke,&pair_smoke,&level_smoke,&restart_smoke,&pair_cycle_smoke,&af_prepare_smoke,&camera_end_restart_smoke};
+            for(bool* flag:flags){*flag=true;refused("an automatic smoke or capture flag");*flag=false;}
+        }
+        capture_once_alias=1;refused("a one-shot command-line capture");capture_once_alias.reset();
+        check(LiveProbeCanPress(),"enabled again after the automatic-run conditions are cleared");
         cameras[1]->first=Clock::now()-std::chrono::minutes(6);refused("CAM-B Live is older than the limit");
         cameras[1]->first=Clock::now()-std::chrono::minutes(4);check(LiveProbeCanPress(),"CAM-B Live younger than the limit");
         cameras[1]->first=Clock::now()-std::chrono::seconds(3);
