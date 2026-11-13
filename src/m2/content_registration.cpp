@@ -1506,10 +1506,12 @@ EvidenceShortage AssessEvidenceShortage(const std::vector<std::string>& reasons,
         for (const char* known : {"coarse-no-unique-blocks", "unique-blocks", "repeating-only", "too-few-points", "prediction-uncertain", "too-dark"})
             if (reason == known) shortage = true;
         if (reason == "brown-lowe") {
-            // V1 fails when inliers <= alpha + beta * points. With every point an inlier (points == inliers) that is inliers * (1 - beta) <= alpha.
+            // V1 fails when inliers <= alpha + beta * points. It is the number of points, and not the outliers, that fails V1 only when
+            // it would fail with every point an inlier: points * (1 - beta) <= alpha. The counts must also be sane (some inliers, and
+            // not more inliers than points); otherwise the fit is not trusted and brown-lowe is a doubt.
             const double alpha = limits.brown_lowe_alpha, beta = limits.brown_lowe_beta;
-            shortage = std::isfinite(alpha) && std::isfinite(beta) && alpha >= 0 && beta >= 0 && beta < 1 && points >= inliers &&
-                static_cast<double>(inliers) * (1.0 - beta) <= alpha;
+            shortage = std::isfinite(alpha) && std::isfinite(beta) && alpha >= 0 && beta >= 0 && beta < 1 &&
+                inliers > 0 && inliers <= points && static_cast<double>(points) * (1.0 - beta) <= alpha;
         }
         if (!shortage) { verdict.doubt = reason; return verdict; }
     }

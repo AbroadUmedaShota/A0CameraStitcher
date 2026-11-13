@@ -1119,7 +1119,7 @@ void BasePose() {
 }
 
 // ---- Evidence shortage (#434): "too few marks" is told from "does not fit" by every reason, in one function -------------
-// The limits are this test's (alpha 8, beta 0.3: V1 passes only above 11.43 inliers when no point is an outlier).
+// The limits are this test's (alpha 8, beta 0.3: with no outlier, V1 is passed only by 12 points or more).
 void Evidence() {
     cr::RegistrationLimits limits;
     limits.brown_lowe_alpha = 8.0;
@@ -1150,19 +1150,34 @@ void Evidence() {
     Check(!assess({"a-code-nobody-knows"}).shortage_only && assess({"a-code-nobody-knows"}).doubt == "a-code-nobody-knows", "an unknown code is a doubt");
     Check(!assess({"unique-blocks", "a-code-nobody-knows"}).shortage_only, "an unknown code beside a shortage is a doubt");
     Check(!assess({}).shortage_only && assess({}).doubt.empty(), "no reason is not a shortage");
-    // brown-lowe: alpha / (1 - beta) = 11.43. At or below it no outlier is needed to fail, so it is the number of points; above it, outliers.
+    // brown-lowe: V1 is passed when inliers > alpha + beta * points. It is a shortage only when even every point as an inlier cannot pass it:
+    // points * (1 - beta) <= alpha (here points <= 11, as 11 * 0.7 = 7.7 <= 8 and 12 * 0.7 = 8.4 > 8), with 0 < inliers <= points.
     Check(assess({"brown-lowe"}, 11, 11).shortage_only, "brown-lowe: 11 inliers of 11 points is a shortage");
-    Check(assess({"brown-lowe"}, 11, 40).shortage_only, "brown-lowe: 11 inliers among many outliers is still few inliers");
-    Check(assess({"brown-lowe"}, 0, 0).shortage_only, "brown-lowe: nothing counted is a shortage");
+    Check(assess({"brown-lowe"}, 1, 11).shortage_only, "brown-lowe: few points, whatever the inliers, is a shortage");
+    {
+        const auto v = assess({"brown-lowe"}, 11, 40);
+        Check(!v.shortage_only && v.doubt == "brown-lowe", "brown-lowe: 11 inliers among 29 outliers is a doubt, not a shortage");
+    }
+    Check(!assess({"brown-lowe"}, 0, 0).shortage_only, "brown-lowe: nothing counted is a doubt");
+    Check(!assess({"brown-lowe"}, 11, 12).shortage_only, "brown-lowe: 11 of 12 points would pass V1 with no outlier, so the outlier is the cause");
+    Check(!assess({"brown-lowe"}, 0, 5).shortage_only, "brown-lowe: no inlier is a doubt");
+    Check(!assess({"brown-lowe"}, 11, 5).shortage_only, "brown-lowe: more inliers than points cannot be told, so it is a doubt");
     {
         const auto v = assess({"brown-lowe"}, 12, 12);
         Check(!v.shortage_only && v.doubt == "brown-lowe", "brown-lowe: 12 inliers of 12 points would pass V1 with no outlier, so the outliers are the cause");
     }
     Check(!assess({"brown-lowe"}, 12, 60).shortage_only, "brown-lowe: 12 inliers among many outliers is a doubt");
     Check(!assess({"brown-lowe"}, 40, 100).shortage_only, "brown-lowe: many inliers, more outliers: a doubt");
-    Check(assess({"brown-lowe", "too-few-points"}, 5, 9).shortage_only, "brown-lowe with few inliers beside another shortage");
-    Check(!assess({"brown-lowe", "residual-shape"}, 5, 9).shortage_only, "brown-lowe with few inliers beside a doubt");
-    Check(!assess({"brown-lowe"}, 11, 5).shortage_only, "brown-lowe: more inliers than points cannot be told, so it is a doubt");
+    Check(assess({"brown-lowe", "too-few-points"}, 5, 9).shortage_only, "brown-lowe with few points beside another shortage");
+    Check(!assess({"brown-lowe", "too-few-points"}, 11, 40).shortage_only, "brown-lowe among outliers beside another shortage is a doubt");
+    Check(!assess({"brown-lowe", "residual-shape"}, 5, 9).shortage_only, "brown-lowe with few points beside a doubt");
+    {
+        // The line follows the condition's limits: with alpha 9, 12 points * 0.7 = 8.4 <= 9 is a shortage, and 13 points are not.
+        auto wider = limits;
+        wider.brown_lowe_alpha = 9.0;
+        Check(cr::AssessEvidenceShortage({"brown-lowe"}, 11, 12, wider).shortage_only, "brown-lowe: the line moves with alpha (11 of 12, alpha 9)");
+        Check(!cr::AssessEvidenceShortage({"brown-lowe"}, 11, 13, wider).shortage_only, "brown-lowe: 13 points * 0.7 = 9.1 > 9 is a doubt");
+    }
     // The limits are the caller's: unset (NaN) or beta not below 1 make brown-lowe a doubt.
     {
         const cr::RegistrationLimits unset;
@@ -1170,6 +1185,12 @@ void Evidence() {
         auto flat = limits;
         flat.brown_lowe_beta = 1.0;
         Check(!cr::AssessEvidenceShortage({"brown-lowe"}, 1, 1, flat).shortage_only, "brown-lowe: beta 1 is a doubt");
+        auto negative = limits;
+        negative.brown_lowe_alpha = -1.0;
+        Check(!cr::AssessEvidenceShortage({"brown-lowe"}, 1, 1, negative).shortage_only, "brown-lowe: a negative alpha is a doubt");
+        auto not_a_number = limits;
+        not_a_number.brown_lowe_beta = std::nan("");
+        Check(!cr::AssessEvidenceShortage({"brown-lowe"}, 1, 1, not_a_number).shortage_only, "brown-lowe: a beta that is not a number is a doubt");
         Check(cr::AssessEvidenceShortage({"unique-blocks"}, 0, 0, unset).shortage_only, "the other reasons do not need the limits");
     }
     // The result form gives the same answer as the three numbers.
@@ -1177,10 +1198,10 @@ void Evidence() {
         cr::RegistrationResult r;
         r.reasons = {"brown-lowe"};
         r.diagnostics.inliers = 11;
+        r.diagnostics.points = 11;
+        Check(cr::AssessEvidenceShortage(r, limits).shortage_only, "the result form: few points");
         r.diagnostics.points = 20;
-        Check(cr::AssessEvidenceShortage(r, limits).shortage_only, "the result form: few inliers");
-        r.diagnostics.inliers = 12;
-        Check(!cr::AssessEvidenceShortage(r, limits).shortage_only, "the result form: more inliers");
+        Check(!cr::AssessEvidenceShortage(r, limits).shortage_only, "the result form: more points");
     }
 }
 }

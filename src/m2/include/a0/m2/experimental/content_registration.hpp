@@ -512,15 +512,16 @@ struct RegistrationResult {
 // Whether an `undetermined` estimate lacks only evidence (#434), or shows a sign that the placement does not fit. The one place that
 // decides it: the check of a recalibration and its sample composite both use it, and so does every sentence that tells the two apart.
 //   shortage_only  every reason is one of "too few marks": coarse-no-unique-blocks, unique-blocks, repeating-only, too-few-points,
-//                  prediction-uncertain, too-dark, and brown-lowe when the inliers are so few that no number of outliers is needed to
-//                  fail V1 (inliers <= alpha / (1 - beta): with every point an inlier the line is still not passed, so it is the number
-//                  of points, not the outliers). Nothing was found wrong; there was too little to measure.
+//                  prediction-uncertain, too-dark, and brown-lowe only when V1 cannot be passed by that many points even if every one
+//                  of them is an inlier (points * (1 - beta) <= alpha): it is the number of points, and not the outliers, that fails it.
+//                  Nothing was found wrong; there was too little to measure.
 //   doubt          the first reason that is not of that kind (coarse-ambiguous, coarse-inconsistent, fit-failed, not-converged,
-//                  residual-shape, starts-disagree, no-overlap, estimate-failed, displacement-failed, brown-lowe with more inliers than
-//                  that, time-budget, and any code this function does not know). One such reason is enough: the placement may be wrong.
+//                  residual-shape, starts-disagree, no-overlap, estimate-failed, displacement-failed, time-budget, brown-lowe in every
+//                  other case, and any code this function does not know). One such reason is enough: the placement may be wrong.
 // No reason at all is not "shortage only" (an undetermined estimate that says nothing is not trusted). The limits are the condition's
-// (alpha and beta of V1); a limit that is not finite or not below 1 makes brown-lowe a doubt. `points` are the counted points of the fit
-// (the inliers cannot be more than that; if they are, brown-lowe is a doubt).
+// (alpha and beta of V1). brown-lowe is a doubt too when alpha is not finite or is negative, when beta is not finite, is negative or is
+// not below 1, and when the counts are not sane: `points` are the counted points of the fit, and 0 < inliers <= points must hold (no
+// counts, no inliers, or more inliers than points show a fit that cannot be trusted).
 struct EvidenceShortage {
     bool shortage_only{};
     std::string doubt;
