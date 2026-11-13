@@ -20,7 +20,10 @@ LiveProbeBackend live_probe_backend=RunLiveProbeOnCamera;
 std::future<LiveProbeThreadOutcome> live_probe_future;
 std::optional<WpdLiveProbeOutcome> live_probe_outcome;
 bool live_probe_lent=false;
-std::string live_probe_frame_result="skipped";
+// What happened to the one frame after the shot: ok, not_live_view, failed (the read itself failed), timeout and
+// interrupted (nothing was read before the wait ran out or the window closed) or skipped (not asked for; the reason
+// is in live_probe_frame_skip_reason).
+std::string live_probe_frame_result="skipped",live_probe_frame_skip_reason="not_asked";
 // While a probe is in progress no AF, fine drive, AF-frame move, capture, pair capture or settings read starts
 // (CanFocus is false for both cameras), and the Live restart is not offered.
 bool LiveProbeBusy(){return live_probe_phase!=LiveProbePhase::Idle && live_probe_phase!=LiveProbePhase::Done;}
@@ -67,7 +70,7 @@ void RequestLiveProbe(){
             <<" focus_mode=0x"<<std::hex<<target.focus_mode<<std::dec<<" deadline_ms="<<std::chrono::duration_cast<std::chrono::milliseconds>(kLiveCaptureProbeDeadline).count();
         Log(line.str());
     }
-    live_probe_outcome.reset();live_probe_lent=false;live_probe_frame_result="skipped";review_visible=false;
+    live_probe_outcome.reset();live_probe_lent=false;live_probe_frame_result="skipped";live_probe_frame_skip_reason="not_asked";review_visible=false;
     const bool first=cameras[0]->owner.RequestHold(),second=cameras[1]->owner.RequestHold();
     if(!first || !second){LiveProbeEndWithoutShutter("hold_not_requested");return;}
     live_probe_hold_started=Clock::now();live_probe_phase=LiveProbePhase::Holding;
@@ -94,6 +97,7 @@ void LiveProbeStartStop(){
         std::ostringstream line;
         line<<target.alias<<" live_capture_probe_after_frame result="<<live_probe_frame_result;
         if(live_probe_frame_result=="not_live_view" || live_probe_frame_result=="failed")line<<" mtp=0x"<<std::hex<<target.probe_frame_mtp.load();
+        if(live_probe_frame_result=="skipped")line<<" reason="<<live_probe_frame_skip_reason;
         Log(line.str());
     }
     if(live_probe_frame_result=="ok")Log(LiveProbeAfLine(target,"after"));
@@ -136,7 +140,8 @@ void AdvanceLiveProbe(){
         // One frame through the unchanged Live path, only when the whole sequence stayed clean, Live View still reads
         // on and the 60-second deadline has not run out. The worker holds again right after it, so exactly one frame
         // is read. After anything outside the expected sequence no frame is asked for.
-        const bool want_frame=got.lent && got.outcome.sequence_clean && got.outcome.live_after==1u && Clock::now()<live_probe_deadline &&
+        const bool in_time=Clock::now()<live_probe_deadline;
+        const bool want_frame=got.lent && got.outcome.sequence_clean && got.outcome.live_after==1u && in_time &&
             !closing && !capture_stop_requested && !stopping && !camera.failed && !camera.done;
         if(want_frame){
             camera.probe_frame_state=1;live_probe_frame_started=Clock::now();
@@ -145,17 +150,21 @@ void AdvanceLiveProbe(){
             capture_status=L"探り: 撮影の後のライブを1枚だけ確かめています…";
         }else{
             live_probe_frame_result="skipped";
+            live_probe_frame_skip_reason=!got.lent?"not_lent":!got.outcome.sequence_clean?"sequence_not_clean":got.outcome.live_after!=1u?"live_not_on":!in_time?"deadline":"window_closing_or_camera_ended";
             LiveProbeStartStop();
         }
         break;}
     case LiveProbePhase::AfterFrame:{
         Camera& camera=*cameras[target];
         const int state=camera.probe_frame_state.load();
-        const bool timed_out=Clock::now()-live_probe_frame_started>=std::chrono::seconds(15);
+        // The wait never outlasts the 60-second deadline either.
+        const bool timed_out=Clock::now()-live_probe_frame_started>=std::chrono::seconds(15) || Clock::now()>=live_probe_deadline;
+        const bool interrupted=closing || capture_stop_requested || camera.done;
         // state 2: the frame was read and the worker is asking to hold again; wait until it is held (or it ended).
         const bool settled=state==2 && (camera.owner.State()==PreviewSessionState::Held || camera.done);
-        if(state==3 || state==4 || camera.done || timed_out || closing || capture_stop_requested || settled){
-            live_probe_frame_result=state==2?"ok":state==3?"not_live_view":"failed";
+        if(state==3 || state==4 || interrupted || timed_out || settled){
+            // A stop before the read is not a failed read: the camera never answered "failed" in that case.
+            live_probe_frame_result=state==2?"ok":state==3?"not_live_view":state==4?"failed":interrupted?"interrupted":"timeout";
             LiveProbeStartStop();
         }
         break;}

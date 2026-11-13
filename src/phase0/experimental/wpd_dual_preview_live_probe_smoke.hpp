@@ -166,6 +166,45 @@ int RunLiveCaptureProbeUiSmoke(){
     check(live_probe_phase==LiveProbePhase::Stopping,"then it stops");
     workers_end();tick();check(live_probe_phase==LiveProbePhase::Done,"done after the stop");
 
+    // 3e. The one frame: every way it can end has its own word, and only a failed read is "failed".
+    {
+        const auto to_after_frame=[&]{
+            reset();click();for(auto& camera:cameras)camera->owner.AcknowledgeHold();tick();
+            return wait_for([&]{return live_probe_phase!=LiveProbePhase::Running;}) && live_probe_phase==LiveProbePhase::AfterFrame;
+        };
+        const auto finish=[&]{workers_end();tick();};
+        check(to_after_frame(),"asks for the frame");
+        cameras[target]->probe_frame_state=4;tick();
+        check(live_probe_frame_result=="failed" && live_probe_phase==LiveProbePhase::Stopping,"a failed read is failed");finish();
+        check(to_after_frame(),"asks for the frame (not in Live View)");
+        cameras[target]->probe_frame_state=3;tick();
+        check(live_probe_frame_result=="not_live_view","a camera that left Live View is not_live_view");finish();
+        check(to_after_frame(),"asks for the frame (timeout)");
+        live_probe_frame_started=Clock::now()-std::chrono::seconds(16);tick();
+        check(live_probe_frame_result=="timeout" && live_probe_phase==LiveProbePhase::Stopping,"a read that never happened in time is timeout, not failed");finish();
+        check(to_after_frame(),"asks for the frame (deadline)");
+        live_probe_deadline=Clock::now()-std::chrono::seconds(1);tick();
+        check(live_probe_frame_result=="timeout","the wait never outlasts the 60-second deadline");finish();
+        check(to_after_frame(),"asks for the frame (window closing)");
+        closing=true;stopping=true;capture_stop_requested=true;tick();
+        check(live_probe_frame_result=="interrupted","a window that closes while waiting is interrupted, not failed");
+        check(to_after_frame(),"asks for the frame (camera ended)");
+        cameras[target]->done=true;tick();
+        check(live_probe_frame_result=="interrupted","a camera whose worker ended before the read is interrupted");
+        check(to_after_frame(),"asks for the frame (read)");
+        cameras[target]->probe_frame_state=2;cameras[target]->owner.RequestHold();cameras[target]->owner.AcknowledgeHold();tick();
+        check(live_probe_frame_result=="ok","a frame that was read is ok");finish();
+        // Not asked for: skipped, with the reason.
+        reset();backend_clean=false;
+        click();for(auto& camera:cameras)camera->owner.AcknowledgeHold();tick();
+        wait_for([&]{return live_probe_phase!=LiveProbePhase::Running;});
+        check(live_probe_frame_result=="skipped" && live_probe_frame_skip_reason=="sequence_not_clean","skipped after an unclean sequence says why");finish();
+        reset();backend_live_after=0u;
+        click();for(auto& camera:cameras)camera->owner.AcknowledgeHold();tick();
+        wait_for([&]{return live_probe_phase!=LiveProbePhase::Running;});
+        check(live_probe_frame_result=="skipped" && live_probe_frame_skip_reason=="live_not_on","skipped when Live View is off says why");finish();
+    }
+
     // 4. A worker that does not answer in time: nothing is sent, the holds are given back, Live runs on.
     reset();
     click();cameras[other]->owner.AcknowledgeHold();tick();
