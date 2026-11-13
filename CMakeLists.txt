@@ -1546,6 +1546,38 @@ if(BUILD_TESTING)
             COMMAND "${CMAKE_COMMAND}" "-DBINARY=$<TARGET_FILE:A0CameraStitcher.WpdDualPreview>" "-DEXPECT=${a0_settings_write_binary_expect}"
                 -P "${CMAKE_SOURCE_DIR}/tests/settings_write_binary_tests.cmake")
         set_tests_properties(preview_settings_write_binary_contracts PROPERTIES TIMEOUT 30)
+        # Live-open capture probe (#426 stage 4, ADR-0044 stage P). OFF by default and separate from every other option: only with
+        # it ON does the preview include the probe headers (they refuse to compile otherwise), so an OFF build carries neither the
+        # probe's gate nor its button nor its smoke entry. Build it in its own folder (for example build-probe-on), never in
+        # build/reference, and never together with A0_BUILD_WPD_SETTINGS_WRITE (that screen stops and restarts Live; the probe's
+        # observation must not be mixed with it). Keep it OFF in any build used on the real bodies until the AGENTS.md item
+        # for ADR-0044 is in place and the owner has approved the camera, the count (one) and the stop conditions.
+        option(A0_BUILD_WPD_LIVE_CAPTURE_PROBE "Build the one-shot Live-open capture probe into the development preview (#426 stage 4, ADR-0044)" OFF)
+        if(A0_BUILD_WPD_LIVE_CAPTURE_PROBE)
+            if(A0_BUILD_WPD_SETTINGS_WRITE)
+                message(FATAL_ERROR "A0_BUILD_WPD_LIVE_CAPTURE_PROBE and A0_BUILD_WPD_SETTINGS_WRITE must not both be ON: the settings screen "
+                    "stops and restarts Live View, which would mix another cause into the probe's observation (ADR-0044).")
+            endif()
+            message(WARNING "A0_BUILD_WPD_LIVE_CAPTURE_PROBE=ON: this executable carries a probe that sends the shutter once with Live View open "
+                "(#426 stage 4, ADR-0044; its window title and first log line say so). Do not use it on the real bodies until the owner's approval "
+                "and the AGENTS.md item are in place.")
+            target_compile_definitions(A0CameraStitcher.WpdDualPreview PRIVATE A0_ENABLE_WPD_LIVE_CAPTURE_PROBE=1)
+            # The window side of the probe on synthetic cameras and a synthetic backend. Opens no camera, no lease.
+            add_test(NAME preview_live_capture_probe_ui_contracts COMMAND A0CameraStitcher.WpdDualPreview --live-capture-probe-ui-smoke)
+            set_tests_properties(preview_live_capture_probe_ui_contracts PROPERTIES TIMEOUT 60)
+            set(a0_live_capture_probe_binary_expect present)
+        else()
+            set(a0_live_capture_probe_binary_expect absent)
+        endif()
+        add_test(NAME preview_live_capture_probe_binary_contracts
+            COMMAND "${CMAKE_COMMAND}" "-DBINARY=$<TARGET_FILE:A0CameraStitcher.WpdDualPreview>" "-DEXPECT=${a0_live_capture_probe_binary_expect}"
+                -P "${CMAKE_SOURCE_DIR}/tests/live_capture_probe_binary_tests.cmake")
+        set_tests_properties(preview_live_capture_probe_binary_contracts PROPERTIES TIMEOUT 60)
+        # The one shutter reaches the transport only through ShutterOnce of the probe header, and the probe button is clicked
+        # by a synthetic message only in the camera-free smoke (reads the sources; runs nothing).
+        add_test(NAME preview_live_capture_probe_source_contracts
+            COMMAND "${CMAKE_COMMAND}" "-DSOURCE_ROOT=${CMAKE_SOURCE_DIR}" -P "${CMAKE_SOURCE_DIR}/tests/live_capture_probe_source_tests.cmake")
+        set_tests_properties(preview_live_capture_probe_source_contracts PROPERTIES TIMEOUT 30)
         if(MSVC)
             target_compile_options(A0CameraStitcher.WpdDualPreview PRIVATE /W4 /permissive- /EHsc /utf-8)
         endif()
