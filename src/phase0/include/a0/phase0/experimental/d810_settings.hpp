@@ -28,24 +28,34 @@ inline constexpr bool D810ValueSigned(D810ValueType type) {
     return type == D810ValueType::Int8 || type == D810ValueType::Int16 || type == D810ValueType::Int32;
 }
 
+// Ids keep their numbers: the ids after NikonShutterSpeed (#427) are appended, never inserted.
 enum class D810SettingId {
     ExposureMode, ShutterSpeed, Aperture, Iso, IsoAuto, WhiteBalance, Metering, ExposureCompensation,
     PictureControl, ActiveDLighting, IsoAutoCandidate, NikonShutterSpeed,
+    ColorSpace, VignetteControl, AutoDistortionControl, HighIsoNr, LongExposureNr, HdrMode,
 };
-// in_table: shown in the side-by-side table. The rest is read for the
-// diagnostic line only (which of two candidate codes the body answers to).
+// in_table: one of the ten fixed rows. They are shown in the side-by-side table and are the
+// only rows the write path reads (kD810WriteReadSpecs).
+// extended (#427): read and compared like the fixed rows and shown in the same table, but never
+// read by the write path and never written. No row is both.
+// Neither flag: read for the diagnostic line only (which of two candidate codes the body answers to).
 struct D810SettingSpec {
     D810SettingId id;
     std::uint16_t code;
     D810ValueType type;
     const char* name;
     bool in_table;
+    bool extended{};
 };
+// A row is compared (and shown) when it is one of the fixed rows or an extended row.
+inline constexpr bool D810SettingCompared(const D810SettingSpec& spec) { return spec.in_table || spec.extended; }
 // String-typed properties are deliberately absent: the parser refuses them.
-// Picture Control (0xD200) has no entry in the upstream configuration table, so
-// its scalar type is an assumption (not cross-checked); a different type is reported as
-// unavailable with the type the body returned, never coerced.
-inline constexpr std::array<D810SettingSpec, 12> kD810SettingSpecs{{
+// The scalar type of a row is the type a public source gives for the code. A body that answers
+// with another type is reported as unavailable (type_mismatch) with the type it returned, never
+// coerced; that is also what happens to an extended row whose public type does not hold on a
+// D810. The sources, and what each row's type and names rest on, are in
+// third_party/PTP_PROTOCOL_REFERENCES.md (section "#427").
+inline constexpr std::array<D810SettingSpec, 18> kD810SettingSpecs{{
     {D810SettingId::ExposureMode, 0x500e, D810ValueType::Uint16, "exposure_mode", true},
     {D810SettingId::ShutterSpeed, 0x500d, D810ValueType::Uint32, "shutter_speed", true},
     {D810SettingId::Aperture, 0x5007, D810ValueType::Uint16, "aperture", true},
@@ -54,8 +64,18 @@ inline constexpr std::array<D810SettingSpec, 12> kD810SettingSpecs{{
     {D810SettingId::WhiteBalance, 0x5005, D810ValueType::Uint16, "white_balance", true},
     {D810SettingId::Metering, 0x500b, D810ValueType::Uint16, "metering", true},
     {D810SettingId::ExposureCompensation, 0x5010, D810ValueType::Int16, "exposure_compensation", true},
-    {D810SettingId::PictureControl, 0xd200, D810ValueType::Uint8, "picture_control", true},
+    {D810SettingId::PictureControl, 0xd200, D810ValueType::Uint16, "picture_control", true},
     {D810SettingId::ActiveDLighting, 0xd14e, D810ValueType::Uint8, "active_d_lighting", true},
+    // Extended rows (#427) follow the ten fixed rows, so the ten are read exactly as before. Every
+    // code is in the property list that a D810 reported (libgphoto2 cameras/nikon-d810.txt). A code
+    // outside that list is never added: a body that does not know a property may answer the begin
+    // with a transfer context and then refuse the END (see 0xd16a below).
+    {D810SettingId::ColorSpace, 0xd032, D810ValueType::Uint8, "color_space", false, true},
+    {D810SettingId::VignetteControl, 0xd0f7, D810ValueType::Uint8, "vignette_control", false, true},
+    {D810SettingId::AutoDistortionControl, 0xd0f8, D810ValueType::Uint8, "auto_distortion_control", false, true},
+    {D810SettingId::HighIsoNr, 0xd070, D810ValueType::Uint8, "high_iso_noise_reduction", false, true},
+    {D810SettingId::LongExposureNr, 0xd06b, D810ValueType::Uint8, "long_exposure_noise_reduction", false, true},
+    {D810SettingId::HdrMode, 0xd130, D810ValueType::Uint8, "hdr_mode", false, true},
     // Diagnostic-only rows come last. 0xd16a is the last row: a body that does
     // not support it answers the begin with a transfer context and then refuses
     // the END, which ends the session (see WpdSettingsReadSession), and every
@@ -270,7 +290,33 @@ inline std::string FormatD810Setting(const D810SettingSpec& spec, std::int64_t v
         }
     case D810SettingId::ExposureCompensation: return D810Printf("%+.2f", value / 1000.0) + " EV";
     case D810SettingId::PictureControl:
-    case D810SettingId::ActiveDLighting: return D810RawText(spec, value);
+        // Names of the Nikon driver's own table (digiCamControl NikonBase.cs), the only public source
+        // for the values; the D810 class there inherits it. The Flat style of a D810 has no entry
+        // there and the custom styles (201 to 209) have no fixed name, so they stay raw.
+        switch (value) {
+        case 1: return "Standard";
+        case 2: return "Neutral";
+        case 3: return "Vivid";
+        case 4: return "Monochrome";
+        case 5: return "Portrait";
+        case 6: return "Landscape";
+        default: return D810RawText(spec, value);
+        }
+    case D810SettingId::ColorSpace:
+        // libgphoto2 and digiCamControl agree on both values.
+        return value == 0 ? "sRGB" : value == 1 ? "AdobeRGB" : D810RawText(spec, value);
+    case D810SettingId::LongExposureNr:
+    case D810SettingId::HdrMode:
+        // Both sources agree that 0 is off and 1 is on. A value of 2 (HDR "sequence" in one of them)
+        // has no name in the other, so it stays raw.
+        return value == 0 ? "OFF" : value == 1 ? "ON" : D810RawText(spec, value);
+    // Raw on purpose: the value tables of these differ by body or rest on one source only.
+    // Active D-Lighting: another body family has the opposite order. Vignette control and auto
+    // distortion control: one source. High ISO noise reduction: the table is another body's.
+    case D810SettingId::ActiveDLighting:
+    case D810SettingId::VignetteControl:
+    case D810SettingId::AutoDistortionControl:
+    case D810SettingId::HighIsoNr: return D810RawText(spec, value);
     }
     return D810RawText(spec, value);
 }
@@ -312,12 +358,12 @@ struct D810ComparisonRow {
     std::string name, a_text, b_text;
     D810Difference difference{D810Difference::Unknown};
 };
-// Table rows only. Unknown: at least one side could not be read, so no claim
-// is made about equality.
+// Compared rows only (the fixed rows and the extended rows, not the diagnostic ones). Unknown: at
+// least one side could not be read, so no claim is made about equality.
 inline std::vector<D810ComparisonRow> CompareD810Settings(const D810SettingsSnapshot& a, const D810SettingsSnapshot& b) {
     std::vector<D810ComparisonRow> rows;
     for (const auto& spec : kD810SettingSpecs) {
-        if (!spec.in_table) continue;
+        if (!D810SettingCompared(spec)) continue;
         D810ComparisonRow row;
         row.id = spec.id;
         row.name = spec.name;
@@ -339,6 +385,26 @@ inline std::size_t CountD810Differences(const std::vector<D810ComparisonRow>& ro
     for (const auto& row : rows)
         if (row.difference == D810Difference::Different) ++count;
     return count;
+}
+// The three counts of a comparison. Every row is in exactly one of them: same (both sides read,
+// equal), different (both read, not equal), unknown (a side could not be read, so nothing is
+// claimed). The difference count alone says nothing about unknown rows; use AllSame().
+struct D810ComparisonSummary {
+    std::size_t same{}, different{}, unknown{};
+    std::size_t Total() const { return same + different + unknown; }
+    // Every compared row was read on both sides and is equal. False for an empty comparison.
+    bool AllSame() const { return Total() > 0 && different == 0 && unknown == 0; }
+};
+inline D810ComparisonSummary SummarizeD810Comparison(const std::vector<D810ComparisonRow>& rows) {
+    D810ComparisonSummary summary;
+    for (const auto& row : rows) {
+        switch (row.difference) {
+        case D810Difference::Same: ++summary.same; break;
+        case D810Difference::Different: ++summary.different; break;
+        case D810Difference::Unknown: ++summary.unknown; break;
+        }
+    }
+    return summary;
 }
 
 // --- Log line ----------------------------------------------------------------

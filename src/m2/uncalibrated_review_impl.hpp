@@ -37,6 +37,34 @@ bool LensEstimatorPrior(const FixedCompositeProfileBinding& profile,MountOrienta
         return x>0 && x<static_cast<int>(width) && std::abs(y)<static_cast<int>(height);
     }catch(const std::invalid_argument&){return false;}
 }
+// #417: CheckRegisteredMappingCover (fixed_composite_creation_v3.cpp) for a capture whose decoded frames have the profile's
+// camera size, with the overlap scan of the seam check on `threads` threads. The seam check reads only the frames' sizes, so the
+// captured frames stand for the blank frame CheckRegisteredMappingCover allocates; the outer edge is counted the same way (A first,
+// then B, the same samples in the same order, the same exception for a position that is not finite). The result equals
+// CheckRegisteredMappingCover's; for frames of another size it is CheckRegisteredMappingCover itself.
+MappingCoverCheck RegisteredMappingCoverOnThreads(const render::DocumentRenderParameters& parameters,const RegisteredMapping& mapping,
+    std::uint32_t seam_column,const SeamBlendSettings& blend,const Image& a,const Image& b,unsigned threads){
+    const auto sized=[](const Image& f){return f.width==kD810SensorWidthPixels && f.height==kD810SensorHeightPixels && f.bgr.size()==render::PixelCount(f.width,f.height)*3;};
+    if(!sized(a) || !sized(b)){const auto cover=CheckRegisteredMappingCover(parameters,mapping,seam_column,blend);return {cover.seam_covered,cover.output_covered};}
+    const auto input=RegisteredDocumentMappedFixedSeamInput(parameters,mapping,seam_column);
+    MappingCoverCheck cover;
+    try{cover.seam_covered=CanRenderMappedFixedSeam(a,b,input,seam_column,blend,threads);}
+    catch(const std::invalid_argument&){cover.seam_covered=false;}
+    const auto covered=[](const render::OutputToCamera& map,double x,double y){
+        render::Point raw{};
+        if(!map({x,y},raw))return false;
+        if(!std::isfinite(raw.x) || !std::isfinite(raw.y))throw std::invalid_argument("output-to-camera mapping returned nonfinite camera coordinates");
+        return raw.x>=0.0 && raw.y>=0.0 && raw.x<static_cast<double>(kD810SensorWidthPixels) && raw.y<static_cast<double>(kD810SensorHeightPixels);
+    };
+    const auto uncovered=[&](std::uint32_t x,std::uint32_t y){
+        return !covered(input.camera_a,static_cast<double>(x),static_cast<double>(y)) && !covered(input.camera_b,static_cast<double>(x),static_cast<double>(y));
+    };
+    std::uint32_t count=0;const std::uint32_t w=input.width,h=input.height;
+    for(std::uint32_t x=0;x<w;++x){if(uncovered(x,0))++count;if(h>1 && uncovered(x,h-1))++count;}
+    for(std::uint32_t y=1;y+1<h;++y){if(uncovered(0,y))++count;if(w>1 && uncovered(w-1,y))++count;}
+    cover.output_covered=count==0;
+    return cover;
+}
 bool SameLensRaster(const render::OutputRaster& a,const render::OutputRaster& b){
     return a.region_um.left==b.region_um.left && a.region_um.top==b.region_um.top && a.region_um.right==b.region_um.right && a.region_um.bottom==b.region_um.bottom &&
         a.dpi==b.dpi && a.width_pixels==b.width_pixels && a.height_pixels==b.height_pixels;
@@ -76,6 +104,27 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
             !SameLensRaster(lens_profile->parameters.raster,lens_condition->raster))
             throw FixedCompositeUnavailable(FixedCompositeSkip::profile_differs,"the profile binding is not the one the condition names");
     }
+    // #417: the registered fixed composite (condition v3) owns geometry and seam too. Its profile is the calibration; the capture
+    // adds B's pose, the paper surface and layer 2 (capture_registration.hpp).
+    const FixedCompositeConditionV3* reg_condition{};const FixedCompositeProfileBinding* reg_profile{};
+    if(r.fixed_composite_registration){
+        const auto& g=*r.fixed_composite_registration;
+        if(r.fixed_composite || r.fixed_composite_lens || r.manual_revision || r.automatic_alignment || r.blend!=BlendMethod::linear_feather || !g.condition || !g.profile ||
+            !hash_valid(g.condition_sha256) || g.thread_count>256)
+            throw std::invalid_argument("registered fixed composite review is exclusive and needs the condition, its profile and the condition hash");
+        reg_condition=g.condition;reg_profile=g.profile;
+        // A capture draws with the condition, so a base pose outside the envelope is refused here whatever the revision's kind.
+        try{ValidateFixedCompositeConditionV3(*reg_condition);RequireFixedCompositeBasePoseInEnvelopeV3(*reg_condition);}
+        catch(const FixedCompositePoseOutsideEnvelope& error){throw FixedCompositeUnavailable(FixedCompositeSkip::pose_outside_envelope,error.what());}
+        catch(const std::invalid_argument& error){throw FixedCompositeUnavailable(FixedCompositeSkip::condition_invalid,error.what());}
+        if(reg_profile->profile_file_sha256!=reg_condition->source.profile_file_sha256 || reg_profile->profile_fingerprint_sha256!=reg_condition->source.profile_fingerprint_sha256 ||
+            !SameLensRaster(reg_profile->parameters.raster,reg_condition->raster))
+            throw FixedCompositeUnavailable(FixedCompositeSkip::profile_differs,"the profile binding is not the one the condition names");
+    }
+    // The threads of the mapped composites (and of the registered composite's estimate, layer 2 and gate): the request's count for
+    // the registered composite when it names one, otherwise one per hardware thread. The images and records do not depend on it.
+    const unsigned review_threads=r.fixed_composite_registration && r.fixed_composite_registration->thread_count?r.fixed_composite_registration->thread_count:
+        std::clamp(std::thread::hardware_concurrency(),1u,256u);
     ValidateCanonicalPath(r.camera_a_original,"CAM-A");ValidateCanonicalPath(r.camera_b_original,"CAM-B");
     const auto a_path=NormalizedAbsolute(r.camera_a_original),b_path=NormalizedAbsolute(r.camera_b_original),job=NormalizedAbsolute(r.output_directory);
     if(a_path.parent_path().filename()!=L"CAM-A" || b_path.parent_path().filename()!=L"CAM-B")throw std::invalid_argument("review A/B original paths are not alias-bound");
@@ -84,7 +133,17 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
     LockedReadFile a_file(a_path,false,true),b_file(b_path,false,true);
     if(a_file.SameFileAs(b_file))throw std::invalid_argument("review originals must be distinct physical files");
     ComApartment apartment;auto factory=CreateFactory();
-    auto a=ReadJpegSnapshot(factory.get(),a_file,"review CAM-A",true),b=ReadJpegSnapshot(factory.get(),b_file,"review CAM-B",true);
+    JpegSnapshot a,b;
+    if(r.fixed_composite_registration){
+        // #417: the registered composite decodes A and B at the same time, B on its own apartment and factory. The other paths
+        // decode one after the other as before.
+        std::exception_ptr b_error;
+        std::thread decode_b([&]{try{ComApartment b_apartment;auto b_factory=CreateFactory();b=ReadJpegSnapshot(b_factory.get(),b_file,"review CAM-B",true);}
+            catch(...){b_error=std::current_exception();}});
+        try{a=ReadJpegSnapshot(factory.get(),a_file,"review CAM-A",true);}catch(...){decode_b.join();throw;}
+        decode_b.join();
+        if(b_error)std::rethrow_exception(b_error);
+    }else{a=ReadJpegSnapshot(factory.get(),a_file,"review CAM-A",true);b=ReadJpegSnapshot(factory.get(),b_file,"review CAM-B",true);}
     if(ToLowerHex(a.sha256)!=r.camera_a_sha256 || ToLowerHex(b.sha256)!=r.camera_b_sha256)throw std::invalid_argument("review source hash differs from capture transaction");
     if(a.image.width!=b.image.width || a.image.height!=b.image.height)throw std::invalid_argument("review source dimensions differ");
     const auto width=a.image.width,height=a.image.height;
@@ -99,6 +158,12 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
         if(lens_condition->orientation!=r.geometry.orientation)
             throw FixedCompositeUnavailable(FixedCompositeSkip::orientation_differs,std::string("condition ")+std::string(MountOrientationName(lens_condition->orientation))+", capture "+std::string(MountOrientationName(r.geometry.orientation)));
         // The profile's camera model fixes the frame its mapping is defined on.
+        if(width!=kD810SensorWidthPixels || height!=kD810SensorHeightPixels)
+            throw FixedCompositeUnavailable(FixedCompositeSkip::size_differs,"profile frame "+std::to_string(kD810SensorWidthPixels)+"x"+std::to_string(kD810SensorHeightPixels)+", capture "+std::to_string(width)+"x"+std::to_string(height));
+    }
+    if(reg_condition){
+        if(reg_condition->orientation!=r.geometry.orientation)
+            throw FixedCompositeUnavailable(FixedCompositeSkip::orientation_differs,std::string("condition ")+std::string(MountOrientationName(reg_condition->orientation))+", capture "+std::string(MountOrientationName(r.geometry.orientation)));
         if(width!=kD810SensorWidthPixels || height!=kD810SensorHeightPixels)
             throw FixedCompositeUnavailable(FixedCompositeSkip::size_differs,"profile frame "+std::to_string(kD810SensorWidthPixels)+"x"+std::to_string(kD810SensorHeightPixels)+", capture "+std::to_string(width)+"x"+std::to_string(height));
     }
@@ -132,12 +197,44 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
         try{RequireFixedCompositeCoverage(*lens_pair);}
         catch(const std::invalid_argument& error){throw FixedCompositeUnavailable(FixedCompositeSkip::size_differs,std::string("output not covered by A or B: ")+error.what());}
         try{
-            if(!CanRenderMappedFixedSeam(a.image,b.image,*lens_pair,lens_condition->seam.column,kSeamBlendDesign))
+            if(!CanRenderMappedFixedSeam(a.image,b.image,*lens_pair,lens_condition->seam.column,kSeamBlendDesign,review_threads))
                 throw FixedCompositeUnavailable(FixedCompositeSkip::seam_outside_overlap,"seam column "+std::to_string(lens_condition->seam.column));
         }catch(const std::invalid_argument& error){throw FixedCompositeUnavailable(FixedCompositeSkip::seam_outside_overlap,error.what());}
     }
-    // Only the decoded copies turn; the locked originals stay byte-identical.
-    OrientRenderInput(a.image,r.geometry.orientation);OrientRenderInput(b.image,r.geometry.orientation);
+    // #417: the registered composite works on the stored order its mapping is defined on: the estimate, layer 2, the level (each
+    // candidate through the cheap check) and the composite now; the gate measures the same pair after the JPEG is written.
+    std::optional<CaptureRegistrationRequest> reg_request;std::optional<PreparedCaptureRegistration> reg_prepared;double reg_milliseconds{};
+    if(reg_condition){
+        const auto& c=*reg_condition;
+        CaptureRegistrationRequest q;
+        q.camera_a=&a.image;q.camera_b=&b.image;q.parameters=&reg_profile->parameters;
+        q.estimator.geometry={c.seam.column,kSeamBlendDesign.width_pixels,c.registration.geometry.omega_margin_px,c.registration.geometry.guard_px,c.registration.geometry.band_half_width_px};
+        q.estimator.envelope=c.registration.envelope;q.estimator.limits=c.registration.limits;q.estimator.design=content_registration::kRegistrationDesignDraft;
+        q.base_pose=c.base_pose;
+        q.lines.envelope=c.registration.envelope;q.lines.surface_envelope=c.registration.surface_envelope;q.lines.apply_beyond_envelope=c.registration.apply_beyond_envelope;
+        q.lines.surface_scale_warn_percent=c.registration.surface_scale_warn_percent;
+        if(c.registration.parallax)q.lines.max_lift_mm=c.registration.parallax->max_lift_mm;
+        q.lines.seam_limit_px=c.seam_gate.limit_px;q.lines.seam_guard_band_px=c.seam_gate.guard_band_px;
+        q.blend=kSeamBlendDesign;q.design=CaptureRegistrationDesignDraft();
+        // The cheap check of each candidate (addendum 11.23.4) from the condition library: the seam with half the blend inside
+        // both covers on every row and the output's outer edge covered, from the mapping alone (no pixel is read; the composite
+        // takes its band once, inside RenderMappedFixedSeam).
+        // CheckRegisteredMappingCover's answer, with the captured frames and the review's threads (RegisteredMappingCoverOnThreads).
+        const auto* profile_parameters=&reg_profile->parameters;const auto seam=c.seam.column;
+        q.cover_check=[profile_parameters,seam,frame_a=&a.image,frame_b=&b.image,review_threads](const RegisteredMapping& m){
+            return RegisteredMappingCoverOnThreads(*profile_parameters,m,seam,kSeamBlendDesign,*frame_a,*frame_b,review_threads);
+        };
+        q.remaining_ms=[deadline=r.deadline]{return std::chrono::duration<double,std::milli>(deadline-std::chrono::steady_clock::now()).count();};
+        q.thread_count=review_threads;
+        const auto started=std::chrono::steady_clock::now();
+        // Nothing is created before this point, so a refusal here leaves only the originals.
+        try{reg_prepared=PrepareCaptureRegistration(q);}
+        catch(const GeometryLevelUnavailable& error){throw FixedCompositeUnavailable(error.SeamCovered()?FixedCompositeSkip::size_differs:FixedCompositeSkip::seam_outside_overlap,error.what());}
+        reg_milliseconds=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
+        reg_request=std::move(q);
+        active();
+    }    // Only the decoded copies turn; the locked originals stay byte-identical. The registered composite keeps the stored order.
+    if(!reg_condition){OrientRenderInput(a.image,r.geometry.orientation);OrientRenderInput(b.image,r.geometry.orientation);}
     int translation_x=static_cast<int>(parameters.camera_b_to_camera_a[2]),translation_y=static_cast<int>(parameters.camera_b_to_camera_a[5]);
     if(r.manual_revision){translation_x=r.manual_revision->x;translation_y=r.manual_revision->y;}
     std::optional<AutomaticStillAlignment> automatic;double alignment_milliseconds{};
@@ -184,7 +281,7 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
             try{
                 scaled=ScaledDocumentMappedFixedSeamInput(profile.parameters,record.scale.applied_scale);
                 try{RequireFixedCompositeCoverage(scaled);}catch(const std::invalid_argument&){covered=false;}
-                if(covered)fits=CanRenderMappedFixedSeam(a.image,b.image,scaled,c.seam.column,kSeamBlendDesign);
+                if(covered)fits=CanRenderMappedFixedSeam(a.image,b.image,scaled,c.seam.column,kSeamBlendDesign,review_threads);
             }
             catch(const std::invalid_argument&){fits=false;}
             if(fits)lens_pair=std::move(scaled);
@@ -201,7 +298,7 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
         const auto& c=*fixed_condition;
         // The cheap check first: a seam that cannot be drawn needs no estimate.
         parameters=FixedCompositeRenderParameters(c);
-        if(!CanRenderFixedSeam(a.image,b.image,parameters,c.seam.column,kSeamBlendDesign))
+        if(!CanRenderFixedSeam(a.image,b.image,parameters,c.seam.column,kSeamBlendDesign,review_threads))
             throw FixedCompositeUnavailable(FixedCompositeSkip::seam_outside_overlap,"seam column "+std::to_string(c.seam.column));
         const auto started=std::chrono::steady_clock::now();
         const auto estimate=EstimateOverlapSimilarity(a.image,b.image,c.mapping.translation_x,c.mapping.translation_y);
@@ -213,7 +310,7 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
         alignment_milliseconds=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
         if(record.scale.status==FixedScaleStatus::applied){
             bool fits=false;render::PairRenderParameters scaled{};
-            try{scaled=FixedCompositeScaledGeometry(c,record.scale.applied_scale);fits=CanRenderFixedSeam(a.image,b.image,scaled,c.seam.column,kSeamBlendDesign);}
+            try{scaled=FixedCompositeScaledGeometry(c,record.scale.applied_scale);fits=CanRenderFixedSeam(a.image,b.image,scaled,c.seam.column,kSeamBlendDesign,review_threads);}
             catch(const std::invalid_argument&){fits=false;}
             if(fits)parameters=scaled;
             else{record.scale.status=FixedScaleStatus::seam_outside_overlap;record.scale.applied_scale=1;}
@@ -223,11 +320,15 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
     }
     // #368: the seam cut replaces only the mixing; geometry and crop are the same.
     std::optional<SeamBlendRecord> seam;double blend_milliseconds{};render::PairRenderResult rendered;
-    if(lens_record){
+    if(reg_prepared){
+        rendered.image=std::move(reg_prepared->composite.image);seam=std::move(reg_prepared->composite.record);
+        alignment_milliseconds=reg_milliseconds-reg_prepared->milliseconds.composite.value_or(0);blend_milliseconds=reg_prepared->milliseconds.composite.value_or(0);
+        if(rendered.image.width!=reg_condition->raster.width_pixels || rendered.image.height!=reg_condition->raster.height_pixels)throw std::runtime_error("registered composite is not the size of the condition's raster");
+    }    else if(lens_record){
         const auto started=std::chrono::steady_clock::now();
         SeamBlendResult fixed;
         // Nothing is created before this point, so a refusal here leaves only the originals.
-        try{fixed=RenderMappedFixedSeam(a.image,b.image,*lens_pair,lens_condition->seam.column,kSeamBlendDesign);}
+        try{fixed=RenderMappedFixedSeam(a.image,b.image,*lens_pair,lens_condition->seam.column,kSeamBlendDesign,{},review_threads);}
         catch(const std::invalid_argument& error){throw FixedCompositeUnavailable(FixedCompositeSkip::size_differs,error.what());}
         blend_milliseconds=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
         // The raster is fixed by the condition: the output is never another size.
@@ -235,7 +336,7 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
         rendered.image=std::move(fixed.image);seam=std::move(fixed.record);
     }else if(fixed_record){
         const auto started=std::chrono::steady_clock::now();
-        auto fixed=RenderPairFixedSeam(a.image,b.image,parameters,fixed_record->seam_column,kSeamBlendDesign);
+        auto fixed=RenderPairFixedSeam(a.image,b.image,parameters,fixed_record->seam_column,kSeamBlendDesign,{},review_threads);
         blend_milliseconds=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
         rendered.image=std::move(fixed.image);seam=std::move(fixed.record);
     }else if(r.blend==BlendMethod::seam_cut){
@@ -243,7 +344,9 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
         blend_milliseconds=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
         rendered.image=std::move(cut.image);seam=std::move(cut.record);
     }else rendered=render::RenderPair(a.image,b.image,parameters);
-    a.image={};b.image={};active();
+    // The registered composite's gate measures the same originals after the JPEG is written (addendum 11.25).
+    if(!reg_prepared){a.image={};b.image={};}
+    active();
     std::filesystem::create_directories(job.parent_path());pins.Pin(job.parent_path(),true);
     if(!std::filesystem::create_directory(job))throw std::runtime_error("cannot reserve new review directory");pins.Pin(job,true);
     const auto partial=job/L"uncalibrated-review.jpg.partial",final=job/L"uncalibrated-review.jpg";
@@ -273,11 +376,29 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
         }
         ValidateSnapshotHash(decoded,saved,"saved review");
     }
-    ValidateSnapshotHash(a,a_file,"review CAM-A");ValidateSnapshotHash(b,b_file,"review CAM-B");active();
+    // The composite JPEG is saved and verified. From here the deadline no longer undoes it: a window that closes meanwhile is noted
+    // (StillReviewResult::deadline_passed) and the report is still written, so that the JPEG never stays without one. The gate takes
+    // the time that is left (none: it is not run and the report says so); a gate that has begun is finished and kept.
+    bool deadline_passed=false;
+    const auto note_deadline=[&]{if(std::chrono::steady_clock::now()>=r.deadline)deadline_passed=true;};
+    InvokeTestHook(after_review_jpeg_hook);note_deadline();
+    // #417: the gate on Omega with the pair the composite was drawn from, now that the JPEG is safe; then the report's record.
+    std::optional<SavedFixedCompositeRegistration> reg_record;
+    if(reg_prepared){
+        MeasureCaptureRegistrationGate(*reg_request,*reg_prepared);
+        a.image={};b.image={};note_deadline();
+        const auto& c=*reg_condition;
+        RegistrationRecordIdentity id;
+        id.condition_sha256=r.fixed_composite_registration->condition_sha256;id.condition_sequence=c.revision.sequence;id.profile_file=c.source.profile_file;
+        id.profile_file_sha256=reg_profile->profile_file_sha256;id.profile_fingerprint_sha256=reg_profile->profile_fingerprint_sha256;
+        if(reg_profile->profile_id && !reg_profile->profile_id->empty())id.profile_id=reg_profile->profile_id;
+        id.seam_origin=std::string(FixedSeamOriginName(c.seam.origin));
+        reg_record=RecordOfCapture(id,*reg_request,*reg_prepared,[](const std::vector<unsigned char>& v){Sha256Provider s;return ToLowerHex(s.Compute(v));});
+    }    ValidateSnapshotHash(a,a_file,"review CAM-A");ValidateSnapshotHash(b,b_file,"review CAM-B");note_deadline();
     std::ostringstream report;
     report.imbue(std::locale::classic());report<<std::setprecision(17);
     const bool similarity=r.manual_revision && (r.manual_revision->rotation_degrees!=0 || r.manual_revision->scale!=1);
-    const char* schema=lens_record?"a0.uncalibrated-still-review.v7":fixed_record?"a0.uncalibrated-still-review.v6":automatic?"a0.uncalibrated-still-review.v5":similarity?"a0.uncalibrated-still-review.v3":r.manual_revision?"a0.uncalibrated-still-review.v2":"a0.uncalibrated-still-review.v1";
+    const char* schema=reg_record?"a0.uncalibrated-still-review.v8":lens_record?"a0.uncalibrated-still-review.v7":fixed_record?"a0.uncalibrated-still-review.v6":automatic?"a0.uncalibrated-still-review.v5":similarity?"a0.uncalibrated-still-review.v3":r.manual_revision?"a0.uncalibrated-still-review.v2":"a0.uncalibrated-still-review.v1";
     report<<"{\"schema\":\""<<schema<<"\",\"pairId\":\""<<r.pair_id
         <<"\",\"state\":\"UncalibratedReviewReady\",\"productQualityAccepted\":false,\"physicalScaleVerified\":false,\"liveToStillFieldOfViewVerified\":false,\"automaticRetryCount\":0,\"inputs\":["
         <<"{\"alias\":\"CAM-A\",\"path\":\""<<ReviewPathJson(a_path)<<"\",\"sha256\":\""<<r.camera_a_sha256<<"\",\"bytes\":"<<a.compressed.size()<<"},"
@@ -287,7 +408,7 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
     if(r.geometry.orientation!=MountOrientation::normal)report<<"\"mountOrientation\":\""<<MountOrientationName(r.geometry.orientation)<<"\",";
     report<<"\"sourceDimensions\":{\"width\":"<<width<<",\"height\":"<<height<<"},";
     // The lens-aware mapping is the profile's: no translation (v7).
-    if(!lens_record)report<<"\"translation\":{\"x\":"<<translation_x<<",\"y\":"<<translation_y<<"},";
+    if(!lens_record && !reg_record)report<<"\"translation\":{\"x\":"<<translation_x<<",\"y\":"<<translation_y<<"},";
     report<<"\"output\":{\"path\":\"uncalibrated-review.jpg\",\"width\":"<<output_width<<",\"height\":"<<output_height<<",\"bytes\":"<<encoded.size<<",\"sha256\":\""<<result.sha256<<"\"}";
     if(r.manual_revision)report<<",\"geometryBasis\":\""<<(similarity?"manual-still-similarity":"manual-still-pixels")<<"\",\"parentReview\":{\"path\":\""<<ReviewPathJson(NormalizedAbsolute(r.manual_revision->parent_report))<<"\",\"sha256\":\""<<r.manual_revision->parent_report_sha256<<"\"}";
     if(similarity)report<<",\"adjustment\":{\"anchor\":\"image-center\",\"rotationDegrees\":"<<r.manual_revision->rotation_degrees<<",\"scale\":"<<r.manual_revision->scale<<"},\"crop\":{\"left\":"<<parameters.crop.left<<",\"top\":"<<parameters.crop.top<<",\"right\":"<<parameters.crop.right<<",\"bottom\":"<<parameters.crop.bottom<<"}";
@@ -314,22 +435,28 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
         }else report<<"null";
         report<<"}";
     }
-    if(lens_record){report<<",\"geometryBasis\":\"fixed-composite-lens\"";WriteFixedCompositeLensJson(report,*lens_record);WriteFixedSeamBlendJson(report,*seam);}
+    if(reg_record){report<<",\"geometryBasis\":\"fixed-composite-registration\",\"fixedCompositeRegistration\":"<<FixedCompositeRegistrationJson(*reg_record);WriteFixedSeamBlendJson(report,*seam);
+        report<<",\"warnings\":"<<RegistrationWarningsJson(reg_record->warnings)<<",\"assessment\":"<<RegistrationAssessmentJson(reg_record->assessment);}
+    else if(lens_record){report<<",\"geometryBasis\":\"fixed-composite-lens\"";WriteFixedCompositeLensJson(report,*lens_record);WriteFixedSeamBlendJson(report,*seam);}
     else if(fixed_record){report<<",\"geometryBasis\":\"fixed-composite\",\"adjustment\":{\"anchor\":\"image-center\",\"rotationDegrees\":"<<fixed_condition->mapping.rotation_degrees<<",\"scale\":"<<fixed_condition->mapping.scale<<"},\"crop\":{\"left\":"<<parameters.crop.left<<",\"top\":"<<parameters.crop.top<<",\"right\":"<<parameters.crop.right<<",\"bottom\":"<<parameters.crop.bottom<<"}";
         WriteFixedCompositeJson(report,*fixed_record,fixed_condition->mapping.translation_x,fixed_condition->mapping.translation_y,fixed_condition->mapping.rotation_degrees,fixed_condition->mapping.scale);WriteFixedSeamBlendJson(report,*seam);}
     else if(seam)WriteSeamBlendJson(report,*seam);
     report<<"}";
     const auto document=report.str();const std::vector<std::uint8_t> report_bytes(document.begin(),document.end());
-    const auto report_partial=job/L"uncalibrated-review.json.partial";active();WriteBytesToNewFile(report_partial,report_bytes);
-    {LockedReadFile saved(report_partial,true,true);if(saved.ReadAll()!=report_bytes)throw std::runtime_error("review report partial changed");active();saved.RenameToWithoutReplace(result.report);}
+    const auto report_partial=job/L"uncalibrated-review.json.partial";note_deadline();WriteBytesToNewFile(report_partial,report_bytes);
+    {LockedReadFile saved(report_partial,true,true);if(saved.ReadAll()!=report_bytes)throw std::runtime_error("review report partial changed");note_deadline();saved.RenameToWithoutReplace(result.report);}
     {LockedReadFile saved(result.report,false,true);if(saved.ReadAll()!=report_bytes)throw std::runtime_error("review report reread failed");}
     result.automatic=std::move(automatic);result.alignment_milliseconds=alignment_milliseconds;
     result.blend=std::move(seam);result.fixed_composite=std::move(fixed_record);result.fixed_composite_lens=std::move(lens_record);result.blend_milliseconds=blend_milliseconds;
-    active();return result;
+    result.fixed_composite_registration=std::move(reg_record);if(reg_prepared)result.registration_milliseconds=reg_prepared->milliseconds;
+    // Both files are final. A deadline that closes from here on is reported to the caller, never turned into a failure.
+    InvokeTestHook(before_review_return_hook);note_deadline();
+    result.deadline_passed=deadline_passed;
+    return result;
 }
 StillBlendComparison CompareStillReviewBlends(const SavedStillReview& review,const std::filesystem::path& prefix,std::uint32_t crop_width,std::uint32_t crop_height){
     if(!crop_width || !crop_height)throw std::invalid_argument("comparison crop is empty");
-    if(review.fixed_composite_lens)throw std::invalid_argument("the blend comparison re-renders a similarity placement; a lens-aware review has none");
+    if(review.fixed_composite_lens || review.fixed_composite_registration)throw std::invalid_argument("the blend comparison re-renders a similarity placement; a lens-aware or registered review has none");
     const auto sources=LoadStillReviewSources(review);
     const auto parameters=SavedStillReviewRenderParameters(review);
     StillBlendComparison c;const auto since=[](auto started){return std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();};

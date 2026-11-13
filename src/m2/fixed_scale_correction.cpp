@@ -141,6 +141,7 @@ std::string_view FixedCompositeSkipText(FixedCompositeSkip skip){
     case FixedCompositeSkip::seam_outside_overlap:return "固定の合成条件の継ぎ目の列が、この撮影の重なりの外にあります";
     case FixedCompositeSkip::profile_absent:return "固定の合成条件が参照する校正ファイル（profile）が、条件と同じフォルダにありません";
     case FixedCompositeSkip::profile_differs:return "固定の合成条件が参照する校正ファイル（profile）が、条件の記録と違うか使えません。設置の時に作り直してください";
+    case FixedCompositeSkip::pose_outside_envelope:return "固定の合成条件の手直しが、範囲の外です。rollback するか、校正をやり直してください";
     }
     return {};
 }

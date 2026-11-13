@@ -1,0 +1,48 @@
+{
+  "schema": "a0.seam-color-plan.v1",
+  "source": "capture-estimate",
+  "state": "usable",
+  "reason": null,
+  "space": "gamma8",
+  "bindings": [
+    {
+      "kind": "condition-v3",
+      "sha256": "02a0c7686ec7b50009bdf43e07398fd0cb275938d6d76bf2d503ab9954a2185a"
+    },
+    {
+      "kind": "capture-original-a",
+      "sha256": "a6c492115b8f28b081972dfb48eac0ddd7baa39ee3e0195d9e8c2290835ac3d0"
+    },
+    {
+      "kind": "capture-original-b",
+      "sha256": "e3598d9471c079cf480d0e0f18b09acb240f9233515122acdf013c9b6c21ac8b"
+    }
+  ],
+  "requestSha256": "f07165b64216ae9a4988fc779b08f0dbe74750bd08a7504a6fb368cdc6c084d2",
+  "globalGainBgr": [1.100000, 1.080000, 1.060000],
+  "knots": [
+    {
+      "yMm": 10.000000,
+      "seamScaleBgr": [1.111000, 1.085400, 1.054700],
+      "seamOffsetBgr": [0.000000, 0.000000, 0.000000]
+    },
+    {
+      "yMm": 14.500000,
+      "seamScaleBgr": [1.127500, 1.101600, 1.070600],
+      "seamOffsetBgr": [0.000000, 0.000000, 0.000000]
+    },
+    {
+      "yMm": 19.000000,
+      "seamScaleBgr": [1.144000, 1.112400, 1.081200],
+      "seamOffsetBgr": [0.000000, 0.000000, 0.000000]
+    },
+    {
+      "yMm": 23.500000,
+      "seamScaleBgr": [1.122000, 1.096200, 1.065300],
+      "seamOffsetBgr": [0.000000, 0.000000, 0.000000]
+    }
+  ],
+  "diagnostics": {
+    "model": "hand-made values for reader tests"
+  }
+}

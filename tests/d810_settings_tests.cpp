@@ -43,6 +43,8 @@ Bytes Desc(unsigned code, unsigned type, unsigned get_set, std::int64_t def, std
     return out;
 }
 const D810SettingSpec& Spec(D810SettingId id) { return D810SettingOf(id); }
+// Every row of the table is asked once in a full read.
+constexpr std::size_t kAsked = kD810SettingSpecs.size();
 Bytes DescFor(const D810SettingSpec& spec, std::int64_t current, unsigned get_set = 1) {
     return Desc(spec.code, static_cast<unsigned>(spec.type), get_set, current, current, 2, {current, current});
 }
@@ -308,7 +310,16 @@ void Formatting() {
     check(text(D810SettingId::Metering, 2) == "Center-weighted" && text(D810SettingId::Metering, 3) == "Multi-pattern" && text(D810SettingId::Metering, 4) == "Spot" &&
         text(D810SettingId::Metering, 0x8010) == "Highlight-weighted" && text(D810SettingId::Metering, 1) == "raw 0x0001" && text(D810SettingId::Metering, 5) == "raw 0x0005", "metering: Nikon names, a value without one stays raw");
     check(text(D810SettingId::ExposureCompensation, 0) == "+0.00 EV" && text(D810SettingId::ExposureCompensation, -333) == "-0.33 EV" && text(D810SettingId::ExposureCompensation, 1000) == "+1.00 EV", "comp");
-    check(text(D810SettingId::PictureControl, 3) == "raw 0x03" && text(D810SettingId::ActiveDLighting, 2) == "raw 0x02", "unnamed values stay raw");
+    check(text(D810SettingId::PictureControl, 3) == "Vivid" && text(D810SettingId::ActiveDLighting, 2) == "raw 0x02", "named picture control, raw active D-Lighting");
+    check(text(D810SettingId::ColorSpace, 0) == "sRGB" && text(D810SettingId::ColorSpace, 1) == "AdobeRGB" && text(D810SettingId::ColorSpace, 2) == "raw 0x02", "color space");
+    for (const auto id : {D810SettingId::LongExposureNr, D810SettingId::HdrMode})
+        check(text(id, 0) == "OFF" && text(id, 1) == "ON" && text(id, 2) == "raw 0x02" && text(id, 255) == "raw 0xff", "off/on rows name 0 and 1 only");
+    for (const auto id : {D810SettingId::ActiveDLighting, D810SettingId::VignetteControl, D810SettingId::AutoDistortionControl, D810SettingId::HighIsoNr})
+        for (const std::int64_t value : {0, 1, 2, 3, 4, 5}) {
+            char raw[16];
+            std::snprintf(raw, sizeof raw, "raw 0x%02x", static_cast<unsigned>(value));
+            check(text(id, value) == raw, "values whose names differ by body or rest on one source stay raw");
+        }
     // The log line of the issue's example.
     D810SettingReading reading;
     reading.id = D810SettingId::ShutterSpeed;
@@ -337,7 +348,7 @@ void Comparison() {
     a[static_cast<std::size_t>(D810SettingId::Metering)] = UnavailableD810Setting(D810SettingId::Metering, "mtp_rejected", 0x200a);
     b[static_cast<std::size_t>(D810SettingId::Metering)] = UnavailableD810Setting(D810SettingId::Metering, "mtp_rejected", 0x200a);
     const auto rows = CompareD810Settings(a, b);
-    check(rows.size() == 10, "table rows only");
+    check(rows.size() == 16, "compared rows only (fixed and extended)");
     for (const auto& row : rows) {
         const bool differs = row.id == D810SettingId::ShutterSpeed || row.id == D810SettingId::Iso;
         const bool unknown = row.id == D810SettingId::WhiteBalance || row.id == D810SettingId::Metering;
@@ -345,7 +356,7 @@ void Comparison() {
         if (row.id == D810SettingId::Metering) check(row.a_text == "unavailable (mtp_rejected)", "unavailable text");
     }
     check(CountD810Differences(rows) == 2, "count");
-    check(CompareD810Settings({}, {}).size() == 10 && CompareD810Settings({}, {})[0].difference == D810Difference::Unknown && CompareD810Settings({}, {})[0].a_text == "unavailable (not_read)", "empty snapshots");
+    check(CompareD810Settings({}, {}).size() == 16 && CompareD810Settings({}, {})[0].difference == D810Difference::Unknown && CompareD810Settings({}, {})[0].a_text == "unavailable (not_read)", "empty snapshots");
     for (const auto& row : rows) check(row.name != "iso_auto_candidate" && row.name != "nikon_shutter_speed", "diagnostic entries are not rows");
 }
 
@@ -356,7 +367,7 @@ bool ShouldAdmit(SettingsCommandKind kind, std::uint32_t opcode, const std::vect
     if (kind != SettingsCommandKind::ExecuteWithDataToRead || arguments.size() != 1) return false;
     if (opcode == 0x1015) return arguments[0] == 0xd1a2;
     if (opcode == 0x1014) {
-        static const std::set<std::uint32_t> codes{0x500e, 0x500d, 0x5007, 0x500f, 0xd054, 0x5005, 0x500b, 0x5010, 0xd200, 0xd14e, 0xd16a, 0xd100};
+        static const std::set<std::uint32_t> codes{0x500e, 0x500d, 0x5007, 0x500f, 0xd054, 0x5005, 0x500b, 0x5010, 0xd200, 0xd14e, 0xd032, 0xd0f7, 0xd0f8, 0xd070, 0xd06b, 0xd130, 0xd16a, 0xd100};
         return codes.count(arguments[0]) != 0;
     }
     return false;
@@ -591,8 +602,8 @@ void HappyRead() {
     const auto shutter = FindD810Reading(read.readings, D810SettingId::ShutterSpeed);
     check(shutter && shutter->desc.current_value == 1667 && FormatD810Setting(Spec(D810SettingId::ShutterSpeed), shutter->desc.current_value) == "1/6 s", "shutter value");
     check(rig.body.trace.front() == "90c8" && rig.body.trace[1] == "1015(d1a2)", "ready then live state first");
-    check(rig.body.CountOf("1014(") == 12 && rig.body.CountOf("1015(") == 1 && rig.body.CountOf("90c8") == 1, "operations");
-    check(rig.body.ends == 13 && rig.body.begins == 13, "each transfer ended once");
+    check(rig.body.CountOf("1014(") == kAsked && rig.body.CountOf("1015(") == 1 && rig.body.CountOf("90c8") == 1, "operations");
+    check(rig.body.ends == kAsked + 1 && rig.body.begins == kAsked + 1, "each transfer ended once");
     check(NoWrites(rig) && rig.session->Gate().Rejected() == 0, "no writes, nothing refused");
     std::set<std::string> allowed{"90c8", "1015(d1a2)", "read", "end"};
     for (const auto& spec : kD810SettingSpecs) {
@@ -639,7 +650,7 @@ void UnreadableItems() {
     check(reason(D810SettingId::IsoAutoCandidate) == "mtp_rejected", "missing code");
     check(FindD810Reading(read.readings, D810SettingId::Metering)->available, "valid item stays");
     check(FindD810Reading(read.readings, D810SettingId::NikonShutterSpeed)->available, "items after a refusal are read");
-    check(rig.body.CountOf("1014(") == 12 && NoWrites(rig), "all twelve asked once");
+    check(rig.body.CountOf("1014(") == kAsked && NoWrites(rig), "every row asked once");
     const auto rows = CompareD810Settings(read.readings, read.readings);
     for (const auto& row : rows)
         if (row.id == D810SettingId::Aperture) check(row.difference == D810Difference::Unknown && row.a_text == "unavailable (type_mismatch)", "table shows the reason");
@@ -656,7 +667,8 @@ void UnreadableItems() {
 void UnsupportedIsoAutoCandidateIsLast() {
     const auto& specs = kD810SettingSpecs;
     check(specs[specs.size() - 2].code == 0xd100 && specs[specs.size() - 1].code == 0xd16a, "0xd100 before 0xd16a, both last");
-    for (std::size_t i = 0; i + 2 < specs.size(); ++i) check(specs[i].in_table, "table rows come first");
+    for (std::size_t i = 0; i + 2 < specs.size(); ++i) check(D810SettingCompared(specs[i]), "compared rows come before the diagnostic ones");
+    check(!D810SettingCompared(specs[specs.size() - 1]) && !D810SettingCompared(specs[specs.size() - 2]), "the two diagnostic rows are not compared");
     auto body = HappyBody();
     body.descs[0xd16a] = Bytes{};
     body.end_response[0xd16a] = 0x200a;
@@ -667,7 +679,7 @@ void UnsupportedIsoAutoCandidateIsLast() {
     check(FindD810Reading(read.readings, D810SettingId::NikonShutterSpeed)->available, "0xd100 is read");
     const auto& candidate = *FindD810Reading(read.readings, D810SettingId::IsoAutoCandidate);
     check(!candidate.available && candidate.reason == "transfer_failed_6", "0xd16a stops the session");
-    check(rig.session->Poisoned() && rig.body.CountOf("1014(") == 12 && rig.body.ends == rig.body.begins && NoWrites(rig), "nothing sent after the stop");
+    check(rig.session->Poisoned() && rig.body.CountOf("1014(") == kAsked && rig.body.ends == rig.body.begins && NoWrites(rig), "nothing sent after the stop");
     // The last row leaves no stop reason behind, so the listing counts as complete although the session is spent:
     // this is the stage A read, whose callers look at the rows; the write path asks the session as well.
     check(read.Complete() && read.stop_reason.empty(), "a stop on the last row leaves the listing complete");
@@ -755,7 +767,7 @@ void RejectedAtEnd() {
         check(LogHas(rig, "CAM-B settings_desc code=0xd200 unavailable reason=mtp_rejected_at_end mtp=0x200a"), "the row carries mtp=0x200a");
         check(Row(read, D810SettingId::ActiveDLighting).available && Row(read, D810SettingId::IsoAutoCandidate).available &&
             Row(read, D810SettingId::NikonShutterSpeed).available, "items after it are read");
-        check(rig.body.CountOf("1014(") == 12 && rig.body.ends == rig.body.begins && NoWrites(rig), "all twelve asked once, every transfer ended once");
+        check(rig.body.CountOf("1014(") == kAsked && rig.body.ends == rig.body.begins && NoWrites(rig), "every row asked once, every transfer ended once");
         check(rig.session->Gate().Rejected() == 0, "nothing refused by the gate");
         const auto rows = CompareD810Settings(read.readings, read.readings);
         for (const auto& line : rows)
@@ -769,7 +781,7 @@ void RejectedAtEnd() {
         const auto read = rig.Run();
         const auto& row = Row(read, D810SettingId::Metering);
         check(read.Complete() && !row.available && row.reason == "mtp_rejected_at_end" && row.mtp_response == 0xa00b, "known size, empty READ");
-        check(Row(read, D810SettingId::ExposureCompensation).available && rig.body.CountOf("1014(") == 12, "later items read");
+        check(Row(read, D810SettingId::ExposureCompensation).available && rig.body.CountOf("1014(") == kAsked, "later items read");
     }
     {   // Two items in a row.
         auto body = HappyBody();
@@ -777,7 +789,7 @@ void RejectedAtEnd() {
         Rig rig(std::move(body));
         const auto read = rig.Run();
         check(read.Complete() && !Row(read, D810SettingId::Metering).available && !Row(read, D810SettingId::ExposureCompensation).available &&
-            Row(read, D810SettingId::PictureControl).available && rig.body.CountOf("1014(") == 12, "two refusals in a row");
+            Row(read, D810SettingId::PictureControl).available && rig.body.CountOf("1014(") == kAsked, "two refusals in a row");
     }
 }
 // Cases in which the read stops at an item (Metering, the seventh entry of the table).
@@ -902,7 +914,7 @@ void EmptyPayloadContinues() {
     check(LogHas(rig, "CAM-B settings_desc code=0x500b unavailable reason=empty_payload mtp=0x2001"), "the row carries mtp=0x2001");
     check(!LogHas(rig, "settings_stop"), "no stop line");
     check(Row(read, D810SettingId::ExposureCompensation).available && Row(read, D810SettingId::NikonShutterSpeed).available, "items after it are read");
-    check(rig.body.CountOf("1014(") == 12 && rig.body.ends == rig.body.begins && NoWrites(rig) && rig.session->Gate().Rejected() == 0, "all twelve asked once, every transfer ended once");
+    check(rig.body.CountOf("1014(") == kAsked && rig.body.ends == rig.body.begins && NoWrites(rig) && rig.session->Gate().Rejected() == 0, "every row asked once, every transfer ended once");
     const auto rows = CompareD810Settings(read.readings, read.readings);
     for (const auto& line : rows)
         if (line.id == D810SettingId::Metering) check(line.difference == D810Difference::Unknown && line.a_text == "unavailable (empty_payload)", "table shows the reason");
@@ -960,7 +972,7 @@ void BeginMtpRejectionContinues() {
     Rig rig(std::move(body));
     const auto read = rig.Run();
     check(read.Complete() && Row(read, D810SettingId::Metering).reason == "mtp_rejected" && Row(read, D810SettingId::Metering).mtp_response == 0x2002 &&
-        rig.body.CountOf("1014(") == 12, "MTP refusal at the begin continues");
+        rig.body.CountOf("1014(") == kAsked, "MTP refusal at the begin continues");
 }
 
 // --- Paths of the transfer that had no test ----------------------------------------------------------
@@ -972,7 +984,7 @@ void OversizeThenEnd() {
         const auto read = rig.Run();
         check(read.Complete() && !rig.session->Poisoned(), "too large does not stop the read");
         check(Row(read, D810SettingId::Metering).reason == "too_large" && !Row(read, D810SettingId::Metering).available, "too_large");
-        check(Row(read, D810SettingId::ExposureCompensation).available && rig.body.CountOf("1014(") == 12, "items after it are read");
+        check(Row(read, D810SettingId::ExposureCompensation).available && rig.body.CountOf("1014(") == kAsked, "items after it are read");
         check(rig.body.ends == rig.body.begins && NoWrites(rig), "the transfer was ended");
         const auto at = std::find(rig.body.trace.begin(), rig.body.trace.end(), "1014(500b)");
         check(at != rig.body.trace.end() && at + 1 != rig.body.trace.end() && *(at + 1) == "end", "no READ_DATA for the oversize item");
@@ -1074,6 +1086,244 @@ void SessionNeverSendsWrites() {
         check(rejected >= 1 && !described && recorder.inner.CountOf("1014(") == 0, "no description request reached the body");
     }
 }
+
+// --- #427: more rows, the Picture Control type, the counts -------------------------------------------
+void ExtendedTableShape() {
+    static_assert(static_cast<int>(D810SettingId::ExposureMode) == 0 && static_cast<int>(D810SettingId::NikonShutterSpeed) == 11 &&
+        static_cast<int>(D810SettingId::ColorSpace) == 12 && static_cast<int>(D810SettingId::HdrMode) == 17, "the first twelve ids keep their numbers, new ids are appended");
+    const auto& specs = kD810SettingSpecs;
+    check(specs.size() == 18, "ten fixed, six extended, two diagnostic");
+    std::size_t fixed = 0, extended = 0, diagnostic = 0, compared = 0;
+    std::set<std::uint16_t> codes;
+    std::set<std::string> names;
+    for (std::size_t i = 0; i < specs.size(); ++i) {
+        const auto& spec = specs[i];
+        check(!(spec.in_table && spec.extended), "no row is both fixed and extended");
+        fixed += spec.in_table;
+        extended += spec.extended;
+        diagnostic += !spec.in_table && !spec.extended;
+        compared += D810SettingCompared(spec);
+        check(codes.insert(spec.code).second && names.insert(spec.name).second, "codes and names are unique");
+        const bool want_fixed = i < 10, want_extended = i >= 10 && i < 16;
+        check(spec.in_table == want_fixed && spec.extended == want_extended, "order: ten fixed, six extended, two diagnostic");
+    }
+    check(fixed == 10 && extended == 6 && diagnostic == 2 && compared == 16, "counts");
+    // The fixed ten are what they were: the same codes in the same order. Only Picture Control changed its type.
+    const std::uint16_t kept[10] = {0x500e, 0x500d, 0x5007, 0x500f, 0xd054, 0x5005, 0x500b, 0x5010, 0xd200, 0xd14e};
+    for (std::size_t i = 0; i < 10; ++i) check(specs[i].code == kept[i], "the fixed ten keep their codes and order");
+    check(Spec(D810SettingId::PictureControl).type == D810ValueType::Uint16 && Spec(D810SettingId::ActiveDLighting).type == D810ValueType::Uint8, "types");
+    // The table holds exactly these codes, nothing else in 0..0xFFFF: the ten, the six that a D810 lists and
+    // the two diagnostic ones. Properties that are only named upstream, write or vendor codes get no row.
+    const std::set<std::uint32_t> table{0x500e, 0x500d, 0x5007, 0x500f, 0xd054, 0x5005, 0x500b, 0x5010, 0xd200, 0xd14e,
+        0xd032, 0xd0f7, 0xd0f8, 0xd070, 0xd06b, 0xd130, 0xd100, 0xd16a};
+    std::size_t found = 0;
+    for (std::uint32_t code = 0; code <= 0xffff; ++code)
+        if (FindD810Setting(code)) { ++found; check(table.count(code) == 1, "code in the table"); }
+    check(found == table.size(), "table size");
+    for (const std::uint32_t code : {0xd201u, 0xd141u, 0xd150u, 0xd20du, 0xd01eu, 0xd01fu, 0xd017u, 0xd01du, 0xd131u, 0xd132u, 0xd031u, 0xd030u, 0xd056u,
+        0xd06au, 0x5013u, 0xd010u, 0xd040u, 0x1016u, 0x9207u, 0x90c2u, 0xd015u, 0xd045u, 0xd15du})
+        check(!FindD810Setting(code), "named-only, undecided-type, write and reset codes have no row");
+    // Only extended rows are new, and they are compared.
+    for (const auto id : {D810SettingId::ColorSpace, D810SettingId::VignetteControl, D810SettingId::AutoDistortionControl, D810SettingId::HighIsoNr,
+        D810SettingId::LongExposureNr, D810SettingId::HdrMode}) {
+        const auto& spec = Spec(id);
+        check(spec.extended && !spec.in_table && D810SettingCompared(spec) && spec.type == D810ValueType::Uint8, "extended row");
+    }
+}
+// The ten fixed rows are asked first, in the old order and by the old codes; the extended rows follow; the two
+// diagnostic ones are last.
+void ReadOrderKeepsTheFixedTenFirst() {
+    Rig rig(HappyBody());
+    const auto read = rig.Run();
+    check(read.Complete(), "complete");
+    std::vector<std::string> asked;
+    for (const auto& entry : rig.body.trace)
+        if (entry.rfind("1014(", 0) == 0) asked.push_back(entry);
+    const std::vector<std::string> expected{"1014(500e)", "1014(500d)", "1014(5007)", "1014(500f)", "1014(d054)", "1014(5005)", "1014(500b)", "1014(5010)",
+        "1014(d200)", "1014(d14e)", "1014(d032)", "1014(d0f7)", "1014(d0f8)", "1014(d070)", "1014(d06b)", "1014(d130)", "1014(d100)", "1014(d16a)"};
+    check(asked == expected, "order of the descriptions asked");
+    check(NoWrites(rig) && rig.session->Gate().Rejected() == 0, "no writes, nothing refused");
+}
+void PictureControlType() {
+    const auto& spec = Spec(D810SettingId::PictureControl);
+    check(spec.type == D810ValueType::Uint16 && spec.in_table && !spec.extended, "picture control is a UINT16 fixed row");
+    const auto good = ParseD810PropDesc(Desc(0xd200, 4, 1, 1, 3, 2, {1, 2, 3, 4, 5, 6}), spec);
+    check(good.Ok() && good.desc.current_value == 3 && good.desc.values.size() == 6 && good.desc.data_type == 4, "UINT16 description parses");
+    check(FormatD810Setting(spec, good.desc.current_value) == "Vivid", "named");
+    // Two-byte values are decoded whole (a custom style is above 255).
+    const auto custom = ParseD810PropDesc(Desc(0xd200, 4, 1, 1, 0x00c9, 2, {1, 0x00c9}), spec);
+    check(custom.Ok() && custom.desc.current_value == 201 && FormatD810Setting(spec, 201) == "raw 0x00c9", "custom style stays raw");
+    const char* names[] = {"raw 0x0000", "Standard", "Neutral", "Vivid", "Monochrome", "Portrait", "Landscape", "raw 0x0007"};
+    for (int value = 0; value < 8; ++value) check(FormatD810Setting(spec, value) == names[value], "names 1 to 6, the rest raw");
+    // The old assumption (UINT8) is refused now, with the type the body gave kept for the log.
+    const auto narrow = ParseD810PropDesc(Desc(0xd200, 2, 1, 1, 3, 2, {1, 2, 3}), spec);
+    check(narrow.error == D810PropDescError::TypeMismatch && narrow.desc.data_type == 2, "UINT8 is a type mismatch now");
+    {   // Through the whole stack: a UINT16 answer reads, and a UINT8 answer is one unreadable row.
+        auto body = HappyBody();
+        body.descs[0xd200] = Desc(0xd200, 4, 1, 1, 3, 2, {1, 2, 3, 4, 5, 6});
+        Rig rig(std::move(body));
+        const auto read = rig.Run();
+        check(read.Complete() && Row(read, D810SettingId::PictureControl).available && Row(read, D810SettingId::PictureControl).desc.current_value == 3, "UINT16 answer is read");
+        check(LogHas(rig, "CAM-B settings_desc code=0xd200 mtp=0x2001 type=0x0004 getset=1 form=2 count=6 current=0x0003 first=0x0001 last=0x0006"), "log line of a UINT16 row");
+        const auto rows = CompareD810Settings(read.readings, read.readings);
+        for (const auto& row : rows)
+            if (row.id == D810SettingId::PictureControl) check(row.a_text == "Vivid" && row.difference == D810Difference::Same, "table shows the name");
+    }
+    {
+        auto body = HappyBody();
+        body.descs[0xd200] = Desc(0xd200, 2, 1, 1, 3, 2, {1, 2, 3});
+        Rig rig(std::move(body));
+        const auto read = rig.Run();
+        check(read.Complete() && !rig.session->Poisoned() && !Row(read, D810SettingId::PictureControl).available &&
+            Row(read, D810SettingId::PictureControl).reason == "type_mismatch", "a UINT8 answer is one unreadable row");
+        check(LogHas(rig, "CAM-B settings_desc code=0xd200 unavailable reason=type_mismatch mtp=0x2001 type=0x0002"), "the body's type stays in the line");
+        check(Row(read, D810SettingId::ActiveDLighting).available && Row(read, D810SettingId::HdrMode).available && rig.body.CountOf("1014(") == kAsked, "the others are read");
+    }
+}
+// Every extended row parses its own type in both forms the public sources show (the on/off rows are ranges
+// upstream, the value tables are enumerations), and refuses another type or another code.
+void ExtendedRowsParse() {
+    for (const auto& spec : kD810SettingSpecs) {
+        if (!spec.extended) continue;
+        const auto type = static_cast<unsigned>(spec.type);
+        check(ParseD810PropDesc(Desc(spec.code, type, 1, 0, 1, 1, {0, 1, 1}), spec).Ok(), "range form");
+        check(ParseD810PropDesc(Desc(spec.code, type, 1, 0, 1, 2, {0, 1, 2, 3}), spec).Ok(), "enumeration form");
+        check(ParseD810PropDesc(Desc(spec.code, type, 0, 0, 1, 0), spec).Ok(), "no form, get only");
+        for (const unsigned other : {1u, 3u, 4u, 5u, 6u})
+            check(ParseD810PropDesc(Desc(spec.code, other, 1, 0, 1, 2, {0, 1}), spec).error == D810PropDescError::TypeMismatch, "another scalar type is a type mismatch");
+        check(ParseD810PropDesc(Desc(spec.code + 1, type, 1, 0, 1, 2, {0, 1}), spec).error == D810PropDescError::CodeMismatch, "another code");
+        check(ParseD810PropDesc(Desc(spec.code, 0xffff, 1, 0, 1, 0), spec).error == D810PropDescError::TypeUnsupported, "a string answer");
+    }
+}
+// One extended row failing, in each way a body can answer, and what that does to the rest of the read.
+void ExtendedRowFailures() {
+    {   // A type other than the table's: that row only, the session goes on and ends as before.
+        auto body = HappyBody();
+        body.descs[0xd130] = Desc(0xd130, 4, 1, 0, 0, 2, {0, 1});
+        body.descs[0xd0f7] = Desc(0xd0f7, 1, 1, 0, 0, 2, {0, 1});
+        Rig rig(std::move(body));
+        const auto read = rig.Run();
+        check(read.Complete() && !rig.session->Poisoned() && read.readings.size() == kAsked, "type mismatch does not stop the read");
+        check(Row(read, D810SettingId::HdrMode).reason == "type_mismatch" && Row(read, D810SettingId::VignetteControl).reason == "type_mismatch", "reasons");
+        check(Row(read, D810SettingId::ColorSpace).available && Row(read, D810SettingId::HighIsoNr).available && Row(read, D810SettingId::IsoAutoCandidate).available, "the others are read");
+        check(LogHas(rig, "CAM-B settings_desc code=0xd130 unavailable reason=type_mismatch mtp=0x2001 type=0x0004"), "the type the body gave is logged");
+        check(LogHas(rig, "CAM-B settings_desc code=0xd0f7 unavailable reason=type_mismatch mtp=0x2001 type=0x0001"), "also for a signed type");
+        check(rig.body.CountOf("1014(") == kAsked && rig.body.ends == rig.body.begins && NoWrites(rig), "every row asked once, every transfer ended");
+        check(!LogHas(rig, "settings_stop") && !LogHas(rig, "settings_read_stopped"), "no stop line");
+    }
+    {   // A refusal at the begin and a code the body answers with an MTP error: those rows only.
+        auto body = HappyBody();
+        body.reject[0xd0f8] = 0x200a;
+        body.descs.erase(0xd070);
+        Rig rig(std::move(body));
+        const auto read = rig.Run();
+        check(read.Complete() && !rig.session->Poisoned(), "refused rows do not stop the read");
+        check(Row(read, D810SettingId::AutoDistortionControl).reason == "mtp_rejected" && Row(read, D810SettingId::HighIsoNr).reason == "mtp_rejected", "reasons");
+        check(Row(read, D810SettingId::LongExposureNr).available && Row(read, D810SettingId::HdrMode).available && Row(read, D810SettingId::NikonShutterSpeed).available, "rows after them are read");
+        check(rig.body.CountOf("1014(") == kAsked && NoWrites(rig), "every row asked once");
+    }
+    {   // An empty answer with an accepted END, and an unknown size whose END is refused: those rows only.
+        auto body = HappyBody();
+        body.unknown_size.insert(0xd06b);
+        body.serve_limit[0xd06b] = 0;
+        body.unknown_size.insert(0xd032);
+        body.serve_limit[0xd032] = 0;
+        body.end_response[0xd032] = 0x200a;
+        Rig rig(std::move(body));
+        const auto read = rig.Run();
+        check(read.Complete() && !rig.session->Poisoned(), "empty answers do not stop the read");
+        check(Row(read, D810SettingId::LongExposureNr).reason == "empty_payload" && Row(read, D810SettingId::ColorSpace).reason == "mtp_rejected_at_end", "reasons");
+        check(Row(read, D810SettingId::HdrMode).available && rig.body.CountOf("1014(") == kAsked, "the rest is read");
+    }
+    {   // The shape a body gives to a property it does not know (the begin opens a transfer of size 0, the END is
+        // refused): the session stops at that row. The ten fixed rows come before every extended row and are
+        // read as before; the rows after the stop are not_read, the diagnostic rows among them.
+        auto body = HappyBody();
+        body.descs[0xd0f8] = Bytes{};
+        body.end_response[0xd0f8] = 0x200a;
+        Rig rig(std::move(body));
+        const auto read = rig.Run();
+        check(rig.session->Poisoned() && !read.Complete() && read.stop_reason == "not_read_after_failure", "the session stops at an unknown property");
+        for (std::size_t i = 0; i < 10; ++i) check(read.readings[i].available, "the fixed ten are read");
+        check(Row(read, D810SettingId::ColorSpace).available && Row(read, D810SettingId::VignetteControl).available, "extended rows before the stop are read");
+        check(Row(read, D810SettingId::AutoDistortionControl).reason.rfind("transfer_failed_", 0) == 0, "the failed row");
+        for (const auto id : {D810SettingId::HighIsoNr, D810SettingId::LongExposureNr, D810SettingId::HdrMode, D810SettingId::NikonShutterSpeed, D810SettingId::IsoAutoCandidate})
+            check(!Row(read, id).available && Row(read, id).reason == "not_read", "rows after the stop are not_read");
+        check(rig.body.CountOf("1014(") == 13 && rig.body.ends == rig.body.begins && NoWrites(rig), "nothing is asked after the stop, the open transfer is ended");
+        const auto summary = SummarizeD810Comparison(CompareD810Settings(read.readings, read.readings));
+        check(summary.same == 12 && summary.different == 0 && summary.unknown == 4 && !summary.AllSame(), "the unread rows are counted as not readable");
+    }
+    {   // The last row (0xd16a) failing that way leaves every compared row read, as before.
+        auto body = HappyBody();
+        body.descs[0xd16a] = Bytes{};
+        body.end_response[0xd16a] = 0x200a;
+        Rig rig(std::move(body));
+        const auto read = rig.Run();
+        const auto summary = SummarizeD810Comparison(CompareD810Settings(read.readings, read.readings));
+        check(rig.session->Poisoned() && summary.same == 16 && summary.AllSame(), "the diagnostic row does not touch the compared rows");
+    }
+}
+// The three counts of a comparison, case by case.
+void ComparisonCounts() {
+    const auto read_of = [](FakeBody body) {
+        Rig rig(std::move(body));
+        return rig.Run().readings;
+    };
+    const auto summary_of = [&](FakeBody a, FakeBody b) {
+        const auto rows = CompareD810Settings(read_of(std::move(a)), read_of(std::move(b)));
+        return std::make_pair(SummarizeD810Comparison(rows), CountD810Differences(rows));
+    };
+    {   // Everything equal on both sides.
+        const auto [summary, differences] = summary_of(HappyBody(), HappyBody());
+        check(summary.same == 16 && summary.different == 0 && summary.unknown == 0 && summary.Total() == 16 && summary.AllSame() && differences == 0, "all equal");
+    }
+    {   // One row differs.
+        auto b = HappyBody();
+        b.descs[0xd032] = DescFor(Spec(D810SettingId::ColorSpace), 0);
+        const auto [summary, differences] = summary_of(HappyBody(), std::move(b));
+        check(summary.same == 15 && summary.different == 1 && summary.unknown == 0 && !summary.AllSame() && differences == 1, "one different");
+    }
+    {   // Type mismatch on one side only: not a match, and the old count of differences says 0.
+        auto b = HappyBody();
+        b.descs[0xd200] = Desc(0xd200, 2, 1, 1, 1, 2, {1, 2});
+        const auto [summary, differences] = summary_of(HappyBody(), std::move(b));
+        check(summary.same == 15 && summary.different == 0 && summary.unknown == 1 && !summary.AllSame() && differences == 0, "type mismatch on one side");
+    }
+    {   // The same row unreadable on both sides is not a match either.
+        auto a = HappyBody(), b = HappyBody();
+        a.descs[0xd200] = Desc(0xd200, 2, 1, 1, 1, 2, {1, 2});
+        b.descs[0xd200] = Desc(0xd200, 2, 1, 1, 1, 2, {1, 2});
+        const auto [summary, differences] = summary_of(std::move(a), std::move(b));
+        check(summary.same == 15 && summary.different == 0 && summary.unknown == 1 && !summary.AllSame() && differences == 0, "unreadable on both sides");
+    }
+    {   // An unsupported code on one side only (refused at the begin): the row is not readable.
+        auto b = HappyBody();
+        b.reject[0xd130] = 0x200a;
+        const auto [summary, differences] = summary_of(HappyBody(), std::move(b));
+        check(summary.same == 15 && summary.unknown == 1 && summary.different == 0 && !summary.AllSame(), "readable on one side only");
+    }
+    {   // Different and unreadable rows together.
+        auto b = HappyBody();
+        b.descs[0x500f] = DescFor(Spec(D810SettingId::Iso), 100);
+        b.descs[0xd070] = Desc(0xd070, 4, 1, 0, 0, 2, {0});
+        b.reject[0xd0f7] = 0x2002;
+        const auto [summary, differences] = summary_of(HappyBody(), std::move(b));
+        check(summary.same == 13 && summary.different == 1 && summary.unknown == 2 && summary.Total() == 16 && !summary.AllSame() && differences == 1, "different and unreadable");
+    }
+    {   // A stopped read: the rows after the stop count as not readable.
+        auto b = HappyBody();
+        b.throw_on_read.insert(0x500b);
+        const auto [summary, differences] = summary_of(HappyBody(), std::move(b));
+        check(summary.same == 6 && summary.different == 0 && summary.unknown == 10 && !summary.AllSame(), "a stopped read");
+    }
+    {   // Nothing read at all, and no rows at all: no claim.
+        const auto rows = CompareD810Settings({}, {});
+        const auto summary = SummarizeD810Comparison(rows);
+        check(summary.same == 0 && summary.different == 0 && summary.unknown == 16 && !summary.AllSame(), "no readings");
+        const auto none = SummarizeD810Comparison({});
+        check(none.Total() == 0 && !none.AllSame(), "an empty comparison is not a match");
+    }
+}
 }
 
 int main() {
@@ -1107,6 +1357,12 @@ int main() {
     run("CleanupNotAdmittedStops", CleanupNotAdmittedStops);
     run("UnknownSizeEndsWithShortRead", UnknownSizeEndsWithShortRead);
     run("SessionNeverSendsWrites", SessionNeverSendsWrites);
+    run("ExtendedTableShape", ExtendedTableShape);
+    run("ReadOrderKeepsTheFixedTenFirst", ReadOrderKeepsTheFixedTenFirst);
+    run("PictureControlType", PictureControlType);
+    run("ExtendedRowsParse", ExtendedRowsParse);
+    run("ExtendedRowFailures", ExtendedRowFailures);
+    run("ComparisonCounts", ComparisonCounts);
     std::cout << checks << " checks, " << failures << " failures, "
               << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() << " ms\n";
     CoUninitialize();

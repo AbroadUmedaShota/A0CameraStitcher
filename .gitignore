@@ -57,3 +57,9 @@ logs/
 /worklog/
 # Nikon SDK module binaries must never be committed, wherever they are placed
 *.md3
+
+# Python bytecode and test caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/

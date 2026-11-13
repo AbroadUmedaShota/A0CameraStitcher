@@ -261,6 +261,8 @@ inline FixedCompositeCondition MakeFixedCompositeCondition(const SavedStillRevie
     if(review.manual_revision && review.automatic)throw std::invalid_argument("a review is either manual or automatic");
     // A lens-aware (v7) report has no similarity to fix; its mapping is a profile's (#405).
     if(review.fixed_composite_lens)throw std::invalid_argument("a lens-aware review has no similarity mapping to make a v1 condition from");
+    // A registered (v8) report has none either: its mapping is a profile's with the capture's registration (#417).
+    if(review.fixed_composite_registration)throw std::invalid_argument("a registered review has no similarity mapping to make a v1 condition from");
     FixedCompositeCondition c;
     c.created_utc=FormatFixedCompositeTime(created);
     c.source.review_report_sha256=review.report_sha256;c.source.pair_id=review.pair_id;

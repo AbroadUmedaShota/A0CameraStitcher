@@ -216,7 +216,7 @@ void ParseRejects(){
     bad(Replace(good,"\"approval\":\"unapproved\"","\"approval\":true"),"approval is not a string");
     bad(Replace(good,"\"approval\":\"unapproved\",",""),"approval missing");
     bad(Replace(good,"fixed-composite-condition.v2","fixed-composite-condition.v1"),"v1 schema");
-    bad(Replace(good,"fixed-composite-condition.v2","fixed-composite-condition.v3"),"future schema");
+    bad(Replace(good,"fixed-composite-condition.v2","fixed-composite-condition.v4"),"future schema");
     bad(Replace(good,"\"schema\":\"a0.fixed-composite-condition.v2\"","\"schema\":2"),"schema not a string");
     bad(Replace(good,"{\"schema\"","{\"extra\":1,\"schema\""),"unknown member");
     bad(Replace(good,"\"seam\":{\"column\":50,","\"seam\":{\"extra\":1,\"column\":50,"),"unknown nested member");
@@ -401,7 +401,7 @@ void Files(const fs::path& fixtures){
     // Damaged and oversize condition files fail; they are not read as absent.
     const auto damaged=root/"damaged.json";
     WriteAll(damaged,"{\"schema\":\"a0.fixed-composite-condition.v2\"}");REJECT(LoadFixedCompositeConditionAny(damaged,kHash));
-    WriteAll(damaged,"{\"schema\":\"a0.fixed-composite-condition.v3\"}");REJECT(LoadFixedCompositeConditionAny(damaged,kHash));
+    WriteAll(damaged,"{\"schema\":\"a0.fixed-composite-condition.v4\"}");REJECT(LoadFixedCompositeConditionAny(damaged,kHash));
     WriteAll(damaged,"{}");REJECT(LoadFixedCompositeConditionAny(damaged,kHash));
     WriteAll(damaged,"");REJECT(LoadFixedCompositeConditionAny(damaged,kHash));
     WriteAll(damaged,std::string(kMaximumFixedCompositeConditionV2Bytes+1,' '));REJECT(LoadFixedCompositeConditionAny(damaged,kHash));

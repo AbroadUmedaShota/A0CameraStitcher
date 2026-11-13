@@ -655,6 +655,57 @@ void GlobalPlacementContradicted() {
     Check(located, "the wide peak is reported at the real position");
 }
 
+// The capture path's band stage evaluates only the first anchors (#417). They are the first of the full set in evaluation order,
+// with the same results, nothing else the measurer makes depends on their number, and a placement that is a period off or
+// contradicted is still found by them: the decision with few anchors keeps the full run's finding.
+void GlobalPlacementFewAnchors() {
+    const auto prefix_of = [](const gate::SeamMeasurement& few, const gate::SeamMeasurement& full) {
+        if (few.global.anchors.size() > full.global.anchors.size()) return false;
+        for (std::size_t k = 0; k < few.global.anchors.size(); ++k) {
+            const auto& a = few.global.anchors[k]; const auto& b = full.global.anchors[k];
+            if (a.x != b.x || a.y != b.y || a.status != b.status || a.local.x != b.local.x || a.local.y != b.local.y || a.wide.x != b.wide.x || a.wide.y != b.wide.y) return false;
+        }
+        return true;
+    };
+    const auto same_points = [](const gate::SeamMeasurement& a, const gate::SeamMeasurement& b) {
+        if (a.points.size() != b.points.size() || a.blocks.size() != b.blocks.size() || a.global.candidates != b.global.candidates) return false;
+        for (std::size_t i = 0; i < a.points.size(); ++i)
+            if (a.points[i].status != b.points[i].status || a.points[i].displacement.x != b.points[i].displacement.x || a.points[i].displacement.y != b.points[i].displacement.y) return false;
+        for (std::size_t i = 0; i < a.blocks.size(); ++i) if (a.blocks[i].block_class != b.blocks[i].block_class) return false;
+        return true;
+    };
+    const auto with_anchors = [](gate::SeamGateDesign d, std::uint32_t anchors) {
+        d.global_maximum_evaluations = anchors; d.global_minimum_anchors = std::min(d.global_minimum_anchors, anchors);
+        return d;
+    };
+    const auto& full_design = gate::kSeamGateDesignCalibrated;
+    // The anchors of a stronger lookalike 300 px away (the contradiction), and of content one lattice period off.
+    std::vector<scene::Stroke> a;
+    scene::Drawing(a, {1900, 700, 2800, 1300}, 311, 2500);
+    auto b = a;
+    for (auto s : a) { s.cx -= 300; s.ink *= 0.5; b.push_back(s); }
+    const auto contradicted = MakeViews(kBigW, kBigH, kBigTx, a, b, Constant(300, 0), 302, 1.0);
+    const auto lattice = LatticeScene(276.0, true);
+    const auto off = MakeViews(kBigW, kBigH, kBigTx, lattice, lattice, Constant(276.0, 0), 278.0, 1.0);
+    struct Case { const char* name; const Views* views; };
+    for (const auto& c : {Case{"a stronger lookalike 300 px away", &contradicted}, Case{"content one lattice period off", &off}}) {
+        const auto g = BigGeometry(*c.views, full_design);
+        const auto full = MeasureWith(*c.views, g, full_design, kZeroPrediction);
+        ReportGlobal(std::string(c.name)+", all anchors", full);
+        for (const std::uint32_t anchors : {1u, 4u}) {
+            const std::string tag = std::string(" (")+c.name+", "+std::to_string(anchors)+" anchors)";
+            const auto few = MeasureWith(*c.views, g, with_anchors(full_design, anchors), kZeroPrediction);
+            ReportGlobal(std::string(c.name)+", "+std::to_string(anchors)+" anchors", few);
+            Check(few.m.global.evaluated == std::min<std::size_t>(anchors, full.m.global.evaluated) && prefix_of(few.m, full.m), "the anchors are the first of the full set, with its results"+tag);
+            Check(same_points(few.m, full.m), "the points, the blocks and the candidates do not depend on the number of anchors"+tag);
+            Check(few.r.state == gate::SeamGateState::fail, "the placement a period off still does not pass"+tag);
+            // One anchor can miss it: in the lookalike scene the contradicted anchor is not the first of the order. The capture path keeps
+            // the band design's minimum (4), which finds it.
+            if (full.r.global_contradicted && anchors >= 4) Check(few.r.global_contradicted > 0 && HasReason(few.r, "global-placement-mismatch"), "a contradiction of the full set is found by the first four anchors"+tag);
+        }
+    }
+}
+
 gate::SeamMeasurement HandRecord() {
     gate::SeamMeasurement m;
     m.design = kCalibrated; m.limits = kLimits; m.block_columns = 1; m.block_rows = 1;
@@ -773,6 +824,7 @@ int main(int argc, char** argv) {
         run("GlobalPlacementLatticeOnly", GlobalPlacementLatticeOnly);
         run("GlobalPlacementWithContent", GlobalPlacementWithContent);
         run("GlobalPlacementContradicted", GlobalPlacementContradicted);
+        run("GlobalPlacementFewAnchors", GlobalPlacementFewAnchors);
         run("GlobalDecisionRules", GlobalDecisionRules);
     } catch (const std::exception& e) {
         std::cerr << "FAIL exception: " << e.what() << '\n';

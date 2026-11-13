@@ -1,0 +1,3 @@
+# Runtime dependency of the a0seam estimator. Pinned to the version the
+# tests were run with (Python 3.12.x).
+numpy==2.5.4

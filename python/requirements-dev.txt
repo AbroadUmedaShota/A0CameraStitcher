@@ -1,0 +1,9 @@
+# Test-only dependencies. Install with: python -m pip install -r python/requirements-dev.txt
+-r requirements.txt
+pytest==9.2.0
+# pytest's own dependencies, pinned for the same reason.
+colorama==0.4.6
+iniconfig==2.3.1
+packaging==26.3
+pluggy==1.7.0
+Pygments==2.21.0

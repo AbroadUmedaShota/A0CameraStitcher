@@ -510,12 +510,16 @@ SavedStillReview ReadReviewMetadata(const std::filesystem::path& path){
     // v7 is the lens-aware fixed composite (#405 W4): the mapping is a profile's, so there is no
     // translation, adjustment or crop; the output is the condition's raster.
     const bool lens=schema=="a0.uncalibrated-still-review.v7";
+    // v8 is the registered fixed composite (#417): the profile's mapping with this capture's pose, surface and layer 2.
+    // Like v7 there is no translation, adjustment or crop. Its own members are read by ReadFixedCompositeRegistrationReport.
+    const bool registered=schema=="a0.uncalibrated-still-review.v8";
     const auto basis=automatic?ReviewString(ReviewAt(root,"geometryBasis")):std::string();
     const bool corrected=basis=="auto-still-similarity" || basis=="auto-still-rotation";
     if(automatic && !corrected && basis!="auto-still-translation" && basis!="live-preview")ReviewReject();
     // Optional in v1..v5: mountOrientation (absent is normal) and blend
     // (#368, absent is the linear feather).
-    if(lens)ReviewFields(root,{"schema","pairId","state","productQualityAccepted","physicalScaleVerified","liveToStillFieldOfViewVerified","automaticRetryCount","inputs","previewGeometry","sourceDimensions","output","geometryBasis","fixedCompositeLens","blend"},{"mountOrientation"});
+    if(registered)ReviewFields(root,{"schema","pairId","state","productQualityAccepted","physicalScaleVerified","liveToStillFieldOfViewVerified","automaticRetryCount","inputs","previewGeometry","sourceDimensions","output","geometryBasis","fixedCompositeRegistration","blend","warnings","assessment"},{"mountOrientation"});
+    else if(lens)ReviewFields(root,{"schema","pairId","state","productQualityAccepted","physicalScaleVerified","liveToStillFieldOfViewVerified","automaticRetryCount","inputs","previewGeometry","sourceDimensions","output","geometryBasis","fixedCompositeLens","blend"},{"mountOrientation"});
     else if(fixed)ReviewFields(root,{"schema","pairId","state","productQualityAccepted","physicalScaleVerified","liveToStillFieldOfViewVerified","automaticRetryCount","inputs","previewGeometry","sourceDimensions","translation","output","geometryBasis","adjustment","crop","fixedComposite","blend"},{"mountOrientation"});
     else if(automatic && corrected)ReviewFields(root,{"schema","pairId","state","productQualityAccepted","physicalScaleVerified","liveToStillFieldOfViewVerified","automaticRetryCount","inputs","previewGeometry","sourceDimensions","translation","output","geometryBasis","adjustment","crop","automaticAlignment"},{"mountOrientation","blend"});
     else if(automatic)ReviewFields(root,{"schema","pairId","state","productQualityAccepted","physicalScaleVerified","liveToStillFieldOfViewVerified","automaticRetryCount","inputs","previewGeometry","sourceDimensions","translation","output","geometryBasis","automaticAlignment"},{"mountOrientation","blend"});
@@ -544,7 +548,15 @@ SavedStillReview ReadReviewMetadata(const std::filesystem::path& path){
     const auto& source=ReviewAt(root,"sourceDimensions");ReviewFields(source,{"width","height"});
     record.source_width=static_cast<unsigned>(ReviewUnsigned(ReviewAt(source,"width"),render::kMaximumImageDimension));record.source_height=static_cast<unsigned>(ReviewUnsigned(ReviewAt(source,"height"),render::kMaximumImageDimension));
     const auto base=ScalePreviewReviewGeometry(record.geometry,record.source_width,record.source_height);
-    if(lens){
+    if(registered){
+        if(record.source_width!=kD810SensorWidthPixels || record.source_height!=kD810SensorHeightPixels)ReviewReject();
+        if(ReviewString(ReviewAt(root,"geometryBasis"))!="fixed-composite-registration")ReviewReject();
+        // Strict, with every derived field (warnings, assessment, geometry hash) derived again by the writer's functions.
+        try{record.fixed_composite_registration=ReadFixedCompositeRegistrationReport(std::string_view(reinterpret_cast<const char*>(bytes.data()),bytes.size()),
+            [](const std::vector<unsigned char>& v){Sha256Provider s;return ToLowerHex(s.Compute(v));});}
+        catch(const std::invalid_argument&){ReviewReject();}
+        if(!IsFixedCompositeProfileFileName(record.fixed_composite_registration->profile_file))ReviewReject();
+    }else if(lens){
         // The profile fixes the frame (cameraModel), so the originals are exactly that size.
         if(record.source_width!=kD810SensorWidthPixels || record.source_height!=kD810SensorHeightPixels)ReviewReject();
         if(ReviewString(ReviewAt(root,"geometryBasis"))!="fixed-composite-lens")ReviewReject();
@@ -572,7 +584,9 @@ SavedStillReview ReadReviewMetadata(const std::filesystem::path& path){
         record.fixed_composite=ReadFixedComposite(ReviewAt(root,"fixedComposite"),record.translation_x,record.translation_y,record.rotation_degrees,record.scale);
     }
     std::uint32_t expected_width{},expected_height{};
-    if(lens){
+    if(registered){
+        expected_width=record.fixed_composite_registration->raster.width_pixels;expected_height=record.fixed_composite_registration->raster.height_pixels;
+    }else if(lens){
         // No placement: the JPEG is exactly the condition's raster.
         expected_width=record.fixed_composite_lens->raster.width_pixels;expected_height=record.fixed_composite_lens->raster.height_pixels;
     }else{
@@ -590,7 +604,12 @@ SavedStillReview ReadReviewMetadata(const std::filesystem::path& path){
     if(ReviewString(ReviewAt(output,"path"))!="uncalibrated-review.jpg")ReviewReject();record.jpeg=full.parent_path()/L"uncalibrated-review.jpg";
     record.width=static_cast<unsigned>(ReviewUnsigned(ReviewAt(output,"width"),render::kMaximumImageDimension));record.height=static_cast<unsigned>(ReviewUnsigned(ReviewAt(output,"height"),render::kMaximumImageDimension));
     if(record.width!=expected_width || record.height!=expected_height)ReviewReject();record.jpeg_bytes=ReviewUnsigned(ReviewAt(output,"bytes"),kMaximumCompressedJpegBytes);if(!record.jpeg_bytes)ReviewReject();record.jpeg_sha256=ReviewHash(ReviewAt(output,"sha256"));
-    if(lens){
+    if(registered){
+        const auto& f=*record.fixed_composite_registration;
+        record.blend=ReadFixedSeamBlend(ReviewAt(root,"blend"),f.seam_column,record.width,record.height);
+        // The mixing width the geometry hash was made with is the blend's.
+        if(record.blend->settings.width_pixels!=f.layout.mixing_width_px)ReviewReject();
+    }else if(lens){
         record.blend=ReadFixedSeamBlend(ReviewAt(root,"blend"),record.fixed_composite_lens->seam_column,record.width,record.height);
     }else if(fixed){
         const auto fixed_base=SimilarityReviewGeometry(record.translation_x,record.translation_y,record.rotation_degrees,record.scale,record.source_width,record.source_height);

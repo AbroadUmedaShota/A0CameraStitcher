@@ -240,6 +240,7 @@
 - setup/correction: parameter contractとWI-0022Cのsynthetic measurement seamは合格。proposalは測定値・fixture/profile provenanceを保持し、profile envelope外を拒否し、profileを変更しない。実写A0品質、承認済みDual profile、実機性能は未検証である。
 - M3P: requirements 2.6.0のfresh software contractは合格したが、実D810、actual JPEG、実WPF画面操作の統合証拠ではない。旧Dual UI Automationは保持し、screen reader、keyboard/focus、Single実画面walkthroughは残る。
 - SingleCamera製品mode: 実D810のCamera Agent撮影、actual JPEG、one-shot、10回p95、100件耐久は合格済み（2026-08-26、ADR-0030以前の実績）。実WPF操作とUI経由fixed-local exportは一回撮影で合格した（V-1CAM-005、#216）。最大5回の受入系列（#227）、handoff（最大5回、#11）、USB抜去は#227の実機日に合格した（冒頭の2026-10-13の節）。電源断は#227の範囲外。
+- 継ぎ目の色の補正（#429）: 値を推定するPythonの部品（`python/a0seam`、合成した画像だけを使う試験つき）がmainにある。アプリからは呼ばない。計画を読むC++の読み手と当てる関数は未実装で、色は今の合わせ方（#415）のまま（ADR-0043）。
 
 ## Deferred / Waiting
 
@@ -250,7 +251,7 @@
 | M1B二台試験 | session-local operator binding、production `CaptureRecoveryOnly` backend、WPF経路、5回runnerは実装済み。100回runnerは未実装で、ADR-0030により今回の受入には使わない。通常`start-reserved-pair`はADR-0028境界によりproduction binding hostでは使用しない | #221の2組から続く系列は#227の実機日の5組目（CAM-Bの`OutOfFocus`）で不合格。USB抜去（二台1組）は所有者の読み方（抜去が原因の削除0、#293 D3）で合格。新しい系列（最大5組）を実機日1に#227で行う。数え方と合格線はADR-0032（#230）で確定した。DualCameraの実機受入は未完了 |
 | 実M2 | リグ・A0品質契約未承認 | `HG-0001/0002` |
 | SingleCamera製品受入 | 実Camera Agent撮影1/10/100とHG-0009は完了。WPF end-to-end one-shotは合格（V-1CAM-005）。最大5回の受入系列（5/5）とLive View handoff（5/5）は#227の実機日に合格 | 旧計画の実WPF 100件（#13）はADR-0030で置き換わった。リリースは合成ができてから（#293 D1） |
-| 配布 | 社内のPCだけに配布し、Nikon SDKは同梱しない（#293 D2）。OpenCV等の他のnative依存の再配布は未承認 | `HG-0005`。導入物・clean-PCでの導入受入・手順書は#293の段階E |
+| 配布 | 社内のPCだけに配布し、Nikon SDKは同梱しない（#293 D2）。OpenCV等の他のnative依存の再配布は未承認。Pythonとnumpyも同じ扱いで、リポジトリは同梱せず、配る時は別の承認が要る（ADR-0043） | `HG-0005`。導入物・clean-PCでの導入受入・手順書は#293の段階E |
 
 90 payloadを検出した旧カード状態は履歴として保持する。2026-08-26の実績は別の専用empty spoolで取得しており、旧カードへ削除・formatを行ったことを意味しない。今後もUSB切断、電源操作、保存障害は自動実行しない。
 
@@ -271,7 +272,7 @@
 
 - `HG-0001`: A0品質・補正上限
 - `HG-0002`: 最終リグ・光学条件
-- `HG-0005`: OpenCV等のnative依存の再配布と導入物の範囲。Nikon SDKは同梱しないと決まった（#293 D2）が、このgate自体は未承認
+- `HG-0005`: OpenCV等のnative依存の再配布と導入物の範囲。Nikon SDKは同梱しないと決まった（#293 D2）が、このgate自体は未承認。Python本体とnumpyを配る事になった時もこのgateで決める（ADR-0043）
 - `HG-0010`: 二台とも動くライブビューをMVPに含めるか、実現方式、プローブEの扱い（#234、#292）
 - `HG-0011`: 二台の当面のライブビューで、静止画が前の原稿を写している可能性がある時の扱い（注意だけか2段押しか、#291、#295）。ADR-0036（Proposed、#307）で操作者の画面が合成表示Cになると、片側が古い静止画のCもこの問いに入り、扱いが変わる
 

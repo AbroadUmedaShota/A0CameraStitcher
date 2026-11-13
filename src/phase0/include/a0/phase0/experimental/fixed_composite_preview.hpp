@@ -2,8 +2,11 @@
 #include "a0/m2/document_render.hpp"
 #include "a0/m2/experimental/fixed_composite_condition.hpp"
 #include "a0/m2/experimental/fixed_composite_condition_v2.hpp"
+#include "a0/m2/experimental/fixed_composite_condition_v3.hpp"
 #include "a0/m2/experimental/fixed_composite_selection.hpp"
 #include "a0/m2/experimental/mount_orientation.hpp"
+#include "a0/m2/experimental/registration_mapping.hpp"
+#include "a0/m2/experimental/registration_pose.hpp"
 #include "a0/m2/experimental/seam_blend.hpp"
 #include "a0/m2/optical_planner.hpp"
 #include "a0/m2/render.hpp"
@@ -12,6 +15,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -91,6 +95,8 @@ struct FixedPreviewGrid {
     std::uint32_t width{},height{};
 };
 
+struct LiveRegistrationContext;
+
 // Everything C needs besides the two frames. Pure data; no pixel is read.
 // Copying it is cheap: the coordinate table of a lens-aware C is shared.
 struct FixedPreviewPlan {
@@ -117,6 +123,8 @@ struct FixedPreviewPlan {
     FixedPreviewGrid grid;
     std::shared_ptr<const a0::m2::experimental::MappedFixedSeamInput> mapped;
     std::optional<std::string> profile_id;
+    // Condition v3 only (#417 LC): what the registered C needs to bake camera B's table again. Null for v1 and v2.
+    std::shared_ptr<const LiveRegistrationContext> live;
 };
 
 // Scales the condition to a view of view_width x view_height (the oriented,
@@ -273,18 +281,36 @@ inline a0::m2::experimental::MappedFixedSeamInput LiveViewMappedInput(const a0::
         LiveViewOutputToCamera(profile.camera_b,grid,sx,sy,view_width,view_height,turned)};
 }
 
-// Plans the lens-aware C of a loaded condition v2 for a view of view_width x view_height (the
-// oriented, reduced live frames, equal for A and B). `orientation` is the mount orientation of the
-// running C; a condition made for the other one is refused. Never throws for a condition: a refusal
-// is in plan.skip, and C is drawn only if a trial render over the whole grid succeeds.
-inline FixedPreviewPlan PlanFixedPreviewV2(const a0::m2::experimental::LoadedFixedCompositeConditionV2& loaded,
-    a0::m2::experimental::MountOrientation orientation,unsigned view_width,unsigned view_height){
+// What the lens-aware planner needs of a condition record: the profile's cameras, the output raster, the seam and the mount
+// orientation. Pointers into a loaded record, which the caller keeps alive for the call.
+struct LensPreviewCondition {
+    const a0::m2::render::DocumentRenderParameters* parameters{};
+    const a0::m2::render::OutputRaster* raster{};
+    a0::m2::experimental::MountOrientation orientation{a0::m2::experimental::MountOrientation::normal};
+    std::uint32_t seam_column{};
+    a0::m2::experimental::FixedSeamOrigin seam_origin{a0::m2::experimental::FixedSeamOrigin::band_center_provisional};
+    std::optional<std::string> profile_id;
+};
+// Camera B's mapping on C's grid, for a C whose B is not B's calibrated mapping. Empty: the calibrated mapping.
+using PreviewBMapper=std::function<a0::m2::render::OutputToCamera(const FixedPreviewGrid& grid,double sx,double sy,
+    unsigned view_width,unsigned view_height,bool turned)>;
+// The two coordinate tables of a plan, for a caller that bakes B again (the table of A never changes in a session).
+struct PreviewTables {
+    std::shared_ptr<const std::vector<a0::m2::render::Point>> camera_a,camera_b;
+};
+
+// Plans the lens-aware C of a condition record for a view of view_width x view_height (the oriented, reduced live frames, equal
+// for A and B). `orientation` is the mount orientation of the running C; a condition made for the other one is refused. Never
+// throws for a condition: a refusal is in plan.skip, and C is drawn only if a trial render over the whole grid succeeds.
+// The condition v2 (PlanFixedPreviewV2) and the condition v3 (PlanFixedPreviewV3) share this body; map_b and tables are the
+// only differences.
+inline FixedPreviewPlan PlanLensAwarePreview(const LensPreviewCondition& condition,a0::m2::experimental::MountOrientation orientation,
+    unsigned view_width,unsigned view_height,const PreviewBMapper& map_b,PreviewTables* tables){
     namespace m2=a0::m2::experimental;
     using m2::FixedCompositeSkip;
-    const auto& condition=loaded.condition;
     FixedPreviewPlan plan;
     plan.lens_aware=true;plan.view_width=view_width;plan.view_height=view_height;
-    plan.capture_seam_column=condition.seam.column;plan.seam_origin=condition.seam.origin;plan.profile_id=loaded.profile.profile_id;
+    plan.capture_seam_column=condition.seam_column;plan.seam_origin=condition.seam_origin;plan.profile_id=condition.profile_id;
     // A refused plan holds no table.
     const auto refuse=[&](FixedCompositeSkip skip,std::string detail){plan.skip=skip;plan.detail=std::move(detail);plan.mapped.reset();return plan;};
     if(condition.orientation!=orientation)
@@ -294,15 +320,20 @@ inline FixedPreviewPlan PlanFixedPreviewV2(const a0::m2::experimental::LoadedFix
     const double sx=static_cast<double>(view_width)/static_cast<double>(a0::m2::kD810SensorWidthPixels);
     const double sy=static_cast<double>(view_height)/static_cast<double>(a0::m2::kD810SensorHeightPixels);
     plan.scale_x=sx;plan.scale_y=sy;
-    try{plan.settings=ScaleSeamBlendSettings(m2::kSeamBlendDesign,sx,sx);plan.grid=MakeFixedPreviewGrid(condition.raster,sx);}
+    try{plan.settings=ScaleSeamBlendSettings(m2::kSeamBlendDesign,sx,sx);plan.grid=MakeFixedPreviewGrid(*condition.raster,sx);}
     catch(const std::invalid_argument& error){return refuse(FixedCompositeSkip::size_differs,error.what());}
     plan.output_width=plan.grid.width;plan.output_height=plan.grid.height;
     const bool turned=orientation==m2::MountOrientation::rotated_180;
     try{
-        const auto direct=LiveViewMappedInput(loaded.profile.parameters,plan.grid,sx,sy,view_width,view_height,turned);
+        const auto& parameters=*condition.parameters;
+        const auto direct_a=LiveViewOutputToCamera(parameters.camera_a,plan.grid,sx,sy,view_width,view_height,turned);
+        const auto direct_b=map_b?map_b(plan.grid,sx,sy,view_width,view_height,turned)
+            :LiveViewOutputToCamera(parameters.camera_b,plan.grid,sx,sy,view_width,view_height,turned);
+        const auto table_a=BakeOutputToCamera(direct_a,plan.output_width,plan.output_height);
+        const auto table_b=BakeOutputToCamera(direct_b,plan.output_width,plan.output_height);
         plan.mapped=std::make_shared<const m2::MappedFixedSeamInput>(m2::MappedFixedSeamInput{plan.output_width,plan.output_height,
-            TableOutputToCamera(BakeOutputToCamera(direct.camera_a,plan.output_width,plan.output_height),plan.output_width,plan.output_height),
-            TableOutputToCamera(BakeOutputToCamera(direct.camera_b,plan.output_width,plan.output_height),plan.output_width,plan.output_height)});
+            TableOutputToCamera(table_a,plan.output_width,plan.output_height),TableOutputToCamera(table_b,plan.output_width,plan.output_height)});
+        if(tables){tables->camera_a=table_a;tables->camera_b=table_b;}
     }catch(const std::exception& error){return refuse(FixedCompositeSkip::condition_invalid,error.what());}
     // Coverage depends on the geometry only, so flat frames decide the fit and the trial render.
     const a0::m2::render::BgrImage flat{view_width,view_height,std::vector<std::uint8_t>(static_cast<size_t>(view_width)*view_height*3,128)};
@@ -319,7 +350,7 @@ inline FixedPreviewPlan PlanFixedPreviewV2(const a0::m2::experimental::LoadedFix
         }
     }catch(const std::invalid_argument& error){return refuse(FixedCompositeSkip::size_differs,error.what());}
     // The JPEG column c is centred on the document X of C's column (c+0.5)*s-0.5; rounded half up.
-    const long long target=static_cast<long long>(std::floor((static_cast<double>(condition.seam.column)+0.5)*sx));
+    const long long target=static_cast<long long>(std::floor((static_cast<double>(condition.seam_column)+0.5)*sx));
     plan.scaled_seam_column=static_cast<std::uint32_t>(std::clamp<long long>(target,0,static_cast<long long>(plan.output_width)-1));
     std::vector<int> offsets{0};
     for(int distance=1;distance<=static_cast<int>(kFixedPreviewSeamFitPixels);++distance){offsets.push_back(-distance);offsets.push_back(distance);}
@@ -340,6 +371,213 @@ inline FixedPreviewPlan PlanFixedPreviewV2(const a0::m2::experimental::LoadedFix
     return refuse(FixedCompositeSkip::seam_outside_overlap,"scaled seam column "+std::to_string(target)+" of "+std::to_string(plan.output_width));
 }
 
+// Plans the lens-aware C of a loaded condition v2 (see PlanLensAwarePreview).
+inline FixedPreviewPlan PlanFixedPreviewV2(const a0::m2::experimental::LoadedFixedCompositeConditionV2& loaded,
+    a0::m2::experimental::MountOrientation orientation,unsigned view_width,unsigned view_height){
+    const auto& condition=loaded.condition;
+    const LensPreviewCondition source{&loaded.profile.parameters,&condition.raster,condition.orientation,condition.seam.column,condition.seam.origin,
+        loaded.profile.profile_id};
+    return PlanLensAwarePreview(source,orientation,view_width,view_height,{},nullptr);
+}
+
+// ---- The registered C (condition v3, #417 LC; docs/design/fixed-composite-registration.md 4 "the live C", addendum 11.21) ----
+//
+// C draws camera B through the same mapping as the JPEG's layer 1 (G(p) Pi(pi), registration_pose.hpp): the pose p and the paper
+// surface pi. Layer 2 is not drawn, and nothing that C estimates goes to the JPEG. The mapping is the one of LiveViewOutputToCamera
+// with one more step on B's document point:
+//
+//   output pixel (x,y) of C's grid -> document point (left+(x+0.5)p_C, top+(y+0.5)p_C) mm      (the grid of the v2 C)
+//     -> G(p) Pi(pi) of that point                                                              (B only; A is the calibrated mapping)
+//     -> raw pixel of the full-size capture (the lens coefficients, render::TryProjectDocument)
+//     -> pixel of the live view, stored order: (sx*u, sy*v), raw*s without a half-pixel shift
+//     -> pixel of the oriented live view: (vw-1-u, vh-1-v) under rotated-180, else unchanged
+//
+// The mount orientation is the flip of the last step and is not applied to p or pi: the pose is B's in the stored (raw) frame, so
+// the same physical movement gives the same pose for either mounting. The surface origin (x0, y0) of Pi is the JPEG's: the
+// middle of the condition's seam column on the condition's raster (SurfaceOriginMm), not a point of C's grid, so that pi means the
+// same thing in C and in the JPEG.
+//
+// With p = p_b and pi = 0 (the condition's fixed mapping) and a zero base pose the table of B is the v2 C's table bit for bit,
+// because the mapping is then LiveViewOutputToCamera itself. A pose without a surface is PoseModel::Homography(p), the maker of
+// fixed_composite_maps.hpp (PoseCorrectedDocumentOutputToCamera); with a surface it is RegisteredHomography with the same
+// checks (the surface is below both cameras at the corners of the raster widened by one pixel), so what is drawn is what the
+// maker gives for the same mapping on the same raster.
+
+struct LiveRegistrationContext {
+    a0::m2::render::CameraProjection camera_b;
+    a0::m2::experimental::content_registration::PoseModel model_b;
+    a0::m2::experimental::content_registration::CameraCentre centre_a;
+    a0::m2::render::Point origin_mm;                 // the surface origin (x0, y0) of the condition's raster and seam column
+    a0::m2::render::OutputRaster raster;             // the condition's (the JPEG's) raster, not C's grid
+    std::uint32_t seam_column;                       // the condition's column
+    FixedPreviewGrid grid;
+    double sx,sy;
+    unsigned view_width,view_height;
+    bool turned;
+    a0::m2::experimental::RegisteredMapping fixed;   // {p_b, no surface}: the condition's fixed mapping, G4
+    // registration.live.limits of the condition, in C's pixels. Absent: C is drawn with the fixed mapping only.
+    std::optional<a0::m2::experimental::content_registration::RegistrationLimits> live_limits;
+    // The tables in force: A's (made once for the session) and B's (made for `baked`).
+    std::shared_ptr<const std::vector<a0::m2::render::Point>> table_a,table_b;
+    a0::m2::experimental::RegisteredMapping baked;
+    LiveRegistrationContext(const a0::m2::render::DocumentRenderParameters& profile,const a0::m2::render::OutputRaster& condition_raster,
+        std::uint32_t condition_seam_column,const FixedPreviewGrid& preview_grid,double scale_x,double scale_y,unsigned width,unsigned height,
+        bool flipped,const a0::m2::experimental::RegisteredMapping& fixed_mapping)
+        :camera_b(profile.camera_b),model_b(profile.camera_b),
+         centre_a(a0::m2::experimental::content_registration::PoseModel(profile.camera_a).Centre({})),
+         origin_mm(a0::m2::experimental::content_registration::SurfaceOriginMm(condition_raster,condition_seam_column)),
+         raster(condition_raster),seam_column(condition_seam_column),grid(preview_grid),sx(scale_x),sy(scale_y),view_width(width),
+         view_height(height),turned(flipped),fixed(fixed_mapping),baked(fixed_mapping){}
+};
+
+// The document homography of a mapping (document mm to document mm), or nullopt for the identity (no pose and no surface). Throws
+// std::invalid_argument for layer 2 (C does not draw it), a pose or surface that is not finite, and a surface that is not below
+// both cameras over the raster.
+inline std::optional<a0::m2::render::Matrix3> LiveDocumentHomography(const LiveRegistrationContext& context,
+    const a0::m2::experimental::RegisteredMapping& mapping){
+    namespace cr=a0::m2::experimental::content_registration;
+    if(mapping.parallax)throw std::invalid_argument("layer 2 is not drawn by the live C");
+    const auto& p=mapping.pose;
+    for(const double v:{p.rx_deg,p.ry_deg,p.rz_deg,p.tx_mm,p.ty_mm,p.tz_percent})if(!std::isfinite(v))throw std::invalid_argument("a pose must be finite");
+    const auto& s=mapping.surface;
+    if(!std::isfinite(s.h0_mm) || !std::isfinite(s.slope_x) || !std::isfinite(s.slope_y))throw std::invalid_argument("the surface plane must be finite");
+    if(p.IsZero() && s.IsZero())return std::nullopt;
+    a0::m2::render::Matrix3 h{};
+    if(s.IsZero())h=context.model_b.Homography(p);
+    else{
+        const auto centre_b=context.model_b.Centre(p);
+        const auto frame=cr::FrameOfRaster(context.raster);
+        constexpr double kReach=1.0; // the same widening as the maker's, with no layer 2
+        for(const double ix:{-kReach,static_cast<double>(context.raster.width_pixels)+kReach})
+            for(const double iy:{-kReach,static_cast<double>(context.raster.height_pixels)+kReach})
+                if(!cr::SurfaceHomographyHoldsAt(context.centre_a,centre_b,context.origin_mm,s,{frame.left_mm+ix*frame.pitch_mm,frame.top_mm+iy*frame.pitch_mm}))
+                    throw std::invalid_argument("the surface is not below both cameras over the raster");
+        h=cr::RegisteredHomography(context.model_b,context.centre_a,context.origin_mm,p,s);
+    }
+    for(const double v:h)if(!std::isfinite(v))throw std::invalid_argument("the document homography of a registered mapping must be finite");
+    return h;
+}
+
+// The mapping of camera B on C's grid for `mapping`: output pixel index (x,y) to the pixel of the oriented live frame. Throws
+// what LiveDocumentHomography throws and, when called, where the projection is not representable. A mapping with neither a pose
+// nor a surface is LiveViewOutputToCamera(camera_b, ...) itself, so it is the v2 C's mapping bit for bit.
+inline a0::m2::render::OutputToCamera LiveViewRegisteredOutputToCamera(const LiveRegistrationContext& context,
+    const a0::m2::experimental::RegisteredMapping& mapping){
+    const auto h=LiveDocumentHomography(context,mapping);
+    if(!h)return LiveViewOutputToCamera(context.camera_b,context.grid,context.sx,context.sy,context.view_width,context.view_height,context.turned);
+    const double right=static_cast<double>(context.view_width)-1,bottom=static_cast<double>(context.view_height)-1;
+    return [camera=context.camera_b,grid=context.grid,sx=context.sx,sy=context.sy,right,bottom,turned=context.turned,g=*h](
+        a0::m2::render::Point output,a0::m2::render::Point& live){
+        const a0::m2::render::Point document{grid.left_mm+(output.x+.5)*grid.pitch_mm,grid.top_mm+(output.y+.5)*grid.pitch_mm};
+        a0::m2::render::Point moved{},raw{};
+        if(!a0::m2::render::TryTransform(g,document,moved))return false;
+        if(!a0::m2::render::TryProjectDocument(camera,moved,raw))throw std::invalid_argument("document projection is not numerically representable");
+        live={raw.x*sx,raw.y*sy};
+        if(turned)live={right-live.x,bottom-live.y};
+        return true;
+    };
+}
+
+// Plans the C of a loaded condition v3: the fixed mapping {p_b, no surface} is drawn until a registration is baked in
+// (RebakePreviewB). Refusals are the v2 C's. plan.live is set for a plan that is drawn. registration.live (the limits of the live
+// estimate, in C's pixels) being null means C is never registered: LiveRegistrationDisabledReason names it.
+inline FixedPreviewPlan PlanFixedPreviewV3(const a0::m2::experimental::LoadedFixedCompositeConditionV3& loaded,
+    a0::m2::experimental::MountOrientation orientation,unsigned view_width,unsigned view_height){
+    const auto& condition=loaded.condition;
+    const LensPreviewCondition source{&loaded.profile.parameters,&condition.raster,condition.orientation,condition.seam.column,condition.seam.origin,
+        loaded.profile.profile_id};
+    const a0::m2::experimental::RegisteredMapping fixed{condition.base_pose,{},std::nullopt};
+    std::shared_ptr<LiveRegistrationContext> context;
+    PreviewTables tables;
+    auto plan=PlanLensAwarePreview(source,orientation,view_width,view_height,
+        [&](const FixedPreviewGrid& grid,double sx,double sy,unsigned width,unsigned height,bool turned){
+            context=std::make_shared<LiveRegistrationContext>(loaded.profile.parameters,condition.raster,condition.seam.column,grid,sx,sy,width,height,turned,fixed);
+            return LiveViewRegisteredOutputToCamera(*context,fixed);
+        },&tables);
+    if(plan.skip || !context)return plan;
+    context->table_a=tables.camera_a;context->table_b=tables.camera_b;
+    if(condition.registration.live)context->live_limits=condition.registration.live->limits;
+    plan.live=std::move(context);
+    return plan;
+}
+
+// "live-registration-disabled" for a v3 plan whose condition has no registration.live; empty for any other plan.
+inline std::string LiveRegistrationDisabledReason(const FixedPreviewPlan& plan){
+    if(plan.live && !plan.live->live_limits)return "live-registration-disabled";
+    return {};
+}
+
+struct LiveRebakeResult {
+    bool ok{false};
+    FixedPreviewPlan plan;     // ok: the plan with B's new table. Not ok: the plan that was given, unchanged
+    std::string detail;        // not ok: why (English, for logs)
+};
+// Bakes camera B's table again for `mapping` and returns a new plan that shares everything else with `plan`, including the table
+// of A (A's mapping never changes in a session). The plan that was given is not changed, so a frame that is being drawn from it
+// is not disturbed: the caller switches to the returned plan between frames (two faces). The work is one pass over C's grid, which
+// is bounded by kFixedPreviewMaximumOutputPixels. A mapping that cannot be drawn (not representable, a sample that neither
+// camera shows, the seam no longer inside the overlap, layer 2, a surface above a camera) is not ok and changes nothing.
+inline LiveRebakeResult RebakePreviewB(const FixedPreviewPlan& plan,const a0::m2::experimental::RegisteredMapping& mapping){
+    namespace m2=a0::m2::experimental;
+    LiveRebakeResult result;
+    result.plan=plan;
+    if(plan.skip || !plan.live || !plan.mapped){result.detail="no registered plan";return result;}
+    try{
+        const auto& context=*plan.live;
+        const auto direct=LiveViewRegisteredOutputToCamera(context,mapping);
+        const auto table_b=BakeOutputToCamera(direct,plan.output_width,plan.output_height);
+        auto mapped=std::make_shared<const m2::MappedFixedSeamInput>(m2::MappedFixedSeamInput{plan.output_width,plan.output_height,
+            plan.mapped->camera_a,TableOutputToCamera(table_b,plan.output_width,plan.output_height)});
+        // The same checks as the plan's, on the seam column in force: every sample is shown by a camera, the seam and half the
+        // blend width lie in the overlap, and a trial render over the whole grid succeeds.
+        const auto inside=[&](const a0::m2::render::Point& p){return p.x>=0 && p.y>=0 && p.x<plan.view_width && p.y<plan.view_height;};
+        for(std::uint32_t j=0;j<plan.output_height;++j)for(std::uint32_t i=0;i<plan.output_width;++i){
+            const a0::m2::render::Point output{static_cast<double>(i),static_cast<double>(j)};
+            a0::m2::render::Point raw_a{},raw_b{};
+            const bool a_shows=mapped->camera_a(output,raw_a) && inside(raw_a);
+            const bool b_shows=mapped->camera_b(output,raw_b) && inside(raw_b);
+            if(!a_shows && !b_shows)throw std::invalid_argument("output pixel ("+std::to_string(i)+","+std::to_string(j)+") is shown by neither camera");
+        }
+        const a0::m2::render::BgrImage flat{plan.view_width,plan.view_height,
+            std::vector<std::uint8_t>(static_cast<size_t>(plan.view_width)*plan.view_height*3,128)};
+        if(!m2::CanRenderMappedFixedSeam(flat,flat,*mapped,plan.view.seam_column,plan.settings))throw std::invalid_argument("the seam column is no longer inside the overlap");
+        (void)m2::RenderMappedFixedSeam(flat,flat,*mapped,plan.view.seam_column,plan.settings);
+        auto next=std::make_shared<LiveRegistrationContext>(context);
+        next->table_b=table_b;next->baked=mapping;
+        result.plan.mapped=std::move(mapped);result.plan.live=std::move(next);result.ok=true;
+    }catch(const std::exception& error){result.detail=error.what();}
+    return result;
+}
+
+// The largest distance, in C's output pixels, between where `a` and `b` put the same output pixel of C in the document, over a
+// sparse lattice of samples_per_axis x samples_per_axis pixels of C's grid (corners included) that camera B shows. This is the
+// "difference of two mappings" that decides whether B's table is baked again (LiveRegistrationTracker::DecideRebake). It is
+// measured on the document plane, so it does not depend on the lens or the size of the view. +infinity where a mapping cannot
+// place a sample. Throws std::invalid_argument for a plan without a registered context, fewer than 2 samples per axis and what
+// LiveDocumentHomography throws.
+inline double LiveMappingDifferencePx(const FixedPreviewPlan& plan,const a0::m2::experimental::RegisteredMapping& a,
+    const a0::m2::experimental::RegisteredMapping& b,unsigned samples_per_axis){
+    if(!plan.live || !plan.live->table_b)throw std::invalid_argument("no registered plan");
+    if(samples_per_axis<2)throw std::invalid_argument("at least 2 samples per axis");
+    const auto& context=*plan.live;
+    const auto ha=LiveDocumentHomography(context,a),hb=LiveDocumentHomography(context,b);
+    const auto& grid=context.grid;
+    const auto index=[&](unsigned k,std::uint32_t size){
+        return static_cast<std::uint32_t>(std::llround(static_cast<double>(k)*static_cast<double>(size-1)/static_cast<double>(samples_per_axis-1)));
+    };
+    double largest=0;
+    for(unsigned jy=0;jy<samples_per_axis;++jy)for(unsigned jx=0;jx<samples_per_axis;++jx){
+        const auto x=index(jx,grid.width),y=index(jy,grid.height);
+        if(std::isnan((*context.table_b)[static_cast<size_t>(y)*grid.width+x].x))continue; // B does not show this sample
+        const a0::m2::render::Point document{grid.left_mm+(x+.5)*grid.pitch_mm,grid.top_mm+(y+.5)*grid.pitch_mm};
+        a0::m2::render::Point pa=document,pb=document;
+        if((ha && !a0::m2::render::TryTransform(*ha,document,pa)) || (hb && !a0::m2::render::TryTransform(*hb,document,pb)))
+            return std::numeric_limits<double>::infinity();
+        largest=std::max(largest,std::hypot(pa.x-pb.x,pa.y-pb.y)/grid.pitch_mm);
+    }
+    return largest;
+}
+
 // One frame pair of C. A and B are the oriented, reduced live frames of the
 // size the plan was made for. The brightness ratio is measured here, in every
 // call, from these two frames; the mapping and the seam column never move.
@@ -356,8 +594,9 @@ inline a0::m2::experimental::SeamBlendResult RenderFixedPreview(const FixedPrevi
 }
 
 // The condition file beside the settings, read when a preview session starts.
-// The preview's view of the condition file, of either version: loaded holds a version 1
-// record, loaded_v2 a version 2 record with its verified profile. At most one is set.
+// The preview's view of the condition file, of any version: loaded holds a version 1
+// record, loaded_v2 a version 2 record with its verified profile, loaded_v3 a version 3 record (#417)
+// with its verified profile. At most one is set.
 // When neither is, reason says why: condition_absent (no file) leaves the uncalibrated C;
 // anything else means a file exists and C is not drawn with it. The reading itself is
 // SelectFixedComposite, the function the pair capture uses, so C and the JPEG judge an
@@ -365,10 +604,13 @@ inline a0::m2::experimental::SeamBlendResult RenderFixedPreview(const FixedPrevi
 struct FixedPreviewSource {
     std::optional<a0::m2::experimental::LoadedFixedCompositeCondition> loaded;
     std::optional<a0::m2::experimental::LoadedFixedCompositeConditionV2> loaded_v2;
+    std::optional<a0::m2::experimental::LoadedFixedCompositeConditionV3> loaded_v3;
     a0::m2::experimental::FixedCompositeSkip reason{a0::m2::experimental::FixedCompositeSkip::condition_absent};
     std::string detail;
     // A condition file exists, usable or not.
-    bool Present() const {return loaded.has_value() || loaded_v2.has_value() || reason!=a0::m2::experimental::FixedCompositeSkip::condition_absent;}
+    bool Present() const {
+        return loaded.has_value() || loaded_v2.has_value() || loaded_v3.has_value() || reason!=a0::m2::experimental::FixedCompositeSkip::condition_absent;
+    }
 };
 template<class Hash>
 FixedPreviewSource LoadFixedPreviewSource(const std::filesystem::path& file,Hash hash){
@@ -377,7 +619,14 @@ FixedPreviewSource LoadFixedPreviewSource(const std::filesystem::path& file,Hash
     source.reason=selection.reason;source.detail=std::move(selection.detail);
     if(selection.loaded){
         if(auto* v1=std::get_if<a0::m2::experimental::LoadedFixedCompositeCondition>(&*selection.loaded))source.loaded=std::move(*v1);
-        else source.loaded_v2=std::move(std::get<a0::m2::experimental::LoadedFixedCompositeConditionV2>(*selection.loaded));
+        else if(auto* v2=std::get_if<a0::m2::experimental::LoadedFixedCompositeConditionV2>(&*selection.loaded))source.loaded_v2=std::move(*v2);
+        else if(auto* v3=std::get_if<a0::m2::experimental::LoadedFixedCompositeConditionV3>(&*selection.loaded))source.loaded_v3=std::move(*v3);
+        else{
+            // A record of a kind that C does not know: nothing is loaded and the reason is kept, so C is not drawn with it and
+            // says why. (LoadFixedCompositeConditionAny returns a v3 record only once the capture path reads v3.)
+            source.reason=a0::m2::experimental::FixedCompositeSkip::condition_invalid;
+            source.detail="fixed composite condition of an unknown kind is not drawn by the live view";
+        }
     }
     return source;
 }
@@ -400,6 +649,11 @@ inline FixedPreviewChoice ChoosePreviewC(const FixedPreviewSource& source,a0::m2
         choice.mode=choice.plan.skip?PreviewCMode::unavailable:PreviewCMode::fixed_composite;
         return choice;
     }
+    if(source.loaded_v3){
+        choice.plan=PlanFixedPreviewV3(*source.loaded_v3,orientation,view_width,view_height);
+        choice.mode=choice.plan.skip?PreviewCMode::unavailable:PreviewCMode::fixed_composite;
+        return choice;
+    }
     if(!source.loaded){
         if(source.reason==a0::m2::experimental::FixedCompositeSkip::condition_absent)return choice;
         choice.mode=PreviewCMode::unavailable;choice.plan.skip=source.reason;choice.plan.detail=source.detail;
@@ -417,6 +671,10 @@ inline const wchar_t* FixedPreviewSeamOriginText(a0::m2::experimental::FixedSeam
 inline constexpr const wchar_t* kUncalibratedPreviewNotice=L"固定の合成条件がありません（未校正の仮の C）";
 inline std::wstring FixedPreviewTitle(a0::m2::experimental::MountOrientation orientation,const FixedPreviewPlan& plan){
     (void)a0::m2::experimental::MountOrientationName(orientation);
+    if(plan.live)
+        return std::wstring(L"C 固定の合成条件 v3（姿勢と紙面を含む写像、目安・未承認・表示専用） 取付の向き: ")+
+            (orientation==a0::m2::experimental::MountOrientation::rotated_180?L"180°回転":L"通常")+
+            L" / 継ぎ目の列 "+std::to_wstring(plan.capture_seam_column)+L"（出力ラスタの画素・"+FixedPreviewSeamOriginText(plan.seam_origin)+L"）";
     if(plan.lens_aware)
         return std::wstring(L"C 固定の合成条件 v2（レンズの歪みを補正、未承認・表示専用） 取付の向き: ")+
             (orientation==a0::m2::experimental::MountOrientation::rotated_180?L"180°回転":L"通常")+
@@ -434,12 +692,19 @@ inline std::wstring FixedPreviewNote(const FixedPreviewPlan& plan){
         if(plan.profile_id)for(const char c:*plan.profile_id)id+=(static_cast<unsigned char>(c)>=0x20 && static_cast<unsigned char>(c)<0x7f)?static_cast<wchar_t>(c):L'?';
         text=L"ライブビューと撮影画像の対応（S）は ※未検証（#309） / 校正の写像（draft、未承認）"+(id.empty()?std::wstring():L" "+id)+
             L" / 倍率は補正しません / 保存しません";
+        // The registered C is a guide: it does not say that the picture is within any criterion.
+        if(plan.live){
+            text=L"ライブビューと撮影画像の対応（S）は ※未検証（#309） / 固定の合成条件 v3 の写像（基準の姿勢を含む、未承認）"+(id.empty()?std::wstring():L" "+id)+
+                L" / 倍率は補正しません / 保存しません / Cは目安です";
+            if(!plan.live->live_limits)text+=L" / 映像からの合わせ込みは条件で無効です";
+        }
     }
     if(plan.seam_shift)text+=L" / 継ぎ目をCの画素に合わせて "+std::to_wstring(std::abs(plan.seam_shift))+L"px "+(plan.seam_shift<0?L"左":L"右")+L"へ寄せています";
     return text;
 }
 // The title while a condition file exists but C is not drawn with it.
 inline std::wstring FixedPreviewUnavailableTitle(const FixedPreviewSource& source){
+    if(source.loaded_v3)return L"C 固定の合成条件 v3（未承認・表示専用）";
     return source.loaded_v2?L"C 固定の合成条件 v2（未承認・表示専用）":L"C 固定の合成条件（未校正・未承認・表示専用）";
 }
 // A position request (manual or automatic) while C is drawn with the condition.
@@ -458,6 +723,7 @@ inline std::wstring FixedPreviewUnavailableText(a0::m2::experimental::FixedCompo
     // Worded as the pair capture's FixedCompositeSkipText, followed by what C does.
     case S::profile_absent:return L"固定の合成条件が参照する校正ファイル（profile）が、条件と同じフォルダにありません。Cを描きません";
     case S::profile_differs:return L"固定の合成条件が参照する校正ファイル（profile）が、条件の記録と違うか使えません。設置の時に作り直してください。Cを描きません";
+    case S::pose_outside_envelope:return L"固定の合成条件の手直しが、範囲の外です。rollback するか、校正をやり直してください。Cを描きません";
     }
     throw std::invalid_argument("unknown fixed composite skip");
 }

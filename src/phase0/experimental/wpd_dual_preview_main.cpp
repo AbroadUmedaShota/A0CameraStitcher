@@ -32,6 +32,7 @@
 #include "a0/phase0/experimental/still_alignment_text.hpp"
 #include "a0/phase0/experimental/fixed_composite_text.hpp"
 #include "a0/phase0/experimental/fixed_composite_preview.hpp"
+#include "a0/phase0/experimental/live_registration_runtime.hpp"
 #include "a0/m2/experimental/overlap_estimation.hpp"
 #include "a0/phase0/experimental/still_pair.hpp"
 #include "a0/phase0/experimental/wpd_still_pair.hpp"
@@ -41,6 +42,8 @@
 #include "a0/m2/experimental/still_review.hpp"
 #include "a0/m2/experimental/fixed_composite_selection.hpp"
 #include "a0/phase0/experimental/fixed_composite_lens_text.hpp"
+#include "a0/phase0/experimental/pair_review_registration.hpp"
+#include "a0/phase0/experimental/pair_review_synthetic.hpp"
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
 #include "a0/phase0/experimental/d810_settings_write_screen.hpp" // #416 stage B, only with A0_BUILD_WPD_SETTINGS_WRITE
 #endif
@@ -380,6 +383,9 @@ struct SettingsReadOutcome {
     std::array<SettingsCameraResult,2> cameras;
     bool CleanClose()const{return cameras[0].clean_close && cameras[1].clean_close;}
     bool Complete()const{return cameras[0].read.Complete() && cameras[1].read.Complete();}
+    // "Everything matches" is a claim about the whole read: both reads ran to the end, both bodies were
+    // closed cleanly, and no compared row is different or unreadable.
+    bool EverythingMatches(const D810ComparisonSummary& summary)const{return Complete() && CleanClose() && summary.AllSame();}
 };
 using SettingsBackend=std::function<SettingsCameraResult(int index,const std::wstring& id,Clock::time_point deadline,const std::atomic<bool>& stop)>;
 SettingsCameraResult RealSettingsBackend(int index,const std::wstring& id,Clock::time_point deadline,const std::atomic<bool>& stop){
@@ -399,7 +405,9 @@ void LogSettingsOutcome(const SettingsReadOutcome& outcome){
     }
     const auto rows=CompareD810Settings(outcome.cameras[0].read.readings,outcome.cameras[1].read.readings);
     for(const auto& row:rows)Log("settings_compare name="+row.name+" A=\""+row.a_text+"\" B=\""+row.b_text+"\" difference="+D810DifferenceToken(row.difference));
-    Log("settings_compare differences="+std::to_string(CountD810Differences(rows))+" setting_writes=0");
+    const auto summary=SummarizeD810Comparison(rows);
+    Log("settings_compare same="+std::to_string(summary.same)+" different="+std::to_string(summary.different)+" unreadable="+std::to_string(summary.unknown)+
+        " all_match="+(outcome.EverythingMatches(summary)?"1":"0")+" setting_writes=0");
 }
 // Explicit read-only entry (#416): prints what each body answers for every table
 // code and the two diagnostic codes, so a person can compare against the camera.
@@ -907,12 +915,13 @@ int main(int argc,char** argv){
     try{
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
         // A build that contains the settings write path says so first (#416 stage B). The smoke opens no camera.
-        Log("settings_write_build=1 development_only=1 enabled_rows="+std::to_string(D810EnabledRowCount(kD810ProductWriteTable)));
+        Log("settings_write_build=1 development_only=1 enabled_rows="+std::to_string(D810EnabledRowCount(kD810ProductWriteTable))+" "+D810StageMark(kD810ProductWriteTable));
 #if defined(A0_SETTINGS_WRITE_TEST_TABLES)
         // The confirmation test build (the only one with a table-taking controller): its one camera-free smoke, and
         // nothing else. No other argument reaches a camera, a lease or the window.
         if(argc==2 && std::string(argv[1])=="--settings-write-confirm-smoke")return RunSettingsWriteConfirmSmoke();
-        Log("settings_write_test_build=1 only --settings-write-confirm-smoke runs here; nothing was opened");
+        if(argc==2 && std::string(argv[1])=="--settings-write-chosen-smoke")return RunSettingsWriteChosenSmoke();
+        Log("settings_write_test_build=1 only --settings-write-confirm-smoke and --settings-write-chosen-smoke run here; nothing was opened");
         return 2;
 #else
         if(argc==2 && std::string(argv[1])=="--settings-write-ui-smoke")return RunSettingsWriteUiSmoke();
@@ -922,7 +931,9 @@ int main(int argc,char** argv){
         if(argc==2 && std::string(argv[1])=="--af-point-ui-smoke")return RunAfPointUiSmoke();
         if(argc==2 && std::string(argv[1])=="--lifecycle-ui-smoke")return RunLifecycleUiSmoke();
         if(argc==2 && std::string(argv[1])=="--fixed-c-ui-smoke")return RunFixedCUiSmoke();
+        if(argc==2 && std::string(argv[1])=="--live-c-ui-smoke")return RunLiveCUiSmoke();
         if(argc==2 && std::string(argv[1])=="--settings-ui-smoke")return RunSettingsUiSmoke();
+        if(argc==3 && std::string(argv[1])=="--pair-v3-ui-smoke")return RunPairV3UiSmoke(argv[2]);
         if(argc==2 && std::string(argv[1])=="--settings-read-diagnostics"){
             ComScope com;HardwareProcessLease lease;return RunSettingsReadDiagnostics(Discover());
         }

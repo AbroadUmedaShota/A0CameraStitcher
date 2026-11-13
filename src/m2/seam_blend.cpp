@@ -3,11 +3,16 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
+#include <exception>
 #include <functional>
 #include <limits>
+#include <mutex>
 #include <stdexcept>
+#include <system_error>
+#include <thread>
 #include <utility>
 
 namespace a0::m2::experimental {
@@ -68,6 +73,34 @@ MappedFrame PrepareMapped(const BgrImage& a,const BgrImage& b,const MappedFixedS
         throw std::invalid_argument("seam blend buffer size does not match its dimensions");
     return {in.width,in.height,FunctionMap{&in.camera_a},FunctionMap{&in.camera_b}};
 }
+void RequireThreadCount(unsigned threads){
+    if(threads<1 || threads>256)throw std::invalid_argument("seam blend: thread count must be 1..256");
+}
+// body(y) for every row y in [0,rows), on up to `threads` workers that take the rows in increasing order.
+// The rows must not depend on one another: each writes only its own row of the outputs. A row that throws
+// stops the rows after it; the exception of the lowest row that threw is rethrown, as if the rows had run
+// in order. With one thread the rows run on the calling thread, in order.
+template<class F> void ForEachRow(unsigned rows,unsigned threads,F&& body){
+    if(threads<=1 || rows<=1){for(unsigned y=0;y<rows;++y)body(y);return;}
+    std::atomic<unsigned> next{0},failed_row{rows};
+    std::mutex lock;std::exception_ptr failure;
+    const auto work=[&]{
+        for(;;){
+            const unsigned y=next.fetch_add(1);
+            if(y>=rows || y>=failed_row.load())return;
+            try{body(y);}
+            catch(...){const std::lock_guard guard(lock);if(y<failed_row.load()){failed_row=y;failure=std::current_exception();}}
+        }
+    };
+    const unsigned workers=std::min(threads,rows);
+    std::vector<std::thread> pool;
+    pool.reserve(workers-1);
+    try{for(unsigned t=1;t<workers;++t)pool.emplace_back(work);}
+    catch(const std::system_error&){} // fewer workers; the calling thread takes the rest
+    work();
+    for(auto& t:pool)t.join();
+    if(failure)std::rethrow_exception(failure);
+}
 constexpr float kAbsent=std::numeric_limits<float>::quiet_NaN();
 // Log luminance of A and B on the band columns [x0,x0+width) of every output
 // row, NaN where either is missing; per row the covered span [c0,c1).
@@ -89,11 +122,11 @@ struct Band {
 // covered cells of a row must be one run (no uncovered cell between the first and
 // the last covered one); a mapped pair that breaks it fails instead of choosing a side.
 template<class MapA,class MapB>
-Band SampleBandColumns(const BgrImage& a,const BgrImage& b,const Frame<MapA,MapB>& f,unsigned x0,unsigned width,bool one_run){
+Band SampleBandColumns(const BgrImage& a,const BgrImage& b,const Frame<MapA,MapB>& f,unsigned x0,unsigned width,bool one_run,unsigned threads){
     Band band{x0,width,f.height,{},{},{},{}};
     const auto cells=static_cast<size_t>(band.width)*band.height;
     band.a.assign(cells,kAbsent);band.b.assign(cells,kAbsent);band.c0.assign(band.height,0);band.c1.assign(band.height,0);
-    for(unsigned y=0;y<band.height;++y){
+    ForEachRow(band.height,threads,[&](unsigned y){
         bool any=false;float* const ra=band.a.data()+static_cast<size_t>(y)*band.width;float* const rb=band.b.data()+static_cast<size_t>(y)*band.width;
         for(unsigned i=0;i<band.width;++i){
             std::array<double,3> pa{},pb{};
@@ -104,16 +137,16 @@ Band SampleBandColumns(const BgrImage& a,const BgrImage& b,const Frame<MapA,MapB
         if(!any)throw std::invalid_argument("seam blend needs A and B on every output row");
         if(one_run)for(unsigned i=band.c0[y];i<band.c1[y];++i)
             if(std::isnan(ra[i]))throw std::invalid_argument("the overlap of A and B is not one run on an output row");
-    }
+    });
     return band;
 }
 // The pair mapping of render::RenderPair: the columns come from the bounds of A and of the placed B.
-Band SampleBand(const BgrImage& a,const BgrImage& b,const Prepared& prepared){
+Band SampleBand(const BgrImage& a,const BgrImage& b,const Prepared& prepared,unsigned threads){
     const auto& plan=prepared.plan;const double ox=prepared.frame.map_a.ox;
     const double start=std::max(plan.a_bounds.minimum_x,plan.b_bounds.minimum_x),end=std::min(plan.a_bounds.maximum_x,plan.b_bounds.maximum_x);
     const double first=std::max(0.0,std::floor(start-ox)-1),last=std::min(double(plan.output_width),std::ceil(end-ox)+1);
     if(!(last>first))throw std::invalid_argument("seam blend has no overlap band");
-    return SampleBandColumns(a,b,prepared.frame,static_cast<unsigned>(first),static_cast<unsigned>(last-first),false);
+    return SampleBandColumns(a,b,prepared.frame,static_cast<unsigned>(first),static_cast<unsigned>(last-first),false,threads);
 }
 // Both cameras have a sample at the output pixel (the coverage test of render::SampleBilinear).
 bool InsideImage(const BgrImage& image,const render::Point& raw){return raw.x>=0.0 && raw.y>=0.0 && raw.x<double(image.width) && raw.y<double(image.height);}
@@ -124,9 +157,9 @@ bool BothCover(const MappedFrame& f,const BgrImage& a,const BgrImage& b,unsigned
 // Per output row, the run [first,end) of columns covered by both cameras that
 // contains the first covered column found on a coarse scan (every 8th column,
 // then every column for a row the coarse scan misses), walked to both ends.
-std::vector<MappedOverlapRow> OverlapRows(const MappedFrame& f,const BgrImage& a,const BgrImage& b){
+std::vector<MappedOverlapRow> OverlapRows(const MappedFrame& f,const BgrImage& a,const BgrImage& b,unsigned threads){
     std::vector<MappedOverlapRow> rows(f.height);
-    for(unsigned y=0;y<f.height;++y){
+    ForEachRow(f.height,threads,[&](unsigned y){
         long long seed=-1;
         for(unsigned x=0;x<f.width && seed<0;x+=8)if(BothCover(f,a,b,x,y))seed=x;
         for(unsigned x=0;x<f.width && seed<0;++x)if(BothCover(f,a,b,x,y))seed=x;
@@ -135,15 +168,15 @@ std::vector<MappedOverlapRow> OverlapRows(const MappedFrame& f,const BgrImage& a
         while(lo>0 && BothCover(f,a,b,lo-1,y))--lo;
         while(hi<f.width && BothCover(f,a,b,hi,y))++hi;
         rows[y]={lo,hi};
-    }
+    });
     return rows;
 }
 // The band of a mapped pair: the columns of the overlap runs of all rows, one cell wider on each side.
-Band SampleMappedBand(const BgrImage& a,const BgrImage& b,const MappedFrame& f){
-    const auto rows=OverlapRows(f,a,b);unsigned first=f.width,end=0;
+Band SampleMappedBand(const BgrImage& a,const BgrImage& b,const MappedFrame& f,unsigned threads){
+    const auto rows=OverlapRows(f,a,b,threads);unsigned first=f.width,end=0;
     for(const auto& r:rows){first=std::min(first,r.first);end=std::max(end,r.end);}
     first=first?first-1:0;end=std::min(f.width,end+1);
-    return SampleBandColumns(a,b,f,first,end-first,true);
+    return SampleBandColumns(a,b,f,first,end-first,true,threads);
 }
 // Local mean of log(A)-log(B) over blocks of side `block`, bilinear between
 // block centres. Blocks without a covered cell take the mean of all cells.
@@ -244,15 +277,35 @@ template<class T> T QuantileOf(std::vector<T>& v,double q){
 }
 // The levels from a fixed-stride sample of the cells covered by both cameras. A band with no covered
 // cell never reaches here (SampleBandColumns rejects a row without one).
-PaperLevels MeasurePaperLevels(const Band& band,std::uint64_t& covered){
-    const auto& d=kPaperSelectionDesign;covered=0;
-    for(unsigned y=0;y<band.height;++y)for(unsigned i=band.c0[y];i<band.c1[y];++i)covered+=band.Valid(i,y)?1u:0u;
+// A running count over the cells in row-major order is split by rows: the count of every row is taken on
+// its own (rows in parallel), a row then starts from the sum of the rows before it, so the cell that
+// carries a given count is the same as in a single pass.
+std::vector<std::uint64_t> FirstCountOfRows(const std::vector<std::uint64_t>& per_row,std::uint64_t& total){
+    std::vector<std::uint64_t> first(per_row.size());total=0;
+    for(size_t y=0;y<per_row.size();++y){first[y]=total;total+=per_row[y];}
+    return first;
+}
+PaperLevels MeasurePaperLevels(const Band& band,std::uint64_t& covered,unsigned threads){
+    const auto& d=kPaperSelectionDesign;
+    std::vector<std::uint64_t> covered_in_row(band.height,0);
+    ForEachRow(band.height,threads,[&](unsigned y){
+        std::uint64_t n=0;for(unsigned i=band.c0[y];i<band.c1[y];++i)n+=band.Valid(i,y)?1u:0u;covered_in_row[y]=n;
+    });
+    const auto first_covered=FirstCountOfRows(covered_in_row,covered);
     const std::uint64_t stride=std::max<std::uint64_t>(1,covered/d.quantile_sample_cells);
-    std::vector<float> la,lb;std::vector<double> ga,gb;std::uint64_t k=0;
-    for(unsigned y=0;y<band.height;++y)for(unsigned i=band.c0[y];i<band.c1[y];++i){
-        if(!band.Valid(i,y) || k++%stride)continue;
-        la.push_back(band.At(band.a,i,y));lb.push_back(band.At(band.b,i,y));
-        ga.push_back(band.Gradient(band.a,i,y));gb.push_back(band.Gradient(band.b,i,y));
+    struct Sample {float la,lb;double ga,gb;};
+    std::vector<std::vector<Sample>> sampled(band.height);
+    ForEachRow(band.height,threads,[&](unsigned y){
+        std::uint64_t k=first_covered[y];
+        for(unsigned i=band.c0[y];i<band.c1[y];++i){
+            if(!band.Valid(i,y) || k++%stride)continue;
+            sampled[y].push_back({band.At(band.a,i,y),band.At(band.b,i,y),band.Gradient(band.a,i,y),band.Gradient(band.b,i,y)});
+        }
+    });
+    std::vector<float> la,lb;std::vector<double> ga,gb;
+    for(auto& row:sampled){
+        for(const auto& s:row){la.push_back(s.la);lb.push_back(s.lb);ga.push_back(s.ga);gb.push_back(s.gb);}
+        row=std::vector<Sample>{};
     }
     if(la.empty())throw std::invalid_argument("seam blend has no cell covered by both cameras");
     const auto floor_of=[&](std::vector<float>& v){return static_cast<float>(std::log1p(d.luminance_fraction*std::expm1(static_cast<double>(QuantileOf(v,d.luminance_quantile)))));};
@@ -271,7 +324,7 @@ struct PaperSums {
 };
 template<class MapA,class MapB>
 PaperSums SumPaper(const BgrImage& a,const BgrImage& b,const Frame<MapA,MapB>& frame,const Band& band,const PaperLevels& levels,
-    const std::vector<std::uint32_t>& seam_x,unsigned half_window){
+    const std::vector<std::uint32_t>& seam_x,unsigned half_window,unsigned threads){
     const auto& d=kPaperSelectionDesign;
     // A sample of both cameras at a band cell that is not clipped and has a positive value in every channel.
     const auto sample=[&](unsigned i,unsigned y,std::array<double,3>& pa,std::array<double,3>& pb){
@@ -279,31 +332,60 @@ PaperSums SumPaper(const BgrImage& a,const BgrImage& b,const Frame<MapA,MapB>& f
         if(std::max({pa[0],pa[1],pa[2],pb[0],pb[1],pb[2]})>=d.clipped_level)return false;
         return std::min({pa[0],pa[1],pa[2],pb[0],pb[1],pb[2]})>0;
     };
+    // The three passes below take the rows in parallel. Every floating-point value that is summed is summed
+    // in the order of a single pass over the rows, so the result does not depend on the thread count: the
+    // per-row window sums only ever add the cells of their own row in column order, and the sums over the
+    // whole band are added by one thread, row after row (see the blocks of the last pass).
+    std::vector<std::uint64_t> candidates_in_row(band.height,0);
+    ForEachRow(band.height,threads,[&](unsigned y){
+        std::uint64_t n=0;for(unsigned i=band.c0[y];i<band.c1[y];++i)n+=IsPaper(band,levels,i,y)?1u:0u;candidates_in_row[y]=n;
+    });
     std::uint64_t candidates=0;
-    for(unsigned y=0;y<band.height;++y)for(unsigned i=band.c0[y];i<band.c1[y];++i)candidates+=IsPaper(band,levels,i,y)?1u:0u;
+    const auto first_candidate=FirstCountOfRows(candidates_in_row,candidates);
     const std::uint64_t stride=std::max<std::uint64_t>(1,candidates/d.quantile_sample_cells);
-    std::array<std::vector<double>,3> ratio;std::uint64_t k=0;
-    for(unsigned y=0;y<band.height;++y)for(unsigned i=band.c0[y];i<band.c1[y];++i){
-        if(!IsPaper(band,levels,i,y) || k++%stride)continue;
-        std::array<double,3> pa{},pb{};
-        if(sample(i,y,pa,pb))for(int c=0;c<3;++c)ratio[c].push_back(pa[c]/pb[c]);
+    std::array<std::vector<double>,3> ratio;
+    {
+        std::vector<std::vector<std::array<double,3>>> sampled(band.height);
+        ForEachRow(band.height,threads,[&](unsigned y){
+            std::uint64_t k=first_candidate[y];
+            for(unsigned i=band.c0[y];i<band.c1[y];++i){
+                if(!IsPaper(band,levels,i,y) || k++%stride)continue;
+                std::array<double,3> pa{},pb{};
+                if(sample(i,y,pa,pb))sampled[y].push_back({pa[0]/pb[0],pa[1]/pb[1],pa[2]/pb[2]});
+            }
+        });
+        for(const auto& row:sampled)for(const auto& r:row)for(int c=0;c<3;++c)ratio[c].push_back(r[c]);
     }
     std::array<double,3> lowest{0,0,0},highest{0,0,0}; // no candidate: nothing is kept
     if(!ratio[0].empty())for(int c=0;c<3;++c){const double median=QuantileOf(ratio[c],0.5);lowest[c]=median/d.ratio_tolerance;highest[c]=median*d.ratio_tolerance;}
     PaperSums sums;for(int c=0;c<3;++c){sums.row_a[c].assign(band.height,0);sums.row_b[c].assign(band.height,0);}
-    for(unsigned y=0;y<band.height;++y){
-        const unsigned s=seam_x[y]-band.x0,first=s>half_window?s-half_window:0,last=std::min(band.width-1,s+half_window);
-        for(unsigned i=band.c0[y];i<band.c1[y];++i){
-            if(!IsPaper(band,levels,i,y))continue;
-            std::array<double,3> pa{},pb{};
-            if(!sample(i,y,pa,pb))continue;
-            bool consistent=true;
-            for(int c=0;c<3;++c){const double r=pa[c]/pb[c];consistent=consistent && r>=lowest[c] && r<=highest[c];}
-            if(!consistent)continue;
-            ++sums.cells;
-            for(int c=0;c<3;++c){
-                sums.a[c]+=pa[c];sums.b[c]+=pb[c];
-                if(i>=first && i<=last){sums.row_a[c][y]+=pa[c];sums.row_b[c][y]+=pb[c];}
+    // A block of rows is sampled in parallel; the samples it keeps (A then B, three channels each, per kept
+    // cell) are then added to the sums of the band in the order of the cells. The block bounds the memory.
+    constexpr unsigned kBlockRows=128;
+    std::vector<std::vector<double>> kept(std::min(kBlockRows,band.height));
+    for(unsigned y0=0;y0<band.height;y0+=kBlockRows){
+        const unsigned rows=std::min(kBlockRows,band.height-y0);
+        ForEachRow(rows,threads,[&](unsigned r){
+            const unsigned y=y0+r;auto& out=kept[r];out.clear();
+            const unsigned s=seam_x[y]-band.x0,first=s>half_window?s-half_window:0,last=std::min(band.width-1,s+half_window);
+            std::array<double,3> window_a{0,0,0},window_b{0,0,0};
+            for(unsigned i=band.c0[y];i<band.c1[y];++i){
+                if(!IsPaper(band,levels,i,y))continue;
+                std::array<double,3> pa{},pb{};
+                if(!sample(i,y,pa,pb))continue;
+                bool consistent=true;
+                for(int c=0;c<3;++c){const double q=pa[c]/pb[c];consistent=consistent && q>=lowest[c] && q<=highest[c];}
+                if(!consistent)continue;
+                out.insert(out.end(),pa.begin(),pa.end());out.insert(out.end(),pb.begin(),pb.end());
+                if(i>=first && i<=last)for(int c=0;c<3;++c){window_a[c]+=pa[c];window_b[c]+=pb[c];}
+            }
+            for(int c=0;c<3;++c){sums.row_a[c][y]=window_a[c];sums.row_b[c][y]=window_b[c];}
+        });
+        for(unsigned r=0;r<rows;++r){
+            const auto& out=kept[r];
+            for(size_t j=0;j<out.size();j+=6){
+                ++sums.cells;
+                for(int c=0;c<3;++c){sums.a[c]+=out[j+c];sums.b[c]+=out[j+3+c];}
             }
         }
     }
@@ -318,13 +400,13 @@ PaperSums SumPaper(const BgrImage& a,const BgrImage& b,const Frame<MapA,MapB>& f
 // to A, rather than leave B with no ratio at all.
 template<class MapA,class MapB>
 std::optional<ColorPlan> MeasureColorMatch(const BgrImage& a,const BgrImage& b,const Frame<MapA,MapB>& frame,const Band& band,const SeamBlendSettings& settings,
-    const ColorMatch& color,SeamBlendResult& result){
+    const ColorMatch& color,SeamBlendResult& result,unsigned threads){
     constexpr double weight[3]={0.114,0.587,0.299}; // B, G, R luminance weights, as Luminance()
     auto& record=result.record;auto& cm=record.color;
     cm.mode=ColorMatchMode::rgb_paper;cm.gain_limit_set=color.gain_limit.has_value();cm.gain_limit=color.gain_limit.value_or(0);
     const double limit=color.gain_limit.value_or(0);
-    const auto levels=MeasurePaperLevels(band,cm.covered_cells);
-    auto sums=SumPaper(a,b,frame,band,levels,record.seam_x,settings.brightness_half_width_pixels);
+    const auto levels=MeasurePaperLevels(band,cm.covered_cells,threads);
+    auto sums=SumPaper(a,b,frame,band,levels,record.seam_x,settings.brightness_half_width_pixels,threads);
     cm.paper_cells=sums.cells;
     ColorPlan plan;
     const auto needed=std::max<std::uint64_t>(1,static_cast<std::uint64_t>(std::ceil(kPaperSelectionDesign.minimum_cell_fraction*static_cast<double>(cm.covered_cells))));
@@ -367,13 +449,17 @@ std::optional<ColorPlan> MeasureColorMatch(const BgrImage& a,const BgrImage& b,c
 // and the seam summary. With a ColorPlan the gain of B is the per-channel one of the plan; row_ratio
 // is then a record only.
 template<class MapA,class MapB>
-SeamBlendResult ComposeAlongSeam(const BgrImage& a,const BgrImage& b,const Frame<MapA,MapB>& frame,const SeamBlendSettings& settings,SeamBlendResult result,const ColorPlan* color=nullptr){
+SeamBlendResult ComposeAlongSeam(const BgrImage& a,const BgrImage& b,const Frame<MapA,MapB>& frame,const SeamBlendSettings& settings,SeamBlendResult result,unsigned threads,const ColorPlan* color=nullptr){
     auto& record=result.record;
     record.summary=SummarizeSeam(record.seam_x);
     const unsigned width=frame.width,height=frame.height;
     auto& output=result.image;output={width,height,std::vector<std::uint8_t>(static_cast<size_t>(render::PixelCount(width,height))*3)};
     const double blend=settings.width_pixels;
-    for(unsigned y=0;y<height;++y){
+    // Rows are independent: each writes its own bytes of the image, and the pixels whose gain was lowered
+    // are counted per row and added up (an integer sum, so the order does not matter).
+    std::atomic<std::uint64_t> limited_pixels{0};
+    ForEachRow(height,threads,[&](unsigned y){
+        std::uint64_t limited_in_row=0;
         const double seam=record.seam_x[y],ratio=result.row_ratio[y],fade=width-seam;
         std::uint8_t* const row=output.bgr.data()+static_cast<size_t>(y)*width*3;
         for(unsigned x=0;x<width;++x){
@@ -391,7 +477,7 @@ SeamBlendResult ComposeAlongSeam(const BgrImage& a,const BgrImage& b,const Frame
                 for(int c=0;c<3;++c)gain[c]=color->global[c]*(x<=seam?residual[c]:residual[c]+(1-residual[c])*(x-seam)/fade);
                 if(w>0){
                     const double peak=std::max({pb[0]*gain[0],pb[1]*gain[1],pb[2]*gain[2]});
-                    if(peak>255){const double scale=255/peak;for(auto& g:gain)g*=scale;++record.saturation_limited_pixels;}
+                    if(peak>255){const double scale=255/peak;for(auto& g:gain)g*=scale;++limited_in_row;}
                 }
                 for(int c=0;c<3;++c)row[x*3+c]=static_cast<std::uint8_t>(std::clamp(std::lround((1-w)*pa[c]+w*gain[c]*pb[c]),0L,255L));
                 continue;
@@ -399,11 +485,13 @@ SeamBlendResult ComposeAlongSeam(const BgrImage& a,const BgrImage& b,const Frame
             double gain=x<=seam?ratio:ratio+(1-ratio)*(x-seam)/fade;
             if(w>0 && gain>1){
                 const double peak=std::max({pb[0],pb[1],pb[2]});
-                if(peak*gain>255){const double limited=std::max(1.0,255/peak);if(limited<gain){gain=limited;++record.saturation_limited_pixels;}}
+                if(peak*gain>255){const double limited=std::max(1.0,255/peak);if(limited<gain){gain=limited;++limited_in_row;}}
             }
             for(int c=0;c<3;++c)row[x*3+c]=static_cast<std::uint8_t>(std::clamp(std::lround((1-w)*pa[c]+w*gain*pb[c]),0L,255L));
         }
-    }
+        limited_pixels.fetch_add(limited_in_row,std::memory_order_relaxed);
+    });
+    record.saturation_limited_pixels+=limited_pixels.load();
     return result;
 }
 // The columns seam-half..seam+half, half = ceil(width_pixels/2)-1 (the columns
@@ -419,25 +507,51 @@ bool SeamInOverlap(const Band& band,std::uint32_t column,unsigned blend_width){
 void RequireSeamInOverlap(const Band& band,std::uint32_t column,unsigned blend_width){
     if(!SeamInOverlap(band,column,blend_width))throw std::invalid_argument("seam column is outside the overlap of A and B");
 }
+// SeamInOverlap(SampleMappedBand(a,b,f,threads),column,blend_width) without the sampling: the same answer, and the same
+// std::invalid_argument for the same inputs, from the coverage alone. The band is the columns of the rows' overlap runs, one cell
+// wider on each side (SampleMappedBand), and a cell of it is valid when both cameras cover it (BothCover is the coverage test of
+// SampleBilinear that Frame::A and Frame::B apply), so the run of a row is its valid cells when it is the row's only run. A row is
+// one run when no cell of the band outside the run found by OverlapRows is covered; the cells inside it are covered by
+// construction and were evaluated by the walk. Every cell of the band that the sampled form evaluates is evaluated here, in the
+// same order within a row, so a mapping that fails (non-finite) fails on the same row; the row's own "not one run" is raised after
+// its scan, as the sampled form does. Costs the mapping evaluations of the band once (no bilinear sample, no logarithm, no band
+// buffer: the sampled band is 2 floats and 2 unsigned per cell).
+bool MappedSeamInOverlap(const MappedFrame& f,const BgrImage& a,const BgrImage& b,std::uint32_t column,unsigned blend_width,unsigned threads){
+    const auto rows=OverlapRows(f,a,b,threads);unsigned first=f.width,end=0;
+    for(const auto& r:rows){first=std::min(first,r.first);end=std::max(end,r.end);}
+    first=first?first-1:0;end=std::min(f.width,end+1);
+    ForEachRow(f.height,threads,[&](unsigned y){
+        const auto run=rows[y];bool outside=false;
+        for(unsigned x=first;x<end;++x){
+            if(x>=run.first && x<run.end){x=run.end-1;continue;}
+            if(BothCover(f,a,b,x,y))outside=true;
+        }
+        if(outside)throw std::invalid_argument("the overlap of A and B is not one run on an output row");
+    });
+    const std::uint64_t half=(blend_width-1)/2;
+    if(column<std::uint64_t(first)+half || std::uint64_t(column)+half>=end)return false;
+    for(const auto& r:rows)if(column-half<r.first || std::uint64_t(column)+half>=r.end)return false;
+    return true;
+}
 // The render of a fixed seam on a decided band, for the pair mapping and for mapped pairs alike.
 template<class MapA,class MapB>
 SeamBlendResult RenderFixedOnBand(const BgrImage& a,const BgrImage& b,const Frame<MapA,MapB>& frame,Band band,std::uint32_t seam_column,
-    const SeamBlendSettings& settings,const ColorMatch& color){
+    const SeamBlendSettings& settings,const ColorMatch& color,unsigned threads){
     SeamBlendResult result;auto& record=result.record;record.settings=settings;record.fixed_seam=true;
     RequireSeamInOverlap(band,seam_column,settings.width_pixels);
     record.seam_x.assign(band.height,seam_column);
     if(color.mode==ColorMatchMode::rgb_paper){
-        const auto plan=MeasureColorMatch(a,b,frame,band,settings,color,result);
+        const auto plan=MeasureColorMatch(a,b,frame,band,settings,color,result,threads);
         if(plan){
             band=Band{};
-            return ComposeAlongSeam(a,b,frame,settings,std::move(result),&*plan);
+            return ComposeAlongSeam(a,b,frame,settings,std::move(result),threads,&*plan);
         }
         // The global gain is not measurable: fall through to the luminance ratio, which sets the
         // difference and ratio fields and row_ratio itself. record.color keeps the counts and the mark.
     }
     MeasureAlongSeam(band,settings,result);
     band=Band{};
-    return ComposeAlongSeam(a,b,frame,settings,std::move(result));
+    return ComposeAlongSeam(a,b,frame,settings,std::move(result),threads);
 }
 } // namespace
 
@@ -446,23 +560,31 @@ SeamBlendResult RenderPairSeamCut(const BgrImage& a,const BgrImage& b,const rend
     const auto prepared=Prepare(a,b,parameters);
     SeamBlendResult result;auto& record=result.record;record.settings=settings;
     {
-        const auto band=SampleBand(a,b,prepared);
+        const auto band=SampleBand(a,b,prepared,1);
         record.seam_x=FindSeam(band,MeasureLocalRatio(band,2*settings.brightness_half_width_pixels),settings.edge_margin_pixels);
         MeasureAlongSeam(band,settings,result);
     }
-    return ComposeAlongSeam(a,b,prepared.frame,settings,std::move(result));
+    return ComposeAlongSeam(a,b,prepared.frame,settings,std::move(result),1);
+}
+
+SeamBlendResult RenderPairFixedSeam(const BgrImage& a,const BgrImage& b,const render::PairRenderParameters& parameters,std::uint32_t seam_column,const SeamBlendSettings& settings,const ColorMatch& color,unsigned thread_count){
+    ValidateSeamBlendSettings(settings);ValidateColorMatch(color);RequireThreadCount(thread_count);
+    const auto prepared=Prepare(a,b,parameters);
+    return RenderFixedOnBand(a,b,prepared.frame,SampleBand(a,b,prepared,thread_count),seam_column,settings,color,thread_count);
 }
 
 SeamBlendResult RenderPairFixedSeam(const BgrImage& a,const BgrImage& b,const render::PairRenderParameters& parameters,std::uint32_t seam_column,const SeamBlendSettings& settings,const ColorMatch& color){
-    ValidateSeamBlendSettings(settings);ValidateColorMatch(color);
+    return RenderPairFixedSeam(a,b,parameters,seam_column,settings,color,1);
+}
+
+bool CanRenderFixedSeam(const BgrImage& a,const BgrImage& b,const render::PairRenderParameters& parameters,std::uint32_t seam_column,const SeamBlendSettings& settings,unsigned thread_count){
+    ValidateSeamBlendSettings(settings);RequireThreadCount(thread_count);
     const auto prepared=Prepare(a,b,parameters);
-    return RenderFixedOnBand(a,b,prepared.frame,SampleBand(a,b,prepared),seam_column,settings,color);
+    return SeamInOverlap(SampleBand(a,b,prepared,thread_count),seam_column,settings.width_pixels);
 }
 
 bool CanRenderFixedSeam(const BgrImage& a,const BgrImage& b,const render::PairRenderParameters& parameters,std::uint32_t seam_column,const SeamBlendSettings& settings){
-    ValidateSeamBlendSettings(settings);
-    const auto prepared=Prepare(a,b,parameters);
-    return SeamInOverlap(SampleBand(a,b,prepared),seam_column,settings.width_pixels);
+    return CanRenderFixedSeam(a,b,parameters,seam_column,settings,1);
 }
 
 MappedFixedSeamInput PairMappedFixedSeamInput(std::uint32_t camera_a_width,std::uint32_t camera_a_height,std::uint32_t camera_b_width,
@@ -483,27 +605,48 @@ MappedFixedSeamInput DocumentMappedFixedSeamInput(const render::DocumentRenderPa
         render::DocumentOutputToCamera(parameters.raster,parameters.camera_a),render::DocumentOutputToCamera(parameters.raster,parameters.camera_b)};
 }
 
+std::vector<MappedOverlapRow> MappedFixedSeamBand(const BgrImage& a,const BgrImage& b,const MappedFixedSeamInput& input,unsigned thread_count){
+    RequireThreadCount(thread_count);
+    return OverlapRows(PrepareMapped(a,b,input),a,b,thread_count);
+}
+
 std::vector<MappedOverlapRow> MappedFixedSeamBand(const BgrImage& a,const BgrImage& b,const MappedFixedSeamInput& input){
-    return OverlapRows(PrepareMapped(a,b,input),a,b);
+    return MappedFixedSeamBand(a,b,input,1);
+}
+
+SeamBlendResult RenderMappedFixedSeam(const BgrImage& a,const BgrImage& b,const MappedFixedSeamInput& input,std::uint32_t seam_column,const SeamBlendSettings& settings,const ColorMatch& color,unsigned thread_count){
+    ValidateSeamBlendSettings(settings);ValidateColorMatch(color);RequireThreadCount(thread_count);
+    const auto frame=PrepareMapped(a,b,input);
+    return RenderFixedOnBand(a,b,frame,SampleMappedBand(a,b,frame,thread_count),seam_column,settings,color,thread_count);
 }
 
 SeamBlendResult RenderMappedFixedSeam(const BgrImage& a,const BgrImage& b,const MappedFixedSeamInput& input,std::uint32_t seam_column,const SeamBlendSettings& settings,const ColorMatch& color){
-    ValidateSeamBlendSettings(settings);ValidateColorMatch(color);
-    const auto frame=PrepareMapped(a,b,input);
-    return RenderFixedOnBand(a,b,frame,SampleMappedBand(a,b,frame),seam_column,settings,color);
+    return RenderMappedFixedSeam(a,b,input,seam_column,settings,color,1);
+}
+
+bool CanRenderMappedFixedSeam(const BgrImage& a,const BgrImage& b,const MappedFixedSeamInput& input,std::uint32_t seam_column,const SeamBlendSettings& settings,unsigned thread_count){
+    ValidateSeamBlendSettings(settings);RequireThreadCount(thread_count);
+    return MappedSeamInOverlap(PrepareMapped(a,b,input),a,b,seam_column,settings.width_pixels,thread_count);
 }
 
 bool CanRenderMappedFixedSeam(const BgrImage& a,const BgrImage& b,const MappedFixedSeamInput& input,std::uint32_t seam_column,const SeamBlendSettings& settings){
-    ValidateSeamBlendSettings(settings);
-    return SeamInOverlap(SampleMappedBand(a,b,PrepareMapped(a,b,input)),seam_column,settings.width_pixels);
+    return CanRenderMappedFixedSeam(a,b,input,seam_column,settings,1);
+}
+
+SeamBlendResult RenderDocumentFixedSeam(const BgrImage& a,const BgrImage& b,const render::DocumentRenderParameters& parameters,std::uint32_t seam_column,const SeamBlendSettings& settings,const ColorMatch& color,unsigned thread_count){
+    return RenderMappedFixedSeam(a,b,DocumentMappedFixedSeamInput(parameters),seam_column,settings,color,thread_count);
 }
 
 SeamBlendResult RenderDocumentFixedSeam(const BgrImage& a,const BgrImage& b,const render::DocumentRenderParameters& parameters,std::uint32_t seam_column,const SeamBlendSettings& settings,const ColorMatch& color){
-    return RenderMappedFixedSeam(a,b,DocumentMappedFixedSeamInput(parameters),seam_column,settings,color);
+    return RenderDocumentFixedSeam(a,b,parameters,seam_column,settings,color,1);
+}
+
+bool CanRenderDocumentFixedSeam(const BgrImage& a,const BgrImage& b,const render::DocumentRenderParameters& parameters,std::uint32_t seam_column,const SeamBlendSettings& settings,unsigned thread_count){
+    return CanRenderMappedFixedSeam(a,b,DocumentMappedFixedSeamInput(parameters),seam_column,settings,thread_count);
 }
 
 bool CanRenderDocumentFixedSeam(const BgrImage& a,const BgrImage& b,const render::DocumentRenderParameters& parameters,std::uint32_t seam_column,const SeamBlendSettings& settings){
-    return CanRenderMappedFixedSeam(a,b,DocumentMappedFixedSeamInput(parameters),seam_column,settings);
+    return CanRenderDocumentFixedSeam(a,b,parameters,seam_column,settings,1);
 }
 
 FixedSeamCondition ScaleFixedSeamCondition(const FixedSeamCondition& capture,std::uint32_t capture_width,std::uint32_t capture_height,

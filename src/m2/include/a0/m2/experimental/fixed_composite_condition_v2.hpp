@@ -1,5 +1,7 @@
 #pragma once
 #include "a0/m2/experimental/fixed_composite_condition.hpp"
+#include "a0/m2/experimental/fixed_composite_condition_v3.hpp"
+#include "a0/m2/experimental/fixed_composite_profile_common.hpp"
 #include "a0/m2/document_render.hpp"
 #include <chrono>
 #include <cstdint>
@@ -45,12 +47,6 @@ namespace a0::m2::experimental {
 //    (#405 W2); creation refuses to run without one.
 inline constexpr std::string_view kFixedCompositeConditionSchemaV2="a0.fixed-composite-condition.v2";
 inline constexpr std::size_t kMaximumFixedCompositeConditionV2Bytes=4096;
-// Same ceiling as the rig profile reader.
-inline constexpr std::size_t kMaximumFixedCompositeProfileBytes=256*1024;
-
-// SHA-256, lower-case hex, of the bytes. The caller's provider, as in v1.
-using FixedCompositeSha256=std::function<std::string(const std::vector<unsigned char>&)>;
-
 struct FixedCompositeConditionV2 {
     // UTC, "YYYY-MM-DDTHH:MM:SSZ".
     std::string created_utc;
@@ -82,16 +78,6 @@ struct FixedCompositeConditionV2 {
     } seam;
 };
 
-// True for a plain file name that may be stored as the profile reference:
-// 6..96 characters of [A-Za-z0-9._-], starting with a letter or digit, ending
-// ".json", no "..", not a Windows device name, and not the condition's own name.
-// Folder separators, drive letters and parent folders are all outside this set.
-bool IsFixedCompositeProfileFileName(std::string_view name);
-// "wpd-fixed-composite-profile-<first 16 hex of the file SHA-256>.json". The
-// name the creating entrance copies the profile to. Not required of a record:
-// the SHA-256 in the record is what identifies the profile.
-std::string FixedCompositeProfileFileName(const std::string& profile_file_sha256);
-
 // Throws std::invalid_argument unless every field is in range: timestamps and
 // hashes well formed, the profile name plain, the raster exact (micrometres and
 // DPI against the pixel counts), the limit finite and non-negative, the seam
@@ -112,31 +98,10 @@ FixedCompositeConditionV2 ParseFixedCompositeConditionV2(std::string_view text);
 // object with a string "schema". Reads nothing else.
 std::string FixedCompositeConditionSchemaOf(std::string_view text);
 
-// A problem with the profile a v2 record names, as opposed to the record itself:
-// `missing` when the file is not in the condition's folder, `differs` when it is
-// there but is not the profile the record names (SHA-256, fingerprint) or cannot be
-// used (not a rig profile 2.0.0, not a calibrated draft, A not left of B, projections
-// invalid over the raster). It is a std::invalid_argument, so callers that only check
-// for that keep working; the review writer uses the kind to say why nothing was composed.
-class FixedCompositeProfileError : public std::invalid_argument {
-public:
-    enum class Kind {missing,differs};
-    FixedCompositeProfileError(Kind kind,const std::string& what):std::invalid_argument(what),kind_(kind){}
-    Kind GetKind() const noexcept {return kind_;}
-private:
-    Kind kind_;
-};
-
-// The referenced profile after verification, ready for the renderers.
-struct FixedCompositeProfileBinding {
-    // The profile's cameras and layout (A on the left, B on the right) with the
-    // condition's raster and bilinear sampling. A copy; the profile is never
-    // changed (ADR-0034 invariant 6).
-    render::DocumentRenderParameters parameters;
-    // The profile's profileId, if it has one (reports quote it).
-    std::optional<std::string> profile_id;
-    std::string profile_file_sha256,profile_fingerprint_sha256;
-};
+// The profile file name rules (IsFixedCompositeProfileFileName, FixedCompositeProfileFileName), the hash
+// provider type (FixedCompositeSha256), the profile error (FixedCompositeProfileError) and the verified
+// profile (FixedCompositeProfileBinding) are shared with the v3 record and are declared in
+// fixed_composite_profile_common.hpp.
 // Verifies the profile bytes against the record and returns the binding.
 // Throws std::invalid_argument when the SHA-256 or the fingerprint differs from
 // the record, the bytes are not a rig profile 2.0.0, the profile is approved or
@@ -178,7 +143,12 @@ struct LoadedFixedCompositeConditionV2 {
     std::string file_sha256;
     FixedCompositeProfileBinding profile;
 };
-using LoadedFixedCompositeConditionAny=std::variant<LoadedFixedCompositeCondition,LoadedFixedCompositeConditionV2>;
+// v3 (fixed_composite_condition_v3.hpp, #417) is part of the variant and LoadFixedCompositeConditionAny returns it: for the
+// condition file's name (kFixedCompositeConditionName) it is the revision in force in the revisions folder beside it, and a
+// v1 or v2 file together with a revision is refused; for the path of a revision file it is that revision. Code that reads
+// the variant must look at each alternative with std::get_if / std::holds_alternative and must not assume that v1 or v2 is
+// the only other one.
+using LoadedFixedCompositeConditionAny=std::variant<LoadedFixedCompositeCondition,LoadedFixedCompositeConditionV2,LoadedFixedCompositeConditionV3>;
 // Reads the condition file (either version). An absent file means there is no
 // condition (std::nullopt). Everything else that is not exact throws, so a
 // damaged file is never mistaken for absence: a file that is not a regular file,
@@ -187,6 +157,15 @@ using LoadedFixedCompositeConditionAny=std::variant<LoadedFixedCompositeConditio
 // the record (see BindFixedCompositeProfile). The v1 branch is
 // ParseFixedCompositeCondition on the same bytes, so v1 behaves as before.
 std::optional<LoadedFixedCompositeConditionAny> LoadFixedCompositeConditionAny(const std::filesystem::path& file,const FixedCompositeSha256& hash);
+namespace fixed_composite_detail {
+// LoadFixedCompositeConditionAny with the v3 branch chosen by the caller (#417). With accept_v3 false it is the reader above, byte for
+// byte: a v3 file is an unknown schema. With true, a file of schema v3 is read as a revision file (LoadFixedCompositeConditionV3) and
+// returned as LoadedFixedCompositeConditionV3, and the ceiling is v3's. With true and the condition file's name, the revision in
+// force beside it is returned when there is one (and a v1 or v2 file next to it is std::invalid_argument). LoadFixedCompositeConditionAny
+// passes true since the capture path was wired; the switch is the one constant in fixed_composite_condition_v2.cpp.
+std::optional<LoadedFixedCompositeConditionAny> LoadFixedCompositeConditionAnyWith(const std::filesystem::path& file,
+    const FixedCompositeSha256& hash,bool accept_v3);
+}
 
 // Writes the record as a NEW file, with the steps and guarantees of
 // WriteFixedCompositeCondition (exclusive partial, read back, move without
