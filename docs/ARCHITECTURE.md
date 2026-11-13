@@ -146,6 +146,7 @@ JPEG decode
 
 - Phase 0: C++20 / CMake / CTest / Nikon D810 Camera Remote SDK
 - M2画像処理: C++20 / OpenCV
+- 継ぎ目の色の補正の推定: Python 3.12 / numpy（`python/a0seam`、ADR-0043）。校正の時と開発の時だけ動く道具で、撮影とライブの合成の実行には要らない。推定した値は計画のファイルに書き、画像に当てるのはM2のC++
 - M3 UI・調整: .NET 10 / WPF
 - M3 IPC: Named Pipe
 - メタデータ: SQLite候補
