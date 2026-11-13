@@ -14,9 +14,13 @@
 //
 // What is checked and what is not (the owner's decision on Q3): findings are of three classes (recalibration_text.hpp).
 //   no_candidate / rejected  the calibration is not offered, whatever the policy.
-//   unverified               the check could not be made (too few marks to measure). With the policy `confirm_with_warning` the
-//                            verdict is `usable_unverified` and the person may confirm after seeing the warning; with `refuse_to_confirm`
-//                            it is `unusable`. The policy is the constant kRecalibrationUnverifiedPolicy, one place.
+//   unverified               the check could not be made because there was too little to measure (too few marks), and nothing was
+//                            found wrong. With the policy `confirm_with_warning` the verdict is `usable_unverified` and the person may
+//                            confirm after seeing the warning; with `refuse_to_confirm` it is `unusable`. The policy is the constant
+//                            kRecalibrationUnverifiedPolicy, one place. An estimate that is undetermined counts as this only when ALL of
+//                            its reasons are of the "too few marks" family (content_registration::AssessEvidenceShortage, the one place
+//                            that decides it); one other reason, or one that is not known, makes it `rejected`. The gate is told apart by
+//                            the codes of its findings (ClassifySample), not by its state.
 // Nothing about "unchecked" is stored in the condition (its format is not changed): the mark is in the record of the staging folder
 // (recalibration-report.json, and confirmation.json after a confirmation) and in the log.
 //
@@ -62,22 +66,33 @@ namespace a0::phase0::experimental {
 // Q1 where the seam goes, Q2 how big the composite is, Q3 what to do with a calibration that could not be checked. Each is a default
 // of the request; a caller (or a test) may pass the other value.
 enum class UnverifiedPolicy {confirm_with_warning,refuse_to_confirm};
+// What the gate's `unconfirmed-content` (a point over the line that a second measurement could not confirm) and `one-sided-content`
+// (content in one camera only) mean. Both are "measured, and it looked wrong", not "too little to measure": the default refuses them
+// (`reject`). The owner's answer is awaited (Q1 of the ruling); `allow_with_warning` makes them `unverified`, a calibration the person may
+// confirm after the warning. kRecalibrationSuspectContentPolicy is the only place that says which; the tests run both values.
+enum class SuspectContentPolicy {reject,allow_with_warning};
 inline constexpr a0::m2::experimental::recalibration::SeamPlacement kRecalibrationSeamPlacement=a0::m2::experimental::recalibration::SeamPlacement::band_center;
 inline constexpr a0::m2::experimental::recalibration::RasterPlacement kRecalibrationRasterPlacement=a0::m2::experimental::recalibration::RasterPlacement::follow_camera_b;
 inline constexpr UnverifiedPolicy kRecalibrationUnverifiedPolicy=UnverifiedPolicy::confirm_with_warning;
+inline constexpr SuspectContentPolicy kRecalibrationSuspectContentPolicy=SuspectContentPolicy::reject;
 // The time the sample composite may take (the stages it holds are all run). Not a line of acceptance; the 180-second window of a pair
 // capture is for the shutter and is not used here (the design, 2.4).
 inline constexpr std::chrono::seconds kRecalibrationSampleWindow{900};
 
 // ---- Pure decisions (no files, no images) ----
-// How each refusal of the computation counts. Table (and why) in the report of the lane:
+// How each refusal of the computation counts (docs/design/recalibration-from-pair.md, section 5):
 //   no_candidate  no-overlap, estimate-failed, estimate-not-verified, stopped: no position was found that holds, nothing to confirm
 //   rejected      tilt-exceeded, height-exceeded, creation-check-failed, raster-too-large, raster-outside-sheet, profile-invalid,
-//                 reestimate-displacement, and reestimate-not-verified when the estimator on the new profile found the pose out of range
-//   unverified    reestimate-not-verified when the estimator on the new profile could not be trusted at all (state undetermined)
-// `reason` of an estimate-not-verified finding is the estimator's first reason code.
-[[nodiscard]] inline std::vector<RecalibrationFinding> ClassifyProposal(const a0::m2::experimental::recalibration::Proposal& proposal){
+//                 reestimate-displacement; reestimate-not-verified when the estimator on the new profile found the pose out of range;
+//                 reestimate-doubtful (it replaces the code reestimate-not-verified) when that estimator was undetermined for a reason
+//                 that is not "too few marks"
+//   unverified    reestimate-not-verified when that estimator was undetermined and every one of its reasons is "too few marks"
+// `reason` of an estimate-not-verified finding is the estimator's first reason code; of a reestimate-doubtful finding, the first reason
+// that is not "too few marks". `limits` are the condition's (alpha and beta of the estimator's first check).
+[[nodiscard]] inline std::vector<RecalibrationFinding> ClassifyProposal(const a0::m2::experimental::recalibration::Proposal& proposal,
+    const a0::m2::experimental::content_registration::RegistrationLimits& limits){
     namespace rc=a0::m2::experimental::recalibration;
+    namespace cr=a0::m2::experimental::content_registration;
     std::vector<RecalibrationFinding> findings;
     for(const auto refusal:proposal.refusals){
         RecalibrationFinding finding;
@@ -89,10 +104,16 @@ inline constexpr std::chrono::seconds kRecalibrationSampleWindow{900};
             finding.klass=FindingClass::no_candidate;
             if(!proposal.estimate.reasons.empty())finding.reason=proposal.estimate.reasons.front();
             break;
-        case rc::Refusal::reestimate_not_verified:
-            finding.klass=proposal.verification.state==a0::m2::experimental::content_registration::RegistrationState::undetermined?FindingClass::unverified:FindingClass::rejected;
-            if(!proposal.verification.reasons.empty())finding.reason=proposal.verification.reasons.front();
+        case rc::Refusal::reestimate_not_verified:{
+            const auto& check=proposal.verification;
+            finding.klass=FindingClass::rejected;
+            if(check.state==cr::RegistrationState::undetermined){
+                const auto assessed=cr::AssessEvidenceShortage(check.reasons,check.inliers,check.points,limits);
+                if(assessed.shortage_only){finding.klass=FindingClass::unverified;finding.reason=check.reasons.front();}
+                else{finding.code="reestimate-doubtful";finding.reason=assessed.doubt;}
+            }else if(!check.reasons.empty())finding.reason=check.reasons.front();
             break;
+        }
         default:
             finding.klass=FindingClass::rejected;break;
         }
@@ -101,12 +122,14 @@ inline constexpr std::chrono::seconds kRecalibrationSampleWindow{900};
     return findings;
 }
 
-// A refusal list that is only "the check could not be made": the candidate may be rebuilt from the pose and offered as unchecked.
-[[nodiscard]] inline bool OnlyUnverifiedCheck(const a0::m2::experimental::recalibration::Proposal& proposal){
+// A refusal list that is only "the check could not be made for want of marks": the candidate may be rebuilt from the pose and offered as
+// unchecked. The class is the one ClassifyProposal gives (one decision, not a second copy of it).
+[[nodiscard]] inline bool OnlyUnverifiedCheck(const a0::m2::experimental::recalibration::Proposal& proposal,
+    const a0::m2::experimental::content_registration::RegistrationLimits& limits){
     namespace rc=a0::m2::experimental::recalibration;
     return !proposal.ready && proposal.refusals.size()==1 && proposal.refusals.front()==rc::Refusal::reestimate_not_verified &&
-        proposal.verification.performed && proposal.verification.state==a0::m2::experimental::content_registration::RegistrationState::undetermined &&
-        proposal.has_pose && !proposal.estimate_record_text.empty();
+        proposal.verification.performed && proposal.has_pose && !proposal.estimate_record_text.empty() &&
+        ClassifyProposal(proposal,limits).front().klass==FindingClass::unverified;
 }
 
 // What the sample composite said, reduced to what the decision needs.
@@ -116,31 +139,65 @@ struct RecalibrationSampleFacts {
     bool out_of_memory{};
     std::optional<a0::m2::experimental::FixedCompositeSkip> skip; // the writer refused before creating anything
     a0::m2::experimental::content_registration::RegistrationState estimate{a0::m2::experimental::content_registration::RegistrationState::undetermined};
+    // The sample's estimate: its reasons, and the inliers and counted points of its fit (what AssessEvidenceShortage needs).
+    std::vector<std::string> estimate_reasons;
+    std::uint32_t estimate_inliers{},estimate_points{};
     a0::m2::experimental::registration_gate::GateState gate{a0::m2::experimental::registration_gate::GateState::not_run};
     a0::m2::experimental::registration_gate::GateCause gate_cause{a0::m2::experimental::registration_gate::GateCause::none};
+    // The codes of the gate's own findings (the `reason` of each entry of RegistrationGateResult::gate_findings).
+    std::vector<std::string> gate_findings;
 };
+
+// One finding of the gate (the codes of registration_gate.hpp's GateFinding): how it counts, and the code that carries its sentence.
+//   too little to measure (unverified)   nothing-measured, content-unmeasured, dx-unmeasured, placement-unverified, gate-undetermined
+//   measured and it looked wrong         unconfirmed-content, one-sided-content: by `policy` (kRecalibrationSuspectContentPolicy)
+//   a problem of the composite itself    transition-outside-band, and a code that is not known here (never confirmed)
+[[nodiscard]] inline RecalibrationFinding ClassifyGateFinding(std::string_view symbol,SuspectContentPolicy policy){
+    const auto suspect=policy==SuspectContentPolicy::allow_with_warning?FindingClass::unverified:FindingClass::rejected;
+    if(symbol=="nothing-measured")return {FindingClass::unverified,"gate-nothing-measured",{}};
+    if(symbol=="content-unmeasured")return {FindingClass::unverified,"gate-content-unmeasured",{}};
+    if(symbol=="dx-unmeasured")return {FindingClass::unverified,"gate-dx-unmeasured",{}};
+    if(symbol=="placement-unverified")return {FindingClass::unverified,"gate-placement-unverified",{}};
+    if(symbol=="gate-undetermined")return {FindingClass::unverified,"gate-undetermined",{}};
+    if(symbol=="unconfirmed-content")return {suspect,"gate-unconfirmed-content",{}};
+    if(symbol=="one-sided-content")return {suspect,"gate-one-sided-content",{}};
+    if(symbol=="transition-outside-band")return {FindingClass::rejected,"gate-transition-outside-band",{}};
+    return {FindingClass::rejected,"gate-unknown",std::string(symbol)};
+}
+
 // The gate and the estimate of the sample. The gate says `fail` for two different things: an excess that it measured (cause lift, pose,
-// displacement: checked and wrong, rejected) and a seam that it could not measure (cause unmeasurable: not checked, nothing found wrong).
-// A paper with few marks ends in the second; that is the case the owner wants a person to be able to decide.
-[[nodiscard]] inline std::vector<RecalibrationFinding> ClassifySample(const RecalibrationSampleFacts& facts){
+// displacement: checked and wrong, rejected) and a seam that it could not measure (cause unmeasurable). The second, and `undetermined`,
+// are told apart by the codes of the gate's findings (ClassifyGateFinding), not by the state: a paper with few marks ends in "too little
+// to measure", the case the owner wants a person to be able to decide; a finding of another kind is never confirmed. A gate that is not
+// `pass` and gives no finding to explain it is not trusted either (`gate-unknown`). The estimate is told apart by all of its reasons.
+[[nodiscard]] inline std::vector<RecalibrationFinding> ClassifySample(const RecalibrationSampleFacts& facts,
+    const a0::m2::experimental::content_registration::RegistrationLimits& limits,
+    SuspectContentPolicy policy=kRecalibrationSuspectContentPolicy){
     namespace cr=a0::m2::experimental::content_registration;
     namespace gate=a0::m2::experimental::registration_gate;
     std::vector<RecalibrationFinding> findings;
-    const auto add=[&](FindingClass klass,const char* code){findings.push_back({klass,code,{}});};
+    const auto add=[&](FindingClass klass,const char* code,std::string reason={}){findings.push_back({klass,code,std::move(reason)});};
     if(facts.out_of_memory){add(FindingClass::rejected,"out-of-memory");return findings;}
     if(facts.threw){add(FindingClass::rejected,"sample-failed");return findings;}
     if(facts.skip){add(FindingClass::rejected,"sample-skipped");return findings;}
     if(!facts.composed){add(FindingClass::rejected,"sample-failed");return findings;}
-    if(facts.estimate==cr::RegistrationState::undetermined)add(FindingClass::unverified,"sample-estimate-undetermined");
+    if(facts.estimate==cr::RegistrationState::undetermined){
+        const auto assessed=cr::AssessEvidenceShortage(facts.estimate_reasons,facts.estimate_inliers,facts.estimate_points,limits);
+        if(assessed.shortage_only)add(FindingClass::unverified,"sample-estimate-undetermined",facts.estimate_reasons.front());
+        else add(FindingClass::rejected,"sample-estimate-doubtful",assessed.doubt);
+    }
     else if(facts.estimate==cr::RegistrationState::out_of_envelope)add(FindingClass::rejected,"sample-estimate-out-of-envelope");
-    switch(facts.gate){
-    case gate::GateState::pass: break;
-    case gate::GateState::fail:
-        if(facts.gate_cause==gate::GateCause::unmeasurable)add(FindingClass::unverified,"gate-unmeasurable");
-        else add(FindingClass::rejected,"gate-fail");
-        break;
-    case gate::GateState::undetermined: add(FindingClass::unverified,"gate-undetermined");break;
-    case gate::GateState::not_run: add(FindingClass::unverified,"gate-not-run");break;
+    const bool by_findings=facts.gate==gate::GateState::undetermined || (facts.gate==gate::GateState::fail && facts.gate_cause==gate::GateCause::unmeasurable);
+    if(facts.gate==gate::GateState::not_run)add(FindingClass::unverified,"gate-not-run");
+    else if(facts.gate==gate::GateState::fail && !by_findings)add(FindingClass::rejected,"gate-fail");
+    else if(by_findings){
+        std::vector<std::string> seen;
+        for(const auto& symbol:facts.gate_findings){
+            if(std::find(seen.begin(),seen.end(),symbol)!=seen.end())continue;
+            seen.push_back(symbol);
+            findings.push_back(ClassifyGateFinding(symbol,policy));
+        }
+        if(seen.empty())add(FindingClass::rejected,"gate-unknown");
     }
     return findings;
 }
@@ -181,6 +238,7 @@ struct RecalibrationJobRequest {
     a0::m2::experimental::recalibration::SeamPlacement seam=kRecalibrationSeamPlacement;
     a0::m2::experimental::recalibration::RasterPlacement raster=kRecalibrationRasterPlacement;
     UnverifiedPolicy unverified_policy=kRecalibrationUnverifiedPolicy;
+    SuspectContentPolicy suspect_content_policy=kRecalibrationSuspectContentPolicy;
     a0::m2::experimental::FixedCompositeSha256 hash;
     // The caller says that the live view is stopped for the length of the job. Refused otherwise.
     bool live_view_stopped{false};
@@ -331,7 +389,7 @@ inline std::string ReportJson(const ReportInput& in){
     s<<"]}";
     if(in.verification){
         const auto& v=*in.verification;
-        s<<",\"verification\":{\"performed\":"<<Bool(v.performed)<<",\"state\":"<<Esc(cr::RegistrationStateCode(v.state))<<",\"seamDisplacementPx\":"<<Num(v.seam_displacement_px)
+        s<<",\"verification\":{\"performed\":"<<Bool(v.performed)<<",\"state\":"<<Esc(cr::RegistrationStateCode(v.state))<<",\"inliers\":"<<v.inliers<<",\"points\":"<<v.points<<",\"seamDisplacementPx\":"<<Num(v.seam_displacement_px)
          <<",\"limitPx\":"<<Num(v.limit_px)<<",\"passed\":"<<Bool(v.passed)<<"}";
     }
     const auto& g=o.facts.gate;
@@ -499,16 +557,16 @@ inline bool IsCanonicalOriginal(const fs::path& file,const wchar_t* alias){
         out.facts.display=proposal.display;
         report.estimate_state=std::string(cr::RegistrationStateCode(proposal.estimate.state));report.estimate_reasons=proposal.estimate.reasons;
         verification=proposal.verification;
-        out.findings=ClassifyProposal(proposal);
+        out.findings=ClassifyProposal(proposal,limits);
         std::optional<rc::Candidate> candidate=proposal.candidate;
-        const bool only_unverified=OnlyUnverifiedCheck(proposal);
+        const bool only_unverified=OnlyUnverifiedCheck(proposal,limits);
         if(proposal.ready && !candidate){find(FindingClass::rejected,"profile-invalid");}
         else if(only_unverified){
             // The check on the new profile could not be made; nothing found wrong. The computation let the candidate go, so it is made
             // again from the pose it found (the same pure steps as before, no images).
             const auto rebuilt=request.computation.from_pose(in,proposal.pose,proposal.fit,proposal.estimate_record_text);
             if(rebuilt.candidate && rebuilt.refusals.empty()){candidate=rebuilt.candidate;out.facts.display=rebuilt.display;}
-            else for(auto& f:ClassifyProposal(rebuilt))out.findings.push_back(std::move(f));
+            else for(auto& f:ClassifyProposal(rebuilt,limits))out.findings.push_back(std::move(f));
         }
         if(!proposal.ready && !only_unverified)candidate.reset();
         if(stop_asked())return finish();   // before the record and the sample
@@ -550,6 +608,9 @@ inline bool IsCanonicalOriginal(const fs::path& file,const wchar_t* alias){
             const auto& record=*composed.review->fixed_composite_registration;
             const auto& capture=record.registration;
             sample.composed=true;sample.estimate=capture.registration.state;sample.gate=capture.gate.state;sample.gate_cause=capture.gate.cause;
+            sample.estimate_reasons=capture.registration.reasons;
+            sample.estimate_inliers=capture.registration.diagnostics.inliers;sample.estimate_points=capture.registration.diagnostics.points;
+            for(const auto& gate_finding:capture.gate.gate_findings)sample.gate_findings.push_back(gate_finding.reason);
             auto& gate_facts=out.facts.gate;
             gate_facts.known=true;gate_facts.state=capture.gate.state;gate_facts.cause=capture.gate.cause;
             gate_facts.maximum_px=registration_text_detail::GateMaximum(capture.gate);
@@ -560,7 +621,7 @@ inline bool IsCanonicalOriginal(const fs::path& file,const wchar_t* alias){
             out.thumbnail=composed.review->thumbnail;
             for(auto& line:DescribeRegistrationReview(*composed.review).log)out.log_lines.push_back(std::move(line));
         }
-        for(auto& f:ClassifySample(sample))out.findings.push_back(std::move(f));
+        for(auto& f:ClassifySample(sample,out.candidate->condition.registration.limits,request.suspect_content_policy))out.findings.push_back(std::move(f));
 
         // 6. The seam at native size, for the screen (a failure here loses the crops, not the result).
         if(stop_asked())return finish();   // before the crops (the sample is in the staging folder, nothing of it is offered)

@@ -146,7 +146,7 @@ cr::PoseParameters PoseForShift(const render::CameraProjection& camera_b, double
 }
 
 // ---- The stand-in for the computation ----
-enum class Fake { ready, check_not_trusted, check_out_of_range, displacement, no_overlap, tilt, throws, throws_memory, outside_sheet };
+enum class Fake { ready, check_not_trusted, check_doubtful, check_failed, check_out_of_range, displacement, no_overlap, tilt, throws, throws_memory, outside_sheet };
 constexpr const char* kRecord = "{\"schema\":\"test-record\"}";
 RecalibrationComputation FakeComputation(Fake mode, std::vector<std::string>* stages = nullptr) {
     RecalibrationComputation c;
@@ -180,6 +180,16 @@ RecalibrationComputation FakeComputation(Fake mode, std::vector<std::string>* st
             // What the computation does when the estimator on the new profile cannot be trusted: no candidate, one refusal.
             p.candidate.reset(); p.ready = false; p.refusals = {rc::Refusal::reestimate_not_verified};
             p.verification.state = cr::RegistrationState::undetermined; p.verification.passed = false; p.verification.reasons = {"too-few-points"};
+            break;
+        case Fake::check_doubtful:
+            // Undetermined for want of marks AND for a sign that the placement does not fit: not "too few marks" alone.
+            p.candidate.reset(); p.ready = false; p.refusals = {rc::Refusal::reestimate_not_verified};
+            p.verification.state = cr::RegistrationState::undetermined; p.verification.passed = false; p.verification.reasons = {"unique-blocks", "residual-shape"};
+            break;
+        case Fake::check_failed:
+            // What VerifyCandidate returns when the estimator refuses its settings.
+            p.candidate.reset(); p.ready = false; p.refusals = {rc::Refusal::reestimate_not_verified};
+            p.verification.state = cr::RegistrationState::undetermined; p.verification.passed = false; p.verification.reasons = {"estimate-failed"};
             break;
         case Fake::check_out_of_range:
             p.candidate.reset(); p.ready = false; p.refusals = {rc::Refusal::reestimate_not_verified};
@@ -236,6 +246,18 @@ bool HasCode(const RecalibrationJobOutcome& o, const std::string& code) {
     return std::any_of(o.findings.begin(), o.findings.end(), [&](const RecalibrationFinding& f) { return f.code == code; });
 }
 
+// The condition's limits of the estimator's first check (alpha 8, beta 0.3: V1 needs more than 11.4 inliers when no point is an outlier). A value of this test.
+cr::RegistrationLimits Limits() {
+    cr::RegistrationLimits limits;
+    limits.brown_lowe_alpha = 8.0;
+    limits.brown_lowe_beta = 0.3;
+    return limits;
+}
+const auto kLimits = Limits();
+bool Is(const std::vector<RecalibrationFinding>& findings, FindingClass klass, const char* code) {
+    return findings.size() == 1 && findings[0].klass == klass && findings[0].code == code;
+}
+
 // ---- 1. The decisions, without files ----
 void Decisions() {
     // Every refusal of the computation, and how it counts.
@@ -260,59 +282,105 @@ void Decisions() {
         p.refusals = {row.refusal};
         p.verification.performed = true;
         p.verification.state = row.check;
-        const auto f = ClassifyProposal(p);
+        p.verification.reasons = {"too-few-points"};
+        const auto f = ClassifyProposal(p, kLimits);
         CHECK(f.size() == 1 && f[0].klass == row.klass && f[0].code == std::string(rc::RefusalCode(row.refusal)));
     }
     {   // The estimator's first reason sharpens the finding.
         rc::Proposal p;
         p.refusals = {rc::Refusal::estimate_not_verified};
         p.estimate.reasons = {"unique-blocks", "too-few-points"};
-        CHECK(ClassifyProposal(p).front().reason == "unique-blocks");
+        CHECK(ClassifyProposal(p, kLimits).front().reason == "unique-blocks");
         rc::Proposal q;
         q.refusals = {rc::Refusal::reestimate_not_verified};
         q.verification.state = cr::RegistrationState::undetermined;
         q.verification.reasons = {"too-few-points"};
-        CHECK(ClassifyProposal(q).front().reason == "too-few-points");
+        CHECK(ClassifyProposal(q, kLimits).front().reason == "too-few-points");
     }
-    // Only a check that could not be made, with a pose to rebuild from, is rebuilt and offered as unchecked.
+    // The check on the new profile when it is undetermined: told by ALL of its reasons (the table of the ruling, one function in m2).
     {
+        struct Case {const char* name; std::vector<std::string> reasons; std::uint32_t inliers, points; FindingClass klass; const char* code; const char* reason;};
+        const Case cases[] = {
+            {"one reason of the family", {"unique-blocks"}, 0, 0, FindingClass::unverified, "reestimate-not-verified", "unique-blocks"},
+            {"every reason of the family", {"coarse-no-unique-blocks", "repeating-only", "too-few-points", "prediction-uncertain", "too-dark"}, 0, 0, FindingClass::unverified, "reestimate-not-verified", "coarse-no-unique-blocks"},
+            {"a shortage and a doubt", {"unique-blocks", "residual-shape"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "residual-shape"},
+            {"a doubt first", {"residual-shape", "unique-blocks"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "residual-shape"},
+            {"a code nobody knows", {"a-code-nobody-knows"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "a-code-nobody-knows"},
+            {"a shortage and a code nobody knows", {"unique-blocks", "a-code-nobody-knows"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "a-code-nobody-knows"},
+            {"no reason", {}, 0, 0, FindingClass::rejected, "reestimate-doubtful", ""},
+            {"the estimate failed", {"estimate-failed"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "estimate-failed"},
+            {"the displacement could not be found", {"displacement-failed"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "displacement-failed"},
+            {"brown-lowe, few inliers (the boundary 11.4: 11)", {"brown-lowe"}, 11, 30, FindingClass::unverified, "reestimate-not-verified", "brown-lowe"},
+            {"brown-lowe, more inliers (12)", {"brown-lowe"}, 12, 30, FindingClass::rejected, "reestimate-doubtful", "brown-lowe"},
+            {"brown-lowe beside a shortage", {"unique-blocks", "brown-lowe"}, 5, 9, FindingClass::unverified, "reestimate-not-verified", "unique-blocks"},
+            {"brown-lowe beside a doubt", {"brown-lowe", "starts-disagree"}, 5, 9, FindingClass::rejected, "reestimate-doubtful", "starts-disagree"},
+        };
+        for (const auto& c : cases) {
+            rc::Proposal p;
+            p.refusals = {rc::Refusal::reestimate_not_verified};
+            p.verification.performed = true; p.verification.state = cr::RegistrationState::undetermined;
+            p.verification.reasons = c.reasons; p.verification.inliers = c.inliers; p.verification.points = c.points;
+            const auto f = ClassifyProposal(p, kLimits);
+            if (!(f.size() == 1 && f[0].klass == c.klass && f[0].code == c.code && f[0].reason == c.reason)) std::cerr << "case: " << c.name << std::endl;
+            CHECK(f.size() == 1 && f[0].klass == c.klass && f[0].code == c.code && f[0].reason == c.reason);
+            // The decision to rebuild and offer the calibration as unchecked is the same one.
+            p.has_pose = true; p.estimate_record_text = kRecord;
+            CHECK(OnlyUnverifiedCheck(p, kLimits) == (c.klass == FindingClass::unverified));
+            // The sample's estimate is told by the same function: the same reasons give the same class.
+            RecalibrationSampleFacts s;
+            s.composed = true; s.estimate = cr::RegistrationState::undetermined; s.gate = gate::GateState::pass;
+            s.estimate_reasons = c.reasons; s.estimate_inliers = c.inliers; s.estimate_points = c.points;
+            const auto g = ClassifySample(s, kLimits);
+            CHECK(g.size() == 1 && g[0].klass == c.klass && g[0].code == (c.klass == FindingClass::unverified ? "sample-estimate-undetermined" : "sample-estimate-doubtful"));
+        }
+        // The same inliers are read against the condition's limits: without them brown-lowe is a doubt.
         rc::Proposal p;
         p.refusals = {rc::Refusal::reestimate_not_verified};
         p.verification.performed = true; p.verification.state = cr::RegistrationState::undetermined;
+        p.verification.reasons = {"brown-lowe"}; p.verification.inliers = 11; p.verification.points = 11;
+        CHECK(ClassifyProposal(p, kLimits).front().klass == FindingClass::unverified);
+        CHECK(ClassifyProposal(p, cr::RegistrationLimits{}).front().klass == FindingClass::rejected);
+    }
+    // Only a check that could not be made for want of marks, with a pose to rebuild from, is rebuilt and offered as unchecked.
+    {
+        rc::Proposal p;
+        p.refusals = {rc::Refusal::reestimate_not_verified};
+        p.verification.performed = true; p.verification.state = cr::RegistrationState::undetermined; p.verification.reasons = {"too-few-points"};
         p.has_pose = true; p.estimate_record_text = kRecord;
-        CHECK(OnlyUnverifiedCheck(p));
+        CHECK(OnlyUnverifiedCheck(p, kLimits));
         auto no_pose = p; no_pose.has_pose = false;
         auto no_record = p; no_record.estimate_record_text.clear();
         auto wrong = p; wrong.verification.state = cr::RegistrationState::out_of_envelope;
+        auto doubt = p; doubt.verification.reasons = {"too-few-points", "fit-failed"};
+        auto silent = p; silent.verification.reasons.clear();
         auto more = p; more.refusals.push_back(rc::Refusal::tilt_exceeded);
         auto ready = p; ready.ready = true;
-        CHECK(!OnlyUnverifiedCheck(no_pose) && !OnlyUnverifiedCheck(no_record) && !OnlyUnverifiedCheck(wrong) && !OnlyUnverifiedCheck(more) && !OnlyUnverifiedCheck(ready));
+        CHECK(!OnlyUnverifiedCheck(no_pose, kLimits) && !OnlyUnverifiedCheck(no_record, kLimits) && !OnlyUnverifiedCheck(wrong, kLimits) && !OnlyUnverifiedCheck(doubt, kLimits) &&
+            !OnlyUnverifiedCheck(silent, kLimits) && !OnlyUnverifiedCheck(more, kLimits) && !OnlyUnverifiedCheck(ready, kLimits));
     }
     // The sample: the gate and the estimate.
     {
         RecalibrationSampleFacts s;
         s.composed = true; s.estimate = cr::RegistrationState::verified; s.gate = gate::GateState::pass;
-        CHECK(ClassifySample(s).empty());
-        auto one = [&](auto edit) { auto t = s; edit(t); return ClassifySample(t); };
-        auto f = one([](auto& t) { t.gate = gate::GateState::undetermined; });
-        CHECK(f.size() == 1 && f[0].klass == FindingClass::unverified && f[0].code == "gate-undetermined");
+        CHECK(ClassifySample(s, kLimits).empty());
+        auto one = [&](auto edit, SuspectContentPolicy policy = kRecalibrationSuspectContentPolicy) { auto t = s; edit(t); return ClassifySample(t, kLimits, policy); };
+        auto f = one([](auto& t) { t.gate = gate::GateState::undetermined; t.gate_findings = {"gate-undetermined"}; });
+        CHECK(Is(f, FindingClass::unverified, "gate-undetermined"));
         f = one([](auto& t) { t.gate = gate::GateState::not_run; });
-        CHECK(f.size() == 1 && f[0].klass == FindingClass::unverified && f[0].code == "gate-not-run");
-        f = one([](auto& t) { t.gate = gate::GateState::fail; t.gate_cause = gate::GateCause::displacement; });
-        CHECK(f.size() == 1 && f[0].klass == FindingClass::rejected && f[0].code == "gate-fail");
+        CHECK(Is(f, FindingClass::unverified, "gate-not-run"));
+        // Over the line (an excess that was measured): by the state and the cause, whatever the findings say.
         for (const auto cause : {gate::GateCause::lift, gate::GateCause::pose, gate::GateCause::displacement, gate::GateCause::none}) {
             f = one([&](auto& t) { t.gate = gate::GateState::fail; t.gate_cause = cause; });
-            CHECK(f.size() == 1 && f[0].klass == FindingClass::rejected && f[0].code == "gate-fail");
+            CHECK(Is(f, FindingClass::rejected, "gate-fail"));
+            f = one([&](auto& t) { t.gate = gate::GateState::fail; t.gate_cause = cause; t.gate_findings = {"nothing-measured"}; });
+            CHECK(Is(f, FindingClass::rejected, "gate-fail"));
         }
-        // A failure because the seam could not be measured is "not checked" (a paper with few marks), not "over the line".
-        f = one([](auto& t) { t.gate = gate::GateState::fail; t.gate_cause = gate::GateCause::unmeasurable; });
-        CHECK(f.size() == 1 && f[0].klass == FindingClass::unverified && f[0].code == "gate-unmeasurable");
-        f = one([](auto& t) { t.estimate = cr::RegistrationState::undetermined; });
-        CHECK(f.size() == 1 && f[0].klass == FindingClass::unverified && f[0].code == "sample-estimate-undetermined");
         f = one([](auto& t) { t.estimate = cr::RegistrationState::out_of_envelope; });
-        CHECK(f.size() == 1 && f[0].klass == FindingClass::rejected && f[0].code == "sample-estimate-out-of-envelope");
-        f = one([](auto& t) { t.estimate = cr::RegistrationState::undetermined; t.gate = gate::GateState::fail; });   // a failure beside a doubt stays a failure
-        CHECK(f.size() == 2);
+        CHECK(Is(f, FindingClass::rejected, "sample-estimate-out-of-envelope"));
+        f = one([](auto& t) { t.estimate = cr::RegistrationState::undetermined; t.estimate_reasons = {"unique-blocks"}; });
+        CHECK(Is(f, FindingClass::unverified, "sample-estimate-undetermined"));
+        f = one([](auto& t) { t.estimate = cr::RegistrationState::undetermined; t.estimate_reasons = {"unique-blocks"}; t.gate = gate::GateState::fail; });   // a failure beside a doubt stays a failure
+        CHECK(f.size() == 2 && f[1].klass == FindingClass::rejected && f[1].code == "gate-fail");
         f = one([](auto& t) { t.composed = false; t.threw = true; });
         CHECK(f.size() == 1 && f[0].code == "sample-failed" && f[0].klass == FindingClass::rejected);
         f = one([](auto& t) { t.composed = false; t.skip = m2e::FixedCompositeSkip::seam_outside_overlap; });
@@ -321,6 +389,62 @@ void Decisions() {
         CHECK(f.size() == 1 && f[0].code == "out-of-memory");
         f = one([](auto& t) { t.composed = false; });
         CHECK(f.size() == 1 && f[0].code == "sample-failed");
+
+        // The gate, told by the codes of its own findings. A seam that could not be measured (state fail, cause unmeasurable) and a gate
+        // that is undetermined are the two states that findings explain. Each code alone, then together, for both answers to Q1.
+        struct GateRow {const char* symbol; FindingClass klass_reject; FindingClass klass_allow; const char* code;};
+        const FindingClass R = FindingClass::rejected, U = FindingClass::unverified;
+        const GateRow gate_rows[] = {
+            {"nothing-measured", U, U, "gate-nothing-measured"},
+            {"content-unmeasured", U, U, "gate-content-unmeasured"},
+            {"dx-unmeasured", U, U, "gate-dx-unmeasured"},
+            {"placement-unverified", U, U, "gate-placement-unverified"},
+            {"gate-undetermined", U, U, "gate-undetermined"},
+            {"unconfirmed-content", R, U, "gate-unconfirmed-content"},   // Q1: the only two codes that the owner's answer changes
+            {"one-sided-content", R, U, "gate-one-sided-content"},
+            {"transition-outside-band", R, R, "gate-transition-outside-band"},
+            {"a-code-nobody-knows", R, R, "gate-unknown"},
+        };
+        const std::pair<gate::GateState, gate::GateCause> states[] = {{gate::GateState::fail, gate::GateCause::unmeasurable}, {gate::GateState::undetermined, gate::GateCause::none}};
+        for (const auto& state_and_cause : states) {
+            const auto state = state_and_cause.first;
+            const auto cause = state_and_cause.second;
+            for (const auto& row : gate_rows) {
+                for (const auto policy : {SuspectContentPolicy::reject, SuspectContentPolicy::allow_with_warning}) {
+                    f = one([&](auto& t) { t.gate = state; t.gate_cause = cause; t.gate_findings = {row.symbol}; }, policy);
+                    const auto expected = policy == SuspectContentPolicy::reject ? row.klass_reject : row.klass_allow;
+                    if (!Is(f, expected, row.code)) std::cerr << "gate code: " << row.symbol << std::endl;
+                    CHECK(Is(f, expected, row.code));
+                    if (std::string(row.code) == "gate-unknown") CHECK(f[0].reason == row.symbol);
+                }
+            }
+            // Together: one finding that is not confirmable decides the verdict; the others are still told one by one.
+            for (const auto policy : {SuspectContentPolicy::reject, SuspectContentPolicy::allow_with_warning}) {
+                f = one([&](auto& t) { t.gate = state; t.gate_cause = cause; t.gate_findings = {"unconfirmed-content", "nothing-measured"}; }, policy);
+                CHECK(f.size() == 2 && f[0].code == "gate-unconfirmed-content" && f[1].code == "gate-nothing-measured");
+                CHECK(DecideVerdict(f, UnverifiedPolicy::confirm_with_warning, true) ==
+                    (policy == SuspectContentPolicy::reject ? RecalibrationVerdict::unusable : RecalibrationVerdict::usable_unverified));
+            }
+            f = one([&](auto& t) { t.gate = state; t.gate_cause = cause; t.gate_findings = {"nothing-measured", "dx-unmeasured", "placement-unverified"}; });
+            CHECK(f.size() == 3 && std::all_of(f.begin(), f.end(), [](const RecalibrationFinding& x) { return x.klass == FindingClass::unverified; }) &&
+                DecideVerdict(f, UnverifiedPolicy::confirm_with_warning, true) == RecalibrationVerdict::usable_unverified);
+            f = one([&](auto& t) { t.gate = state; t.gate_cause = cause; t.gate_findings = {"nothing-measured", "transition-outside-band"}; });
+            CHECK(DecideVerdict(f, UnverifiedPolicy::confirm_with_warning, true) == RecalibrationVerdict::unusable);
+            f = one([&](auto& t) { t.gate = state; t.gate_cause = cause; t.gate_findings = {"nothing-measured", "nothing-measured"}; });   // a code is told once
+            CHECK(Is(f, FindingClass::unverified, "gate-nothing-measured"));
+            // A gate that is not `pass` and gives nothing to explain it is not trusted.
+            f = one([&](auto& t) { t.gate = state; t.gate_cause = cause; });
+            CHECK(Is(f, FindingClass::rejected, "gate-unknown"));
+        }
+        // A finding of the gate is not looked at when the gate passed or was not run (the state is the whole story there).
+        f = one([](auto& t) { t.gate = gate::GateState::pass; t.gate_findings = {"unconfirmed-content"}; });
+        CHECK(f.empty());
+        // The default is the answer in force: Q1 is "reject" until the owner says otherwise (one constant, one place).
+        CHECK(kRecalibrationSuspectContentPolicy == SuspectContentPolicy::reject);
+        const RecalibrationJobRequest fresh_request;
+        CHECK(fresh_request.suspect_content_policy == kRecalibrationSuspectContentPolicy);
+        f = one([](auto& t) { t.gate = gate::GateState::fail; t.gate_cause = gate::GateCause::unmeasurable; t.gate_findings = {"one-sided-content"}; });
+        CHECK(Is(f, kRecalibrationSuspectContentPolicy == SuspectContentPolicy::reject ? FindingClass::rejected : FindingClass::unverified, "gate-one-sided-content"));
     }
     // The verdict, for each policy. Nothing without a candidate is usable; anything found wrong is not; only a doubt follows the policy.
     {
@@ -443,6 +567,8 @@ void JobRefusals(const Pair& pair) {
             {Fake::no_overlap, "staging-noov", FindingClass::no_candidate, "no-overlap"},
             {Fake::displacement, "staging-disp", FindingClass::rejected, "reestimate-displacement"},
             {Fake::check_out_of_range, "staging-oor", FindingClass::rejected, "reestimate-not-verified"},
+            {Fake::check_doubtful, "staging-dbt", FindingClass::rejected, "reestimate-doubtful"},
+            {Fake::check_failed, "staging-fail", FindingClass::rejected, "reestimate-doubtful"},
         };
         for (const auto& c : cases) {
             for (const auto policy : {UnverifiedPolicy::confirm_with_warning, UnverifiedPolicy::refuse_to_confirm}) {
@@ -457,6 +583,18 @@ void JobRefusals(const Pair& pair) {
                 const auto confirmed = ConfirmRecalibration(o, settings, kHash, {true});
                 CHECK(!confirmed.written && confirmed.reason == "not-usable");
             }
+        }
+        {   // A check that was undetermined for a reason beyond "too few marks" says so, and is told apart from the checks that only lacked marks.
+            auto d = Request(settings, pair, "staging-dbt-lines", FakeComputation(Fake::check_doubtful));
+            const auto o = RunRecalibrationJob(d);
+            CHECK(HasLine(o.screen_lines, "合っていない疑いが見つかりました") && HasLine(o.screen_lines, "浮いているか") && !HasLine(o.screen_lines, "確かな値になりませんでした") && !o.ready);
+            CHECK(std::any_of(o.findings.begin(), o.findings.end(), [](const RecalibrationFinding& f) { return f.code == "reestimate-doubtful" && f.reason == "residual-shape"; }));
+            CHECK(HasLine(o.log_lines, "recalibration_finding class=rejected code=reestimate-doubtful reason=residual-shape"));
+            // The record of the run carries the state and the counts that the decision was made from.
+            const auto report = Tree(ReadAll(d.staging_folder / "recalibration-report.json"));
+            const auto& verification = At(report, "verification");
+            CHECK(At(verification, "state").string == "undetermined" && At(verification, "inliers").kind == json::JsonKind::number && At(verification, "points").kind == json::JsonKind::number);
+            CHECK(At(report, "verdict").string == "unusable" && !ConfirmRecalibration(o, settings, kHash, {true}).written);
         }
         auto r = Request(settings, pair, "staging-tilt", FakeComputation(Fake::tilt));
         const auto o = RunRecalibrationJob(r);
@@ -591,6 +729,8 @@ void WholeJob(const Pair& pair) {
     CHECK(o.candidate.has_value() && o.facts.gate.known && o.facts.creation_checked);
     CHECK(o.verdict == RecalibrationVerdict::usable_unverified && o.ready && o.unverified());
     CHECK(OnlyClass(o, FindingClass::unverified));
+    // A flat sheet: the estimate lacks marks and the gate measured nothing. Told by the codes of the reasons and of the gate's findings, not by the state.
+    CHECK(HasCode(o, "sample-estimate-undetermined") && HasCode(o, "gate-nothing-measured") && !HasCode(o, "sample-estimate-doubtful") && !HasCode(o, "gate-unknown"));
     CHECK(Has(o.screen_lines.front(), "未確認の校正"));
     CHECK(HasLine(o.screen_lines, "継ぎ目のずれ: 確かめられませんでした") || HasLine(o.screen_lines, "継ぎ目のずれ: 確かめが行われませんでした") ||
         HasLine(o.screen_lines, "継ぎ目のずれ: 測れない所があり、確かめられませんでした"));   // the gate's result is on the screen

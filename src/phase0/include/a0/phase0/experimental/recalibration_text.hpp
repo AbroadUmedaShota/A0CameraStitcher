@@ -111,6 +111,24 @@ enum class RecalibrationVerdict {usable,usable_unverified,unusable};
 // ---- The sentence for each finding ----
 struct RecalibrationSentence {std::string reason,remedy;};
 
+// What an estimator's reason code says, for the estimate of the pair, of the check on the new profile and of the sample alike (the reason
+// codes of content_registration.hpp). The doubtful ones (the placement may be wrong) and the "too few marks" ones are told by the same table.
+[[nodiscard]] inline RecalibrationSentence RecalibrationEstimateReasonSentence(const std::string& r){
+    if(r=="unique-blocks")return {"模様が足りません","文字や図形が上から下まである紙で撮り直してください"};
+    if(r=="prediction-uncertain")return {"精度が出ません","模様の多い紙で撮り直してください"};
+    if(r=="residual-shape")return {"紙が浮いているか、平らでないようです","机に直に平らに置いて撮り直してください"};
+    if(r=="not-converged" || r=="starts-disagree")return {"位置が一つに決まりません","紙を少し動かして撮り直してください"};
+    if(r=="repeating-only")return {"繰り返す模様だけで、位置が一つに決まりません","文字や図形がある紙で撮り直してください"};
+    // The coarse stage found no block whose place is single: too few marks, or a pattern that repeats (a grid, a ruled sheet).
+    if(r=="coarse-no-unique-blocks")return {"位置が一つに決まる模様がありません（模様が足りないか、同じ模様の繰り返しです）","文字や図形が上から下まである紙で撮り直してください。罫線や格子だけの紙は使えません"};
+    if(r=="coarse-inconsistent" || r=="coarse-ambiguous")return {"大まかな位置が一つに決まりません","紙を少し動かして、模様の多い紙で撮り直してください"};
+    if(r=="too-few-points")return {"位置を測れる点が足りません","文字や図形が多い紙で撮り直してください"};
+    if(r=="no-overlap")return {"左右の重なりに、位置を測る中身がありません","継ぎ目のあたりに文字や線がある紙を置いて撮り直してください"};
+    if(r=="brown-lowe")return {"位置を測った点の多くが外れていて、確かな値になりません","紙を替えて撮り直してください"};
+    if(r=="fit-failed")return {"位置の当てはめが成り立ちませんでした","紙を替えて撮り直してください"};
+    return {"位置を確かに決められませんでした","模様の多い紙で撮り直してください"};
+}
+
 [[nodiscard]] inline RecalibrationSentence RecalibrationFindingSentence(const RecalibrationFinding& finding){
     const auto& c=finding.code;
     const auto& r=finding.reason;
@@ -128,19 +146,7 @@ struct RecalibrationSentence {std::string reason,remedy;};
     // The computation's refusals.
     if(c=="no-overlap")return {"左右の重なりが見つかりません","継ぎ目のあたりに文字や線がある紙を置いて撮り直してください。カメラの間が広すぎて重なりが無い事もあります"};
     if(c=="estimate-failed")return {"位置の計算が成り立ちませんでした","紙を替えて撮り直してください"};
-    if(c=="estimate-not-verified"){
-        if(r=="unique-blocks")return {"模様が足りません","文字や図形が上から下まである紙で撮り直してください"};
-        if(r=="prediction-uncertain")return {"精度が出ません","模様の多い紙で撮り直してください"};
-        if(r=="residual-shape")return {"紙が浮いているか、平らでないようです","机に直に平らに置いて撮り直してください"};
-        if(r=="not-converged" || r=="starts-disagree")return {"位置が一つに決まりません","紙を少し動かして撮り直してください"};
-        if(r=="repeating-only")return {"繰り返す模様だけで、位置が一つに決まりません","文字や図形がある紙で撮り直してください"};
-        // The coarse stage found no block whose place is single: too few marks, or a pattern that repeats (a grid, a ruled sheet).
-        if(r=="coarse-no-unique-blocks")return {"位置が一つに決まる模様がありません（模様が足りないか、同じ模様の繰り返しです）","文字や図形が上から下まである紙で撮り直してください。罫線や格子だけの紙は使えません"};
-        if(r=="coarse-inconsistent" || r=="coarse-ambiguous")return {"大まかな位置が一つに決まりません","紙を少し動かして、模様の多い紙で撮り直してください"};
-        if(r=="too-few-points")return {"位置を測れる点が足りません","文字や図形が多い紙で撮り直してください"};
-        if(r=="no-overlap")return {"左右の重なりに、位置を測る中身がありません","継ぎ目のあたりに文字や線がある紙を置いて撮り直してください"};
-        return {"位置を確かに決められませんでした","模様の多い紙で撮り直してください"};
-    }
+    if(c=="estimate-not-verified")return RecalibrationEstimateReasonSentence(r);
     if(c=="tilt-exceeded")return {"カメラの向きが変わったようです（傾きが許容を超えています）","チャートでの校正が要ります。技術担当へ知らせてください"};
     if(c=="height-exceeded")return {"カメラの高さ、ピント、ズームのどれかが変わったようです","チャートでの校正が要ります。高さとピントリングとズームは触らないでください"};
     if(c=="creation-check-failed")return {"カメラの間隔が広すぎて、撮るたびの自動の合わせ込みの範囲では継ぎ目を保てません","間隔を少し狭めてください"};
@@ -152,13 +158,29 @@ struct RecalibrationSentence {std::string reason,remedy;};
         if(finding.klass==FindingClass::unverified)return {"新しい校正での確かめが、確かな値になりませんでした","紙を替えて撮り直すと確かめられます"};
         return {"新しい校正で確かめたところ、位置が範囲の外になりました","撮り直してください"};
     }
+    // The check on the new profile found a sign that the placement does not fit (not only too few marks): the calibration is not offered.
+    if(c=="reestimate-doubtful"){
+        const auto s=RecalibrationEstimateReasonSentence(r);
+        return {"新しい校正で確かめたところ、合っていない疑いが見つかりました（"+s.reason+"）",s.remedy};
+    }
     if(c=="stopped")return {"中止しました","何も書いていません。前の校正のままです"};
-    // The sample and its gate.
+    // The sample and its gate. The first group is "too little to measure": nothing was found wrong. The second is a sign that it does not fit.
     if(c=="gate-undetermined")return {"継ぎ目のずれを確かめられませんでした","継ぎ目の線の上に文字や線が多い紙で撮り直すと確かめられます"};
-    if(c=="gate-unmeasurable")return {"継ぎ目のずれを測れない所があり、確かめられませんでした","継ぎ目の線の上に文字や線が多い紙で撮り直すと確かめられます"};
+    if(c=="gate-nothing-measured")return {"継ぎ目の上に測れる所が無く、継ぎ目のずれを確かめられませんでした","継ぎ目の線の上に文字や線が多い紙で撮り直すと確かめられます"};
+    if(c=="gate-content-unmeasured")return {"継ぎ目の上の文字や線の多くを測れず、継ぎ目のずれを確かめきれませんでした","継ぎ目の線の上に文字や線が多い紙で撮り直すと確かめられます"};
+    if(c=="gate-dx-unmeasured")return {"継ぎ目の左右のずれを測れる線（縦線）が無く、確かめきれませんでした","縦線や文字がある紙で撮り直すと確かめられます"};
+    if(c=="gate-placement-unverified")return {"左右の写真の位置が合っているかを、模様では確かめきれませんでした","模様の多い紙で撮り直すと確かめられます"};
     if(c=="gate-not-run")return {"継ぎ目のずれの確かめが行われませんでした","撮り直してください"};
     if(c=="gate-fail")return {"継ぎ目のずれが基準を超えました","紙を替えて撮り直してください"};
+    if(c=="gate-unconfirmed-content")return {"基準を超えた所があり、測り直しでは確かめられませんでした","紙を平らに置き直して撮り直してください"};
+    if(c=="gate-one-sided-content")return {"片方のカメラにだけ写っている所があります（紙が浮いているか、位置が合っていません）","紙を平らに置き直して撮り直してください"};
+    if(c=="gate-transition-outside-band")return {"継ぎ目の混ぜ合わせの幅が、想定の範囲の外です","技術担当へ知らせてください"};
+    if(c=="gate-unknown")return {"継ぎ目の確かめで、想定していない結果が出ました","技術担当へ知らせてください"};
     if(c=="sample-estimate-undetermined")return {"見本の合成で、位置の推定が確かになりませんでした","紙を替えて撮り直すと確かめられます"};
+    if(c=="sample-estimate-doubtful"){
+        const auto s=RecalibrationEstimateReasonSentence(r);
+        return {"見本の合成で、位置が合っていない疑いが見つかりました（"+s.reason+"）",s.remedy};
+    }
     if(c=="sample-estimate-out-of-envelope")return {"見本の合成で、位置が範囲の外になりました","撮り直してください"};
     if(c=="sample-skipped")return {"見本を合成できませんでした（今の条件に合いません）","撮り直してください。続く時は技術担当へ知らせてください"};
     if(c=="sample-failed")return {"見本の合成に失敗しました（時間かメモリが足りなかった可能性があります）","撮り直してください"};

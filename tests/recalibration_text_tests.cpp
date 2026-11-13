@@ -109,7 +109,9 @@ void Sentences() {
     }
     CHECK(distinct.size() == 12);   // twelve codes, twelve different sentences (the unchecked variant of reestimate-not-verified is a thirteenth)
     const char* lane[] = {"no-v3-condition", "staging-exists", "staging-in-settings", "live-not-stopped", "decode-failed", "hash-mismatch", "size-mismatch", "profile-unreadable", "out-of-memory", "job-failed",
-        "gate-undetermined", "gate-unmeasurable", "gate-not-run", "gate-fail", "sample-estimate-undetermined", "sample-estimate-out-of-envelope", "sample-skipped", "sample-failed"};
+        "gate-undetermined", "gate-nothing-measured", "gate-content-unmeasured", "gate-dx-unmeasured", "gate-placement-unverified", "gate-not-run", "gate-fail",
+        "gate-unconfirmed-content", "gate-one-sided-content", "gate-transition-outside-band", "gate-unknown", "reestimate-doubtful",
+        "sample-estimate-undetermined", "sample-estimate-doubtful", "sample-estimate-out-of-envelope", "sample-skipped", "sample-failed"};
     for (const auto* code : lane) {
         const auto s = RecalibrationFindingSentence({FindingClass::rejected, code, {}});
         CHECK(!s.reason.empty() && !s.remedy.empty() && !Has(s.reason, "理由を特定できません") && Plain(s.reason) && Plain(s.remedy));
@@ -132,6 +134,39 @@ void Sentences() {
     CHECK(wrong.reason != unchecked.reason && Has(wrong.reason, "範囲の外") && Has(unchecked.reason, "確かな値になりませんでした"));
     CHECK(Has(RecalibrationFindingSentence({FindingClass::unverified, "gate-undetermined", {}}).reason, "確かめられませんでした"));
     CHECK(Has(RecalibrationFindingSentence({FindingClass::rejected, "gate-fail", {}}).reason, "基準を超えました"));
+    // The codes of the gate's findings each have their own sentence, and the ones that are not "too little to measure" are told apart from them.
+    {
+        const char* too_little[] = {"gate-nothing-measured", "gate-content-unmeasured", "gate-dx-unmeasured", "gate-placement-unverified", "gate-undetermined"};
+        std::set<std::string> reasons;
+        for (const auto* code : too_little) {
+            const auto s = RecalibrationFindingSentence({FindingClass::unverified, code, {}});
+            CHECK(Has(s.reason, "確かめ") && Has(s.remedy, "確かめられます"));
+            reasons.insert(s.reason);
+        }
+        CHECK(reasons.size() == 5);
+        const auto unconfirmed = RecalibrationFindingSentence({FindingClass::rejected, "gate-unconfirmed-content", {}});
+        CHECK(Has(unconfirmed.reason, "基準を超えた所があり、測り直しでは確かめられませんでした"));
+        const auto one_sided = RecalibrationFindingSentence({FindingClass::rejected, "gate-one-sided-content", {}});
+        CHECK(Has(one_sided.reason, "片方のカメラにだけ写っている所があります") && Has(one_sided.reason, "紙が浮いているか"));
+        // The sentence of a code does not change with the answer to Q1 (the class says whether it can be confirmed; the words say what was found).
+        for (const char* code : {"gate-unconfirmed-content", "gate-one-sided-content"})
+            CHECK(RecalibrationFindingSentence({FindingClass::rejected, code, {}}).reason == RecalibrationFindingSentence({FindingClass::unverified, code, {}}).reason);
+        CHECK(Has(RecalibrationFindingSentence({FindingClass::rejected, "gate-transition-outside-band", {}}).remedy, "技術担当"));
+        CHECK(Has(RecalibrationFindingSentence({FindingClass::rejected, "gate-unknown", "a-code-nobody-knows"}).remedy, "技術担当"));
+        CHECK(!Has(RecalibrationFindingSentence({FindingClass::rejected, "gate-unknown", "a-code-nobody-knows"}).reason, "a-code-nobody-knows"));   // a code is never put on the screen
+    }
+    // A check or a sample that is undetermined for a reason beyond "too few marks" says "a sign that it does not fit", with the reason's own words;
+    // the same table as the estimate of the pair (one place for the words of a reason).
+    for (const char* code : {"reestimate-doubtful", "sample-estimate-doubtful"}) {
+        const auto sentence = [&](const char* r) { return RecalibrationFindingSentence({FindingClass::rejected, code, r}); };
+        CHECK(Has(sentence("residual-shape").reason, "合っていない疑い") && Has(sentence("residual-shape").reason, "浮いているか") && Has(sentence("residual-shape").remedy, "平らに"));
+        CHECK(Has(sentence("starts-disagree").reason, "一つに決まりません") && Has(sentence("coarse-ambiguous").reason, "大まかな位置"));
+        CHECK(Has(sentence("brown-lowe").reason, "外れていて") && Has(sentence("fit-failed").reason, "当てはめ"));
+        CHECK(Has(sentence("").reason, "合っていない疑い") && Has(sentence("a-code-nobody-knows").reason, "合っていない疑い") && !Has(sentence("a-code-nobody-knows").reason, "nobody"));
+        CHECK(sentence("residual-shape").reason != RecalibrationFindingSentence({FindingClass::unverified, "reestimate-not-verified", "residual-shape"}).reason);
+    }
+    CHECK(Has(RecalibrationFindingSentence({FindingClass::rejected, "reestimate-doubtful", "residual-shape"}).reason, "新しい校正で確かめたところ"));
+    CHECK(Has(RecalibrationFindingSentence({FindingClass::rejected, "sample-estimate-doubtful", "residual-shape"}).reason, "見本の合成で"));
     // The tilt and the height send the person to the chart, not to a retake.
     CHECK(Has(RecalibrationFindingSentence({FindingClass::rejected, "tilt-exceeded", {}}).remedy, "チャート"));
     CHECK(Has(RecalibrationFindingSentence({FindingClass::rejected, "height-exceeded", {}}).remedy, "チャート"));
