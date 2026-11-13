@@ -268,7 +268,8 @@ inline std::string GateLine(const RecalibrationGateFacts& g){
     switch(verdict){
     case RecalibrationVerdict::usable: return "この校正は使えます";
     case RecalibrationVerdict::usable_unverified:
-        return "未確認の校正です。継ぎ目のずれを確かめられませんでした。数と見本を見て、使うかどうかを決めてください";
+        // What could not be checked is told by the lines of reasons below; this line must not name it (the gate may have passed).
+        return "未確認の校正です。数と見本を見て、使うかどうかを決めてください";
     case RecalibrationVerdict::unusable: return "この校正は使えません";
     }
     return {};

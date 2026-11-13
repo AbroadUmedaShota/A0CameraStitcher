@@ -226,7 +226,7 @@ void ResultLines() {
 void Verdicts() {
     CHECK(RecalibrationVerdictLine(RecalibrationVerdict::usable) == "この校正は使えます");
     CHECK(Has(RecalibrationVerdictLine(RecalibrationVerdict::usable_unverified), "未確認の校正"));
-    CHECK(Has(RecalibrationVerdictLine(RecalibrationVerdict::usable_unverified), "確かめられませんでした"));
+    CHECK(!Has(RecalibrationVerdictLine(RecalibrationVerdict::usable_unverified), "確かめられませんでした"));   // what was not checked is for the reason lines
     CHECK(RecalibrationVerdictLine(RecalibrationVerdict::unusable) == "この校正は使えません");
     CHECK(RecalibrationVerdictCode(RecalibrationVerdict::usable_unverified) == "usable-unverified");
     // The screen: the verdict first, then why, then the numbers.
@@ -239,6 +239,24 @@ void Verdicts() {
     CHECK(lines.size() >= 4 && Has(lines.front(), "未確認の校正"));
     CHECK(Has(lines[1], "継ぎ目のずれを確かめられませんでした。"));
     CHECK(Has(lines[2], "A に対する B の位置の変化"));
+    // The check of the estimate on the new profile was not trusted but the gate passed: the screen must not say "the seam was not checked" and
+    // "the seam is within the line" together. The verdict line says only that the calibration is unchecked; the reasons say what.
+    {
+        RecalibrationResultFacts passed;
+        passed.display = SampleDisplay();
+        passed.gate = Gate(gate::GateState::pass);
+        passed.creation_checked = true;
+        const std::vector<RecalibrationFinding> estimate_only{{FindingClass::unverified, "reestimate-not-verified", "too-few-points"}};
+        const auto both = RecalibrationScreenLines(RecalibrationVerdict::usable_unverified, estimate_only, passed);
+        CHECK(Has(both.front(), "未確認の校正") && HasLine(both, "新しい校正での確かめが、確かな値になりませんでした") && HasLine(both, "継ぎ目のずれ: 基準内"));
+        CHECK(!HasLine(both, "継ぎ目のずれを確かめられませんでした"));
+        for (const auto& l : both) CHECK(!(Has(l, "確かめられませんでした") && Has(l, "基準内")));
+        // When the gate itself could not decide, the reason line (not the verdict line) says so.
+        passed.gate = Gate(gate::GateState::undetermined);
+        const std::vector<RecalibrationFinding> gate_only{{FindingClass::unverified, "gate-undetermined", {}}};
+        const auto gate_lines = RecalibrationScreenLines(RecalibrationVerdict::usable_unverified, gate_only, passed);
+        CHECK(!Has(gate_lines.front(), "確かめられませんでした") && Has(gate_lines[1], "継ぎ目のずれを確かめられませんでした"));
+    }
     // A calibration that cannot be used says why in a way the person can act on.
     const auto refused = RecalibrationScreenLines(RecalibrationVerdict::unusable, {{FindingClass::rejected, "tilt-exceeded", {}}}, RecalibrationResultFacts{});
     CHECK(refused.front() == "この校正は使えません" && HasLine(refused, "チャートでの校正が要ります"));
