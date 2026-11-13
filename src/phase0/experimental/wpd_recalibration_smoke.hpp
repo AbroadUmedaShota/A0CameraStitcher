@@ -534,7 +534,9 @@ int RunRecalibrationUiSmoke(const std::filesystem::path& fixtures,const std::fil
                 m2e::WriteFixedCompositeConditionV3(revisions,second);
             }
             const auto after_other=snapshot(settings);
+            const std::string pressed_candidate=recal_ui.outcome && recal_ui.outcome->candidate?recal_ui.outcome->candidate->sha256:std::string{};
             press(kRecalUseUnchecked);tick();
+            check(!pressed_candidate.empty() && recal_ui.confirmed_unchecked_sha==pressed_candidate && !RecalibrationUncheckedInForce(),"changed: the unchecked mark is remembered from the press, and is not shown for a revision that is not that candidate");
             check(recal_ui.confirmations_written==confirmed_before && snapshot(settings)==after_other,"changed: nothing is written over a revision that appeared meanwhile");
             check(phase()==RecalPhase::idle && has(capture_status,L"条件が変わっています") && has(capture_status,L"いま有効な校正は改訂 2 です"),"changed: the status says so and names the revision in force");
             check(fixed_source.loaded_v3 && fixed_source.loaded_v3->condition.revision.sequence==2,"changed: Live read the revision that is in force");

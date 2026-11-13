@@ -668,6 +668,9 @@ void RecalibrationDecide(){
         RecalibrationConfirmOptions options;options.acknowledge_unverified=action==RecalAction::use_unchecked;
         RecalibrationConfirmResult confirmed;
         bool state_unknown=false;
+        // The unchecked mark is remembered from the press on, not from a confirmation that came back: a write that ends in a failed read-back or
+        // an exception may still have put this candidate in force, and the mark must then show. It only shows for a revision with this SHA-256.
+        if(action==RecalAction::use_unchecked && r.outcome->candidate)r.confirmed_unchecked_sha=r.outcome->candidate->sha256;
         try{
             confirmed=ConfirmRecalibration(*r.outcome,RecalibrationSettingsFolder(),
                 [](const std::vector<unsigned char>& bytes){return a0::phase0::Sha256Hex(bytes);},options);
