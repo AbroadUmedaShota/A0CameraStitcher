@@ -1428,6 +1428,35 @@ if(BUILD_TESTING)
         add_test(NAME still_review_condition_v3_contracts COMMAND a0_still_review_condition_v3_tests "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2"
             $<TARGET_FILE:A0CameraStitcher.StillReview> "${CMAKE_SOURCE_DIR}/docs/examples/wpd-registration-policy.example.json")
         set_tests_properties(still_review_condition_v3_contracts PROPERTIES TIMEOUT 1200)
+        # The recalibration of camera B from one pair (#434 lane B): the words (sentences for every reason, the numbers of the result screen, the
+        # directions of the drawing), and the job and its confirmation with a stand-in for the computation (settings folder untouched by the job,
+        # what a confirmation writes and in what order, the unchecked calibration and its acknowledgement, the command line). Camera and window free.
+        # The third argument says whether StillReview was built with A0_BUILD_WPD_RECALIBRATION (on) or not (off).
+        add_executable(a0_recalibration_text_tests tests/recalibration_text_tests.cpp)
+        target_include_directories(a0_recalibration_text_tests PRIVATE src/phase0/include src/common/include)
+        target_link_libraries(a0_recalibration_text_tests PRIVATE a0_m2_capture_registration a0_m2_fixed_composite_recalibration)
+        if(MSVC)
+            target_compile_options(a0_recalibration_text_tests PRIVATE /W4 /permissive- /EHsc /fp:precise /utf-8)
+        endif()
+        add_test(NAME recalibration_text_contracts COMMAND a0_recalibration_text_tests)
+        set_tests_properties(recalibration_text_contracts PROPERTIES TIMEOUT 120)
+        add_executable(a0_recalibration_job_tests tests/recalibration_job_tests.cpp)
+        target_include_directories(a0_recalibration_job_tests PRIVATE src/phase0/include src/common/include)
+        target_link_libraries(a0_recalibration_job_tests PRIVATE a0_m2_offline_stitcher a0_m2_fixed_composite a0_m2_fixed_composite_v2 a0_m2_capture_registration
+            a0_m2_rig_profile_v2 a0_m2_fixed_composite_recalibration ole32 windowscodecs)
+        target_compile_definitions(a0_recalibration_job_tests PRIVATE NOMINMAX)
+        if(MSVC)
+            target_compile_options(a0_recalibration_job_tests PRIVATE /W4 /permissive- /EHsc /fp:precise /utf-8)
+        endif()
+        add_dependencies(a0_recalibration_job_tests A0CameraStitcher.StillReview)
+        if(A0_BUILD_WPD_RECALIBRATION)
+            set(a0_recalibration_cli_mode on)
+        else()
+            set(a0_recalibration_cli_mode off)
+        endif()
+        add_test(NAME recalibration_job_contracts COMMAND a0_recalibration_job_tests "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2"
+            $<TARGET_FILE:A0CameraStitcher.StillReview> ${a0_recalibration_cli_mode})
+        set_tests_properties(recalibration_job_contracts PROPERTIES TIMEOUT 900)
         add_executable(a0_review_viewport_tests tests/review_viewport_tests.cpp)
         target_include_directories(a0_review_viewport_tests PRIVATE src/m2/include)
         target_link_libraries(a0_review_viewport_tests PRIVATE a0_m2_render)
@@ -1436,10 +1465,17 @@ if(BUILD_TESTING)
         target_include_directories(a0_review_alignment_tests PRIVATE src/m2/include)
         target_link_libraries(a0_review_alignment_tests PRIVATE a0_m2_render)
         add_test(NAME review_alignment_contracts COMMAND a0_review_alignment_tests)
+        # Recalibration of camera B from one pair (#434): the development command line of StillReview (--recalibrate-from-pair) and, in the
+        # preview, the button. OFF by default: with it OFF neither has an entrance (the sources are not compiled in and the library is not linked).
+        option(A0_BUILD_WPD_RECALIBRATION "Build the recalibration of camera B from one pair into StillReview and the development preview (#434)" OFF)
         add_executable(A0CameraStitcher.StillReview src/phase0/experimental/still_review_main.cpp)
         target_include_directories(A0CameraStitcher.StillReview PRIVATE src/phase0/include)
         target_link_libraries(A0CameraStitcher.StillReview PRIVATE a0_m2_offline_stitcher a0_m2_fixed_composite a0_m2_fixed_composite_v2 user32 gdi32 windowscodecs ole32 comdlg32)
         target_compile_definitions(A0CameraStitcher.StillReview PRIVATE UNICODE _UNICODE NOMINMAX)
+        if(A0_BUILD_WPD_RECALIBRATION)
+            target_link_libraries(A0CameraStitcher.StillReview PRIVATE a0_m2_fixed_composite_recalibration)
+            target_compile_definitions(A0CameraStitcher.StillReview PRIVATE A0_ENABLE_WPD_RECALIBRATION=1)
+        endif()
         if(A0_BUILD_STITCH_EVAL)
             add_dependencies(m2_stitch_eval_contracts A0CameraStitcher.StillReview)
             add_test(NAME saved_review_evaluation_contracts COMMAND m2_stitch_eval_contracts

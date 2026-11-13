@@ -10,6 +10,9 @@
 #include "a0/phase0/experimental/fixed_composite_tool.hpp"
 #include "a0/phase0/experimental/fixed_composite_tool_v2.hpp"
 #include "a0/phase0/experimental/fixed_composite_cli_v3.hpp"
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+#include "a0/phase0/experimental/recalibration_cli.hpp"
+#endif
 #include "a0/phase0/experimental/seam_crops_export.hpp"
 #include "a0/m2/experimental/seam_crops.hpp"
 #include "a0/m2/stitch_job_manifest.hpp"
@@ -920,6 +923,16 @@ int wmain(int argc,wchar_t** argv){
             return a0::phase0::experimental::RunFixedConditionV3Command(std::vector<std::wstring>(argv+2,argv+argc),std::cout,
                 [](const std::vector<unsigned char>& bytes){return a0::m2::experimental::FixedCompositeBytesSha256(bytes);},std::chrono::system_clock::now());
         }
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+        if(argc>=2 && std::wstring_view(argv[1])==a0::phase0::experimental::kRecalibrationCommandName){
+            // Development entry (#434): recalibrates camera B from one saved pair and reports what it found. Reads the settings folder,
+            // writes only into a new staging folder, never confirms, never touches a camera. Present only in a build with
+            // A0_BUILD_WPD_RECALIBRATION.
+            SetConsoleOutputCP(CP_UTF8);
+            return a0::phase0::experimental::RunRecalibrationCommand(std::vector<std::wstring>(argv+2,argv+argc),std::cout,
+                [](const std::vector<unsigned char>& bytes){return a0::m2::experimental::FixedCompositeBytesSha256(bytes);},std::chrono::system_clock::now());
+        }
+#endif
         if(argc==4 && std::wstring_view(argv[1])==L"--export-seam-crops"){
             // #418 stage 0: the seam's top, middle and bottom at native size in one PNG, without a window.
             // File-only; the saved review is not changed and an existing file is never overwritten.
