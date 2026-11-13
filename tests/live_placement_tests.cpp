@@ -186,13 +186,14 @@ void AfterCapture(){
     profile.q_px={0.0,0.5,0.0};profile.row_spacing_px=10;profile.a_px=4;profile.l_px=8;
     jpeg.parallax=profile;
     const auto serial=machine.Serial(),wanted=machine.WantedSerial();
-    CHECK(machine.ApplyCapture(jpeg,"G1",kSha));
+    CHECK(machine.ApplyCapture(jpeg,"G1",kSha,0.5));
     const auto view=machine.View();
     CHECK(Same(view.mapping,jpeg) && !view.mapping.parallax);   // the nine numbers are the JPEG's, to the bit
     CHECK(view.serial==serial+1 && machine.WantedSerial()==wanted+1 && view.source==LivePlacementSource::after_capture);
     CHECK(view.activity==LivePlacementActivity::idle && !view.ask && view.outcome==LivePlacementOutcomeKind::none && !machine.BeginJob());
     CHECK(view.capture && view.capture->level=="G1" && view.capture->layer_two_dropped && Same(view.capture->before,live.mapping) &&
         view.capture->before_source==LivePlacementSource::auto_start && !view.capture->difference_px);
+    CHECK(view.capture->layer_two_max_px && *view.capture->layer_two_max_px==0.5);   // the largest shift of what was dropped, as the caller gave it
     CHECK(machine.CaptureDifferencePending());
     machine.SetCaptureDifference(std::numeric_limits<double>::quiet_NaN());
     machine.SetCaptureDifference(-1.0);
@@ -201,13 +202,36 @@ void AfterCapture(){
     CHECK(!machine.CaptureDifferencePending() && machine.Capture()->difference_px==2.5);
     // A level without layer 2: nothing is dropped.
     auto plain=Placed(Pose{0.3,0,0,1.0,0,0});
-    CHECK(plain.ApplyCapture(ex::RegisteredMapping{kBase,{},std::nullopt},"G4",kSha) && !plain.Capture()->layer_two_dropped && Same(plain.Placement(),ex::RegisteredMapping{kBase,{},std::nullopt}));
+    CHECK(plain.ApplyCapture(ex::RegisteredMapping{kBase,{},std::nullopt},"G4",kSha,0.5) && !plain.Capture()->layer_two_dropped && !plain.Capture()->layer_two_max_px &&
+        Same(plain.Placement(),ex::RegisteredMapping{kBase,{},std::nullopt}));
     // A profile whose samples are all zero is no layer 2 either.
     ex::RegisteredMapping flat{kBase,{},std::nullopt};
     ex::ParallaxProfile zero;zero.q_px={0.0,0.0};
     flat.parallax=zero;
     auto zeros=Placed(Pose{0.3,0,0,1.0,0,0});
-    CHECK(zeros.ApplyCapture(flat,"G2",kSha) && !zeros.Capture()->layer_two_dropped);
+    CHECK(zeros.ApplyCapture(flat,"G2",kSha,0.5) && !zeros.Capture()->layer_two_dropped && !zeros.Capture()->layer_two_max_px);
+    // A layer 2 with no usable number (none, zero, negative, not finite): dropped, and no number is kept.
+    for(const std::optional<double> number:{std::optional<double>{},std::optional<double>{0.0},std::optional<double>{-0.5},std::optional<double>{std::numeric_limits<double>::infinity()},
+        std::optional<double>{std::numeric_limits<double>::quiet_NaN()}}){
+        auto without=Placed(Pose{0.3,0,0,1.0,0,0});
+        CHECK(without.ApplyCapture(jpeg,"G1",kSha,number) && without.Capture()->layer_two_dropped && !without.Capture()->layer_two_max_px);
+    }
+}
+
+// 7b. Layer 2 of the capture's record, for the sentence and the two log lines: the largest shift is taken from the record's summary only for a
+// mapping that carries a layer 2 that moves something, and the log fields are written by one function.
+void LayerTwoFields(){
+    ex::ParallaxProfile moving;moving.q_px={0.0,0.5,0.0};
+    ex::ParallaxProfile still;still.q_px={0.0,0.0};
+    const ex::RegisteredMapping with{kBase,{},moving},zero{kBase,{},still},none{kBase,{},std::nullopt};
+    CHECK(LivePlacementHasLayerTwo(with) && !LivePlacementHasLayerTwo(zero) && !LivePlacementHasLayerTwo(none));
+    CHECK(LivePlacementLayerTwoMaxPx(with,0.5)==0.5 && !LivePlacementLayerTwoMaxPx(zero,0.5) && !LivePlacementLayerTwoMaxPx(none,0.5));
+    CHECK(!LivePlacementLayerTwoMaxPx(with,0.0) && !LivePlacementLayerTwoMaxPx(with,-1.0) && !LivePlacementLayerTwoMaxPx(with,std::numeric_limits<double>::quiet_NaN()) &&
+        !LivePlacementLayerTwoMaxPx(with,std::numeric_limits<double>::infinity()));
+    CHECK(LivePlacementLayerTwoFields(true,0.5)=="layer_two_dropped=1 layer_two_max_px=0.5");
+    CHECK(LivePlacementLayerTwoFields(true,std::nullopt)=="layer_two_dropped=1 layer_two_max_px=unknown");
+    CHECK(LivePlacementLayerTwoFields(false,std::nullopt)=="layer_two_dropped=0 layer_two_max_px=0" && LivePlacementLayerTwoFields(false,0.5)=="layer_two_dropped=0 layer_two_max_px=0");
+    CHECK(LivePlacementLayerTwoFields(true,0.1)=="layer_two_dropped=1 layer_two_max_px=0.10000000000000001");
 }
 
 // 8. A shot that is not for the session's condition, or whose mapping is not a position, changes nothing.
@@ -363,6 +387,7 @@ int main(){
         ValueSemantics();
         NoDrift();
         Fields();
+        LayerTwoFields();
         BeyondEnvelope();
     }catch(const std::exception& e){++failures;std::cerr<<"unexpected exception: "<<e.what()<<'\n';}
     std::cout<<checks<<" checks, "<<failures<<" failures\n";

@@ -184,15 +184,17 @@ bool AskLiveEstimate(){
 }
 // A shot that ended with a JPEG made with the registered composite (#437 stage 1): the live C is drawn from now on with the mapping that the
 // JPEG was made with (its level's mapping, layer 2 left out), so what C shows after the shot is what the JPEG has. The JPEG itself is not
-// touched; its position is the one the shot estimated. The capture's log line writes that mapping with the same function as the live log.
+// touched; its position is the one the shot estimated. The capture's log line writes that mapping, and layer 2 that the live C does not draw
+// (its largest shift from the record's parallax summary), with the same functions as the live log.
 void ApplyCaptureToLivePlacement(const a0::m2::experimental::StillReviewResult& review){
     if(!review.fixed_composite_registration)return;
     const auto& record=*review.fixed_composite_registration;
     const auto& level=record.registration.level;
     const std::string code(a0::m2::experimental::GeometryLevelCode(level.level));
-    const bool applied=live_runtime && live_runtime->ApplyCapture(level.mapping,code,record.condition_sha256);
-    Log("pair_review_placement source=after-capture level="+code+" "+LivePlacementFields(level.mapping)+" condition_sha256="+record.condition_sha256+
-        " applied_to_live="+(applied?"1":"0")+" quality_accepted=0");
+    const auto layer_two_max=LivePlacementLayerTwoMaxPx(level.mapping,record.registration.parallax.summary.max_shift_px);
+    const bool applied=live_runtime && live_runtime->ApplyCapture(level.mapping,code,record.condition_sha256,layer_two_max);
+    Log("pair_review_placement source=after-capture level="+code+" "+LivePlacementFields(level.mapping)+" condition_sha256="+record.condition_sha256+" "+
+        LivePlacementLayerTwoFields(LivePlacementHasLayerTwo(level.mapping),layer_two_max)+" applied_to_live="+(applied?"1":"0")+" quality_accepted=0");
 }
 void LogPreviewChoice(const FixedPreviewChoice& choice){
     std::ostringstream line;line.imbue(std::locale::classic());
@@ -2595,6 +2597,7 @@ int RunLiveCUiSmoke(){
         m2::StillReviewResult review;
         m2::SavedFixedCompositeRegistration record;
         record.condition_sha256=sha;record.registration.level.level=level;record.registration.level.mapping=std::move(mapping);
+        if(layer_two)record.registration.parallax.summary.max_shift_px=0.4;   // the largest shift of that layer 2 (the q samples' largest)
         review.fixed_composite_registration=std::move(record);
         return review;
     };
@@ -2611,14 +2614,14 @@ int RunLiveCUiSmoke(){
         ApplyCaptureToLivePlacement(shot(jpeg_mapping,m2::GeometryLevel::g1,std::string(64,'1'),true));
         std::cout.rdbuf(original_buffer);
         const auto text=captured.str();
-        check(contains(text,"pair_review_placement source=after-capture level=G1 "+LivePlacementFields(jpeg_mapping)+" condition_sha256="+std::string(64,'1')+" applied_to_live=1"));
-        check(contains(text,"C live_placement_after_capture serial="+std::to_string(serial+1)+" level=G1 before_source=auto-button ") && contains(text,"layer_two_dropped=1") &&
-            contains(text,"seam_difference_px="));
+        const std::string layer_two_fields=LivePlacementLayerTwoFields(true,0.4);   // "layer_two_dropped=1 layer_two_max_px=0.40000000000000002"
+        check(contains(text,"pair_review_placement source=after-capture level=G1 "+LivePlacementFields(jpeg_mapping)+" condition_sha256="+std::string(64,'1')+" "+layer_two_fields+" applied_to_live=1"));
+        check(contains(text,"C live_placement_after_capture serial="+std::to_string(serial+1)+" level=G1 before_source=auto-button ") && contains(text,layer_two_fields+" seam_difference_px="));
         const auto after=live_runtime->Status();
         check(after.placement.source==LivePlacementSource::after_capture && after.placement.serial==serial+1 && LivePlacementSameMapping(after.placement.mapping,jpeg_mapping) &&
             !after.placement.mapping.parallax);
         check(after.placement.capture && after.placement.capture->difference_px && contains(after.state_text,"撮影の後の自動調整で位置を確定しました（G1）") &&
-            contains(after.state_text,"局所の補正はライブのCには出ません") && contains(after.state_text,"JPEGの画素"));
+            contains(after.state_text,"JPEGの局所の補正（最大 0.4 px）はライブのCには出ません") && contains(after.state_text,"JPEGの画素）動かしました。今のライブのCはJPEGと同じ位置です"));
     }
     // The session that follows the shot (what StartPreview does): the position is carried, drawn into the new plan, and no estimate is asked
     // for; the pair stays admitted and the picture goes on.

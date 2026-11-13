@@ -10,10 +10,12 @@
 #include <cmath>
 #include <deque>
 #include <functional>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -557,17 +559,26 @@ void AfterCapture(){
     ex::ParallaxProfile profile;
     profile.q_px={0.0,0.5,0.0};profile.row_spacing_px=10;profile.a_px=4;profile.l_px=8;
     jpeg.parallax=profile;
-    CHECK(!rig.runtime->ApplyCapture(jpeg,"G1",std::string(64,'9')));   // not for this condition
+    CHECK(!rig.runtime->ApplyCapture(jpeg,"G1",std::string(64,'9'),0.5));   // not for this condition
     CHECK(rig.runtime->Status().placement.serial==live.placement.serial && rig.runtime->Status().placement.source==LivePlacementSource::auto_start);
-    CHECK(rig.runtime->ApplyCapture(jpeg,"G1",kSha));
+    CHECK(rig.runtime->ApplyCapture(jpeg,"G1",kSha,0.5));   // layer 2's largest shift, 0.5 px, as the record's summary gives it
     auto status=rig.runtime->Status();
     CHECK(status.placement.source==LivePlacementSource::after_capture && status.placement.serial==live.placement.serial+1);
     CHECK(SameNine(status.placement.mapping,jpeg) && !status.placement.mapping.parallax);
-    // The sentence: the level, how far the shot moved the position along the seam (in the JPEG's pixels), and what the live C does not show.
-    const double distance=LiveSeamMappingDifferenceOutputPx(rig.plan,ex::RegisteredMapping{live_pose,{},std::nullopt},ex::RegisteredMapping{jpeg.pose,jpeg.surface,std::nullopt},kLiveSeamDifferenceRows);
+    // The sentence: the level, how far the live C moved from where it was before the shot along the seam (in the JPEG's pixels), that the live C
+    // is now at the JPEG's position, and layer 2 with its largest shift (what the live C does not show).
+    const ex::RegisteredMapping jpeg_without_layer_two{jpeg.pose,jpeg.surface,std::nullopt};
+    const double distance=LiveSeamMappingDifferenceOutputPx(rig.plan,ex::RegisteredMapping{live_pose,{},std::nullopt},jpeg_without_layer_two,kLiveSeamDifferenceRows);
     CHECK(status.placement.capture && status.placement.capture->difference_px && *status.placement.capture->difference_px==distance && distance>0);
-    CHECK(Contains(status.state_text,"撮影の後の自動調整で位置を確定しました（G1）") && Contains(status.state_text,"ライブの位置と継ぎ目で ") && Contains(status.state_text,"px（JPEGの画素）違います"));
-    CHECK(Contains(status.state_text,"局所の補正はライブのCには出ません") && Contains(status.state_text,"自動位置合わせ"));
+    // The live C against the JPEG's position after the shot: no distance (the number in the sentence is not that one).
+    CHECK(LiveSeamMappingDifferenceOutputPx(rig.plan,status.placement.mapping,jpeg_without_layer_two,kLiveSeamDifferenceRows)==0);
+    {
+        std::ostringstream moved;moved.imbue(std::locale::classic());moved<<std::fixed<<std::setprecision(1)<<distance;
+        CHECK(Contains(status.state_text,"撮影の後の自動調整で位置を確定しました（G1）。撮影の前のライブの位置から継ぎ目で最大 "+moved.str()+" px（JPEGの画素）動かしました。今のライブのCはJPEGと同じ位置です"));
+    }
+    CHECK(!Contains(status.state_text,"違います") && !Contains(status.state_text,"ライブの位置と継ぎ目"));
+    CHECK(Contains(status.state_text,"JPEGの局所の補正（最大 0.5 px）はライブのCには出ません") && Contains(status.state_text,"自動位置合わせ"));
+    CHECK(status.placement.capture && status.placement.capture->layer_two_dropped && status.placement.capture->layer_two_max_px && *status.placement.capture->layer_two_max_px==0.5);
     // Not drawn yet: until the next pass the plan is the one before, and nothing is asked for.
     CHECK(rig.runtime->CurrentPlan()==before_plan && rig.jobs.size()==1);
     const auto pass=rig.Pass();
@@ -603,8 +614,8 @@ void AfterCapture(){
     // The log: what the shot did, once, and P in the one form after it was drawn; the JPEG's side writes the same nine numbers with the same
     // function.
     CHECK(rig.Lines("C live_placement_after_capture ")==1 && Contains(rig.LogText(),"level=G1") && Contains(rig.LogText(),"before_source=auto-start") &&
-        Contains(rig.LogText(),LivePlacementFields(ex::RegisteredMapping{live_pose,{},std::nullopt},"before_")) && Contains(rig.LogText(),"layer_two_dropped=1") &&
-        Contains(rig.LogText(),"seam_difference_px="));
+        Contains(rig.LogText(),LivePlacementFields(ex::RegisteredMapping{live_pose,{},std::nullopt},"before_")) &&
+        Contains(rig.LogText(),LivePlacementLayerTwoFields(true,0.5)+" seam_difference_px=") && Contains(rig.LogText(),"layer_two_dropped=1 layer_two_max_px=0.5 "));
     const std::string expected="C live_placement serial="+std::to_string(live.placement.serial+1)+" source=after-capture "+LivePlacementFields(ex::RegisteredMapping{jpeg.pose,jpeg.surface,std::nullopt})+
         " condition_sha256="+kSha+" drawn=1";
     CHECK(Contains(rig.LogText(),expected));
@@ -615,11 +626,27 @@ void AfterCapture(){
     CHECK(rig.runtime->ApplyCapture(condition_position,"G4",kSha));
     (void)rig.Pass();
     status=rig.runtime->Status();
-    CHECK(Contains(status.state_text,"JPEGは条件の位置で作りました") && Contains(status.state_text,"ライブの位置と継ぎ目で ") && !Contains(status.state_text,"局所の補正"));
+    CHECK(Contains(status.state_text,"JPEGは条件の位置で作りました。ライブのCもその位置へ移しました（撮影の前のライブの位置から継ぎ目で最大 ") && Contains(status.state_text,"px（JPEGの画素）動かしました）") &&
+        !Contains(status.state_text,"局所の補正") && !Contains(status.state_text,"違います"));
     CHECK(SameNine(rig.runtime->CurrentPlan()->live->baked,condition_position) && rig.jobs.size()==1);
+    CHECK(Contains(rig.LogText(),"level=G4 ") && Contains(rig.LogText(),"layer_two_dropped=0 layer_two_max_px=0 "));
     // The coarse level.
     CHECK(rig.runtime->ApplyCapture(ex::RegisteredMapping{Pose{0,0,0,0.5,0.25,0},ex::SurfacePlane{1.0,0,0},std::nullopt},"G3",kSha));
-    CHECK(Contains(rig.runtime->Status().state_text,"JPEGは目安の位置（G3）で作りました"));
+    CHECK(Contains(rig.runtime->Status().state_text,"JPEGは目安の位置（G3）で作りました。ライブのCもその位置へ移しました（撮影の前のライブの位置から継ぎ目で最大 "));
+    // Layer 2 that the record gave no usable number for (not positive, not finite, or none): the sentence says C does not draw it, with no number,
+    // and the log says "unknown". A layer 2 that moves nothing is not dropped.
+    for(const std::optional<double> number:{std::optional<double>{},std::optional<double>{0.0},std::optional<double>{-1.0},std::optional<double>{std::numeric_limits<double>::quiet_NaN()}}){
+        CHECK(rig.runtime->ApplyCapture(jpeg,"G2",kSha,number));
+        const auto text=rig.runtime->Status().state_text;
+        CHECK(Contains(text,"。局所の補正はライブのCには出ません") && !Contains(text,"局所の補正（") && !Contains(text,"nan"));
+    }
+    CHECK(Contains(rig.LogText(),"layer_two_dropped=1 layer_two_max_px=unknown "));
+    {
+        ex::RegisteredMapping flat=jpeg;
+        flat.parallax=ex::ParallaxProfile{};flat.parallax->q_px={0.0,0.0};
+        CHECK(rig.runtime->ApplyCapture(flat,"G2",kSha,0.5));
+        CHECK(!Contains(rig.runtime->Status().state_text,"局所の補正") && !rig.runtime->Status().placement.capture->layer_two_max_px);
+    }
     // The button after a shot is a new estimate; it replaces what the shot set.
     rig.script={Estimate(Pose{0.2,0,0.4,2.0,0,0})};
     CHECK(rig.runtime->RequestEstimate(LiveEstimateAsk::button)==LiveAskResult::accepted);
@@ -636,14 +663,14 @@ void AfterCaptureCarried(){
     // No plan yet: the shot cannot be measured, and the sentence leaves the number out.
     CHECK(first.runtime->ApplyCapture(jpeg,"G2",kSha));
     auto status=first.runtime->Status();
-    CHECK(status.placement.capture && !status.placement.capture->difference_px && Contains(status.state_text,"撮影の後の自動調整で位置を確定しました（G2）") &&
-        !Contains(status.state_text,"違います") && !Contains(status.state_text,"同じです"));
+    CHECK(status.placement.capture && !status.placement.capture->difference_px && Contains(status.state_text,"撮影の後の自動調整で位置を確定しました（G2）。今のライブのCはJPEGと同じ位置です") &&
+        !Contains(status.state_text,"動かしました") && !Contains(status.state_text,"動いていません"));
     const auto carried=first.runtime->PlacementMachine();
     Rig next(true,Pose{},ex::MountOrientation::normal,carried);
     CHECK(next.runtime->Status().placement.source==LivePlacementSource::after_capture && next.runtime->Status().placement.activity==LivePlacementActivity::idle);
     next.runtime->PublishBase(next.plan);
     status=next.runtime->Status();
-    CHECK(status.placement.capture && status.placement.capture->difference_px && *status.placement.capture->difference_px>0 && Contains(status.state_text,"px（JPEGの画素）違います"));
+    CHECK(status.placement.capture && status.placement.capture->difference_px && *status.placement.capture->difference_px>0 && Contains(status.state_text,"px（JPEGの画素）動かしました"));
     const auto pass=next.Pass();
     CHECK(!pass.job_ran && pass.rebaked && next.jobs.empty() && SameNine(next.runtime->CurrentPlan()->live->baked,jpeg));
     CHECK(Contains(next.LogText(),"C live_placement serial="+std::to_string(carried.Serial())+" source=after-capture "+LivePlacementFields(jpeg)));

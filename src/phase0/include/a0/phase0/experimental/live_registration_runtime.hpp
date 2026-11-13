@@ -412,12 +412,14 @@ public:
     }
     // A capture ended with a JPEG made with `mapping` (the mapping of the geometry level it chose) from the condition of `condition_sha256`:
     // P becomes that mapping, with layer 2 left out. False (nothing changed) when the condition is not the session's.
-    bool ApplyCapture(const a0::m2::experimental::RegisteredMapping& mapping,const std::string& level,const std::string& condition_sha256){
+    // `layer_two_max_px`: the largest shift of the JPEG's layer 2 (LivePlacementLayerTwoMaxPx), for the sentence and the log.
+    bool ApplyCapture(const a0::m2::experimental::RegisteredMapping& mapping,const std::string& level,const std::string& condition_sha256,
+        std::optional<double> layer_two_max_px=std::nullopt){
         std::optional<std::string> line;
         bool applied=false;
         {
             std::lock_guard lock(mutex_);
-            applied=machine_.ApplyCapture(mapping,level,condition_sha256);
+            applied=machine_.ApplyCapture(mapping,level,condition_sha256,layer_two_max_px);
             if(applied){
                 bake_failed_=false;failed_wanted_serial_.reset();
                 MeasureCaptureLocked();
@@ -628,13 +630,13 @@ private:
             <<" condition_sha256="<<machine_.ConditionSha256()<<" drawn=1 quality_accepted=0";
         return line.str();
     }
-    // What a shot did, once: P before the shot and the JPEG's mapping, the level, and how far apart they are (when it was measured).
+    // What a shot did, once: P before the shot, the level, how far P moved (seam_difference_px, when it was measured) and layer 2 that C does not draw.
     [[nodiscard]] std::optional<std::string> CaptureLineLocked() const {
         const auto& note=machine_.Capture();
         if(!note)return std::nullopt;
         std::ostringstream line;line.imbue(std::locale::classic());
         line<<"C live_placement_after_capture serial="<<machine_.Serial()<<" level="<<note->level<<" before_source="<<LivePlacementSourceCode(note->before_source)
-            <<' '<<LivePlacementFields(note->before,"before_")<<" layer_two_dropped="<<(note->layer_two_dropped?1:0);
+            <<' '<<LivePlacementFields(note->before,"before_")<<' '<<LivePlacementLayerTwoFields(note->layer_two_dropped,note->layer_two_max_px);
         if(note->difference_px)line<<" seam_difference_px="<<*note->difference_px;
         line<<" quality_accepted=0";
         return line.str();

@@ -185,25 +185,42 @@ inline constexpr std::string_view kLiveEstimatorUnavailableReason = "live-estima
     }
     return {};
 }
-// How far two positions are apart along the seam, as a person reads it. Empty difference: nothing is said.
-[[nodiscard]] inline std::string LivePlacementDifferenceText(const std::optional<double>& difference_px) {
+// How far the live C moved at the shot: the distance between the position it was drawn with before the shot and the one it is drawn with
+// now, along the seam (the largest of the lattice's samples, in pixels of the JPEG's raster). It is not a difference between the live C and
+// the JPEG: after the shot the live C is drawn with the JPEG's own position. Empty difference: nothing is said.
+[[nodiscard]] inline std::string LivePlacementMovedText(const std::optional<double>& difference_px) {
     if (!difference_px || !std::isfinite(*difference_px)) return {};
-    if (*difference_px < 0.05) return "ライブの位置と同じです";
+    if (*difference_px < 0.05) return "撮影の前のライブの位置から動いていません";
     std::ostringstream s;
     s.imbue(std::locale::classic());
-    s << "ライブの位置と継ぎ目で " << std::fixed << std::setprecision(1) << *difference_px << " px（JPEGの画素）違います";
+    s << "撮影の前のライブの位置から継ぎ目で最大 " << std::fixed << std::setprecision(1) << *difference_px << " px（JPEGの画素）動かしました";
+    return s.str();
+}
+// The layer 2 that the JPEG has and the live C does not draw: its largest shift when the record gave one (output px, the JPEG's pixels).
+[[nodiscard]] inline std::string LivePlacementLayerTwoText(const LivePlacementCaptureNote& note) {
+    if (!note.layer_two_dropped) return {};
+    if (!note.layer_two_max_px || !std::isfinite(*note.layer_two_max_px)) return "局所の補正はライブのCには出ません";
+    std::ostringstream s;
+    s.imbue(std::locale::classic());
+    s << "JPEGの局所の補正（最大 " << std::fixed << std::setprecision(1) << *note.layer_two_max_px << " px）はライブのCには出ません";
     return s.str();
 }
 // What the shot did to the position (after_capture): the JPEG's own estimate decided it (G1, G2), or it did not and the JPEG was made with a
-// position that the condition or the coarse stage gave (G3, G4). The live C is drawn with the JPEG's position from now on.
+// position that the condition or the coarse stage gave (G3, G4). Either way the live C is drawn with the JPEG's position from now on, so it
+// is at the same place as the JPEG; what the sentence says moved is the live C, and what stays different is layer 2.
 [[nodiscard]] inline std::string LivePlacementCaptureText(const LivePlacementCaptureNote& note) {
-    const auto difference = LivePlacementDifferenceText(note.difference_px);
-    const auto bracket = difference.empty() ? std::string() : "（" + difference + "）";
+    const auto moved = LivePlacementMovedText(note.difference_px);
+    const auto layer_two = LivePlacementLayerTwoText(note);
     std::string text;
-    if (note.level == "G1" || note.level == "G2") text = "撮影の後の自動調整で位置を確定しました（" + note.level + "）" + (difference.empty() ? std::string() : "。" + difference);
-    else if (note.level == "G3") text = "撮影の後の自動調整では確かな位置が出ませんでした。JPEGは目安の位置（G3）で作りました" + bracket;
-    else text = "撮影の後の自動調整では確かな位置が出ませんでした。JPEGは条件の位置で作りました" + bracket;
-    if (note.layer_two_dropped) text += "。局所の補正はライブのCには出ません";
+    if (note.level == "G1" || note.level == "G2") {
+        text = "撮影の後の自動調整で位置を確定しました（" + note.level + "）";
+        if (!moved.empty()) text += "。" + moved;
+        text += "。今のライブのCはJPEGと同じ位置です";
+    } else {
+        text = std::string("撮影の後の自動調整では確かな位置が出ませんでした。JPEGは") + (note.level == "G3" ? "目安の位置（G3）" : "条件の位置") + "で作りました。ライブのCもその位置へ移しました";
+        if (!moved.empty()) text += "（" + moved + "）";
+    }
+    if (!layer_two.empty()) text += "。" + layer_two;
     return text;
 }
 

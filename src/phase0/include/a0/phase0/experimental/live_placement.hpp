@@ -62,13 +62,17 @@ enum class LiveAskResult {accepted,busy,disabled};
 enum class LivePlacementOutcomeKind {none,placed,not_decided};
 
 // What is known about the shot that made P (after_capture only). `level` is the geometry level of the JPEG ("G1" to "G4"); `before` is P as
-// the live C drew it when the shutter was pressed; the difference is how far the two are apart along the seam, in pixels of the JPEG's raster
-// (empty until it was measured on a plan: the machine cannot measure it).
+// the live C drew it when the shutter was pressed; the difference is how far P moved from `before` along the seam, in pixels of the JPEG's raster
+// (empty until it was measured on a plan: the machine cannot measure it). It is how far the live C moved, not a difference between the live C
+// and the JPEG: after the shot the live C is drawn with the JPEG's own position. What stays different is layer 2, which the live C does not
+// draw: `layer_two_max_px` is its largest shift in output pixels (the record's ParallaxSummary::max_shift_px), empty when layer 2 is
+// absent or the record gave no usable number.
 struct LivePlacementCaptureNote {
     std::string level;
     a0::m2::experimental::RegisteredMapping before;
     LivePlacementSource before_source{LivePlacementSource::fixed_condition};
     bool layer_two_dropped{false};       // the JPEG was made with layer 2, which the live C does not draw
+    std::optional<double> layer_two_max_px;
     std::optional<double> difference_px;
 };
 
@@ -97,17 +101,35 @@ struct LivePlacementView {
 // The pose and the surface of a mapping as `key=value` fields for a log line (ASCII, the classic locale, 17 significant digits, no negative
 // zero). The one function that writes P: the live log and the capture's log both call it, so the two lines can be compared as text.
 // `prefix` goes in front of every key (a line that carries two positions).
+[[nodiscard]] inline std::string LivePlacementNumber(double value){
+    if(!std::isfinite(value))return std::string("nan");
+    if(value==0)return std::string("0");
+    std::ostringstream s;s.imbue(std::locale::classic());s<<std::setprecision(17)<<value;
+    return s.str();
+}
 [[nodiscard]] inline std::string LivePlacementFields(const a0::m2::experimental::RegisteredMapping& mapping,std::string_view prefix={}){
-    const auto number=[](double value){
-        if(!std::isfinite(value))return std::string("nan");
-        if(value==0)return std::string("0");
-        std::ostringstream s;s.imbue(std::locale::classic());s<<std::setprecision(17)<<value;
-        return s.str();
-    };
+    const auto number=[](double value){return LivePlacementNumber(value);};
     const auto& p=mapping.pose;const auto& s=mapping.surface;
     const std::string k(prefix);
     return k+"rx_deg="+number(p.rx_deg)+" "+k+"ry_deg="+number(p.ry_deg)+" "+k+"rz_deg="+number(p.rz_deg)+" "+k+"tx_mm="+number(p.tx_mm)+" "+k+"ty_mm="+number(p.ty_mm)+
         " "+k+"tz_percent="+number(p.tz_percent)+" "+k+"h0_mm="+number(s.h0_mm)+" "+k+"slope_x="+number(s.slope_x)+" "+k+"slope_y="+number(s.slope_y);
+}
+
+// Whether a mapping carries a layer 2 that moves something (a profile with a q sample that is not 0).
+[[nodiscard]] inline bool LivePlacementHasLayerTwo(const a0::m2::experimental::RegisteredMapping& mapping){
+    return mapping.parallax.has_value() && !mapping.parallax->IsZero();
+}
+// Layer 2's largest shift (output px) as the record of the shot has it, for the mapping that the JPEG was made with. Empty when the mapping has no
+// layer 2 that moves something, or the number is not usable (not finite or not positive): nothing is estimated here.
+[[nodiscard]] inline std::optional<double> LivePlacementLayerTwoMaxPx(const a0::m2::experimental::RegisteredMapping& mapping,double summary_max_shift_px){
+    if(!LivePlacementHasLayerTwo(mapping) || !std::isfinite(summary_max_shift_px) || !(summary_max_shift_px>0))return std::nullopt;
+    return summary_max_shift_px;
+}
+// Layer 2 of a mapping as `key=value` fields for a log line: `layer_two_dropped=0|1 layer_two_max_px=<number>|unknown` (0 when there is none).
+// The live log and the capture's log both call it.
+[[nodiscard]] inline std::string LivePlacementLayerTwoFields(bool layer_two,const std::optional<double>& max_shift_px){
+    if(!layer_two)return "layer_two_dropped=0 layer_two_max_px=0";
+    return "layer_two_dropped=1 layer_two_max_px="+(max_shift_px?LivePlacementNumber(*max_shift_px):std::string("unknown"));
 }
 
 // Equal to the bit (-0 and +0 count as equal; NaN is never equal): P and the mapping that C was baked with are compared by this.
@@ -225,11 +247,14 @@ public:
     // P becomes that mapping and nothing is asked for. A request that waited, a job that ran and a position that waited are dropped.
     // `condition_sha256` is the sha of the condition the JPEG was made with: another one than the session's is refused (false) and
     // changes nothing, because the mapping is B's position against another condition's base pose.
-    bool ApplyCapture(const a0::m2::experimental::RegisteredMapping& mapping,const std::string& level,const std::string& condition_sha256){
+    // `layer_two_max_px`: the largest shift of that layer 2 (LivePlacementLayerTwoMaxPx); kept in the note for the sentence and the log.
+    bool ApplyCapture(const a0::m2::experimental::RegisteredMapping& mapping,const std::string& level,const std::string& condition_sha256,
+        std::optional<double> layer_two_max_px=std::nullopt){
         if(!configured_ || condition_sha256!=sha_ || !Finite(mapping.pose) || !Finite(mapping.surface))return false;
         LivePlacementCaptureNote note;
         note.level=level;note.before=placement_;note.before_source=source_;
-        note.layer_two_dropped=mapping.parallax.has_value() && !mapping.parallax->IsZero();
+        note.layer_two_dropped=LivePlacementHasLayerTwo(mapping);
+        if(note.layer_two_dropped && layer_two_max_px && std::isfinite(*layer_two_max_px) && *layer_two_max_px>0)note.layer_two_max_px=layer_two_max_px;
         placement_=a0::m2::experimental::RegisteredMapping{mapping.pose,mapping.surface,std::nullopt};
         source_=LivePlacementSource::after_capture;
         beyond_envelope_=false;exceeded_.clear();
@@ -240,7 +265,7 @@ public:
         capture_=std::move(note);
         return true;
     }
-    // How far P before the shot is from the mapping of the JPEG along the seam (pixels of the JPEG's raster). Not finite: not measured.
+    // How far P moved from before the shot to the mapping of the JPEG along the seam (pixels of the JPEG's raster). Not finite: not measured.
     void SetCaptureDifference(double pixels){
         if(capture_ && std::isfinite(pixels) && pixels>=0)capture_->difference_px=pixels;
     }

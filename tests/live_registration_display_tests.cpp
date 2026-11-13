@@ -329,35 +329,57 @@ void PlacementTexts(){
     CHECK(Contains(text,"撮影JPEGの位置ではCを描けませんでした") && Contains(text,"直前") && one_line(text) && no_verdict(text));
     view.source=LivePlacementSource::auto_button;
     CHECK(Contains(LivePlacementStateText(view,true),"推定した位置ではCを描けませんでした"));
-    // After a shot: the level decides what is said, and the distance is read in the JPEG's pixels.
+    // After a shot: the level decides what is said. The distance is how far the live C moved from where it was before the shot (the JPEG's
+    // pixels), not a difference between the live C and the JPEG: the live C is at the JPEG's position now. What stays different is layer 2.
     view.outcome=LivePlacementOutcomeKind::none;view.source=LivePlacementSource::after_capture;
     LivePlacementCaptureNote note;
     note.level="G1";note.difference_px=2.46;
     view.capture=note;
     text=LivePlacementStateText(view);
-    CHECK(Contains(text,"撮影の後の自動調整で位置を確定しました（G1）") && Contains(text,"ライブの位置と継ぎ目で 2.5 px（JPEGの画素）違います") && !Contains(text,"局所の補正") && one_line(text) && no_verdict(text));
+    CHECK(Contains(text,"撮影の後の自動調整で位置を確定しました（G1）。撮影の前のライブの位置から継ぎ目で最大 2.5 px（JPEGの画素）動かしました。今のライブのCはJPEGと同じ位置です") &&
+        !Contains(text,"局所の補正") && !Contains(text,"違います") && !Contains(text,"ライブの位置と継ぎ目") && one_line(text) && no_verdict(text));
     view.capture->level="G2";
     CHECK(Contains(LivePlacementStateText(view),"位置を確定しました（G2）"));
-    view.capture->layer_two_dropped=true;
-    CHECK(Contains(LivePlacementStateText(view),"局所の補正はライブのCには出ません"));
+    // Layer 2: its largest shift when the record gave one; without a number the sentence still says that C does not draw it.
+    view.capture->layer_two_dropped=true;view.capture->layer_two_max_px=0.43;
+    text=LivePlacementStateText(view);
+    CHECK(Contains(text,"今のライブのCはJPEGと同じ位置です。JPEGの局所の補正（最大 0.4 px）はライブのCには出ません") && one_line(text) && no_verdict(text));
+    view.capture->layer_two_max_px=12.34;
+    CHECK(Contains(LivePlacementStateText(view),"JPEGの局所の補正（最大 12.3 px）はライブのCには出ません"));
+    view.capture->layer_two_max_px=kNaN;
+    text=LivePlacementStateText(view);
+    CHECK(Contains(text,"。局所の補正はライブのCには出ません") && !Contains(text,"局所の補正（") && !Contains(text,"nan"));
+    view.capture->layer_two_max_px=std::nullopt;
+    text=LivePlacementStateText(view);
+    CHECK(Contains(text,"。局所の補正はライブのCには出ません") && !Contains(text,"局所の補正（"));
+    view.capture->layer_two_max_px=0.43;
+    // A layer 2 that moves nothing is not dropped, so no number is said even when one is left in the note.
     view.capture->layer_two_dropped=false;
+    CHECK(!Contains(LivePlacementStateText(view),"局所の補正"));
+    // G3 and G4: the JPEG was made with a position that was not estimated, and the live C moved to it too; the movement is in a bracket.
     view.capture->level="G3";
     text=LivePlacementStateText(view);
-    CHECK(Contains(text,"確かな位置が出ませんでした") && Contains(text,"JPEGは目安の位置（G3）で作りました（ライブの位置と継ぎ目で 2.5 px") && !Contains(text,"位置を確定しました"));
+    CHECK(Contains(text,"確かな位置が出ませんでした。JPEGは目安の位置（G3）で作りました。ライブのCもその位置へ移しました（撮影の前のライブの位置から継ぎ目で最大 2.5 px（JPEGの画素）動かしました）") &&
+        !Contains(text,"位置を確定しました") && !Contains(text,"違います") && !Contains(text,"局所の補正") && one_line(text) && no_verdict(text));
     view.capture->level="G4";
     text=LivePlacementStateText(view);
-    CHECK(Contains(text,"JPEGは条件の位置で作りました（ライブの位置と継ぎ目で 2.5 px") && !Contains(text,"位置を確定しました"));
+    CHECK(Contains(text,"JPEGは条件の位置で作りました。ライブのCもその位置へ移しました（撮影の前のライブの位置から継ぎ目で最大 2.5 px") && !Contains(text,"位置を確定しました"));
+    view.capture->layer_two_dropped=true;
+    CHECK(Contains(LivePlacementStateText(view),"動かしました）。JPEGの局所の補正（最大 0.4 px）はライブのCには出ません"));
+    view.capture->layer_two_dropped=false;
+    // The movement: none when the live C did not move; nothing at all when it was not measured.
     view.capture->difference_px=0.0;
-    CHECK(Contains(LivePlacementStateText(view),"（ライブの位置と同じです）"));
+    CHECK(Contains(LivePlacementStateText(view),"（撮影の前のライブの位置から動いていません）"));
     view.capture->difference_px=0.04;
-    CHECK(Contains(LivePlacementStateText(view),"ライブの位置と同じです"));
+    CHECK(Contains(LivePlacementStateText(view),"撮影の前のライブの位置から動いていません") && !Contains(LivePlacementStateText(view),"動かしました"));
     view.capture->difference_px=std::nullopt;
     text=LivePlacementStateText(view);
-    CHECK(Contains(text,"JPEGは条件の位置で作りました") && !Contains(text,"違います") && !Contains(text,"同じです") && !Contains(text,"（ライブ"));
+    CHECK(Contains(text,"JPEGは条件の位置で作りました。ライブのCもその位置へ移しました") && !Contains(text,"動かしました") && !Contains(text,"動いていません") && !Contains(text,"（撮影"));
     view.capture->level="G1";
-    CHECK(Contains(LivePlacementStateText(view),"位置を確定しました（G1）。紙を替えた時は") && !Contains(LivePlacementStateText(view),"違います"));
+    text=LivePlacementStateText(view);
+    CHECK(Contains(text,"位置を確定しました（G1）。今のライブのCはJPEGと同じ位置です。紙を替えた時は") && !Contains(text,"動かしました") && !Contains(text,"違います"));
     view.capture->difference_px=kNaN;
-    CHECK(!Contains(LivePlacementStateText(view),"違います") && !Contains(LivePlacementStateText(view),"nan"));
+    CHECK(!Contains(LivePlacementStateText(view),"動かしました") && !Contains(LivePlacementStateText(view),"nan"));
     // A shot's position with no note (a carried machine that lost it) is still said.
     view.capture.reset();
     CHECK(Contains(LivePlacementStateText(view),"撮影の後の位置で描いています"));
