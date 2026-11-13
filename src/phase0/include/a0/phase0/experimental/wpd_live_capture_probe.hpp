@@ -273,10 +273,14 @@ struct WpdLiveProbeOutcome {
     std::optional<unsigned> live_after;
     // "read", "unreadable" (tried, or no longer admitted) or "not_read" (an anomaly stopped the run before it).
     std::string live_after_state{"not_read"};
-    // DeviceReady sent once just before the import of a clean run, so that a busy camera does not refuse the import and
-    // leave the image in the camera. It is recorded and never used to decide anything. A run with an anomaly sends none.
+    // DeviceReady before the import of a clean run, so that a busy camera does not refuse the import and leave the image
+    // in the camera. It is handled like the still capture's: busy answers are waited out inside the ready bound and the
+    // deadline; any other result (a refusal, a transport failure, the bound or the deadline) is an anomaly
+    // ("import_not_ready"). A run that already has an anomaly sends none.
     bool import_ready_attempted{};
-    DWORD import_ready{};
+    DWORD import_ready{}; // 0x2001, the last response code, or 0 for a transport failure or no admission
+    unsigned import_busy_polls{};
+    long long import_ready_waited_ms{};
     // The image may still be in the camera's memory (the import did not finish): Live View may be refused until a power cycle.
     bool sdram_may_remain{};
     // True only when the shutter was confirmed and nothing outside the expected sequence happened. The window asks for
@@ -491,15 +495,32 @@ inline WpdLiveProbeOutcome RunLiveCaptureProbe(WpdLiveCaptureProbeChannel& chann
             out.attributed = true;
             try {
                 channel.AuthorizeObject(*ledger.Handle());
-                // Once, in a clean run only: after an anomaly the import adds no new kind of command.
+                // Once, in a clean run only: after an anomaly the import adds no new kind of command. Busy answers are
+                // waited out inside the ready bound and the deadline; anything but 0x2001 is outside the expected
+                // sequence. The import itself is still attempted once, into the private partial.
                 if (anomaly) skipped_import_ready = true;
-                else if (channel.Admitted()) {
+                else {
                     out.import_ready_attempted = true;
+                    const auto ready_start = now();
+                    DWORD code = 0;
                     try {
-                        const auto r = channel.Ready();
-                        out.import_ready = r.Ok() ? 0x2001 : r.error == WpdLiveViewResultError::MtpRejected ? r.mtp_response : 0;
-                    } catch (const std::exception&) {}
-                    log("live_capture_probe_import_ready=" + Hex(out.import_ready, 4));
+                        for (;;) {
+                            if (!channel.Admitted()) break;
+                            const auto r = channel.Ready();
+                            if (r.Ok()) { code = 0x2001; break; }
+                            if (r.error != WpdLiveViewResultError::MtpRejected) break;
+                            code = r.mtp_response;
+                            if (code != 0x2019) break;
+                            ++out.import_busy_polls;
+                            if (now() - ready_start >= options.ready_wait) break;
+                            sleep(options.ready_poll);
+                        }
+                    } catch (const std::exception&) { code = 0; }
+                    out.import_ready = code;
+                    out.import_ready_waited_ms = elapsed_ms(ready_start);
+                    log("live_capture_probe_import_ready=" + Hex(code, 4) + " busy_polls=" + std::to_string(out.import_busy_polls) +
+                        " waited_ms=" + std::to_string(out.import_ready_waited_ms));
+                    if (code != 0x2001) flag("import_not_ready");
                 }
                 WpdStillObjectInfo info{};
                 try { info = ParseWpdStillObjectInfo(channel.Read(WpdStillOperation::ObjectInfo, 4096)); }
@@ -554,7 +575,8 @@ inline WpdLiveProbeOutcome RunLiveCaptureProbe(WpdLiveCaptureProbeChannel& chann
         if (payload) {
             const bool clean = confirmed && !anomaly && ledger.Pristine() && out.after_ready == 0x2001;
             out.published = "partial_only";
-            out.object_reason = clean ? "verified" : !confirmed ? "shutter_unconfirmed" : !ledger.Pristine() ? "unexpected_event" : "after_shutter_not_ready";
+            out.object_reason = clean ? "verified" : !confirmed ? "shutter_unconfirmed" : !ledger.Pristine() ? "unexpected_event"
+                : out.after_ready != 0x2001 ? "after_shutter_not_ready" : out.anomaly;
             if (clean && hooks.save_original) {
                 try {
                     if (hooks.save_original(std::move(*payload))) out.published = "original";

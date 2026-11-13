@@ -50,13 +50,17 @@ public:
     bool fail_live_read = false, bad_info = false, shutter_throws = false;
     int busy_before = 0, busy_after = 0;
     DWORD ready_before = 0x2001, ready_after = 0x2001, shutter_response = 0x2001;
-    DWORD ready_at_import = 0; // when set, the second DeviceReady after the shutter (the one before the import) answers with it
+    // Answers to the DeviceReady calls that follow the first one after the shutter (the ones before the import), in order;
+    // kThrow makes the call fail in the transport. Past the end of the list the body answers ready_after. Use with busy_after = 0.
+    static constexpr DWORD kThrow = 0xffffffff;
+    std::vector<DWORD> import_ready_script;
     int ready_calls_after{};
     std::vector<std::vector<WpdStillEvent>> pre, post{std::vector<WpdStillEvent>{{0xc101, 0x0badf00d}, {0xc102, 0}}}; // batches for successive reads before / after the shutter (default: one object and its completion)
     DWORD handle = 0x0badf00d;
     std::vector<unsigned char> jpeg{0xff, 0xd8, 7, 8, 9, 10, 0xff, 0xd9};
     std::function<void()> on_shutter;
     std::function<void(size_t)> on_post_events; // after the n-th events read that follows the shutter
+    std::function<void(int)> on_ready_call;     // after the n-th DeviceReady that follows the shutter has been answered
     // What reached the body.
     int shutters{}, object_reads{}, info_reads{}, ends{}, profile_reads{}, post_event_reads{};
     std::vector<std::string> trace;
@@ -97,9 +101,16 @@ protected:
             DWORD response = 0x2001;
             int& busy = shutters ? busy_after : busy_before;
             if (busy > 0) { --busy; response = 0x2019; } else response = shutters ? ready_after : ready_before;
-            if (shutters && ++ready_calls_after == 2 && ready_at_import) response = ready_at_import;
+            if (shutters && ++ready_calls_after >= 2) {
+                const size_t at = static_cast<size_t>(ready_calls_after - 2);
+                if (at < import_ready_script.size()) {
+                    if (import_ready_script[at] == kThrow) throw std::runtime_error("synthetic transport failure");
+                    response = import_ready_script[at];
+                }
+            }
             auto result = Reply(true);
             result->SetUnsignedIntegerValue(WPD_PROPERTY_MTP_EXT_RESPONSE_CODE, response);
+            if (shutters && on_ready_call) on_ready_call(ready_calls_after);
             return {S_OK, result};
         }
         if (with_read) {
@@ -477,13 +488,44 @@ int main() {
             Check(run.IndexOf("live_capture_probe_anomaly reason=after_shutter_not_ready not_sent=completion_wait,import_ready,live_state_read,frame_read") >= 0, "the log names the anomaly and what was not sent");
             Check(!o.import_ready_attempted && CountAfter(f, "90c8") == 1, "after an anomaly the DeviceReady before the import is not sent");
         }
-        {   // The DeviceReady before the import is only recorded: a busy or refusing answer changes nothing.
-            ProbeFake f; f.ready_at_import = 0x2019;
+        {   // The DeviceReady before the import is handled like the still capture's: busy is waited out, 0x2001 goes on.
+            ProbeFake f; f.import_ready_script = {0x2019, 0x2019, 0x2019, 0x2001};
             const auto run = Go(f);
-            Check(run.out.import_ready_attempted && run.out.import_ready == 0x2019 && run.out.published == "original" && run.saved == 1 && run.out.sequence_clean && run.out.result == WpdLiveProbeResult::Observed, "a busy answer before the import is recorded and decides nothing");
-            ProbeFake g; g.ready_at_import = 0xa002;
-            const auto refused = Go(g);
-            Check(refused.out.import_ready == 0xa002 && refused.out.published == "original" && refused.out.sequence_clean, "a refusal before the import is recorded and decides nothing");
+            const auto& o = run.out;
+            Check(o.import_ready_attempted && o.import_ready == 0x2001 && o.import_busy_polls == 3 && o.published == "original" && run.saved == 1 && o.sequence_clean && o.result == WpdLiveProbeResult::Observed && o.anomaly == "none",
+                "busy answers before the import are waited out, then 0x2001 keeps the run clean");
+            Check(CountAfter(f, "90c8") == 5 && f.info_reads == 1 && f.object_reads == 1 && run.IndexOf("live_capture_probe_import_ready=0x2001 busy_polls=3") >= 0, "busy before the import: the waits are DeviceReady only and are logged");
+        }
+        // Anything but 0x2001 before the import is outside the expected sequence: the image is imported once into the
+        // partial, and no completion observation, 0xD1A2 read or frame follows.
+        for (const DWORD answer : std::vector<DWORD>{0xa002, 0xa004, 0x2002, ProbeFake::kThrow}) {
+            ProbeFake f; f.import_ready_script = {answer};
+            const auto run = Go(f);
+            const auto& o = run.out;
+            const DWORD recorded = answer == ProbeFake::kThrow ? 0u : answer;
+            Check(o.import_ready_attempted && o.import_ready == recorded && o.import_busy_polls == 0, "a bad answer before the import is recorded");
+            Check(!o.sequence_clean && o.anomaly == "import_not_ready" && o.result == WpdLiveProbeResult::StoppedAfterShutter, "a bad answer before the import: the sequence is not clean and the run stops after the shutter");
+            Check(o.attributed && o.published == "partial_only" && run.saved == 0 && run.partial == f.jpeg && f.info_reads == 1 && f.object_reads == 1 && o.object_reason == "import_not_ready" && !o.sdram_may_remain, "a bad answer before the import: the one object is imported once, to the partial only");
+            Check(CountAfter(f, "1015") == 0 && f.profile_reads == 1 && f.post_event_reads == 1 && o.completion.completion_wait == WpdStillCompletionWaitResult::NotReached && !o.live_after && o.live_after_state == "not_read",
+                "a bad answer before the import: no completion observation, no 0xD1A2 read, no further event read");
+            Check(CountAfter(f, "90c8") == 2 && CountAfter(f, "1008") == 1 && CountAfter(f, "1009") == 1, "a bad answer before the import: DeviceReady is not repeated");
+            Check(run.IndexOf("live_capture_probe_anomaly reason=import_not_ready not_sent=completion_wait,live_state_read,frame_read") >= 0, "a bad answer before the import: the anomaly line names what was not sent");
+        }
+        {   // The camera stays busy until the bound runs out.
+            ProbeFake f; f.import_ready_script.assign(100000, 0x2019);
+            const auto run = Go(f, false, false, {}, Short());
+            Check(run.out.import_ready == 0x2019 && run.out.import_busy_polls > 0 && run.out.anomaly == "import_not_ready" && !run.out.sequence_clean && run.out.published == "partial_only" && f.info_reads == 1 && f.object_reads == 1 && CountAfter(f, "1015") == 0 && run.out.completion.completion_wait == WpdStillCompletionWaitResult::NotReached,
+                "busy until the bound: an anomaly, the object is imported once to the partial, nothing follows");
+        }
+        {   // The deadline arrives while the camera is still busy before the import: the wait ends, nothing else is sent.
+            ProbeFake f; f.import_ready_script.assign(100, 0x2019);
+            bool over = false;
+            f.on_ready_call = [&](int call) { if (call == 3) over = true; }; // the second DeviceReady of the wait
+            f.admission = [&] { return !over; };
+            const auto run = Go(f);
+            Check(run.out.import_ready_attempted && run.out.import_ready == 0x2019 && run.out.import_busy_polls == 2 && run.out.anomaly == "import_not_ready" && !run.out.sequence_clean && CountAfter(f, "90c8") == 3 && CountAfter(f, "1015") == 0 && f.post_event_reads == 1,
+                "the deadline during the busy wait before the import: an anomaly, no further DeviceReady, nothing follows");
+            Check(f.info_reads == 0 && f.object_reads == 0 && run.out.sdram_may_remain && run.out.published == "none", "the deadline during the busy wait before the import: nothing is imported and the warning is kept");
         }
         {   // The camera stays busy after the shutter: waited, recorded, the image is a partial only.
             ProbeFake f; f.busy_after = 3;
