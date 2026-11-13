@@ -1943,6 +1943,12 @@ if(BUILD_TESTING)
         "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2")
     target_include_directories(m2_fixed_composite_tool_v3_contracts PRIVATE src/phase0/include src/common/include)
     target_link_libraries(m2_fixed_composite_tool_v3_contracts PRIVATE a0_m2_fixed_composite_v2)
+    # Recalibration of camera B from one pair (#434): the kind recalibrated of the condition v3, the pose baked into a new draft profile, the
+    # candidate revision and its checks, and the whole path on rendered synthetic pairs. Camera and file free (the settings are a temporary folder).
+    a0_add_registration_lane_test(m2_fixed_composite_recalibration_contracts tests/fixed_composite_recalibration_tests.cpp
+        "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2")
+    target_include_directories(m2_fixed_composite_recalibration_contracts PRIVATE src/phase0/include src/common/include)
+    target_link_libraries(m2_fixed_composite_recalibration_contracts PRIVATE a0_m2_fixed_composite_recalibration ole32 windowscodecs)
     a0_add_registration_lane_test(m2_capture_registration_contracts tests/capture_registration_tests.cpp)
     target_link_libraries(m2_capture_registration_contracts PRIVATE a0_m2_capture_registration a0_m2_fixed_composite_v2)
     a0_add_registration_lane_test(m2_fixed_composite_registration_text_contracts tests/fixed_composite_registration_text_tests.cpp)
