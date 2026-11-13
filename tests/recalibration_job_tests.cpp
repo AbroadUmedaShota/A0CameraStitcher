@@ -830,7 +830,14 @@ int main(int argc, char** argv) {
         fixture = ReadAll(fs::path(argv[1]) / "calibrated-draft.json");
         if (fixture.empty()) throw std::invalid_argument("the fixture is missing");
         fs::path parent = fs::temp_directory_path();
-        if (const char* value = std::getenv("A0_TEST_TMPDIR"); value != nullptr && *value != '\0') parent = fs::path(value);
+        {
+            char* value = nullptr;
+            std::size_t length = 0;
+            if (_dupenv_s(&value, &length, "A0_TEST_TMPDIR") == 0 && value != nullptr) {
+                if (*value != 0) parent = fs::path(value);
+                std::free(value);
+            }
+        }
         root = parent / ("recalibration-job-test-" + std::to_string(GetCurrentProcessId()) + "-" + std::to_string(GetTickCount64()));
         fs::create_directories(root);
         const auto started = std::chrono::steady_clock::now();

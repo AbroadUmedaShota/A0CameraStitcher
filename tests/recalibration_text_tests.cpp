@@ -118,6 +118,10 @@ void Sentences() {
     CHECK(Has(reason("residual-shape").reason, "浮いている") && Has(reason("residual-shape").remedy, "平らに"));
     CHECK(Has(reason("not-converged").reason, "一つに決まりません") && Has(reason("starts-disagree").reason, "一つに決まりません"));
     CHECK(Has(reason("repeating-only").reason, "繰り返す模様"));
+    CHECK(Has(reason("coarse-no-unique-blocks").reason, "同じ模様の繰り返し") && Has(reason("coarse-no-unique-blocks").remedy, "格子"));
+    CHECK(Has(reason("coarse-inconsistent").reason, "大まかな位置") && Has(reason("coarse-ambiguous").reason, "大まかな位置"));
+    CHECK(Has(reason("too-few-points").reason, "点が足りません") && Has(reason("no-overlap").reason, "重なり"));
+    CHECK(reason("coarse-no-unique-blocks").reason != reason("unique-blocks").reason);
     CHECK(reason("unique-blocks").reason != reason("residual-shape").reason && reason("anything-else").reason != reason("unique-blocks").reason);
     // Checked and wrong, and could not be checked, are told apart.
     const auto wrong = RecalibrationFindingSentence({FindingClass::rejected, "reestimate-not-verified", {}});

@@ -130,6 +130,11 @@ struct RecalibrationSentence {std::string reason,remedy;};
         if(r=="residual-shape")return {"紙が浮いているか、平らでないようです","机に直に平らに置いて撮り直してください"};
         if(r=="not-converged" || r=="starts-disagree")return {"位置が一つに決まりません","紙を少し動かして撮り直してください"};
         if(r=="repeating-only")return {"繰り返す模様だけで、位置が一つに決まりません","文字や図形がある紙で撮り直してください"};
+        // The coarse stage found no block whose place is single: too few marks, or a pattern that repeats (a grid, a ruled sheet).
+        if(r=="coarse-no-unique-blocks")return {"位置が一つに決まる模様がありません（模様が足りないか、同じ模様の繰り返しです）","文字や図形が上から下まである紙で撮り直してください。罫線や格子だけの紙は使えません"};
+        if(r=="coarse-inconsistent" || r=="coarse-ambiguous")return {"大まかな位置が一つに決まりません","紙を少し動かして、模様の多い紙で撮り直してください"};
+        if(r=="too-few-points")return {"位置を測れる点が足りません","文字や図形が多い紙で撮り直してください"};
+        if(r=="no-overlap")return {"左右の重なりに、位置を測る中身がありません","継ぎ目のあたりに文字や線がある紙を置いて撮り直してください"};
         return {"位置を確かに決められませんでした","模様の多い紙で撮り直してください"};
     }
     if(c=="tilt-exceeded")return {"カメラの向きが変わったようです（傾きが許容を超えています）","チャートでの校正が要ります。技術担当へ知らせてください"};
