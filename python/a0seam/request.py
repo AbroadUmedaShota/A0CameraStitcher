@@ -45,6 +45,10 @@ MAX_STRIP_WIDTH = 1024
 MAX_DPI = 4800
 MAX_TOP_UM = 10**9
 MAX_KNOTS = 4096           # the reader accepts at most this many knots
+# Rows x columns around the seam that the estimator holds in memory at once.
+# The peak is about 120 bytes per pixel (measured on a synthetic strip of this
+# size: 470 MB of working set, interpreter and numpy included).
+MAX_WORK_PIXELS = 4_000_000
 B_SAMPLES = "mapped-before-color-gain"
 GLOBAL_GAIN_RANGE = (0.25, 4.0)   # the reader's gate on G
 _TOP_KEYS = {"schema", "raster", "globalGainBgr", "bindings", "strip", "design"}
@@ -217,6 +221,9 @@ def load_request(path):
     low, high = GLOBAL_GAIN_RANGE
     if not isinstance(gain, list) or len(gain) != 3 or not all(_is_number(g) and low <= g <= high for g in gain):
         raise InputError(f"globalGainBgr must be three numbers in {low}..{high}")
+
+    if height * (2 * design.reach + 1) > MAX_WORK_PIXELS:
+        raise InputError(f"the strip area around the seam is too large (more than {MAX_WORK_PIXELS} pixels)")
 
     bindings = read_bindings(doc)
     base_dir = os.path.dirname(os.path.abspath(path))

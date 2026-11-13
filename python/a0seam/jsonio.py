@@ -16,6 +16,7 @@ import numpy as np
 from .errors import InputError
 
 MAX_JSON_BYTES = 1 << 20
+MAX_INT_DIGITS = 18       # a longer integer is an input error, not a number to compute with
 FLOAT_DIGITS = 6
 
 
@@ -36,13 +37,27 @@ def _no_duplicates(label):
     return build
 
 
+def _parse_int(label):
+    def parse(text):
+        if len(text) > MAX_INT_DIGITS:
+            raise InputError(f"{label} holds an integer with too many digits")
+        return int(text)
+    return parse
+
+
 def loads_strict(raw, label):
-    """Parse UTF-8 JSON bytes; duplicate keys, NaN and Infinity are InputError."""
+    """Parse UTF-8 JSON bytes.
+
+    Duplicate keys, NaN, Infinity, very long integers and very deep nesting are
+    InputError, like malformed JSON.
+    """
     try:
         return json.loads(raw.decode("utf-8"), object_pairs_hook=_no_duplicates(label),
-                          parse_constant=_reject_constant(label))
+                          parse_constant=_reject_constant(label), parse_int=_parse_int(label))
     except (UnicodeDecodeError, json.JSONDecodeError) as e:
         raise InputError(f"{label} is not valid JSON: {e}") from e
+    except RecursionError as e:
+        raise InputError(f"{label} is nested too deeply") from e
 
 
 def read_json_file(path, label, max_bytes=MAX_JSON_BYTES):
@@ -53,7 +68,7 @@ def read_json_file(path, label, max_bytes=MAX_JSON_BYTES):
         with open(path, "rb") as f:
             raw = f.read()
     except OSError as e:
-        raise InputError(f"cannot read the {label}: {e.strerror or e}") from e
+        raise InputError(f"cannot read the {label}: {e.strerror or type(e).__name__}") from e
     return loads_strict(raw, label), raw
 
 
@@ -105,6 +120,8 @@ def write_atomic(path, text):
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
             f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, path)
     except BaseException:
         if os.path.exists(tmp):
@@ -133,14 +150,14 @@ def _emit(v, indent, out):
     if v is None:
         out.append("null")
     elif isinstance(v, str):
-        out.append('"' + v.replace("\\", "\\\\").replace('"', '\\"') + '"')
+        out.append(json.dumps(v, ensure_ascii=False))
     elif isinstance(v, dict):
         if not v:
             out.append("{}")
             return
         out.append("{\n")
         for i, (key, val) in enumerate(v.items()):
-            out.append(f'{pad}  "{key}": ')
+            out.append(f"{pad}  {json.dumps(key, ensure_ascii=False)}: ")
             _emit(val, indent + 1, out)
             out.append(",\n" if i < len(v) - 1 else "\n")
         out.append(pad + "}")

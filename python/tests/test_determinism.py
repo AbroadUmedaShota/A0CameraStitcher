@@ -35,13 +35,13 @@ def test_two_runs_write_identical_bytes(tmp_path):
 
 def test_plan_digest_is_pinned(tmp_path):
     req, _ = estimate_scene(tmp_path, synth.Scene())
-    assert record.digest_without_environment(cli.estimate(req)) == PINNED_DIGEST
+    assert record.digest_without_environment(cli.estimate_plan(req)) == PINNED_DIGEST
 
 
 def test_fresh_process_gives_the_same_bytes_whatever_the_thread_environment(tmp_path):
     scene = synth.Scene()
     req, path = estimate_scene(tmp_path / "in", scene)
-    expected = record.dumps(cli.estimate(req)).encode("utf-8")
+    expected = record.dumps(cli.estimate_plan(req)).encode("utf-8")
     launcher = os.path.join(PYTHON_DIR, "estimate_seam_row_gain.py")
     for threads in ("1", "4"):
         out = str(tmp_path / f"out-{threads}.json")
@@ -66,6 +66,6 @@ def test_module_entry_point_and_exit_codes(tmp_path):
 
 def test_plan_has_no_machine_specific_text_besides_the_environment_block(tmp_path):
     req, _ = estimate_scene(tmp_path, synth.Scene())
-    text = record.dumps(cli.estimate(req))
+    text = record.dumps(cli.estimate_plan(req))
     assert str(tmp_path) not in text
     assert "\r" not in text and text.endswith("}\n")

@@ -56,8 +56,8 @@ class WindowDesign:
              "radii must satisfy 1 <= meanRadiusPx <= flatRadiusPx <= 1024")
         need(out, 0 <= self.seam_half_width_px <= 4096, "seamHalfWidthPx must be 0..4096")
         need(out, 0.0 <= self.flat_std_dn <= 255.0, "flatStdDn must be 0..255")
-        need(out, 0.0 <= self.min_level_dn < self.max_level_dn <= 255.0,
-             "level guards must satisfy 0 <= minLevelDn < maxLevelDn <= 255")
+        need(out, 0.0 < self.min_level_dn < self.max_level_dn <= 255.0,
+             "level guards must satisfy 0 < minLevelDn < maxLevelDn <= 255")
         return out
 
 

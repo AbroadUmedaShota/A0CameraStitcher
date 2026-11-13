@@ -1,4 +1,5 @@
 """Plan serialization."""
+import json
 import math
 
 import numpy as np
@@ -39,3 +40,10 @@ def test_digest_ignores_only_the_environment_block_of_the_diagnostics():
     assert record.digest_without_environment(base) == record.digest_without_environment(plan("3.13.0", 1.0))
     assert record.digest_without_environment(base) != record.digest_without_environment(plan("3.12.10", 1.000001))
     assert record.digest_without_environment(base) != record.digest_without_environment(plan("3.12.10", 1.0, "y"))
+
+
+def test_strings_are_escaped_as_json():
+    doc = {"key\nline": "tab\tquote\" back\\ bell\u0007 snow\u2603"}
+    text = record.dumps(doc)
+    assert json.loads(text) == doc
+    assert text.count("\n") == 3              # the control characters did not add lines

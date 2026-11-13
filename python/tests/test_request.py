@@ -96,6 +96,10 @@ MUTATIONS = {
     "design int given as float": (lambda d: set_in(d, ["design"], {"stepPx": 8.5}), "integer"),
     "design radii out of order": (lambda d: set_in(d, ["design"], {"meanRadiusPx": 30}), "radii"),
     "design min windows too small": (lambda d: set_in(d, ["design"], {"minWindows": 1}), "minWindows"),
+    "design min level zero": (lambda d: set_in(d, ["design"], {"minLevelDn": 0.0}), "minLevelDn"),
+    "strip area too large": (lambda d: set_in(d, ["raster", "heightPx"], 20000), "too large"),
+    "strip area too large by design": (lambda d: set_in(d, ["design"], {"seamHalfWidthPx": 480, "stepPx": 8}) or
+                                       set_in(d, ["raster", "heightPx"], 9000), "too large"),
     "too many knots": (lambda d: (set_in(d, ["raster", "heightPx"], 5000), set_in(d, ["design"], {"knotSpacingRows": 1})),
                        "more than 4096 knots"),
 }
@@ -121,6 +125,20 @@ def test_strip_wider_than_the_limit_is_refused(tmp_path, capsys):
     code, out = run(path)
     assert code == 2 and not os.path.exists(out)
     assert "at most 1024" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("text", [
+    "[" * 100000,
+    '{"a":' * 100000,
+    '{"schema": ' + "9" * 5000 + "}",
+    '{"raster": {"widthPx": 1' + "0" * 30 + "}}",
+])
+def test_deeply_nested_or_huge_numbers_are_input_errors(tmp_path, text):
+    path = str(tmp_path / "request.json")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    code, out = run(path)
+    assert code == 2 and not os.path.exists(out)
 
 
 def test_tampered_strip_is_caught_by_its_hash(tmp_path):
@@ -160,7 +178,7 @@ def test_unexpected_failure_exits_1_and_writes_no_plan(tmp_path, monkeypatch, ca
     def boom(_req):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(cli, "estimate", boom)
+    monkeypatch.setattr(cli, "estimate_plan", boom)
     code, out = run(path)
     assert code == 1 and not os.path.exists(out)
     assert "boom" in capsys.readouterr().err
