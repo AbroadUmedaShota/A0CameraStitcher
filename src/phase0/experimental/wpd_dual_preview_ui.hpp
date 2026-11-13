@@ -57,7 +57,7 @@ a0::m2::experimental::MountOrientation mount_orientation{};
 // Read once at startup (#365). Absent: values are recorded, nothing is corrected.
 std::optional<a0::m2::experimental::StillMergePolicy> merge_policy;
 Clock::time_point capture_deadline;
-Pixels review_pixels;bool review_visible=false;
+Pixels review_pixels;bool review_visible=false,review_calibrated=false;
 std::filesystem::path review_path;
 std::wstring capture_status=L"撮影すると両Liveを停止 → 選択カメラを撮影・PC保存 → 両Liveを再開";
 struct MergeView {
@@ -79,6 +79,30 @@ struct MergeView {
 // thread while no merge worker exists; the merge worker and the UI only read it.
 FixedPreviewSource fixed_source;
 bool FixedConditionPresent(){return fixed_source.Present();}
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+// The recalibration button (#434, wpd_recalibration_ui.hpp, included below). Only --recalibration-ui-smoke replaces the settings folder
+// (a temporary one); every other run reads the folder beside the identity map.
+std::optional<std::filesystem::path> recalibration_settings_override;
+inline constexpr const wchar_t* kRecalUncheckedMark=L"未確認の校正"; // what the screen calls a calibration that was used without its seam checked
+bool RecalibrationHoldsLive();                 // a calibration holds the place of Live: CanFocus, CanRestartPreview, CanReadSettings
+void RecalibrationRefreshUncheckedMark();        // looked up where the condition is read
+std::wstring RecalibrationTitleNote();
+bool RecalibrationUncheckedInForce();
+bool DrawRecalibrationScreen(HDC dc,const RECT& client);
+void LayoutRecalibrationButtons(const RECT& rect);
+#endif
+// The caption of the window and the label of the pair button say what the Live view read (#432), not what the first build of the window
+// knew. preview_window is set by the window that shows them; the camera-free smokes have none (or a window of their own).
+HWND preview_window{};
+void ApplyCalibrationTexts(){
+    std::wstring note;
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+    RecalibrationRefreshUncheckedMark();
+    note=RecalibrationTitleNote();
+#endif
+    if(preview_window && !closing)SetWindowTextW(preview_window,PreviewWindowTitle(fixed_source,note).c_str());
+    if(pair_button)SetWindowTextW(pair_button,PairButtonLabel(fixed_source));
+}
 // The live registration of C for a condition v3 (#417 LC). live_runtime is replaced only by PrepareLiveRuntime (or the smoke), on the
 // UI thread while no merge worker exists; the merge worker, its helper thread and Paint only call the runtime's own thread-safe members.
 // live_estimator_override and live_design_override are replaced only by --live-c-ui-smoke, which runs without a camera.
@@ -91,6 +115,9 @@ unsigned live_captures_seen{};
 void LoadFixedSource(){
     try{
         auto file=DefaultIdentityMapPath();file.replace_filename(a0::m2::experimental::kFixedCompositeConditionName);
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+        if(recalibration_settings_override)file=*recalibration_settings_override/a0::m2::experimental::kFixedCompositeConditionName;
+#endif
         fixed_source=LoadFixedPreviewSource(file,[](const std::vector<unsigned char>& bytes){return a0::phase0::Sha256Hex(bytes);});
     }catch(const std::exception& error){
         fixed_source={};fixed_source.reason=a0::m2::experimental::FixedCompositeSkip::condition_invalid;fixed_source.detail=error.what();
@@ -110,6 +137,7 @@ void LoadFixedSource(){
             <<" orientation="<<a0::m2::experimental::MountOrientationName(c.orientation)<<" revision="<<c.revision.sequence<<" registration_live="<<(c.registration.live?1:0)<<" approval=unapproved";}
     else if(!fixed_source.loaded && fixed_source.reason!=a0::m2::experimental::FixedCompositeSkip::condition_absent)line<<" reason="<<a0::m2::experimental::FixedCompositeSkipCode(fixed_source.reason);
     Log(line.str());
+    ApplyCalibrationTexts(); // every session start reads the condition again; so does the caption
 }
 // The live registration of C (#417 LC): a runtime for a condition v3, made at every preview session start (the condition is read
 // again there). A session that follows a capture asks for its first full estimate with the reason after-capture, and a session whose
@@ -171,12 +199,19 @@ int SettingsTableBottom(std::size_t count,int client_bottom,int reserved_bottom,
 int PreviewLowerShift(int client_width); // how far the rows of buttons push the lower half down (defined below)
 int PreviewTopShift(int client_width); // the same for the two Live panes (defined below)
 #endif
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+HWND recal_enter_button{};   // the calibration entrance (#434): wpd_recalibration_ui.hpp makes it, LayoutRecalibrationButtons places it
+inline constexpr int kRecalEnterWidth=200,kRecalEntranceRoom=kRecalEnterWidth+kLayoutGap+kLayoutMargin;   // the entrance and the room the status text leaves for it
+#endif
 void CheckButtonLayouts(const std::function<void(bool)>& check); // the button layout checks of the window smokes (defined before them)
 #if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
 #include "wpd_dual_preview_live_probe_ui.hpp" // #426 stage 4: the window side of the Live-open capture probe
 #endif
 bool CanFocus(Camera& camera){
     std::lock_guard lock(camera.mutex);
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+    if(RecalibrationHoldsLive())return false; // a calibration holds the place of Live (the shot, the computation, the result): no AF, no capture
+#endif
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
     if(SettingsWriteBusy() || SettingsPanelOpen())return false; // a settings write or reread holds the cameras, and the panel takes the place of the Live area: no AF, no capture
 #endif
@@ -204,9 +239,19 @@ bool PanelHoldsLive(){return SettingsPanelOpen();}
 bool SettingsReadBusy(){return settings_future.valid();}
 bool PanelHoldsLive(){return false;}
 #endif
-bool CanRestartPreview(){return !SettingsReadBusy() && !settings_close_failed && !PanelHoldsLive() && LiveStoppedAndClosed();}
+bool CanRestartPreview(){
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+    if(RecalibrationHoldsLive())return false; // the calibration restarts Live itself, after the person has decided
+#endif
+    return !SettingsReadBusy() && !settings_close_failed && !PanelHoldsLive() && LiveStoppedAndClosed();
+}
 // Re-checked inside the handler, not only through the button state.
-bool CanReadSettings(){return !SettingsReadBusy() && !settings_close_failed && LiveStoppedAndClosed() && settings_backend;}
+bool CanReadSettings(){
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+    if(RecalibrationHoldsLive())return false;
+#endif
+    return !SettingsReadBusy() && !settings_close_failed && LiveStoppedAndClosed() && settings_backend;
+}
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
 void DiscardSettingsWriteView();
 void DiscardSettingsView(){settings_view.reset();DiscardSettingsWriteView();}
@@ -470,6 +515,9 @@ void LayoutButtons(HWND hwnd){
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
     LayoutSettingsWriteButtons(rect);
 #endif
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+    LayoutRecalibrationButtons(rect);
+#endif
 }
 void OpenSavedInspector(){
     if(review_path.empty())return;
@@ -731,6 +779,9 @@ RECT PreviewStatusRect(const RECT& client){
 #if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
     rect.right=std::max<LONG>(rect.left+100,rect.right-300); // leave room for the probe button
 #endif
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+    rect.right=std::max<LONG>(rect.left+100,rect.right-kRecalEntranceRoom); // leave room for the calibration entrance (#434)
+#endif
     return rect;
 }
 std::array<std::uint64_t,6> Paint(HDC dc,RECT client){
@@ -763,8 +814,11 @@ std::array<std::uint64_t,6> Paint(HDC dc,RECT client){
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
     if(preview_joined && settings_write && settings_write->screen->View() && DrawSettingsWrite(dc,client))return drawn; // a confirmation or a result is never under the review
 #endif
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+    if(DrawRecalibrationScreen(dc,client))return drawn; // the guide, the progress or the result of the calibration takes the place of C (#434)
+#endif
     if(review_visible && !review_pixels.bytes.empty()){
-        const wchar_t* title=L"撮影JPEGの合成結果（静止画／未校正・確認用）";
+        const wchar_t* title=PreviewReviewHeading(review_calibrated);
         const int shift=PreviewLowerShift(client.right);
         TextOutW(dc,12,client.bottom/2+88+shift,title,lstrlenW(title));
         const wchar_t* text=L"現在のライブ映像とは別の撮影結果です。「ライブCに戻す」で切り替えられます";
@@ -785,6 +839,10 @@ std::array<std::uint64_t,6> Paint(HDC dc,RECT client){
     if(merged.decided && merged.mode==PreviewCMode::fixed_composite){
         title=FixedPreviewTitle(mount_orientation,merged.fixed_plan);
         status=merged.position_refusal.empty()?FixedPreviewNote(merged.fixed_plan):merged.position_refusal;
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+        // A calibration that was used although its seam could not be checked says so for as long as it is in force (#434).
+        if(RecalibrationUncheckedInForce())status=std::wstring(kRecalUncheckedMark)+L"。継ぎ目のずれを確かめられないまま使っています / "+status;
+#endif
         live_rows=merged.fixed_plan.live!=nullptr;
     }else if(FixedConditionPresent()){
         title=FixedPreviewUnavailableTitle(fixed_source);
@@ -833,6 +891,13 @@ void RequestCapture(int index){
 std::function<VerifiedStillPair(const std::array<std::wstring,2>&,Clock::time_point)> pair_capture_backend=
     [](const std::array<std::wstring,2>& ids,Clock::time_point deadline){return CaptureStillPairShutterFirst(ids,deadline);};
 std::optional<std::filesystem::path> pair_settings_folder_override,pair_review_root_override;
+// How a pair that did not complete is put into the outcome (#430): out of focus, whether the preflight stopped it before either shutter,
+// what each body answered, and the image notices a body left. The pair capture and the calibration's pair capture both call this, so the
+// status row (AdvanceCapture) says the same thing for the same failure. The caller then throws pair.error.
+void RecordIncompletePair(CaptureUiOutcome& result,const VerifiedStillPair& pair){
+    result.capture.out_of_focus=pair.out_of_focus;result.preflight_refused=!pair.shutter_dispatched[0] && !pair.shutter_dispatched[1];
+    result.preflight_status=DescribeStillPairPreflightRefusal(pair);result.late_object_status=DescribeStillPairLateObjects(pair);
+}
 CaptureUiOutcome SavePairReview(const std::array<std::wstring,2>& ids,ReviewGeometry geometry,Clock::time_point deadline){
     CaptureUiOutcome result;
     const auto root=pair_review_root_override?*pair_review_root_override:DefaultIdentityMapPath().parent_path().parent_path()/"wpd-pair-reviews";
@@ -851,11 +916,7 @@ CaptureUiOutcome SavePairReview(const std::array<std::wstring,2>& ids,ReviewGeom
         if(!selection.loaded && selection.reason!=a0::m2::experimental::FixedCompositeSkip::condition_absent)Log("pair_fixed_composite_condition_unusable reason="+std::string(a0::m2::experimental::FixedCompositeSkipCode(selection.reason))+" detail="+RedactPaths(selection.detail));
         // #389: both shutters precede either import, all under this one deadline.
         auto pair=pair_capture_backend(ids,deadline);
-        if(!pair.complete){
-            result.capture.out_of_focus=pair.out_of_focus;result.preflight_refused=!pair.shutter_dispatched[0] && !pair.shutter_dispatched[1];
-            result.preflight_status=DescribeStillPairPreflightRefusal(pair);result.late_object_status=DescribeStillPairLateObjects(pair);
-            throw std::runtime_error(pair.error);
-        }
+        if(!pair.complete){RecordIncompletePair(result,pair);throw std::runtime_error(pair.error);}
         const auto& a=pair.originals[0];const auto& b=pair.originals[1];
         result.capture={true,true,a.path,a.bytes,a.sha256,{}};result.originals={a.path,b.path};originals_saved=true;
         a0::m2::experimental::StillReviewRequest request{a.path,b.path,review_directory,a.sha256,b.sha256,evidence.RunId(),geometry,deadline};
@@ -918,6 +979,10 @@ CaptureUiOutcome SavePairReview(const std::array<std::wstring,2>& ids,ReviewGeom
     }
     return result;
 }
+// A review made with a fixed composite condition (v1, v2 or v3) is a calibrated composite (the heading over it says so, #432).
+bool ReviewIsCalibrated(const a0::m2::experimental::StillReviewResult& review){
+    return review.fixed_composite || review.fixed_composite_lens || review.fixed_composite_registration;
+}
 // The status row of a saved capture. A v8 review adds one sentence per line under the path (#417): the level, the pose of B and
 // the paper surface, the gate, the warnings, the stages the time budget dropped. Every other review has the one line it always had.
 std::wstring SavedCaptureStatus(const CaptureUiOutcome& result){
@@ -937,6 +1002,9 @@ std::wstring SavedCaptureStatus(const CaptureUiOutcome& result){
     if(result.review && result.review->automatic)status+=L" / "+StillAlignmentLine(*result.review->automatic);
     return status;
 }
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+#include "wpd_recalibration_ui.hpp" // #434: the calibration button (after SavePairReview, whose seams it uses)
+#endif
 void AdvanceCapture(HWND hwnd){
     if(settings_future.valid() && settings_future.wait_for(std::chrono::seconds(0))==std::future_status::ready){
         auto outcome=settings_future.get();settings_stop.reset();ApplySettingsOutcome(outcome);
@@ -952,8 +1020,19 @@ void AdvanceCapture(HWND hwnd){
             const int index=*capture_pending;capture_pending.reset();
             if(safe){
                 capture_status=index==2?L"AとBのシャッターを続けて1回ずつ切り、原画像と確認用Merge JPEGを保存しています…":index==0?L"Aを1回撮影してPCへ保存しています…":L"Bを1回撮影してPCへ保存しています…";
-                capture_future=std::async(std::launch::async,[ids=registered_ids,index,geometry=pending_geometry,deadline=capture_deadline]{
-                    try{ComScope com;if(index==2)return SavePairReview(ids,geometry,deadline);return CaptureUiOutcome{SaveStillOnce(ids[index],index==0?"CAM-A":"CAM-B",true,deadline),{}};}
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+                const auto calibration_record=RecalibrationCaptureFor(index); // non-null: this pair is a calibration's (the originals only)
+#endif
+                capture_future=std::async(std::launch::async,[ids=registered_ids,index,geometry=pending_geometry,deadline=capture_deadline
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+                    ,calibration_record
+#endif
+                    ]{
+                    try{ComScope com;
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+                        if(calibration_record)return SaveRecalibrationPair(ids,deadline,calibration_record);
+#endif
+                        if(index==2)return SavePairReview(ids,geometry,deadline);return CaptureUiOutcome{SaveStillOnce(ids[index],index==0?"CAM-A":"CAM-B",true,deadline),{}};}
                     catch(const std::exception& error){CaptureUiOutcome result;result.capture.error=ErrorSummary(error);return result;}
                 });
             }else capture_status=L"Liveの安全な終了を確認できません。撮影せず停止しました。";
@@ -970,8 +1049,15 @@ void AdvanceCapture(HWND hwnd){
     }
     if(capture_future.valid() && capture_future.wait_for(std::chrono::seconds(0))==std::future_status::ready){
         auto result=capture_future.get();
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+        if(RecalibrationTakeCapture(result)){} // the pair of a calibration: Live stays stopped and the job runs; a failed capture falls through to the failure below
+        else
+#endif
         if(result.capture.success && result.capture.closed){
             captures_saved+=(result.review || result.composite_skip || result.composite_failure)?2:1;capture_status=SavedCaptureStatus(result);
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+            capture_status+=RecalibrationNudgeLine(result); // the cameras seem to have moved a lot: say which button to press (#434)
+#endif
             if(result.review){
                 ++pair_reviews;review_path=result.review->jpeg;const auto& thumbnail=result.review->thumbnail;
                 if(pair_cycle_smoke){pair_cycle_reports.push_back(result.review->report);std::wcout<<L"pair_cycle_report="<<result.review->report.wstring()<<std::endl;}
@@ -985,7 +1071,7 @@ void AdvanceCapture(HWND hwnd){
                     const auto divisor=std::max(1u,(std::max(result.review->width,result.review->height)+1199)/1200);const auto column=*seam_column/divisor;
                     if(column<thumbnail.width)for(unsigned y=0;y<thumbnail.height;++y){auto* pixel=review_pixels.bytes.data()+(static_cast<size_t>(y)*thumbnail.width+column)*4;pixel[0]=255;pixel[1]=0;pixel[2]=255;}
                 }
-                review_visible=true;
+                review_visible=true;review_calibrated=ReviewIsCalibrated(*result.review);
             }
             // #417 LC: the live registration is asked for a full pass after a shot here, with the originals of this shot gone from
             // the live view: tracker.RequestFull(now, after_capture). J8w does not call it; the tracker is LC's.
@@ -1007,6 +1093,9 @@ void AdvanceCapture(HWND hwnd){
     }
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
     if(closing && SettingsWriteHoldsWindow(hwnd))return; // a write or reread is waited for the same way
+#endif
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+    if(closing && RecalibrationHoldsWindow())return; // a calibration's job in progress is asked to stop and waited for the same way
 #endif
 #if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
     AdvanceLiveProbe();
@@ -1061,6 +1150,8 @@ int RunPairV3UiSmoke(const std::filesystem::path& fixtures){
         check(first.capture.success && first.capture.closed && first.review && !first.composite_skip,"v3: a composite is made");
         if(first.review){
             check(first.review->fixed_composite_registration && !first.review->fixed_composite_lens && !first.review->fixed_composite,"v3: the review is a registered one");
+            check(ReviewIsCalibrated(*first.review) && std::wstring(PreviewReviewHeading(ReviewIsCalibrated(*first.review))).find(L"未校正")==std::wstring::npos &&
+                std::wstring(PreviewReviewHeading(false)).find(L"未校正")!=std::wstring::npos,"v3: the heading over the saved composite does not say uncalibrated");
             if(first.review->fixed_composite_registration){
                 const auto& record=*first.review->fixed_composite_registration;
                 check(record.registration.level.level==m2e::GeometryLevel::g4,"v3: flat frames give G4");
@@ -1321,6 +1412,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM w,LPARAM l){
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
         if(HandleSettingsWriteCommand(id,HIWORD(w),reinterpret_cast<HWND>(l)))return 0;
 #endif
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+        if(HandleRecalibrationCommand(id,HIWORD(w),reinterpret_cast<HWND>(l)))return 0;
+#endif
 #if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
         if(id==kLiveProbeButtonId && HIWORD(w)==BN_CLICKED && reinterpret_cast<HWND>(l)==live_probe_button){RequestLiveProbe();return 0;}
 #endif
@@ -1397,6 +1491,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM w,LPARAM l){
     case WM_KEYDOWN:if(w==VK_ESCAPE)SendMessageW(hwnd,WM_CLOSE,0,0);return 0;
     case WM_CLOSE:closing=true;stopping=true;capture_stop_requested=true;capture_pending.reset();
         if(settings_stop)settings_stop->store(true); // Only set. The read ends, closes its body, then the window goes.
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+        RecalibrationOnClose(); // a job in progress is asked to stop; the window goes when it has ended
+#endif
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
         if(SettingsWriteBusy())return 0; // the wait notice (SettingsWriteHoldsWindow) owns the title; a repeated request must not bring the first wording back
 #endif
@@ -1417,6 +1514,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM w,LPARAM l){
         if(review_button){EnableWindow(review_button,!review_pixels.bytes.empty());SetWindowTextW(review_button,review_visible?L"ライブCに戻す":L"撮影結果を見る");}
         if(inspect_button)EnableWindow(inspect_button,!review_path.empty());
         if(settings_button)EnableWindow(settings_button,CanReadSettings() && !PanelHoldsLive());
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+        UpdateRecalibrationControls(hwnd);
+#endif
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
         SettingsWriteTimer();
 #endif
@@ -1491,7 +1591,12 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM w,LPARAM l){
         // Interactive failures stay visible after Stop/Close. Finite test
         // runs still terminate and retain a failing result; no auto restart.
         if(run_seconds>0 && !camera_end_restart_smoke && (cameras[0]->failed || cameras[1]->failed))closing=true;
-        try{AdvanceCapture(hwnd);}
+        try{
+            AdvanceCapture(hwnd);
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+            AdvanceRecalibration(); // the end of the job, the person's decision, the start of Live again
+#endif
+        }
         catch(const std::exception& error){
             all_sessions_passed=false;closing=true;stopping=true;capture_pending.reset();
             Log(std::string("preview host failure: ")+error.what());
@@ -1530,6 +1635,9 @@ bool CheckButtonLayoutAt(int width,int height,const std::function<void(bool)>& c
     for(auto& h:capture_buttons)slots.push_back(&h);
     for(auto& h:merge_buttons)slots.push_back(&h);
     for(HWND* h:{&pair_button,&review_button,&inspect_button,&session_button,&seam_button,&settings_button})slots.push_back(h);
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+    slots.push_back(&recal_enter_button);
+#endif
 #if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
     slots.push_back(&live_probe_button);
 #endif
@@ -1549,6 +1657,9 @@ bool CheckButtonLayoutAt(int width,int height,const std::function<void(bool)>& c
     for(int j=0;j<5;++j)made=make(merge_buttons[j],merge_labels[j]) && made;
     made=make(pair_button,L"両台撮影 → 仮Merge保存") && make(review_button,L"撮影結果を見る") && make(inspect_button,L"拡大確認・再Merge") &&
         make(session_button,L"ライブ停止") && make(seam_button,L"継ぎ目の線を表示",BS_AUTOCHECKBOX) && make(settings_button,L"両台の設定を読む") && made;
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+    made=make(recal_enter_button,kRecalEnterLabel) && made;
+#endif
 #if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
     made=make(live_probe_button,LiveProbeButtonLabel()) && made;
 #endif
@@ -1636,6 +1747,9 @@ void CheckButtonLayouts(const std::function<void(bool)>& check){
     for(const int width:{1000,1024,1056,1400,1920})if(!CheckButtonLayoutAt(width,1800,check))check(false);
 }
 #include "wpd_dual_preview_af_smoke.hpp"
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+#include "wpd_recalibration_smoke.hpp" // #434: --recalibration-ui-smoke
+#endif
 #if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
 #include "wpd_dual_preview_live_probe_smoke.hpp" // camera-free contract of the probe's window side
 #endif
@@ -1969,9 +2083,14 @@ int RunFixedCUiSmoke(){
     if(!window)return 2;
     for(int j=0;j<5;++j)merge_buttons[j]=CreateWindowExW(0,L"BUTTON",L"x",WS_CHILD,0,0,10,10,window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(300+j)),instance,nullptr);
     seam_button=CreateWindowExW(0,L"BUTTON",L"x",WS_CHILD|BS_AUTOCHECKBOX,0,0,10,10,window,reinterpret_cast<HMENU>(404),instance,nullptr);
-    bool controls=seam_button!=nullptr;for(const auto button:merge_buttons)controls=controls && button!=nullptr;
+    pair_button=CreateWindowExW(0,L"BUTTON",L"x",WS_CHILD,0,0,10,10,window,reinterpret_cast<HMENU>(400),instance,nullptr);
+    bool controls=seam_button!=nullptr && pair_button!=nullptr;for(const auto button:merge_buttons)controls=controls && button!=nullptr;
     if(!controls){DestroyWindow(window);return 2;}
+    preview_window=window;
     SendMessageW(seam_button,BM_SETCHECK,BST_CHECKED,0);
+    // The caption and the pair button's label as the window shows them (#432): read back from the window itself.
+    const auto caption=[&]{ApplyCalibrationTexts();wchar_t text[256]{};GetWindowTextW(window,text,256);return std::wstring(text);};
+    const auto pair_label=[&]{wchar_t text[64]{};GetWindowTextW(pair_button,text,64);return std::wstring(text);};
     HDC dc=CreateCompatibleDC(nullptr);BITMAPINFO info{};info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);info.bmiHeader.biWidth=1400;info.bmiHeader.biHeight=-960;
     info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;void* bits{};auto bitmap=CreateDIBSection(dc,&info,DIB_RGB_COLORS,&bits,nullptr,0);
     if(!dc || !bitmap){DestroyWindow(window);return 2;}
@@ -2016,6 +2135,7 @@ int RunFixedCUiSmoke(){
     // 1. A condition that applies: C is drawn with it, the seam line is over the picture, and no position request moves C.
     fixed_source={};fixed_source.loaded=m2::LoadedFixedCompositeCondition{condition(mount_orientation),std::string(64,'b')};
     check(FixedConditionPresent());
+    check(caption()==PreviewTitleFrame(L"校正あり・v1") && PreviewTitleMarksMatch(caption()) && pair_label()==L"両台撮影 → 合成を保存");
     check(start_worker([]{return merged.decided && merged.mode==PreviewCMode::fixed_composite && merged.frames>=3 && !merged.pixels.bytes.empty();}));
     {
         std::lock_guard lock(merged.mutex);
@@ -2068,6 +2188,7 @@ int RunFixedCUiSmoke(){
     };
     fixed_source={};fixed_source.loaded_v2=lens_condition(mount_orientation);
     check(FixedConditionPresent());
+    check(caption()==PreviewTitleFrame(L"校正あり・v2") && PreviewTitleMarksMatch(caption()) && pair_label()==L"両台撮影 → 合成を保存");
     check(start_worker([]{return merged.decided && merged.mode==PreviewCMode::fixed_composite && merged.frames>=3 && !merged.pixels.bytes.empty();}));
     {
         std::lock_guard lock(merged.mutex);
@@ -2127,6 +2248,7 @@ int RunFixedCUiSmoke(){
     for(const auto reason:{m2::FixedCompositeSkip::condition_invalid,m2::FixedCompositeSkip::profile_absent,m2::FixedCompositeSkip::profile_differs,m2::FixedCompositeSkip::pose_outside_envelope}){
         fixed_source={};fixed_source.reason=reason;
         check(FixedConditionPresent());
+        check(caption()==PreviewTitleFrame(L"校正を読めません") && PreviewTitleMarksMatch(caption()) && pair_label()==L"両台撮影 → 仮Merge保存");
         check(start_worker([]{return merged.decided && merged.mode==PreviewCMode::unavailable && merged.rendered_revision==merged.revision && merged.source_a.time_since_epoch().count()>0;}));
         {
             std::lock_guard lock(merged.mutex);
@@ -2144,6 +2266,7 @@ int RunFixedCUiSmoke(){
     // 4. No condition: the uncalibrated C stays, its position requests work, and no seam line is drawn.
     fixed_source={};
     check(!FixedConditionPresent());
+    check(caption()==PreviewTitleFrame(L"校正なし・仮Merge") && PreviewTitleMarksMatch(caption()) && pair_label()==L"両台撮影 → 仮Merge保存");
     check(start_worker([]{return merged.decided && merged.mode==PreviewCMode::uncalibrated && !merged.pixels.bytes.empty();}));
     paint();check(pink(picture_rect())==0);
     {
@@ -2159,6 +2282,7 @@ int RunFixedCUiSmoke(){
     stop_worker();rearm();ClearMerge();
 
     SelectObject(dc,old);DeleteObject(bitmap);DeleteDC(dc);DestroyWindow(window);
+    preview_window=nullptr;pair_button=nullptr;
     fixed_source={};stopping=true;
     CheckButtonLayouts([&](bool ok){check(ok);}); // #437: the buttons at the width of a narrow screen and at a wide one
     Log("fixed_c_ui_checks="+std::to_string(checks)+" failures="+std::to_string(failures)+" camera_operations=0");return failures?1:0;
@@ -2423,6 +2547,8 @@ int RunLiveCUiSmoke(){
 
     // 3. The reasons of the first full estimate of a session: a start, a session after a capture, a condition read again.
     fixed_source={};fixed_source.loaded_v3=condition(true,std::string(64,'1'));
+    // The caption of a condition v3 names its revision (#432); the smoke's revision is 1.
+    check(PreviewWindowTitle(fixed_source)==PreviewTitleFrame(L"校正あり・改訂 1") && PreviewTitleMarksMatch(PreviewWindowTitle(fixed_source)) && std::wstring(PairButtonLabel(fixed_source))==L"両台撮影 → 合成を保存");
     live_captures_seen=captures_saved;live_condition_sha.clear();
     PrepareLiveRuntime();
     check(live_runtime && live_runtime->Status().view.full_reason==LiveFullReason::session_start);
@@ -2484,13 +2610,9 @@ int RunPreviewWindow(const std::array<std::wstring,2>& ids){
     for(int i=0;i<2;++i){cameras[i]=std::make_unique<Camera>();cameras[i]->alias=i==0?"CAM-A":"CAM-B";}
     auto instance=GetModuleHandleW(nullptr);WNDCLASSW wc{};wc.lpfnWndProc=WindowProc;wc.hInstance=instance;wc.lpszClassName=L"A0WpdDualPreview";wc.hCursor=LoadCursor(nullptr,IDC_ARROW);
     if(!RegisterClassW(&wc))throw std::runtime_error("register window failed");
-#if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
-    const wchar_t* const window_title=L"A0 [探りbuild: ライブを開いたまま1回撮る] A/B Live + C 仮Merge（未校正） / 撮影・PC保存";
-#else
-    const wchar_t* const window_title=L"A0 A/B Live + C 仮Merge（未校正） / 撮影・PC保存";
-#endif
-    HWND window=CreateWindowExW(0,wc.lpszClassName,window_title,WS_OVERLAPPEDWINDOW|WS_VISIBLE|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,1400,960,nullptr,nullptr,instance,nullptr);
+    HWND window=CreateWindowExW(0,wc.lpszClassName,PreviewWindowTitle(fixed_source).c_str(),WS_OVERLAPPEDWINDOW|WS_VISIBLE|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,1400,960,nullptr,nullptr,instance,nullptr);
     if(!window)throw std::runtime_error("create window failed");
+    preview_window=window; // the caption follows the condition that StartPreview reads (#432)
     constexpr std::array<const wchar_t*,3> labels{L"AF",L"近くへ微調整",L"遠くへ微調整"};
     for(int i=0;i<2;++i){
         for(int j=0;j<3;++j){focus_buttons[i][j]=CreateWindowExW(0,L"BUTTON",labels[j],WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,0,0,0,0,window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(100+i*10+j)),instance,nullptr);if(!focus_buttons[i][j])throw std::runtime_error("create focus button failed");EnableWindow(focus_buttons[i][j],FALSE);}
@@ -2516,6 +2638,9 @@ int RunPreviewWindow(const std::array<std::wstring,2>& ids){
 #endif
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
     CreateSettingsWriteControls(window,instance);InitProductSettingsWrite(); // before any session: a block left by an earlier run holds capture
+#endif
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+    CreateRecalibrationControls(window,instance);
 #endif
     LayoutButtons(window);run_start=Clock::now();StartPreview();SetTimer(window,1,50,nullptr);
     // A hidden console launch can supply STARTF_USESHOWWINDOW/SW_HIDE. This

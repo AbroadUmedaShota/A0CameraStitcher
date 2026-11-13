@@ -53,7 +53,12 @@ inline constexpr std::uint32_t kMaximumFixedCompositeRevisionSequence=999999;
 
 // What a revision changed (11.19.3). The members after `kind` are those of the kind and nothing else; the writer and the
 // reader accept exactly the set of the kind.
-enum class FixedCompositeRevisionKind {created,migrated_from_v2,saved_estimate,manual_adjustment,rollback,values};
+//
+// recalibrated (#434) was added to the closed set of kinds without a new version of the record (formats document, rule 8 and the
+// notes of section 3): the members it uses already exist, a reader that does not know the kind refuses the whole chain, and the
+// kinds before it mean what they meant. It is the only kind that may change the profile, the output raster and the seam column
+// of its parent.
+enum class FixedCompositeRevisionKind {created,migrated_from_v2,saved_estimate,manual_adjustment,rollback,values,recalibrated};
 [[nodiscard]] constexpr std::string_view FixedCompositeRevisionKindText(FixedCompositeRevisionKind k){
     switch(k){
     case FixedCompositeRevisionKind::created:return "created";
@@ -62,12 +67,14 @@ enum class FixedCompositeRevisionKind {created,migrated_from_v2,saved_estimate,m
     case FixedCompositeRevisionKind::manual_adjustment:return "manual-adjustment";
     case FixedCompositeRevisionKind::rollback:return "rollback";
     case FixedCompositeRevisionKind::values:return "values";
+    case FixedCompositeRevisionKind::recalibrated:return "recalibrated";
     }
     return {};
 }
 [[nodiscard]] constexpr std::optional<FixedCompositeRevisionKind> ParseFixedCompositeRevisionKind(std::string_view text){
     for(const auto k:{FixedCompositeRevisionKind::created,FixedCompositeRevisionKind::migrated_from_v2,FixedCompositeRevisionKind::saved_estimate,
-        FixedCompositeRevisionKind::manual_adjustment,FixedCompositeRevisionKind::rollback,FixedCompositeRevisionKind::values})
+        FixedCompositeRevisionKind::manual_adjustment,FixedCompositeRevisionKind::rollback,FixedCompositeRevisionKind::values,
+        FixedCompositeRevisionKind::recalibrated})
         if(FixedCompositeRevisionKindText(k)==text)return k;
     return std::nullopt;
 }
@@ -76,6 +83,7 @@ struct FixedCompositeRevisionChangeV3 {
     // migrated_from_v2: SHA-256 of the v2 file the values were taken from.
     std::optional<std::string> v2_sha256;
     // saved_estimate: the report the pose was taken from and its pair.
+    // recalibrated: the record of the estimate the new profile was made from (a0.pair-recalibration-estimate.v1) and its pair.
     std::optional<std::string> report_sha256,pair_id;
     // manual_adjustment: what the operator entered, as the displacement at the seam in output pixels and a rotation in degrees,
     // and the largest change of the seam column's displacement between the parent's base pose and the new one. There is no
@@ -109,7 +117,8 @@ struct FixedCompositeConditionV3 {
         std::uint32_t column{};
         FixedSeamOrigin origin{FixedSeamOrigin::band_center_provisional};
     } seam;
-    // p_b: against the calibrated pose; degrees, mm, percent. All zero for `created` and `migrated_from_v2`.
+    // p_b: against the calibrated pose; degrees, mm, percent. All zero for `created`, `migrated_from_v2` and `recalibrated` (the
+    // pose of B is then in the profile itself).
     content_registration::PoseParameters base_pose;
 
     struct Registration {

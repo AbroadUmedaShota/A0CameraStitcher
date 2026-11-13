@@ -95,7 +95,7 @@ struct Profile {
 
 // ---- Condition v3 ----
 struct ChangeV3 {
-    std::string kind{"created"};                 // created, migrated-from-v2, saved-estimate, manual-adjustment, rollback, values
+    std::string kind{"created"};                 // created, migrated-from-v2, saved-estimate, manual-adjustment, rollback, values, recalibrated
     std::string v2_sha256{Hex64('1')},report_sha256{Hex64('2')},pair_id{"pair-0001"},restored_sha256{Hex64('3')};
     double entered_seam_dx_px{1},entered_seam_dy_px{-1},entered_rotation_deg{0.25},maximum_seam_displacement_px{1.5};
 };
@@ -127,7 +127,7 @@ inline std::string ChangeV3Json(const ChangeV3& c){
     using namespace detail;
     std::string s="{\"kind\":"+Str(c.kind);
     if(c.kind=="migrated-from-v2")s+=",\"v2Sha256\":"+Str(c.v2_sha256);
-    else if(c.kind=="saved-estimate")s+=",\"reportSha256\":"+Str(c.report_sha256)+",\"pairId\":"+Str(c.pair_id);
+    else if(c.kind=="saved-estimate" || c.kind=="recalibrated")s+=",\"reportSha256\":"+Str(c.report_sha256)+",\"pairId\":"+Str(c.pair_id);
     else if(c.kind=="manual-adjustment")
         s+=",\"entered\":{\"seamDxPx\":"+Num(c.entered_seam_dx_px)+",\"seamDyPx\":"+Num(c.entered_seam_dy_px)+",\"rotationDeg\":"+Num(c.entered_rotation_deg)+
             "},\"maximumSeamDisplacementPx\":"+Num(c.maximum_seam_displacement_px);

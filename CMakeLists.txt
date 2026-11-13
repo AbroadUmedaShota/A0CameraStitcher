@@ -460,6 +460,19 @@ else()
     target_compile_options(a0_m2_capture_registration PRIVATE -Wall -Wextra -Wpedantic -ffp-contract=off)
 endif()
 
+# Recalibration of camera B from one pair (#434, docs/design/recalibration-from-pair.md): the wide search, the estimator in six degrees of
+# freedom, the new draft profile with B's pose baked in, the candidate revision (kind recalibrated) and its checks. Pure computation: no camera,
+# no file, no clock; the SHA-256 provider is a parameter.
+add_library(a0_m2_fixed_composite_recalibration src/m2/fixed_composite_recalibration.cpp)
+target_include_directories(a0_m2_fixed_composite_recalibration PUBLIC src/m2/include PRIVATE src/common/include)
+target_link_libraries(a0_m2_fixed_composite_recalibration PUBLIC a0_m2_fixed_composite_v2 a0_m2_content_registration a0_m2_overlap_estimation a0_m2_rig_profile_v2
+    a0_m2_fixed_composite_maps a0_m2_seam_blend a0_m2_registration_pose a0_m2_render)
+if(MSVC)
+    target_compile_options(a0_m2_fixed_composite_recalibration PRIVATE /W4 /permissive- /EHsc /fp:precise /utf-8)
+else()
+    target_compile_options(a0_m2_fixed_composite_recalibration PRIVATE -Wall -Wextra -Wpedantic -ffp-contract=off)
+endif()
+
 # Development-only probe of #417 (P0): reads a saved pair and a fixed composite condition v2, measures the
 # B-minus-A displacement field over the overlap band and fits registration models to it. Never part of the
 # product; it composes nothing and uses no camera.
@@ -1452,6 +1465,38 @@ if(BUILD_TESTING)
         add_test(NAME still_review_condition_v3_contracts COMMAND a0_still_review_condition_v3_tests "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2"
             $<TARGET_FILE:A0CameraStitcher.StillReview> "${CMAKE_SOURCE_DIR}/docs/examples/wpd-registration-policy.example.json")
         set_tests_properties(still_review_condition_v3_contracts PROPERTIES TIMEOUT 1200)
+        # Recalibration of camera B from one pair (#434): the development command line of StillReview (--recalibrate-from-pair) and, in the
+        # preview, the button. OFF by default: with it OFF neither has an entrance (the sources are not compiled in and the library is not linked).
+        option(A0_BUILD_WPD_RECALIBRATION "Build the recalibration of camera B from one pair into StillReview and the development preview (#434)" OFF)
+        # The recalibration of camera B from one pair (#434 lane B): the words (sentences for every reason, the numbers of the result screen, the
+        # directions of the drawing), and the job and its confirmation with a stand-in for the computation (settings folder untouched by the job,
+        # what a confirmation writes and in what order, the unchecked calibration and its acknowledgement, the command line). Camera and window free.
+        # The third argument says whether StillReview was built with A0_BUILD_WPD_RECALIBRATION (on) or not (off).
+        add_executable(a0_recalibration_text_tests tests/recalibration_text_tests.cpp)
+        target_include_directories(a0_recalibration_text_tests PRIVATE src/phase0/include src/common/include)
+        target_link_libraries(a0_recalibration_text_tests PRIVATE a0_m2_capture_registration a0_m2_fixed_composite_recalibration)
+        if(MSVC)
+            target_compile_options(a0_recalibration_text_tests PRIVATE /W4 /permissive- /EHsc /fp:precise /utf-8)
+        endif()
+        add_test(NAME recalibration_text_contracts COMMAND a0_recalibration_text_tests)
+        set_tests_properties(recalibration_text_contracts PROPERTIES TIMEOUT 120)
+        add_executable(a0_recalibration_job_tests tests/recalibration_job_tests.cpp)
+        target_include_directories(a0_recalibration_job_tests PRIVATE src/phase0/include src/common/include)
+        target_link_libraries(a0_recalibration_job_tests PRIVATE a0_m2_offline_stitcher a0_m2_fixed_composite a0_m2_fixed_composite_v2 a0_m2_capture_registration
+            a0_m2_rig_profile_v2 a0_m2_fixed_composite_recalibration ole32 windowscodecs)
+        target_compile_definitions(a0_recalibration_job_tests PRIVATE NOMINMAX)
+        if(MSVC)
+            target_compile_options(a0_recalibration_job_tests PRIVATE /W4 /permissive- /EHsc /fp:precise /utf-8)
+        endif()
+        add_dependencies(a0_recalibration_job_tests A0CameraStitcher.StillReview)
+        if(A0_BUILD_WPD_RECALIBRATION)
+            set(a0_recalibration_cli_mode on)
+        else()
+            set(a0_recalibration_cli_mode off)
+        endif()
+        add_test(NAME recalibration_job_contracts COMMAND a0_recalibration_job_tests "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2"
+            $<TARGET_FILE:A0CameraStitcher.StillReview> ${a0_recalibration_cli_mode})
+        set_tests_properties(recalibration_job_contracts PROPERTIES TIMEOUT 900)
         add_executable(a0_review_viewport_tests tests/review_viewport_tests.cpp)
         target_include_directories(a0_review_viewport_tests PRIVATE src/m2/include)
         target_link_libraries(a0_review_viewport_tests PRIVATE a0_m2_render)
@@ -1464,6 +1509,10 @@ if(BUILD_TESTING)
         target_include_directories(A0CameraStitcher.StillReview PRIVATE src/phase0/include)
         target_link_libraries(A0CameraStitcher.StillReview PRIVATE a0_m2_offline_stitcher a0_m2_fixed_composite a0_m2_fixed_composite_v2 user32 gdi32 windowscodecs ole32 comdlg32)
         target_compile_definitions(A0CameraStitcher.StillReview PRIVATE UNICODE _UNICODE NOMINMAX)
+        if(A0_BUILD_WPD_RECALIBRATION)
+            target_link_libraries(A0CameraStitcher.StillReview PRIVATE a0_m2_fixed_composite_recalibration)
+            target_compile_definitions(A0CameraStitcher.StillReview PRIVATE A0_ENABLE_WPD_RECALIBRATION=1)
+        endif()
         if(A0_BUILD_STITCH_EVAL)
             add_dependencies(m2_stitch_eval_contracts A0CameraStitcher.StillReview)
             add_test(NAME saved_review_evaluation_contracts COMMAND m2_stitch_eval_contracts
@@ -1559,6 +1608,28 @@ if(BUILD_TESTING)
             COMMAND "${CMAKE_COMMAND}" "-DBINARY=$<TARGET_FILE:A0CameraStitcher.WpdDualPreview>" "-DEXPECT=${a0_settings_write_binary_expect}"
                 -P "${CMAKE_SOURCE_DIR}/tests/settings_write_binary_tests.cmake")
         set_tests_properties(preview_settings_write_binary_contracts PROPERTIES TIMEOUT 30)
+        # The calibration button (#434): the option A0_BUILD_WPD_RECALIBRATION is declared above, beside StillReview. With it ON the preview carries
+        # the button, its screens and a camera-free smoke of them (the job's computation replaced by a stand-in that returns at once); with it
+        # OFF the preview carries none of that, and the binary check below looks for it in the file.
+        if(A0_BUILD_WPD_RECALIBRATION)
+            # The settings write screen sets a minimum window width that the calibration screen's checks at a narrower width cannot meet
+            # (the calibration smoke fails at its first width check), so the two are not built together until that is settled.
+            if(A0_BUILD_WPD_SETTINGS_WRITE)
+                message(FATAL_ERROR "A0_BUILD_WPD_RECALIBRATION and A0_BUILD_WPD_SETTINGS_WRITE must not both be ON: the settings write screen "
+                    "keeps the window wider than the width the calibration screen is checked at.")
+            endif()
+            target_link_libraries(A0CameraStitcher.WpdDualPreview PRIVATE a0_m2_fixed_composite_recalibration a0_m2_capture_registration a0_m2_rig_profile_v2)
+            target_compile_definitions(A0CameraStitcher.WpdDualPreview PRIVATE A0_ENABLE_WPD_RECALIBRATION=1)
+            add_test(NAME preview_recalibration_ui_contracts COMMAND A0CameraStitcher.WpdDualPreview --recalibration-ui-smoke "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2")
+            set_tests_properties(preview_recalibration_ui_contracts PROPERTIES TIMEOUT 600)
+            set(a0_recalibration_binary_expect present)
+        else()
+            set(a0_recalibration_binary_expect absent)
+        endif()
+        add_test(NAME preview_recalibration_binary_contracts
+            COMMAND "${CMAKE_COMMAND}" "-DBINARY=$<TARGET_FILE:A0CameraStitcher.WpdDualPreview>" "-DEXPECT=${a0_recalibration_binary_expect}"
+                -P "${CMAKE_SOURCE_DIR}/tests/recalibration_binary_tests.cmake")
+        set_tests_properties(preview_recalibration_binary_contracts PROPERTIES TIMEOUT 60)
         # Live-open capture probe (#426 stage 4, ADR-0044 stage P). OFF by default and separate from every other option: only with
         # it ON does the preview include the probe headers (they refuse to compile otherwise), so an OFF build carries neither the
         # probe's gate nor its button nor its smoke entry. Build it in its own folder (for example build-probe-on), never in
@@ -1570,6 +1641,10 @@ if(BUILD_TESTING)
             if(A0_BUILD_WPD_SETTINGS_WRITE)
                 message(FATAL_ERROR "A0_BUILD_WPD_LIVE_CAPTURE_PROBE and A0_BUILD_WPD_SETTINGS_WRITE must not both be ON: the settings screen "
                     "stops and restarts Live View, which would mix another cause into the probe's observation (ADR-0044).")
+            endif()
+            if(A0_BUILD_WPD_RECALIBRATION)
+                message(FATAL_ERROR "A0_BUILD_WPD_LIVE_CAPTURE_PROBE and A0_BUILD_WPD_RECALIBRATION must not both be ON: the calibration "
+                    "screen stops Live View and takes its own capture, which would mix another cause into the probe's observation (ADR-0044).")
             endif()
             # The probe never goes into the reference build folder (the AGENTS.md item for ADR-0044).
             # Compared in lower case (the file system ignores case) and as a path component, so build/Reference and
@@ -2014,6 +2089,12 @@ if(BUILD_TESTING)
         "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2")
     target_include_directories(m2_fixed_composite_tool_v3_contracts PRIVATE src/phase0/include src/common/include)
     target_link_libraries(m2_fixed_composite_tool_v3_contracts PRIVATE a0_m2_fixed_composite_v2)
+    # Recalibration of camera B from one pair (#434): the kind recalibrated of the condition v3, the pose baked into a new draft profile, the
+    # candidate revision and its checks, and the whole path on rendered synthetic pairs. Camera and file free (the settings are a temporary folder).
+    a0_add_registration_lane_test(m2_fixed_composite_recalibration_contracts tests/fixed_composite_recalibration_tests.cpp
+        "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2")
+    target_include_directories(m2_fixed_composite_recalibration_contracts PRIVATE src/phase0/include src/common/include)
+    target_link_libraries(m2_fixed_composite_recalibration_contracts PRIVATE a0_m2_fixed_composite_recalibration ole32 windowscodecs)
     a0_add_registration_lane_test(m2_capture_registration_contracts tests/capture_registration_tests.cpp)
     target_link_libraries(m2_capture_registration_contracts PRIVATE a0_m2_capture_registration a0_m2_fixed_composite_v2)
     a0_add_registration_lane_test(m2_fixed_composite_registration_text_contracts tests/fixed_composite_registration_text_tests.cpp)

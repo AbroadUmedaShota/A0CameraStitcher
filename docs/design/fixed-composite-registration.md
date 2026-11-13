@@ -746,6 +746,7 @@ G3 の「一意なブロック」として数えるのは錨（unique か、色�
 | `manual-adjustment` | 操作者も可（#418 段 2） | 面内の 3 成分（基線の向きの平行移動、直交の平行移動、光軸まわりの回転）だけを動かす。画面では継ぎ目での dx・dy（出力 px）と回転で入れ、姿勢の差に直して p_b に足す（`SolveManualChange`）。入れた値と、親の p_b と新しい p_b の継ぎ目の列に沿った変位の差の最大（推定器の収束の量と同じ測り方）を記録する |
 | `rollback` | 操作者も可 | 前の改訂の中身（`basePose` と値の欄）をそのまま写す |
 | `values` | 技術担当者 | 方針ファイルの値（範囲・線）を写し直す（`source.policySha256` が変わる） |
+| `recalibrated` | 操作者も可（#434） | カメラの間隔を変えた後、撮影の 1 組から CAM-B の写像だけを取り直す。B の姿勢 p-hat を新しい draft profile の B の documentToImage に焼き込み、p_b = 0 とする。親から変えてよいのは profile の 3 欄・`outputRaster`・`seam`・`basePose` だけ（profile を変えてよい唯一の種類）。詳細は `recalibration-from-pair.md`。範囲（envelope）の中心は新しい profile の位置になる（11.19.2 の「校正」に、取り直した profile も含む） |
 
 種類ごとの欄の組は書式の文書 3 節。
 

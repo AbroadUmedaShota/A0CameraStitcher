@@ -195,6 +195,7 @@ void ValidateChange(const FixedCompositeConditionV3& c){
         if(!fixed_composite_detail::IsLowerHex64(*ch.v2_sha256))Reject("revision.change.v2Sha256 is not 64 lower-case hex digits");
         break;
     case Kind::saved_estimate:
+    case Kind::recalibrated:
         only(false,true,true,false,false,false);
         if(!fixed_composite_detail::IsLowerHex64(*ch.report_sha256))Reject("revision.change.reportSha256 is not 64 lower-case hex digits");
         if(!fixed_composite_detail::IsPairId(*ch.pair_id))Reject("revision.change.pairId is not a pair identity");
@@ -212,11 +213,12 @@ void ValidateChange(const FixedCompositeConditionV3& c){
         if(!fixed_composite_detail::IsLowerHex64(*ch.restored_sha256))Reject("revision.change.restoredSha256 is not 64 lower-case hex digits");
         break;
     }
-    // The base pose of a first revision is the calibration's.
-    if(first_kind){
+    // The base pose of a first revision is the calibration's; that of a recalibrated revision is its own profile's (the pose of B was
+    // baked into the profile, so nothing is left to measure the ranges from).
+    if(first_kind || ch.kind==Kind::recalibrated){
         const auto& p=c.base_pose;
         if(!(p.rx_deg==0 && p.ry_deg==0 && p.rz_deg==0 && p.tx_mm==0 && p.ty_mm==0 && p.tz_percent==0))
-            Reject("basePose of a first revision is not zero");
+            Reject(first_kind?"basePose of a first revision is not zero":"basePose of a recalibrated revision is not zero");
     }
 }
 }
@@ -242,7 +244,8 @@ std::string FormatChange(const FixedCompositeRevisionChangeV3& ch){
     switch(ch.kind){
     case Kind::created:case Kind::values:break;
     case Kind::migrated_from_v2:s+=",\"v2Sha256\":"+Quoted(*ch.v2_sha256);break;
-    case Kind::saved_estimate:s+=",\"reportSha256\":"+Quoted(*ch.report_sha256)+",\"pairId\":"+Quoted(*ch.pair_id);break;
+    case Kind::saved_estimate:case Kind::recalibrated:
+        s+=",\"reportSha256\":"+Quoted(*ch.report_sha256)+",\"pairId\":"+Quoted(*ch.pair_id);break;
     case Kind::manual_adjustment:
         s+=",\"entered\":{\"seamDxPx\":"+Num(ch.entered->seam_dx_px)+",\"seamDyPx\":"+Num(ch.entered->seam_dy_px)+",\"rotationDeg\":"+Num(ch.entered->rotation_deg)+
             "},\"maximumSeamDisplacementPx\":"+Num(*ch.maximum_seam_displacement_px);
@@ -280,7 +283,7 @@ FixedCompositeRevisionChangeV3 ParseChange(const JsonValue& v){
     case Kind::migrated_from_v2:
         Object(v,"revision.change",{"kind","v2Sha256"});
         ch.v2_sha256=Str(At(v,"v2Sha256"),"v2Sha256");break;
-    case Kind::saved_estimate:
+    case Kind::saved_estimate:case Kind::recalibrated:
         Object(v,"revision.change",{"kind","reportSha256","pairId"});
         ch.report_sha256=Str(At(v,"reportSha256"),"reportSha256");ch.pair_id=Str(At(v,"pairId"),"pairId");break;
     case Kind::manual_adjustment:{

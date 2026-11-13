@@ -32,6 +32,13 @@
 #include "a0/phase0/experimental/still_alignment_text.hpp"
 #include "a0/phase0/experimental/fixed_composite_text.hpp"
 #include "a0/phase0/experimental/fixed_composite_preview.hpp"
+#include "a0/phase0/experimental/preview_window_title.hpp"
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+#include "a0/phase0/experimental/recalibration_job.hpp" // #434, only with A0_BUILD_WPD_RECALIBRATION: the button that makes the calibration again
+#include "a0/common/protocol_json.hpp"
+#include <ctime>
+#include <stop_token>
+#endif
 #include "a0/phase0/experimental/live_registration_runtime.hpp"
 #include "a0/m2/experimental/overlap_estimation.hpp"
 #include "a0/phase0/experimental/still_pair.hpp"
@@ -1013,6 +1020,11 @@ int main(int argc,char** argv){
         if(argc==2 && std::string(argv[1])=="--live-c-ui-smoke")return RunLiveCUiSmoke();
         if(argc==2 && std::string(argv[1])=="--settings-ui-smoke")return RunSettingsUiSmoke();
         if(argc==3 && std::string(argv[1])=="--pair-v3-ui-smoke")return RunPairV3UiSmoke(argv[2]);
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+        // #434: the calibration button's screens on a synthetic pair and a computation that returns at once. <rig profile v2 fixture folder>
+        // [<folder for pictures of the screens>]. No camera, no lease, no settings folder of the machine.
+        if((argc==3 || argc==4) && std::string(argv[1])=="--recalibration-ui-smoke")return RunRecalibrationUiSmoke(argv[2],argc==4?argv[3]:"");
+#endif
         if(argc==2 && std::string(argv[1])=="--settings-read-diagnostics"){
             ComScope com;HardwareProcessLease lease;return RunSettingsReadDiagnostics(Discover());
         }

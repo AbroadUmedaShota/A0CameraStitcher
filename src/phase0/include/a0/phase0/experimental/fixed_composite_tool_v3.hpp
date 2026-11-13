@@ -174,6 +174,8 @@ inline double MaximumSeamDisplacement(const cr::PoseModel& model,const cr::Plane
 
     if(request.kind==Kind::saved_estimate)
         return refuse("推定の姿勢を基準にする改訂（saved-estimate）は、報告 v8 の読み手がまだ無いため作れません。作りません");
+    if(request.kind==Kind::recalibrated)
+        return refuse("再校正（recalibrated）の改訂は、このツールでは作れません（校正のやり直しだけが作ります）。作りません");
 
     // The ranges, lines and limits come from the policy file, never from the code.
     std::optional<RegistrationPolicyV1> policy;
