@@ -1,8 +1,9 @@
-"""Estimator of the seam row-gain field for the stitched page.
+"""Estimator of the seam colour plan for the stitched page.
 
 The package reads a request (a seam column, the mapped A and B' strips around
-the seam, the global gain) and writes a record of per-row gains at the seam.
-It never writes an image; applying the gains is the renderer's job.
+the seam, the global gain) and writes a plan (a0.seam-color-plan.v1) with the
+scale B' needs at the seam along the page. It never writes an image; applying
+the plan is the renderer's job.
 """
 import os
 

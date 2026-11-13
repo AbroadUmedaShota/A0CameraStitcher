@@ -12,7 +12,9 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-PITCH_UM_REF = 25400.0 / 180.0
+DPI_REF = 180
+PITCH_MM_REF = 25.4 / DPI_REF
+TOP_UM = 12500
 HEIGHT_REF = 640
 WIDTH_REF = 520
 SEAM_REF = 260
@@ -87,8 +89,8 @@ class Scene:
     gain_fn: object = None        # optional replacement (y_ref, u_ref) -> (.., 3)
     page_fn: object = None        # optional replacement (y_ref, u_ref) -> (.., 3)
     design: dict = field(default_factory=dict)
-    default_gain: bool = True
     global_gain: tuple = tuple(GLOBAL_GAIN)
+    b_samples: str = "mapped-before-color-gain"
 
     @property
     def height(self):
@@ -110,11 +112,6 @@ class Scene:
     def gain(self, y_ref, u_ref):
         return self.gain_fn(y_ref, u_ref) if self.gain_fn else true_gain(y_ref, u_ref, self.ramp)
 
-    def default_row_gain(self):
-        y = (np.arange(self.height) + 0.5) * self.scale
-        wobble = 1.0 + 0.02 * np.sin(y / 50.0)
-        return (np.asarray(self.global_gain) * wobble[:, None]).astype("<f4")
-
     def strip(self):
         y, u = self.coords()
         p = self.page_fn(y, u) if self.page_fn else page(y, u, self.bars, self.orange, self.dark, self.band)
@@ -129,28 +126,36 @@ def _sha(path):
         return hashlib.sha256(f.read()).hexdigest()
 
 
+def binding_list():
+    """Three distinct, fixed fingerprints for the bindings of a request (no real files are fingerprinted)."""
+    return [{"kind": kind, "sha256": hashlib.sha256(kind.encode("ascii")).hexdigest()}
+            for kind in ("condition-v3", "capture-original-a", "capture-original-b")]
+
+
+def request_doc(scene, strip_sha):
+    """The request document of a scene (a dict); strip_sha is the SHA-256 of the strip file."""
+    doc = {
+        "schema": "a0.seam-estimate-request.v1",
+        "raster": {"widthPx": scene.width, "heightPx": scene.height, "dpi": DPI_REF // scene.scale,
+                   "topUm": TOP_UM, "seamColumn": scene.seam},
+        "globalGainBgr": [float(v) for v in scene.global_gain],
+        "bindings": binding_list(),
+        "strip": {"file": "strip.u16", "sha256": strip_sha, "firstColumn": 0, "width": scene.width,
+                  "bSamples": scene.b_samples},
+    }
+    if scene.design:
+        doc["design"] = dict(scene.design)
+    return doc
+
+
 def write_request(folder, scene, name="request.json"):
-    """Write the strip, the default gains and the request JSON; returns the request path."""
+    """Write the strip and the request JSON; returns the request path."""
     os.makedirs(folder, exist_ok=True)
     strip_path = os.path.join(folder, "strip.u16")
     scene.strip().tofile(strip_path)
-    doc = {
-        "schema": "a0.seam-estimate-request.v1",
-        "output": {"width": scene.width, "height": scene.height,
-                   "pixelPitchUm": PITCH_UM_REF * scene.scale, "originYMm": 12.5},
-        "seamColumn": scene.seam,
-        "globalGainBgr": [float(v) for v in scene.global_gain],
-        "strip": {"file": "strip.u16", "sha256": _sha(strip_path), "firstColumn": 0, "width": scene.width},
-    }
-    if scene.default_gain:
-        gain_path = os.path.join(folder, "default-gain.f32")
-        scene.default_row_gain().tofile(gain_path)
-        doc["defaultRowGain"] = {"file": "default-gain.f32", "sha256": _sha(gain_path)}
-    if scene.design:
-        doc["design"] = dict(scene.design)
     path = os.path.join(folder, name)
     with open(path, "w", encoding="utf-8", newline="\n") as f:
-        json.dump(doc, f, indent=1)
+        json.dump(request_doc(scene, _sha(strip_path)), f, indent=1)
     return path
 
 
@@ -161,21 +166,17 @@ HALF_SCALE_DESIGN = {
 }
 
 
-def knot_arrays(rec):
-    """(rows in reference pixels, gains (n,3)) of the used knots of a parsed record."""
-    pitch_mm = rec["raster"]["pixelPitchUm"] / 1000.0
-    origin = rec["raster"]["originYMm"]
-    scale = rec["raster"]["pixelPitchUm"] / PITCH_UM_REF
-    ys, gs = [], []
-    for k in rec["knots"]:
-        if k["used"]:
-            row = (k["yMm"] - origin) / pitch_mm - 0.5
-            ys.append((row + 0.5) * scale)
-            gs.append(k["gainBgr"])
-    return np.array(ys), np.array(gs)
+def knot_arrays(plan):
+    """(rows in reference pixels, scales (n,3)) of the knots of a parsed plan."""
+    raster = plan["diagnostics"]["raster"]
+    top_mm = raster["topUm"] / 1000.0
+    pitch_mm = 25.4 / raster["dpi"]
+    scale = DPI_REF / raster["dpi"]
+    ys = [((k["yMm"] - top_mm) / pitch_mm) * scale for k in plan["knots"]]
+    return np.array(ys), np.array([k["seamScaleBgr"] for k in plan["knots"]])
 
 
-def gain_at_reference_rows(rec, y_ref):
-    """Log-linear interpolation of the used knots of a record at reference rows (no fill-in beyond them)."""
-    ys, gs = knot_arrays(rec)
-    return np.stack([np.exp(np.interp(y_ref, ys, np.log(gs[:, c]))) for c in range(3)], axis=-1)
+def scale_at_reference_rows(plan, y_ref):
+    """Scale between the knots of a plan as the reader defines it: linear in yMm, end values held."""
+    ys, gs = knot_arrays(plan)
+    return np.stack([np.interp(y_ref, ys, gs[:, c]) for c in range(3)], axis=-1)

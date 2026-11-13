@@ -1,5 +1,4 @@
-"""Bad input: exit code 2, no record written; other failures: exit code 1."""
-import hashlib
+"""Bad input: exit code 2, no plan written; other failures: exit code 1."""
 import json
 import os
 
@@ -24,7 +23,7 @@ def save(path, doc):
 
 
 def run(path):
-    out = os.path.join(os.path.dirname(path), "seam-row-gain.json")
+    out = os.path.join(os.path.dirname(path), cli.DEFAULT_PLAN_NAME)
     code = cli.main([path, "--out", out])
     return code, out
 
@@ -41,47 +40,87 @@ def delete_in(doc, keys):
     del doc[keys[-1]]
 
 
+# name -> (mutation, text the error message must contain)
 MUTATIONS = {
-    "wrong schema": lambda d: set_in(d, ["schema"], "a0.seam-estimate-request.v2"),
-    "unknown top key": lambda d: set_in(d, ["extra"], 1),
-    "missing strip": lambda d: delete_in(d, ["strip"]),
-    "missing output": lambda d: delete_in(d, ["output"]),
-    "seam outside": lambda d: set_in(d, ["seamColumn"], SCENE.width),
-    "seam is a float": lambda d: set_in(d, ["seamColumn"], 260.5),
-    "seam is a bool": lambda d: set_in(d, ["seamColumn"], True),
-    "height zero": lambda d: set_in(d, ["output", "height"], 0),
-    "height too small": lambda d: set_in(d, ["output", "height"], 40),
-    "pitch zero": lambda d: set_in(d, ["output", "pixelPitchUm"], 0),
-    "pitch as text": lambda d: set_in(d, ["output", "pixelPitchUm"], "141"),
-    "unknown output key": lambda d: set_in(d, ["output", "dpi"], 180),
-    "gain negative": lambda d: set_in(d, ["globalGainBgr"], [1.2, -1.0, 1.1]),
-    "gain wrong length": lambda d: set_in(d, ["globalGainBgr"], [1.2, 1.1]),
-    "strip does not cover the seam": lambda d: set_in(d, ["strip", "firstColumn"], 200),
-    "strip wrong size": lambda d: set_in(d, ["strip", "width"], SCENE.width - 1),
-    "strip hash not hex": lambda d: set_in(d, ["strip", "sha256"], "XYZ"),
-    "strip hash wrong": lambda d: set_in(d, ["strip", "sha256"], "0" * 64),
-    "strip hash upper case": lambda d: set_in(d, ["strip", "sha256"], d["strip"]["sha256"].upper()),
-    "strip file missing": lambda d: set_in(d, ["strip", "file"], "nothing.u16"),
-    "strip file leaves the folder": lambda d: set_in(d, ["strip", "file"], "../strip.u16"),
-    "strip file absolute": lambda d: set_in(d, ["strip", "file"], os.path.abspath("strip.u16")),
-    "default gain hash wrong": lambda d: set_in(d, ["defaultRowGain", "sha256"], "1" * 64),
-    "unknown design key": lambda d: set_in(d, ["design"], {"stepsPx": 8}),
-    "design not an object": lambda d: set_in(d, ["design"], [1]),
-    "design gain limit not above 1": lambda d: set_in(d, ["design"], {"gainLimit": 1.0}),
-    "design int given as float": lambda d: set_in(d, ["design"], {"stepPx": 8.5}),
-    "design radii out of order": lambda d: set_in(d, ["design"], {"meanRadiusPx": 30}),
-    "design min windows too small": lambda d: set_in(d, ["design"], {"minWindows": 1}),
+    "wrong schema": (lambda d: set_in(d, ["schema"], "a0.seam-estimate-request.v2"), "schema must be"),
+    "unknown top key": (lambda d: set_in(d, ["extra"], 1), "unknown keys"),
+    "old output block": (lambda d: set_in(d, ["output"], {"width": 520}), "unknown keys"),
+    "old default row gain": (lambda d: set_in(d, ["defaultRowGain"], {"file": "g.f32", "sha256": "0" * 64}),
+                             "unknown keys"),
+    "missing strip": (lambda d: delete_in(d, ["strip"]), "strip is missing"),
+    "missing raster": (lambda d: delete_in(d, ["raster"]), "raster is missing"),
+    "missing bindings": (lambda d: delete_in(d, ["bindings"]), "bindings is missing"),
+    "seam outside": (lambda d: set_in(d, ["raster", "seamColumn"], SCENE.width), "seamColumn"),
+    "seam is a float": (lambda d: set_in(d, ["raster", "seamColumn"], 260.5), "seamColumn"),
+    "seam is a bool": (lambda d: set_in(d, ["raster", "seamColumn"], True), "seamColumn"),
+    "height zero": (lambda d: set_in(d, ["raster", "heightPx"], 0), "heightPx"),
+    "height too small": (lambda d: set_in(d, ["raster", "heightPx"], 40), "too small"),
+    "height above the limit": (lambda d: set_in(d, ["raster", "heightPx"], 32769), "heightPx"),
+    "width zero": (lambda d: set_in(d, ["raster", "widthPx"], 0), "widthPx"),
+    "dpi zero": (lambda d: set_in(d, ["raster", "dpi"], 0), "dpi"),
+    "dpi is a float": (lambda d: set_in(d, ["raster", "dpi"], 180.5), "dpi"),
+    "dpi as text": (lambda d: set_in(d, ["raster", "dpi"], "180"), "dpi"),
+    "dpi above the limit": (lambda d: set_in(d, ["raster", "dpi"], 4801), "dpi"),
+    "topUm is a float": (lambda d: set_in(d, ["raster", "topUm"], 12500.5), "topUm"),
+    "topUm is huge": (lambda d: set_in(d, ["raster", "topUm"], 10**12), "topUm"),
+    "unknown raster key": (lambda d: set_in(d, ["raster", "pixelPitchUm"], 141.1), "unknown keys"),
+    "raster lacks dpi": (lambda d: delete_in(d, ["raster", "dpi"]), "raster is missing"),
+    "gain negative": (lambda d: set_in(d, ["globalGainBgr"], [1.2, -1.0, 1.1]), "globalGainBgr"),
+    "gain wrong length": (lambda d: set_in(d, ["globalGainBgr"], [1.2, 1.1]), "globalGainBgr"),
+    "gain above the readers range": (lambda d: set_in(d, ["globalGainBgr"], [1.2, 4.5, 1.1]), "globalGainBgr"),
+    "gain below the readers range": (lambda d: set_in(d, ["globalGainBgr"], [1.2, 0.2, 1.1]), "globalGainBgr"),
+    "strip does not cover the seam": (lambda d: (set_in(d, ["strip", "firstColumn"], 200), set_in(d, ["strip", "width"], 320)), "must cover"),
+    "strip wrong size": (lambda d: set_in(d, ["strip", "width"], SCENE.width - 1), "bytes"),
+    "strip hash not hex": (lambda d: set_in(d, ["strip", "sha256"], "XYZ"), "sha256"),
+    "strip hash wrong": (lambda d: set_in(d, ["strip", "sha256"], "0" * 64), "does not match"),
+    "strip hash upper case": (lambda d: set_in(d, ["strip", "sha256"], d["strip"]["sha256"].upper()), "sha256"),
+    "strip file missing": (lambda d: set_in(d, ["strip", "file"], "nothing.u16"), "does not exist"),
+    "strip file leaves the folder": (lambda d: set_in(d, ["strip", "file"], "../strip.u16"), "leaves"),
+    "strip file absolute": (lambda d: set_in(d, ["strip", "file"], os.path.abspath("strip.u16")), "relative"),
+    "b samples missing": (lambda d: delete_in(d, ["strip", "bSamples"]), "bSamples"),
+    "b samples already scaled": (lambda d: set_in(d, ["strip", "bSamples"], "mapped-after-color-gain"), "bSamples"),
+    "bindings empty": (lambda d: set_in(d, ["bindings"], []), "bindings"),
+    "bindings not a list": (lambda d: set_in(d, ["bindings"], {"kind": "condition-v3"}), "bindings"),
+    "bindings unknown kind": (lambda d: set_in(d, ["bindings", 1, "kind"], "capture-original-c"), "known kind"),
+    "bindings repeat a kind": (lambda d: set_in(d, ["bindings", 2, "kind"], "capture-original-a"), "repeats"),
+    "bindings lack a kind": (lambda d: d["bindings"].pop(0), "lacks"),
+    "bindings sha upper case": (lambda d: set_in(d, ["bindings", 0, "sha256"], "A" * 64), "sha256"),
+    "bindings sha short": (lambda d: set_in(d, ["bindings", 0, "sha256"], "ab"), "sha256"),
+    "bindings extra key": (lambda d: set_in(d, ["bindings", 0, "note"], "x"), "exactly"),
+    "unknown design key": (lambda d: set_in(d, ["design"], {"stepsPx": 8}), "unknown key"),
+    "old design name for the limit": (lambda d: set_in(d, ["design"], {"gainLimit": 1.2}), "unknown key"),
+    "design not an object": (lambda d: set_in(d, ["design"], [1]), "design"),
+    "design ratio not above 1": (lambda d: set_in(d, ["design"], {"maxScaleRatioToGlobal": 1.0}), "maxScaleRatio"),
+    "design ratio above the readers": (lambda d: set_in(d, ["design"], {"maxScaleRatioToGlobal": 1.3}),
+                                       "maxScaleRatio"),
+    "design int given as float": (lambda d: set_in(d, ["design"], {"stepPx": 8.5}), "integer"),
+    "design radii out of order": (lambda d: set_in(d, ["design"], {"meanRadiusPx": 30}), "radii"),
+    "design min windows too small": (lambda d: set_in(d, ["design"], {"minWindows": 1}), "minWindows"),
+    "too many knots": (lambda d: (set_in(d, ["raster", "heightPx"], 5000), set_in(d, ["design"], {"knotSpacingRows": 1})),
+                       "more than 4096 knots"),
 }
 
 
 @pytest.mark.parametrize("name", sorted(MUTATIONS))
-def test_bad_request_exits_2_and_writes_no_record(tmp_path, name):
+def test_bad_request_exits_2_and_writes_no_plan(tmp_path, capsys, name):
+    mutate, expected = MUTATIONS[name]
     _, path, doc = make_request(tmp_path)
-    MUTATIONS[name](doc)
+    mutate(doc)
     save(path, doc)
     code, out = run(path)
     assert code == 2
     assert not os.path.exists(out)
+    assert expected in capsys.readouterr().err
+
+
+def test_strip_wider_than_the_limit_is_refused(tmp_path, capsys):
+    _, path, doc = make_request(tmp_path)
+    doc["raster"]["widthPx"] = 2000
+    doc["strip"]["width"] = 1025
+    save(path, doc)
+    code, out = run(path)
+    assert code == 2 and not os.path.exists(out)
+    assert "at most 1024" in capsys.readouterr().err
 
 
 def test_tampered_strip_is_caught_by_its_hash(tmp_path):
@@ -91,18 +130,6 @@ def test_tampered_strip_is_caught_by_its_hash(tmp_path):
         byte = f.read(1)
         f.seek(1000)
         f.write(bytes([byte[0] ^ 1]))
-    code, out = run(path)
-    assert code == 2 and not os.path.exists(out)
-
-
-def test_non_positive_default_gain_exits_2(tmp_path):
-    folder, path, doc = make_request(tmp_path)
-    bad = SCENE.default_row_gain()
-    bad[5, 1] = 0.0
-    gain_path = os.path.join(folder, "default-gain.f32")
-    bad.tofile(gain_path)
-    doc["defaultRowGain"]["sha256"] = hashlib.sha256(open(gain_path, "rb").read()).hexdigest()
-    save(path, doc)
     code, out = run(path)
     assert code == 2 and not os.path.exists(out)
 
@@ -127,7 +154,7 @@ def test_request_without_arguments_is_a_usage_error():
     assert e.value.code == 2
 
 
-def test_unexpected_failure_exits_1_and_writes_no_record(tmp_path, monkeypatch, capsys):
+def test_unexpected_failure_exits_1_and_writes_no_plan(tmp_path, monkeypatch, capsys):
     _, path, _ = make_request(tmp_path)
 
     def boom(_req):
@@ -141,19 +168,19 @@ def test_unexpected_failure_exits_1_and_writes_no_record(tmp_path, monkeypatch, 
 
 def test_unwritable_output_exits_1(tmp_path):
     _, path, _ = make_request(tmp_path)
-    code = cli.main([path, "--out", str(tmp_path / "no-such-folder" / "record.json")])
+    code = cli.main([path, "--out", str(tmp_path / "no-such-folder" / "plan.json")])
     assert code == 1
 
 
 def test_a_failed_run_does_not_leave_temporary_files(tmp_path):
     folder, path, doc = make_request(tmp_path)
-    doc["seamColumn"] = -1
+    doc["raster"]["seamColumn"] = -1
     save(path, doc)
     run(path)
     assert not [n for n in os.listdir(folder) if n.endswith(".tmp")]
 
 
-def test_default_record_path_is_next_to_the_request(tmp_path):
+def test_default_plan_path_is_next_to_the_request(tmp_path):
     folder, path, _ = make_request(tmp_path)
     assert cli.main([path]) == 0
-    assert os.path.isfile(os.path.join(folder, cli.DEFAULT_RECORD_NAME))
+    assert os.path.isfile(os.path.join(folder, cli.DEFAULT_PLAN_NAME))

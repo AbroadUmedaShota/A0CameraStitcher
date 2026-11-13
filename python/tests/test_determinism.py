@@ -9,11 +9,11 @@ from a0seam.request import load_request
 
 PYTHON_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# SHA-256 of the record of the default synthetic scene without its environment
+# SHA-256 of the plan of the default synthetic scene without its environment
 # block (record.digest_without_environment). It pins the numeric result: when a
 # change to the estimator or a numpy upgrade moves it, review the difference in
-# the record and update this value in the same commit.
-PINNED_DIGEST = "930b6d5326e597089f919908f3c6d8a74a00edbfe62188e82f3c691b5b5e535a"
+# the plan and update this value in the same commit.
+PINNED_DIGEST = "ea5c0f4c885c2bca09a14be83808223f09f19c250165ac43fa9a55e4d2179bca"
 
 
 def estimate_scene(folder, scene):
@@ -26,14 +26,14 @@ def test_two_runs_write_identical_bytes(tmp_path):
     outputs = []
     for name in ("one", "two"):
         _, path = estimate_scene(tmp_path / name, scene)
-        out = str(tmp_path / name / "record.json")
+        out = str(tmp_path / name / "plan.json")
         assert cli.main([path, "--out", out]) == 0
         with open(out, "rb") as f:
             outputs.append(f.read())
     assert outputs[0] == outputs[1]
 
 
-def test_record_digest_is_pinned(tmp_path):
+def test_plan_digest_is_pinned(tmp_path):
     req, _ = estimate_scene(tmp_path, synth.Scene())
     assert record.digest_without_environment(cli.estimate(req)) == PINNED_DIGEST
 
@@ -64,7 +64,7 @@ def test_module_entry_point_and_exit_codes(tmp_path):
     assert bad.returncode == 2 and "input error" in bad.stderr
 
 
-def test_record_has_no_machine_specific_text_besides_the_environment_block(tmp_path):
+def test_plan_has_no_machine_specific_text_besides_the_environment_block(tmp_path):
     req, _ = estimate_scene(tmp_path, synth.Scene())
     text = record.dumps(cli.estimate(req))
     assert str(tmp_path) not in text

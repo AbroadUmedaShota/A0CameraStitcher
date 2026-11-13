@@ -1,4 +1,4 @@
-"""Record serialization."""
+"""Plan serialization."""
 import math
 
 import numpy as np
@@ -31,9 +31,11 @@ def test_non_finite_numbers_are_refused(bad):
         record.dumps({"x": bad})
 
 
-def test_digest_ignores_only_the_environment_block():
-    base = {"schema": "s", "environment": {"python": "3.12.10"}, "v": 1.0}
-    same = {"schema": "s", "environment": {"python": "3.13.0"}, "v": 1.0}
-    other = {"schema": "s", "environment": {"python": "3.12.10"}, "v": 1.000001}
-    assert record.digest_without_environment(base) == record.digest_without_environment(same)
-    assert record.digest_without_environment(base) != record.digest_without_environment(other)
+def test_digest_ignores_only_the_environment_block_of_the_diagnostics():
+    def plan(python, v, other="x"):
+        return {"schema": "s", "knots": [v], "diagnostics": {"environment": {"python": python}, "other": other}}
+
+    base = plan("3.12.10", 1.0)
+    assert record.digest_without_environment(base) == record.digest_without_environment(plan("3.13.0", 1.0))
+    assert record.digest_without_environment(base) != record.digest_without_environment(plan("3.12.10", 1.000001))
+    assert record.digest_without_environment(base) != record.digest_without_environment(plan("3.12.10", 1.0, "y"))
