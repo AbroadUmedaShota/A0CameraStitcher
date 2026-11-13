@@ -25,6 +25,10 @@ The development level display uses only the public numeric facts for signed
 big-endian roll/pitch integer words at payload offsets 52/56 in NikonD600Base.cs,
 BaseMTPCamera.ToInt16, and degree-based RotateTransform in LiveViewWnd.xaml
 at the same fixed commit. No fractional encoding or sensor validity is inferred.
+The read-only settings comparison (#427) also references NikonBase.cs at the same fixed commit for the scalar
+type of the Picture Control item 0xD200 (UInt16) and the numbers 1 to 6 of its names, the colour space values,
+and the on/off values of the long exposure noise reduction and HDR mode (InitPictControl, InitColorSpace,
+InitOnOffProperty, HDRMode). The numbers and types are protocol facts; no upstream implementation is copied.
 https://github.com/dukus/digiCamControl/blob/a95ee52bbc1e192a7d1da038f3af6561b185d312/CameraControl.Devices/BaseMTPCamera.cs
 https://github.com/dukus/digiCamControl/blob/a95ee52bbc1e192a7d1da038f3af6561b185d312/CameraControl/windows/LiveViewWnd.xaml
 
