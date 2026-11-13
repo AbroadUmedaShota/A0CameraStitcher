@@ -70,8 +70,8 @@ void Guide() {
     const auto lines = RecalibrationGuideLines();
     CHECK(lines.size() == 7);
     CHECK(HasLine(lines, "カメラの間隔を変えた時だけ") && HasLine(lines, "撮影のたびには要りません"));   // when, and not every shot
-    CHECK(HasLine(lines, "机と平行に"));                 // how to move the cameras
-    CHECK(HasLine(lines, "線や模様の多い紙を 1 枚"));      // what to put down
+    CHECK(HasLine(lines, "平行に動かして"));              // how to move the cameras
+    CHECK(HasLine(lines, "いつも図面を置く面") && HasLine(lines, "線や模様の多い薄い紙を 1 枚") && HasLine(lines, "新しい基準の面"));   // what to put down, and where (the surface is not named)
     CHECK(HasLine(lines, "ピントを合わせ"));            // the fourth condition of the paper
     CHECK(HasLine(lines, "冊子") && HasLine(lines, "罫線"));
     CHECK(HasLine(lines, "高さ") && HasLine(lines, "ズーム"));   // what not to touch
