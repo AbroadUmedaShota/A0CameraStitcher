@@ -1302,6 +1302,16 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME preview_live_registration_display_contracts COMMAND a0_live_registration_display_tests)
     set_tests_properties(preview_live_registration_display_contracts PROPERTIES TIMEOUT 120)
+    # The position that the live C is drawn with (#437 stage 1): one position, replaced only by an estimate that was asked for, a new condition
+    # or a shot; no time, frames, thread or window. Header only.
+    add_executable(a0_live_placement_tests tests/live_placement_tests.cpp)
+    target_include_directories(a0_live_placement_tests PRIVATE src/phase0/include src/common/include)
+    target_link_libraries(a0_live_placement_tests PRIVATE a0_m2_render)
+    if(MSVC)
+        target_compile_options(a0_live_placement_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+    endif()
+    add_test(NAME preview_live_placement_contracts COMMAND a0_live_placement_tests)
+    set_tests_properties(preview_live_placement_contracts PROPERTIES TIMEOUT 120)
     # The state machine of the live C's registration (#417 LC): start, follow-up, change detection, stale results, holding and
     # the decision to bake camera B's table again, with a scripted estimator. Header only; no camera, clock or thread.
     add_executable(a0_live_registration_tracker_tests tests/live_registration_tracker_tests.cpp)
@@ -1312,9 +1322,9 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME preview_live_registration_tracker_contracts COMMAND a0_live_registration_tracker_tests)
     set_tests_properties(preview_live_registration_tracker_contracts PROPERTIES TIMEOUT 120)
-    # The worker of the live C (#417 LC): a job when one is due, the bake of B's table when the mapping in force has moved, the swap of the
-    # plan that C draws with and the status that the window shows, on a synthetic rig with a scripted estimator and a moved clock. One test
-    # runs the worker thread itself. No camera, file or window.
+    # The worker of the live C (#417 LC, #437 stage 1): the estimate when one is asked for, the bake of B's table whenever the position is to
+    # be replaced, the swap of the plan that C draws with and the status that the window shows, on a synthetic rig with a scripted estimator.
+    # One test runs the worker thread itself. No camera, file or window.
     add_executable(a0_live_registration_runtime_tests tests/live_registration_runtime_tests.cpp)
     target_include_directories(a0_live_registration_runtime_tests PRIVATE src/phase0/include src/common/include)
     target_link_libraries(a0_live_registration_runtime_tests PRIVATE a0_m2_fixed_composite_v2 a0_m2_fixed_composite a0_m2_seam_blend a0_m2_content_registration a0_m2_registration_pose a0_m2_render)
