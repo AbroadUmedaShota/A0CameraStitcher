@@ -466,13 +466,16 @@ private:
         WpdStillCaptureRun& run;
         ~Publisher(){run.Publish();}
     };
+    // Copying failure_ allocates (it holds a map); an allocation failure must not terminate.
     void Publish()noexcept{
         if(!observation_ || !preflighted_)return;
-        observation_->shutter_attempted=channel_.CaptureAttempted();
-        observation_->complete_event=ledger_.Completed();
-        observation_->complete_event_code=ledger_.CompletionCode();
-        observation_->completion_wait=wait_result_;observation_->completion_wait_ms=wait_ms_;
-        observation_->failure=failure_;
+        try{
+            observation_->shutter_attempted=channel_.CaptureAttempted();
+            observation_->complete_event=ledger_.Completed();
+            observation_->complete_event_code=ledger_.CompletionCode();
+            observation_->completion_wait=wait_result_;observation_->completion_wait_ms=wait_ms_;
+            observation_->failure=failure_;
+        }catch(...){}
     }
     void Active()const{if(!may_continue_())throw std::runtime_error("still transaction deadline/stop");}
     void Ready(){WaitWpdStillReady(channel_,may_continue_);}
