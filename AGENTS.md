@@ -26,6 +26,7 @@ Chat summaries are source material, not current specification. Unresolved busine
 
 - Windows 11 x64 is the target platform.
 - Use C++20/CMake for Phase 0 and .NET 10 for the application layer from M3 onward.
+- Python 3.12 with numpy (pinned in `python/requirements.txt`) is allowed only for the calibration- and development-time seam colour estimator in `python/a0seam` (ADR-0043). It writes a plan and never draws images; capture and the live C never start Python, and the application does not bundle Python or numpy (redistribution needs `HG-0005`).
 - The attempted Phase 0 hybrid path (WPD baseline/close, SDK one-shot card capture/close, WPD recovery) is rejected by hardware evidence and must remain fail-closed. `HG-0008` was approved on 2026-08-06: a dedicated empty/cleared card may be used as the single-slot transient spool replacement. Empty means zero camera payload objects, including non-JPEG images, video, and generic files; WPD folders and functional nodes are structure, not payload.
 - Never overlap SDK and WPD sessions. Stop and fully close SDK Live View before the hybrid transaction; re-open Live View only after the WPD recovery succeeds.
 - Permit Phase 0A Live View handoff only with one physical D810 connected. With two bodies, require an explicit SDK/WPD-to-alias binding for each body before handoff.
