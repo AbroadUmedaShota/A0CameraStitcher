@@ -7,10 +7,13 @@
 // 0.9 mm of paper per pixel, which is what a 640 x 424 live view of a frame that covers about 600 mm gives. C's grid is the
 // condition's region at the pitch of that frame (about 1.06 mm per pixel, 727 x 321 pixels). Noise of 2 DN is added to every frame.
 //
-// The target. C is a guide drawn at its own resolution, and B's table is baked again only when the mapping moves by more than
-// tau_bake = 0.5 px of C. A seam that is off by less than half a pixel of C is not visible in C, so the target of a full estimate
-// is: the largest error along the seam column below 0.5 px of C (about 0.5 mm of paper). It says nothing about the capture, whose
-// estimate is made again on the captured images.
+// The target. C is a guide drawn at its own resolution. A seam that is off by less than half a pixel of C is not visible in C, so the
+// target of a full estimate is: the largest error along the seam column below 0.5 px of C (about 0.5 mm of paper). It says nothing about
+// the capture, whose estimate is made again on the captured images.
+//
+// Since #437 stage 1 the estimate runs when it is asked for (the start of a session, the button) and nowhere else: the scenes of the
+// follow-up, of the steady scene and of the fall back to the fixed mapping that tested the old policy are gone; the estimator's own follow
+// job is still tested here, on the estimator itself.
 #include "a0/phase0/experimental/live_registration_runtime.hpp"
 #include "parallax_scene.hpp"
 
@@ -210,19 +213,16 @@ SeamError SeamErrorOf(const LiveRig& live,const ps::SceneModel& model,const ex::
 // ---- The worker with the connected estimate ----------------------------------------------------------------------------------------
 struct Session {
     LiveRig& live;
-    double now{0};
     render::BgrImage a,b;
     std::vector<std::string> log;
     std::unique_ptr<LiveRegistrationRuntime> runtime;
     LiveFrameSource frames;
     LiveEstimator estimator;
-    explicit Session(LiveRig& rig,const LiveRegistrationRanges& ranges=Ranges(),const LiveEstimatorDesign& design=kLiveEstimatorDesignDraft,
-        const LiveTrackerDesign& tracker_design=kLiveTrackerDesignDraft):live(rig){
+    explicit Session(LiveRig& rig,const LiveRegistrationRanges& ranges=Ranges(),const LiveEstimatorDesign& design=kLiveEstimatorDesignDraft):live(rig){
         LiveRegistrationRuntime::Config config;
-        config.design=tracker_design;
         config.base_pose=live.base;config.live_enabled=true;
         config.mount=live.turned?ex::MountOrientation::rotated_180:ex::MountOrientation::normal;
-        config.clock=[this]{return now;};
+        config.condition_sha256=std::string(64,'d');
         config.log=[this](const std::string& line){log.push_back(line);};
         runtime=std::make_unique<LiveRegistrationRuntime>(config,live.rig.Parameters());
         runtime->PublishBase(live.plan);
@@ -232,11 +232,12 @@ struct Session {
             [design](const LiveEstimatorInputs& in){return EstimateLiveRegistration(in,design);},ranges);
     }
     void Show(const LiveScene& scene){a=scene.a;b=scene.b;}
-    LivePassResult Pass(double at){now=at;return runtime->RunPass(frames,estimator);}
+    // One pass of the worker. The first pass of a session runs the estimate of the start; every other job is one that the test asked for.
+    LivePassResult Pass(){return runtime->RunPass(frames,estimator);}
     std::string LogText() const {std::string all;for(const auto& line:log)all+=line+"\n";return all;}
 };
 
-void Report(const char* name,const SeamError& before,const SeamError& after,const LiveRegistrationView& view){
+void Report(const char* name,const SeamError& before,const SeamError& after,const LivePlacementView& view){
     const auto& p=view.mapping.pose;const auto& s=view.mapping.surface;
     std::cerr<<std::fixed<<std::setprecision(3)<<"info "<<name<<": seam error before max "<<before.maximum<<" rms "<<before.rms<<" px, after max "<<after.maximum
         <<" rms "<<after.rms<<" px ("<<after.rows<<" rows); pose rx "<<p.rx_deg<<" ry "<<p.ry_deg<<" rz "<<p.rz_deg<<" tx "<<p.tx_mm<<" ty "<<p.ty_mm
@@ -270,385 +271,83 @@ void FullEstimates(){
         Session session(live);
         session.Show(scene);
         const auto before=SeamErrorOf(live,*scene.model,ex::RegisteredMapping{});
-        const auto pass=session.Pass(0);
+        const auto pass=session.Pass();
         const auto status=session.runtime->Status();
-        const auto after=SeamErrorOf(live,*scene.model,status.view.mapping);
-        Report(c.name,before,after,status.view);
+        const auto after=SeamErrorOf(live,*scene.model,status.placement.mapping);
+        Report(c.name,before,after,status.placement);
         Check(pass.job_ran && pass.kind==LiveJobKind::full && pass.accept==LiveAcceptKind::applied,(std::string(c.name)+": the full estimate is taken ("+session.LogText()+")").c_str());
-        Check(status.view.state==LiveRegistrationState::tracking && Contains(status.state_text,"目安"),(std::string(c.name)+": C says it is a guide").c_str());
+        Check(status.placement.source==LivePlacementSource::auto_start && Contains(status.state_text,"位置を確定しました（自動・開始時") && !Contains(status.state_text,"基準内"),
+            (std::string(c.name)+": C says that the position is confirmed, and not that it is within a criterion").c_str());
         // The line of the log carries what the estimate measured, for whoever sets the limits of the live view on a rig.
         Check(Contains(session.LogText(),"job=full") && Contains(session.LogText(),"estimate_state=") && Contains(session.LogText(),"sigma_px=") &&
             Contains(session.LogText(),"rms_px=") && Contains(session.LogText(),"bias_px="),(std::string(c.name)+": the log line has the measured values").c_str());
-        // ... and the estimate itself (the six components and the paper), the components outside the range, whether it replaced the estimate in force
-        // and what C is drawn with.
+        // ... and the estimate itself (the six components and the paper) and the components outside the range; and, once the bake that drew it
+        // has passed, the position in the one form that the capture's log writes too.
         Check(Contains(session.LogText(),"est_rx_deg=") && Contains(session.LogText(),"est_ry_deg=") && Contains(session.LogText(),"est_rz_deg=") &&
             Contains(session.LogText(),"est_tx_mm=") && Contains(session.LogText(),"est_ty_mm=") && Contains(session.LogText(),"est_tz_percent=") &&
             Contains(session.LogText(),"est_h0_mm=") && Contains(session.LogText(),"est_slope_x=") && Contains(session.LogText(),"est_slope_y=") &&
-            Contains(session.LogText(),"exceeded=") && Contains(session.LogText(),"replaced=1 seam_diff_px=") && Contains(session.LogText(),"adopt_line_px=") &&
-            Contains(session.LogText(),"drawn_rx_deg=") && Contains(session.LogText(),"drawn_h0_mm=") && Contains(session.LogText(),"drawn_slope_y="),
-            (std::string(c.name)+": the log line has the estimate, the range and what C is drawn with").c_str());
+            Contains(session.LogText(),"exceeded=") && Contains(session.LogText(),"C live_placement serial=") && Contains(session.LogText(),"source=auto-start") &&
+            Contains(session.LogText(),LivePlacementFields(status.placement.mapping)) && Contains(session.LogText(),"drawn=1"),
+            (std::string(c.name)+": the log has the estimate, the range and the position that C is drawn with").c_str());
         Check(before.rows>=40 && before.maximum>c.moved_px,(std::string(c.name)+": the scene moves the seam").c_str());
         // The lean of B's lens is the scene's to within a quarter of a degree (the band sees it far less well than the turn).
-        Check(std::abs(status.view.mapping.pose.rx_deg-c.b.rx_deg)<=0.25 && std::abs(status.view.mapping.pose.ry_deg-c.b.ry_deg)<=0.25,
+        Check(std::abs(status.placement.mapping.pose.rx_deg-c.b.rx_deg)<=0.25 && std::abs(status.placement.mapping.pose.ry_deg-c.b.ry_deg)<=0.25,
             (std::string(c.name)+": B's tilt is the scene's within 0.25 degrees").c_str());
         Check(after.maximum<=kSeamTargetPx,(std::string(c.name)+": the seam is within the target after the estimate").c_str());
         // The table that C draws with is the estimate's.
-        Check(pass.rebaked && session.runtime->CurrentPlan() && session.runtime->CurrentPlan()->live->baked.pose.rz_deg==status.view.mapping.pose.rz_deg,
+        Check(pass.rebaked && session.runtime->CurrentPlan() && session.runtime->CurrentPlan()->live->baked.pose.rz_deg==status.placement.mapping.pose.rz_deg,
             (std::string(c.name)+": B's table is baked for the estimate").c_str());
         // The neighbourhood of the seam (the columns that the blend of C can show), not only the column itself.
-        Check(SeamErrorOf(live,*scene.model,status.view.mapping,-8).maximum<=kSeamTargetPx && SeamErrorOf(live,*scene.model,status.view.mapping,8).maximum<=kSeamTargetPx,
+        Check(SeamErrorOf(live,*scene.model,status.placement.mapping,-8).maximum<=kSeamTargetPx && SeamErrorOf(live,*scene.model,status.placement.mapping,8).maximum<=kSeamTargetPx,
             (std::string(c.name)+": eight columns either side of the seam are within the target").c_str());
         // B's direction is shown, and its turn is the scene's (the turn about the axis is what the band sees best).
         Check(!Contains(status.orientation.b_short,"測れていません") && Contains(status.orientation_line,"B: "),(std::string(c.name)+": B's direction is shown").c_str());
-        Check(std::abs(status.view.mapping.pose.rz_deg-c.b.rz_deg)<=0.15,(std::string(c.name)+": B's turn is the scene's within 0.15 degrees").c_str());
+        Check(std::abs(status.placement.mapping.pose.rz_deg-c.b.rz_deg)<=0.15,(std::string(c.name)+": B's turn is the scene's within 0.15 degrees").c_str());
     }
 }
 
-// ---- 2. The follow-up keeps up with a slow drift, a jump asks for a full estimate, and a still scene is not baked again and again ----
-void FollowsAndJumps(){
+// ---- 2. C does not follow by itself: B moves, and nothing changes until the button is pressed ----------------------------------------
+void HoldsUntilPressed(){
     LiveRig live;
+    const Pose start{0.0,0.0,0.4,2.0,-1.0,0.0},moved{0.1,-0.1,0.7,4.0,-1.0,0.0};
+    const auto before=MakeLiveScene(live,"waves",kWaves,{},start,910);
+    const auto after=MakeLiveScene(live,"waves",kWaves,{},moved,911);
     Session session(live);
-    const Pose start{0,0,0.3,2.0,1.0,0};
-    std::uint64_t seed=200;
-    auto scene=MakeLiveScene(live,"waves",kWaves,{},start,++seed);
-    session.Show(scene);
-    double t=0;
-    CHECK(session.Pass(t).accept==LiveAcceptKind::applied);
-    CHECK(SeamErrorOf(live,*scene.model,session.runtime->Status().view.mapping).maximum<=kSeamTargetPx);
-    // A slow drift: each step moves the seam by about a fifth of a pixel of C. A follow-up that finds less than its limit (0.5 px) confirms
-    // the estimate in force and changes nothing on screen; once the drift is over the limit the follow-up detects a change, the full estimate
-    // that it asks for runs at once and is taken. So the seam is off by the limit and a step at the most, and within the target at the end.
-    Pose pose=start;
-    double worst=0;
-    int confirmed=0,corrected=0;
-    for(int k=0;k<5;++k){
-        pose.tx_mm+=0.15;pose.rz_deg+=0.01;pose.ty_mm-=0.1;
-        scene=MakeLiveScene(live,"waves",kWaves,{},pose,++seed);
-        session.Show(scene);
-        t+=0.6;
-        auto pass=session.Pass(t);
-        Check(pass.job_ran && pass.kind==LiveJobKind::follow,("drift step: the follow-up runs ("+session.LogText()+")").c_str());
-        if(pass.accept==LiveAcceptKind::applied)++confirmed;
-        else if(session.runtime->Status().view.full_pending){
-            pass=session.Pass(t);
-            Check(pass.job_ran && pass.kind==LiveJobKind::full && pass.accept==LiveAcceptKind::applied,("drift step: the full estimate is taken ("+session.LogText()+")").c_str());
-            ++corrected;
-        }
-        const auto view=session.runtime->Status().view;
-        const auto error=SeamErrorOf(live,*scene.model,view.mapping);
-        worst=std::max(worst,error.maximum);
-        CHECK(view.state==LiveRegistrationState::tracking && error.maximum<=kSeamTargetPx+0.25);
-    }
-    std::cerr<<std::fixed<<std::setprecision(3)<<"info drift: largest seam error over 5 steps "<<worst<<" px ("<<confirmed<<" follow-ups confirmed the estimate, "<<corrected<<" changes corrected by a full estimate)\n";
-    CHECK(confirmed>=1 && corrected>=1 && SeamErrorOf(live,*scene.model,session.runtime->Status().view.mapping).maximum<=kSeamTargetPx);
-    const auto follows_before=session.runtime->Status().view.counters.follow_jobs;
-    // A jump: the follow-up is not taken (what it found is beyond its line, or it found nothing), the estimate before stays on
-    // screen, and the next job is a full estimate, which is taken.
-    const Pose kept=session.runtime->Status().view.mapping.pose;
-    pose.tx_mm+=5.0;pose.rz_deg-=0.7;
-    scene=MakeLiveScene(live,"waves",kWaves,{},pose,++seed);
-    session.Show(scene);
-    t+=0.6;
-    const auto jumped=session.Pass(t);
-    {
-        const auto view=session.runtime->Status().view;
-        Check(jumped.job_ran && jumped.kind==LiveJobKind::follow && jumped.accept==LiveAcceptKind::kept_previous,("jump: the follow-up is not taken ("+session.LogText()+")").c_str());
-        CHECK(view.full_pending && view.full_reason==LiveFullReason::change_detected && view.state==LiveRegistrationState::holding);
-        CHECK(view.mapping.pose.tx_mm==kept.tx_mm && view.mapping.pose.rz_deg==kept.rz_deg);
-        CHECK(Contains(session.runtime->Status().state_text,"直前の推定"));
-        std::cerr<<"info jump: the follow-up reported "<<Join(view.last_failure)<<'\n';
-    }
-    const auto full=session.Pass(t);   // at once
-    {
-        const auto view=session.runtime->Status().view;
-        const auto error=SeamErrorOf(live,*scene.model,view.mapping);
-        Check(full.job_ran && full.kind==LiveJobKind::full && full.accept==LiveAcceptKind::applied,("jump: the full estimate is taken ("+session.LogText()+")").c_str());
-        CHECK(view.state==LiveRegistrationState::tracking && error.maximum<=kSeamTargetPx);
-        CHECK(view.counters.follow_jobs==follows_before+1);
-        std::cerr<<std::fixed<<std::setprecision(3)<<"info jump: seam error after the full estimate "<<error.maximum<<" px\n";
-    }
-    // A still scene (the same paper and pose, new noise in every frame): the follow-ups are taken, and the scatter of the estimate
-    // does not bake B's table again and again.
-    const auto rebakes_before=session.runtime->Status().rebakes;
-    double still_worst=0,largest_step=0;
-    ex::RegisteredMapping previous=session.runtime->Status().view.mapping;
-    constexpr int kStill=10;
-    for(int k=0;k<kStill;++k){
-        auto again=scene;
-        again.a=ReducedA().at("waves");AddNoise(again.a,7000+k,kNoiseSigma);
-        again.b=Reduce(ps::RenderRaw(*scene.model,ps::Camera::b));AddNoise(again.b,8000+k,kNoiseSigma);
-        session.Show(again);
-        t+=0.6;
-        const auto pass=session.Pass(t);
-        const auto view=session.runtime->Status().view;
-        CHECK(pass.job_ran && pass.kind==LiveJobKind::follow && pass.accept==LiveAcceptKind::applied);
-        still_worst=std::max(still_worst,SeamErrorOf(live,*scene.model,view.mapping).maximum);
-        largest_step=std::max(largest_step,LiveMappingDifferencePx(live.plan,previous,view.mapping,9));
-        previous=view.mapping;
-    }
-    const auto still_rebakes=session.runtime->Status().rebakes-rebakes_before;
-    std::cerr<<std::fixed<<std::setprecision(3)<<"info still scene: "<<kStill<<" follow-ups, "<<still_rebakes<<" rebakes, largest seam error "<<still_worst
-        <<" px, largest move of the mapping between two follow-ups over C "<<largest_step<<" px\n";
-    CHECK(still_worst<=kSeamTargetPx);
-    CHECK(still_rebakes<=2);
-}
-
-// ---- 2b. A still scene with the scatter of a real rig: C is not drawn again and again, and a real move is followed -------------------------
-// The symptom on a rig, with nothing moved: C baked again after nearly every follow-up, each time with the mapping several pixels away from
-// the one before over the whole of C, while the follow-up reported a fraction of a pixel at the seam. The seam constrains some directions
-// of the estimate (the baseline, the turn) and hardly the others (the lean of B, its height), so the scatter of the estimate is small at
-// the seam and several times larger at the ends of C.
-//
-// Two scenes. The first is a stand-in for the estimator that answers the truth with a scatter of that kind (the draws are made in the poorly
-// constrained directions, so the seam moves a fraction of a pixel and the ends several pixels); it runs the real tracker, difference
-// functions and bakes, and takes no time. The second runs the estimator itself on synthetic frames that are flat (contrast 0.3) and noisy
-// (6 DN), the most that the estimator accepts before it refuses the frame: its scatter is smaller than a rig's, and it shows the same effect
-// at that size. ※The prediction sigma of these frames stays far below a rig's; the sizes are not those of a measurement.
-constexpr double kFlatContrast=0.3,kFlatNoise=6.0;   // the synthetic frames of the second scene
-constexpr double kMoveNoise=10.0;                    // DN, the frames of the move
-// The condition's limits with the line for the prediction sigma relaxed to 0.6 px, as a rig needs; the rest are the development values.
-cr::RegistrationLimits RigLimits(){auto l=LiveLimits();l.maximum_prediction_sigma_px=0.6;return l;}
-// Times of the jobs on an idle four-core machine (the full estimate, the follow-up and the bake of B's table), in seconds; the clock of the
-// session advances by them, so that the time to recover from a move includes the work that follows it. ※assumption: the figures of the
-// estimate's report for a machine that is not busy.
-constexpr double kFullSeconds=0.45,kFollowSeconds=0.1,kBakeSeconds=0.25;
-
-// The contrast of a frame about its own mean: a rig's frames are dim and flat next to the synthetic ones.
-void Dim(render::BgrImage& image,double contrast){
-    double sum=0;
-    for(const auto v:image.bgr)sum+=v;
-    const double mean=sum/static_cast<double>(image.bgr.size());
-    for(auto& v:image.bgr)v=static_cast<std::uint8_t>(std::clamp(std::lround(mean+contrast*(v-mean)),0L,255L));
-}
-struct Clean {LiveScene scene;render::BgrImage a,b;};
-Clean MakeClean(const LiveRig& live,const Pose& pose,std::uint64_t seed,double contrast=1.0){
-    Clean c;
-    c.scene=MakeLiveScene(live,"waves",kWaves,{},pose,seed,0.0);
-    c.a=c.scene.a;c.b=c.scene.b;
-    if(contrast!=1.0){Dim(c.a,contrast);Dim(c.b,contrast);}
-    return c;
-}
-void ShowNoisy(Session& session,const Clean& clean,std::uint64_t seed,double sigma){
-    session.a=clean.a;session.b=clean.b;
-    AddNoise(session.a,seed*2+1,sigma);AddNoise(session.b,seed*2+2,sigma);
-}
-// One pass of the worker with the cost of the jobs on the session's clock.
-LivePassResult TimedPass(Session& session,const LiveEstimator& estimator){
-    const auto result=session.runtime->RunPass(session.frames,estimator);
-    if(result.job_ran)session.now+=result.kind==LiveJobKind::full?kFullSeconds:kFollowSeconds;
-    if(result.rebaked)session.now+=kBakeSeconds;
-    if(!result.job_ran && !result.rebaked)session.now+=0.05;
-    return result;
-}
-LivePassResult TimedPass(Session& session){return TimedPass(session,session.estimator);}
-LiveTrackerDesign LegacyTracker(){auto d=kLiveTrackerDesignDraft;d.tracker.adopt_threshold_px=0;d.tracker.adopt_sigma_factor=0;return d;}
-
-struct SteadyResult {
-    int follows{},fulls{},rebakes{},over_limit{},held{},summaries{};
-    double worst_error{0},largest_step{0},largest_change{0};
-    LiveRegistrationState state{};
-};
-SteadyResult Summarise(Session& session,const LiveTrackerCounters& before,std::uint64_t rebakes_before,LiveRegistrationState state){
-    const auto status=session.runtime->Status();
-    SteadyResult out;
-    out.rebakes=static_cast<int>(status.rebakes-rebakes_before);
-    out.follows=static_cast<int>(status.view.counters.follow_jobs-before.follow_jobs);
-    out.fulls=static_cast<int>(status.view.counters.full_jobs-before.full_jobs);
-    out.over_limit=static_cast<int>(status.view.counters.changes_detected-before.changes_detected);
-    out.held=static_cast<int>(status.view.counters.held-before.held);
-    out.state=state;
-    return out;
-}
-void ReportSteady(const char* name,const SteadyResult& r,double seconds){
-    std::cerr<<std::fixed<<std::setprecision(3)<<"info "<<name<<": "<<seconds<<" s of a still scene, "<<r.follows<<" follow-ups and "<<r.fulls<<" full estimates ("<<r.over_limit
-        <<" changes detected, "<<r.held<<" estimates taken as confirmations), "<<r.rebakes<<" rebakes, largest move of C between two passes "<<r.largest_step
-        <<" px, largest change a follow-up reported "<<r.largest_change<<" px, worst seam error "<<r.worst_error<<" px\n";
-}
-
-// ---- the first scene: the truth and a scatter ----
-struct Scatter {double tilt_deg,height_percent,shift_mm,turn_deg,sigma_px;};
-// The scatter of a rig, ※assumption: sizes found so that the distance at the seam is a fraction of a pixel and C moves by several pixels over the whole.
-constexpr Scatter kRigScatter{0.05,0.1,0.016,0.004,0.3};
-LiveEstimator ScatteredEstimator(const LiveRig& live,const Pose& truth,const Scatter& scatter,std::uint64_t seed){
-    auto draws=std::make_shared<ps::Lcg>(ps::Lcg{seed*0x9E3779B97F4A7C15ull+3});
-    return [&live,truth,scatter,draws](const LiveJob& job,const render::BgrImage&,const render::BgrImage&){
-        const auto g=[&]{return (draws->Uniform()+draws->Uniform()+draws->Uniform()+draws->Uniform()-2.0)*std::sqrt(3.0);};
-        LiveEstimateOutcome o;
-        o.usable=true;o.pose=truth;
-        o.pose.rx_deg+=g()*scatter.tilt_deg;o.pose.ry_deg+=g()*scatter.tilt_deg;o.pose.tz_percent+=g()*scatter.height_percent;
-        o.pose.tx_mm+=g()*scatter.shift_mm;o.pose.ty_mm+=g()*scatter.shift_mm;o.pose.rz_deg+=g()*scatter.turn_deg;
-        o.band_brightness=100;o.prediction_sigma_px=scatter.sigma_px;
-        if(job.kind==LiveJobKind::follow){
-            o.change_px=LiveSeamMappingDifferencePx(live.plan,ex::RegisteredMapping{job.start_pose,job.start_surface,std::nullopt},
-                ex::RegisteredMapping{o.pose,o.surface,std::nullopt},kLiveSeamDifferenceRows);
-            o.inlier_fraction=0.9;
-        }
-        return o;
-    };
-}
-SteadyResult RunScattered(LiveRig& live,const LiveTrackerDesign& tracker,const Pose& truth,const Scatter& scatter,double seconds,std::uint64_t seed){
-    Session session(live,Ranges(),kLiveEstimatorDesignDraft,tracker);
-    session.a=Flat(128);session.b=Flat(128);
-    const auto estimator=ScatteredEstimator(live,truth,scatter,seed);
-    for(int k=0;k<6 && session.runtime->Status().view.state!=LiveRegistrationState::tracking;++k)(void)TimedPass(session,estimator);
-    const double begin=session.now;
-    const auto before=session.runtime->Status().view.counters;
-    const auto rebakes0=session.runtime->Status().rebakes;
-    const ex::RegisteredMapping truth_mapping{truth,{},std::nullopt};
-    ex::RegisteredMapping previous=session.runtime->Status().view.mapping;
-    double worst=0,step=0;
-    while(session.now-begin<seconds){
-        (void)TimedPass(session,estimator);
-        const auto view=session.runtime->Status().view;
-        worst=std::max(worst,LiveSeamMappingDifferencePx(live.plan,truth_mapping,view.mapping,kLiveSeamDifferenceRows));
-        step=std::max(step,LiveMappingDifferencePx(live.plan,previous,view.mapping,9));
-        previous=view.mapping;
-    }
-    auto out=Summarise(session,before,rebakes0,session.runtime->Status().view.state);
-    out.worst_error=worst;out.largest_step=step;
-    for(const auto& line:session.log)if(Contains(line,"C live_registration_summary ") && Contains(line,"held=") && Contains(line,"rebakes=") && Contains(line,"largest_follow_change_px="))++out.summaries;
-    return out;
-}
-void SteadyUnderRigScatter(){
-    LiveRig live;
-    live.context->live_limits=RigLimits();
-    const Pose truth{0.1,-0.1,0.4,2.0,-1.0,0};
-    // The size of the scatter, as the first estimate measures it: from the draws themselves.
-    {
-        const auto estimator=ScatteredEstimator(live,truth,kRigScatter,5);
-        LiveJob job;job.kind=LiveJobKind::follow;job.start_pose=truth;
-        double seam=0,whole=0,seam_sum=0;
-        const int n=200;
-        for(int k=0;k<n;++k){
-            const auto o=estimator(job,Flat(0),Flat(0));
-            seam=std::max(seam,o.change_px);seam_sum+=o.change_px;
-            whole=std::max(whole,LiveMappingDifferencePx(live.plan,ex::RegisteredMapping{truth,{},std::nullopt},ex::RegisteredMapping{o.pose,o.surface,std::nullopt},9));
-        }
-        std::cerr<<std::fixed<<std::setprecision(3)<<"info the scatter of the draws: "<<n<<" draws, distance from the truth at the seam mean "<<seam_sum/n<<" max "<<seam
-            <<" px, over the whole of C max "<<whole<<" px\n";
-        Check(seam<=0.6 && seam_sum/n>=0.1 && whole>=3*kLiveTrackerDesignDraft.tracker.bake_threshold_px,"the draws scatter at the seam by under a pixel and over the whole of C by more than the line of the bake");
-    }
-    const auto legacy=RunScattered(live,LegacyTracker(),truth,kRigScatter,60,1);
-    const auto steady=RunScattered(live,kLiveTrackerDesignDraft,truth,kRigScatter,60,1);
-    ReportSteady("scatter, every estimate replaces the one in force",legacy,60);
-    ReportSteady("scatter, the significance line",steady,60);
-    // (a) Without the line C is baked again for most follow-ups; with it, a handful of times at most, and when it is it moves by a step of
-    // the size of a real move.
-    Check(legacy.rebakes>=20,"without the line the scatter bakes B's table again and again");
-    Check(steady.rebakes<=3,"with the line a still scene is baked at most a few times");
-    Check(steady.worst_error<=kSeamTargetPx,"the seam stays within the target");
-    Check(steady.state==LiveRegistrationState::tracking && steady.follows>=40,"and C stays on the estimate");
-    // The log carries a summary of the still scene every 30 s, since the job line is written only when something differs from the line before.
-    Check(steady.summaries>=2 && steady.summaries<=4,"the log has a summary line every 30 seconds");
-}
-
-// ---- the second scene: the estimator on flat, noisy frames ----
-SteadyResult RunFlatFrames(LiveRig& live,const LiveTrackerDesign& tracker,const Clean& clean,double seconds,std::uint64_t seed){
-    Session session(live,Ranges(),kLiveEstimatorDesignDraft,tracker);
-    ShowNoisy(session,clean,seed,kFlatNoise);
-    for(int k=0;k<6 && session.runtime->Status().view.state!=LiveRegistrationState::tracking;++k){ShowNoisy(session,clean,seed+1+k,kFlatNoise);(void)TimedPass(session);}
-    const double begin=session.now;
-    const auto before=session.runtime->Status().view.counters;
-    const auto rebakes0=session.runtime->Status().rebakes;
-    ex::RegisteredMapping previous=session.runtime->Status().view.mapping;
-    double worst=0,step=0;
-    for(int pass=0;session.now-begin<seconds;++pass){
-        ShowNoisy(session,clean,seed+100+pass,kFlatNoise);
-        (void)TimedPass(session);
-        const auto view=session.runtime->Status().view;
-        worst=std::max(worst,SeamErrorOf(live,*clean.scene.model,view.mapping).maximum);
-        step=std::max(step,LiveMappingDifferencePx(live.plan,previous,view.mapping,9));
-        previous=view.mapping;
-    }
-    auto out=Summarise(session,before,rebakes0,session.runtime->Status().view.state);
-    out.worst_error=worst;out.largest_step=step;
-    for(const auto& line:session.log){
-        const auto at=line.find("change_px=");
-        if(at!=std::string::npos && line.find("job=follow")!=std::string::npos)out.largest_change=std::max(out.largest_change,std::atof(line.c_str()+at+10));
-    }
-    return out;
-}
-void SteadyOnFlatFrames(){
-    LiveRig live;
-    live.context->live_limits=RigLimits();
-    const Pose pose{0.1,-0.1,0.4,2.0,-1.0,0};
-    const auto clean=MakeClean(live,pose,900,kFlatContrast);
-    const auto legacy=RunFlatFrames(live,LegacyTracker(),clean,30,1000);
-    const auto steady=RunFlatFrames(live,kLiveTrackerDesignDraft,clean,30,1000);
-    ReportSteady("flat noisy frames, every estimate replaces the one in force",legacy,30);
-    ReportSteady("flat noisy frames, the significance line",steady,30);
-    Check(legacy.rebakes>=10,"flat frames, without the line: the scatter bakes B's table again and again");
-    Check(steady.rebakes<=3,"flat frames, with the line: a still scene is baked at most a few times");
-    Check(steady.worst_error<=kSeamTargetPx,"flat frames: the seam stays within the target");
-    Check(steady.state==LiveRegistrationState::tracking && steady.follows>=40,"flat frames: C stays on the estimate");
-}
-
-// A move of camera B while the scene is otherwise still: the seam of C is within the target again within kRecoverSeconds of the move.
-constexpr double kRecoverSeconds=2.0;
-void FollowsAMoveOfB(){
-    LiveRig live;
-    live.context->live_limits=RigLimits();
-    const Pose start{0.1,-0.1,0.4,2.0,-1.0,0};
-    struct Move {const char* name;Pose to;};
-    const Move moves[]{{"B moved 2 mm along the baseline",{0.1,-0.1,0.4,4.0,-1.0,0}},{"B turned 0.3 degrees",{0.1,-0.1,0.7,2.0,-1.0,0}},
-        {"B moved 2 mm and turned 0.3 degrees",{0.1,-0.1,0.7,0.0,-1.0,0}}};
-    const auto before=MakeClean(live,start,910);
-    std::uint64_t seed=2000;
-    for(const auto& move:moves){
-        const auto after=MakeClean(live,move.to,911);
-        Session session(live);
-        ShowNoisy(session,before,seed,kMoveNoise);
-        for(int k=0;k<8 && session.runtime->Status().view.state!=LiveRegistrationState::tracking;++k){ShowNoisy(session,before,++seed,kMoveNoise);(void)TimedPass(session);}
-        Check(session.runtime->Status().view.state==LiveRegistrationState::tracking,(std::string(move.name)+": the first estimate is taken").c_str());
-        // Still for 8 s, then the move.
-        const double settle=session.now+8;
-        while(session.now<settle){ShowNoisy(session,before,++seed,kMoveNoise);(void)TimedPass(session);}
-        const auto drawn=[&]{const auto plan=session.runtime->CurrentPlan();return plan?plan->live->baked:session.runtime->BasePlan()->live->baked;};
-        const double error_before_move=SeamErrorOf(live,*before.scene.model,drawn()).maximum;
-        const double moved_px=SeamErrorOf(live,*after.scene.model,drawn()).maximum;
-        const double move_time=session.now;
-        double recovered=-1;
-        int passes=0;
-        while(session.now-move_time<6 && recovered<0){
-            ShowNoisy(session,after,++seed,kMoveNoise);
-            (void)TimedPass(session);++passes;
-            if(SeamErrorOf(live,*after.scene.model,drawn()).maximum<=kSeamTargetPx)recovered=session.now-move_time;
-        }
-        std::cerr<<std::fixed<<std::setprecision(3)<<"info "<<move.name<<": seam error before the move "<<error_before_move<<" px, right after it "<<moved_px
-            <<" px, back within "<<kSeamTargetPx<<" px after "<<recovered<<" s (clock of idle-machine job times, "<<passes<<" passes)\n";
-        Check(error_before_move<=kSeamTargetPx,(std::string(move.name)+": the seam was right before the move").c_str());
-        Check(moved_px>kSeamTargetPx,(std::string(move.name)+": the move shows at the seam").c_str());
-        Check(recovered>=0 && recovered<=kRecoverSeconds,(std::string(move.name)+": the seam is back within the target in time").c_str());
-    }
-}
-
-// Frames that carry nothing to estimate from, after C has been tracking: the estimate in force is kept for the holding time and then C goes
-// back to the condition's fixed mapping, as it did before the policy of the significance line.
-void FallsBackToFixed(){
-    LiveRig live;
-    live.context->live_limits=RigLimits();
-    const auto clean=MakeClean(live,Pose{0.1,-0.1,0.4,2.0,-1.0,0},910);
-    struct Case {const char* name;render::BgrImage a,b;};
-    const Case cases[]{{"dark",Noise(4,3.0,31),Noise(4,3.0,32)},{"plain paper",Flat(200),Flat(190)},{"camera B black",clean.a,Flat(0)},
-        {"camera A black",Flat(0),clean.b}};
-    for(const auto& c:cases){
-        Session session(live);
-        std::uint64_t seed=3000;
-        for(int k=0;k<8 && session.runtime->Status().view.state!=LiveRegistrationState::tracking;++k){ShowNoisy(session,clean,++seed,kMoveNoise);(void)TimedPass(session);}
-        Check(session.runtime->Status().view.state==LiveRegistrationState::tracking,(std::string(c.name)+": C was tracking").c_str());
-        session.a=c.a;session.b=c.b;
-        const double start=session.now;
-        bool held=false;
-        while(session.now-start<5.0){
-            (void)TimedPass(session);
-            if(session.runtime->Status().view.state==LiveRegistrationState::holding)held=true;
-        }
-        const auto status=session.runtime->Status();
-        Check(held,(std::string(c.name)+": the estimate in force is kept for a while").c_str());
-        Check(status.view.state==LiveRegistrationState::fixed && status.view.mapping.pose.IsZero() && status.view.mapping.surface.IsZero(),
-            (std::string(c.name)+": C is back on the fixed mapping").c_str());
-        Check(Contains(status.state_text,"固定の写像") && !Contains(status.state_text,"目安"),(std::string(c.name)+": and says so").c_str());
-    }
+    session.Show(before);
+    const auto first=session.Pass();
+    Check(first.job_ran && first.accept==LiveAcceptKind::applied && first.rebaked,("the estimate of the start is taken ("+session.LogText()+")").c_str());
+    const auto placed=session.runtime->Status();
+    CHECK(SeamErrorOf(live,*before.model,placed.placement.mapping).maximum<=kSeamTargetPx);
+    // B moves. However long the worker runs afterwards nothing is estimated, nothing is baked and P stays: the seam is off, and C says
+    // nothing about it.
+    session.Show(after);
+    const auto plan=session.runtime->CurrentPlan();
+    for(int k=0;k<400;++k){const auto pass=session.Pass();CHECK(!pass.job_ran && !pass.rebaked);}
+    auto status=session.runtime->Status();
+    CHECK(session.runtime->CurrentPlan()==plan && status.placement.serial==placed.placement.serial && LivePlacementSameMapping(status.placement.mapping,placed.placement.mapping));
+    CHECK(status.state_text==placed.state_text && status.rebakes==placed.rebakes);
+    const double off=SeamErrorOf(live,*after.model,status.placement.mapping).maximum;
+    std::cerr<<std::fixed<<std::setprecision(3)<<"info B moved: the seam is off by "<<off<<" px of C with nothing following it\n";
+    Check(off>kSeamTargetPx,"the move shows at the seam");
+    // The button: one estimate, and the seam is right again.
+    CHECK(session.runtime->RequestEstimate(LiveEstimateAsk::button)==LiveAskResult::accepted);
+    const auto pressed=session.Pass();
+    status=session.runtime->Status();
+    Check(pressed.job_ran && pressed.kind==LiveJobKind::full && pressed.accept==LiveAcceptKind::applied && pressed.rebaked,("the press runs one estimate ("+session.LogText()+")").c_str());
+    CHECK(status.placement.source==LivePlacementSource::auto_button && Contains(status.state_text,"位置を確定しました（自動・ボタン"));
+    CHECK(SeamErrorOf(live,*after.model,status.placement.mapping).maximum<=kSeamTargetPx);
+    CHECK(session.runtime->CurrentPlan()->live->baked.pose.tx_mm==status.placement.mapping.pose.tx_mm);
+    // A press on frames that carry nothing to estimate from: P stays, the sentence says why, and nothing is asked for again.
+    session.a=Flat(200);session.b=Flat(190);
+    const auto kept=session.runtime->CurrentPlan();
+    const auto serial=status.placement.serial;
+    CHECK(session.runtime->RequestEstimate(LiveEstimateAsk::button)==LiveAskResult::accepted);
+    const auto nothing=session.Pass();
+    status=session.runtime->Status();
+    CHECK(nothing.job_ran && nothing.accept==LiveAcceptKind::kept_previous && !nothing.rebaked && session.runtime->CurrentPlan()==kept && status.placement.serial==serial);
+    CHECK(Contains(status.state_text,"位置を決められませんでした") && Contains(status.state_text,"前の位置のままです（出どころ: ボタンの自動）"));
+    CHECK(SeamErrorOf(live,*after.model,status.placement.mapping).maximum<=kSeamTargetPx);   // the position that was right is still the one in force
+    for(int k=0;k<100;++k)CHECK(!session.Pass().job_ran);
 }
 
 // ---- 3. Nothing to estimate from: no estimate is taken, and the screen does not say that C is registered -----------------------------
@@ -656,21 +355,24 @@ void ExpectNoEstimate(LiveRig& live,const char* name,const render::BgrImage& a,c
     const LiveEstimatorDesign& design=kLiveEstimatorDesignDraft){
     Session session(live,Ranges(),design);
     session.a=a;session.b=b;
-    const auto pass=session.Pass(0);
+    const auto pass=session.Pass();
     const auto status=session.runtime->Status();
-    std::cerr<<"info "<<name<<": "<<Join(status.view.last_failure)<<'\n';
+    std::cerr<<"info "<<name<<": "<<Join(status.placement.last_failure)<<'\n';
     Check(pass.job_ran && pass.accept==LiveAcceptKind::kept_previous && !pass.rebaked,(std::string(name)+": no estimate is taken").c_str());
-    Check(status.view.state==LiveRegistrationState::fixed && status.view.mapping.pose.IsZero() && status.view.mapping.surface.IsZero() && !session.runtime->CurrentPlan(),
-        (std::string(name)+": C stays on the fixed mapping").c_str());
-    Check(Contains(status.state_text,"推定できない") && !Contains(status.state_text,"目安") && Contains(status.orientation.b_short,"測れていません"),
-        (std::string(name)+": the rows say that nothing is estimated").c_str());
-    if(reason)Check(Has(status.view.last_failure,reason),(std::string(name)+": the reason is "+reason+", got "+Join(status.view.last_failure)).c_str());
-    // And again on later frames: a wrong estimate must not slip through on a retry either.
+    Check(status.placement.source==LivePlacementSource::fixed_condition && status.placement.mapping.pose.IsZero() && status.placement.mapping.surface.IsZero() && !session.runtime->CurrentPlan(),
+        (std::string(name)+": C stays on the condition's position").c_str());
+    Check(Contains(status.state_text,"位置を決められませんでした") && !Contains(status.state_text,"位置を確定しました") && Contains(status.orientation.b_short,"測れていません"),
+        (std::string(name)+": the rows say that no position was decided").c_str());
+    if(reason)Check(Has(status.placement.last_failure,reason),(std::string(name)+": the reason is "+reason+", got "+Join(status.placement.last_failure)).c_str());
+    // Nothing is asked for again by itself; and when it is asked for, on the same kind of frames, a wrong estimate must not slip through
+    // either.
     for(int k=1;k<=3;++k){
-        const auto retry=session.Pass(1.1*k);
-        Check(!retry.job_ran || retry.accept==LiveAcceptKind::kept_previous,(std::string(name)+": no estimate is taken on a retry").c_str());
+        CHECK(!session.Pass().job_ran);
+        CHECK(session.runtime->RequestEstimate(LiveEstimateAsk::button)==LiveAskResult::accepted);
+        const auto retry=session.Pass();
+        Check(retry.job_ran && retry.accept==LiveAcceptKind::kept_previous,(std::string(name)+": no estimate is taken when it is asked for again").c_str());
     }
-    CHECK(session.runtime->Status().view.state==LiveRegistrationState::fixed);
+    CHECK(session.runtime->Status().placement.source==LivePlacementSource::fixed_condition);
 }
 void NothingToEstimateFrom(){
     LiveRig live;
@@ -719,13 +421,13 @@ void RepeatingPattern(){
         Session session(live);
         session.Show(scene);
         const auto before=SeamErrorOf(live,*scene.model,ex::RegisteredMapping{});
-        const auto pass=session.Pass(0);
+        const auto pass=session.Pass();
         const auto status=session.runtime->Status();
-        const auto after=SeamErrorOf(live,*scene.model,status.view.mapping);
-        Report("cells and text",before,after,status.view);
+        const auto after=SeamErrorOf(live,*scene.model,status.placement.mapping);
+        Report("cells and text",before,after,status.placement);
         // Either the true place or no estimate; never an estimate that is off.
         if(pass.accept==LiveAcceptKind::applied)CHECK(after.maximum<=kSeamTargetPx);
-        else CHECK(status.view.state==LiveRegistrationState::fixed);
+        else CHECK(status.placement.source==LivePlacementSource::fixed_condition);
         Check(pass.accept==LiveAcceptKind::applied,("cells and text: the text anchors the estimate ("+session.LogText()+")").c_str());
     }
 }
@@ -765,22 +467,20 @@ void StopsQuickly(){
     }
     std::cerr<<std::fixed<<std::setprecision(3)<<"timing stop: "<<asked_total<<" questions in a full job; slowest return after the stop "<<slowest*1000<<" ms\n";
     CHECK(slowest<2.0);   // one measurement of the band at most; a busy machine is allowed for
-    // Through the worker: a stopped job is handed to the tracker (nothing stays in flight), nothing is baked, and the next pass
-    // with no stop estimates.
+    // Through the worker: a stopped job estimated nothing (it is asked for again, and no failure is recorded), nothing is baked, and the next
+    // pass with no stop estimates.
     const auto stopped=session.runtime->RunPass(session.frames,session.estimator,[]{return true;});
-    CHECK(stopped.job_ran && stopped.accept==LiveAcceptKind::kept_previous && !stopped.rebaked);
-    CHECK(session.runtime->Status().view.state==LiveRegistrationState::fixed && Has(session.runtime->Status().view.last_failure,kLiveEstimateStoppedReason));
-    const auto next=session.Pass(1.1);
+    CHECK(stopped.job_ran && stopped.accept==LiveAcceptKind::discarded_stale && !stopped.rebaked);
+    CHECK(session.runtime->Status().placement.activity==LivePlacementActivity::requested && session.runtime->Status().placement.outcome==LivePlacementOutcomeKind::none);
+    const auto next=session.Pass();
     CHECK(next.job_ran && next.accept==LiveAcceptKind::applied && next.rebaked);
     // The real worker thread: asked to stop while a job runs, it is joined quickly.
     {
         Session threaded(live);
         threaded.Show(scene);
         std::atomic<int> jobs{0};
-        const auto origin=std::chrono::steady_clock::now();
         LiveRegistrationRuntime::Config config;
-        config.live_enabled=true;
-        config.clock=[origin]{return std::chrono::duration<double>(std::chrono::steady_clock::now()-origin).count();};
+        config.live_enabled=true;config.condition_sha256=std::string(64,'d');
         LiveRegistrationRuntime runtime(config,live.rig.Parameters());
         runtime.PublishBase(live.plan);
         const LiveEstimator estimator=MakeLiveEstimator([&]{return runtime.BasePlan();},runtime.Design(),ConnectedLiveEstimatorEntrance(),Ranges());
@@ -830,8 +530,8 @@ void DeterministicAndMounted(){
         Session turned_session(turned);
         turned_session.Show(turned_scene);
         const auto before=SeamErrorOf(turned,*turned_scene.model,ex::RegisteredMapping{});
-        const auto pass=turned_session.Pass(0);
-        const auto view=turned_session.runtime->Status().view;
+        const auto pass=turned_session.Pass();
+        const auto view=turned_session.runtime->Status().placement;
         const auto after=SeamErrorOf(turned,*turned_scene.model,view.mapping);
         Report("mounted upside down",before,after,view);
         Check(pass.accept==LiveAcceptKind::applied && after.maximum<=kSeamTargetPx,("mounted upside down: the seam is within the target ("+turned_session.LogText()+")").c_str());
@@ -842,8 +542,8 @@ void DeterministicAndMounted(){
         Session pose_only(live,Ranges(false));
         pose_only.Show(scene);
         const auto before=SeamErrorOf(live,*scene.model,ex::RegisteredMapping{});
-        const auto pass=pose_only.Pass(0);
-        const auto view=pose_only.runtime->Status().view;
+        const auto pass=pose_only.Pass();
+        const auto view=pose_only.runtime->Status().placement;
         const auto after=SeamErrorOf(live,*scene.model,view.mapping);
         Report("pose only",before,after,view);
         Check(pass.accept==LiveAcceptKind::applied && after.maximum<=kSeamTargetPx && view.mapping.surface.IsZero(),("pose only: the seam is within the target ("+pose_only.LogText()+")").c_str());
@@ -890,7 +590,7 @@ void Connection(){
     // Without the condition's ranges the estimate is not connected, and says so with the code that the window words.
     {
         LiveRegistrationRuntime::Config config;
-        config.live_enabled=true;config.clock=[]{return 0.0;};
+        config.live_enabled=true;config.condition_sha256=std::string(64,'d');
         LiveRegistrationRuntime runtime(config,live.rig.Parameters());
         runtime.PublishBase(live.plan);
         const auto estimator=MakeLiveEstimator([&]{return runtime.BasePlan();},runtime.Design(),ConnectedLiveEstimatorEntrance());
@@ -921,8 +621,8 @@ void Connection(){
         outcome=refuses.estimator(job,beyond.a,beyond.b);
         CHECK(!outcome.usable && outcome.beyond_envelope && Has(outcome.reasons,kLiveEstimateBeyondEnvelopeReason));
         applies.Show(beyond);
-        CHECK(applies.Pass(0).accept==LiveAcceptKind::applied && Contains(applies.runtime->Status().state_text,"範囲の外"));
-        Check(Contains(applies.runtime->Status().state_text,"範囲を超えた量: 回転）") && Contains(applies.LogText(),"drawn_exceeded=rotation"),
+        CHECK(applies.Pass().accept==LiveAcceptKind::applied && Contains(applies.runtime->Status().state_text,"範囲の外"));
+        Check(Contains(applies.runtime->Status().state_text,"範囲を超えた量: 回転）") && Contains(applies.LogText(),"exceeded=rotation:"),
             ("the screen and the log name the component that is outside the range: "+applies.runtime->Status().state_text).c_str());
     }
 }
@@ -954,23 +654,18 @@ void Timing(){
     const auto baked=RebakePreviewB(live.plan,ex::RegisteredMapping{full.pose,full.surface,std::nullopt});
     std::cerr<<std::fixed<<std::setprecision(1)<<"timing bake of B's table: wall "<<(WallSeconds()-wall)*1000<<" ms, processor "<<(CpuSeconds()-cpu)*1000<<" ms\n";
     Check(baked.ok,("the estimate can be baked: "+baked.detail).c_str());
-    // The follow-up has to fit in its interval with room for the bake (a busy machine is allowed for: twice the interval).
-    CHECK(follow_wall<2*kLiveTrackerDesignDraft.tracker.follow_interval_seconds);
+    // The follow job is not on the live path any more (nothing asks for it); its time is reported for whoever brings it back.
+    (void)follow_wall;
 }
 }
 
-int main(int argc,char** argv){
+int main(){
     const double started=WallSeconds();
     try{
-        if(argc>1 && std::string(argv[1])=="--steady"){SteadyUnderRigScatter();SteadyOnFlatFrames();FollowsAMoveOfB();FallsBackToFixed();}   // the sections of the still scene, for tuning
-        else{
+        {
         Connection();
         FullEstimates();
-        FollowsAndJumps();
-        SteadyUnderRigScatter();
-        SteadyOnFlatFrames();
-        FollowsAMoveOfB();
-        FallsBackToFixed();
+        HoldsUntilPressed();
         NothingToEstimateFrom();
         RepeatingPattern();
         DeterministicAndMounted();
