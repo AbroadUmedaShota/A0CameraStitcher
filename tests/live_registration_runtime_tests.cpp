@@ -481,6 +481,8 @@ void Disabled(){
     const auto shot=rig.Pass();
     CHECK(!shot.job_ran && shot.rebaked && rig.runtime->CurrentPlan() && SameNine(rig.runtime->CurrentPlan()->live->baked,jpeg));
     CHECK(Contains(rig.runtime->Status().state_text,"撮影の後の自動調整で位置を確定しました（G2）") && rig.jobs.empty());
+    // The button is refused for this condition, so the sentence does not tell the person to press it.
+    CHECK(!Contains(rig.runtime->Status().state_text,"自動位置合わせ"));
 }
 
 // A new plan for another frame size drops the baked plan; P stays and is baked into the new plan, and no estimate is asked for.

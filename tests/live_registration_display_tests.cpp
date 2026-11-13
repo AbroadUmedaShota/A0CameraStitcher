@@ -380,6 +380,14 @@ void PlacementTexts(){
     CHECK(Contains(text,"位置を確定しました（G1）。今のライブのCはJPEGと同じ位置です。紙を替えた時は") && !Contains(text,"動かしました") && !Contains(text,"違います"));
     view.capture->difference_px=kNaN;
     CHECK(!Contains(LivePlacementStateText(view),"動かしました") && !Contains(LivePlacementStateText(view),"nan"));
+    // The button is named only where it works: a condition without registration.live refuses it.
+    view.live_enabled=false;
+    text=LivePlacementStateText(view);
+    CHECK(!Contains(text,"自動位置合わせ") && Contains(text,"位置を確定しました（G1）") && one_line(text));
+    view.capture->level="G4";view.capture->layer_two_dropped=true;
+    text=LivePlacementStateText(view);
+    CHECK(!Contains(text,"自動位置合わせ") && Contains(text,"JPEGの局所の補正（最大 0.4 px）はライブのCには出ません") && text.size()>=std::string("出ません").size() && text.substr(text.size()-std::string("出ません").size())=="出ません");
+    view.live_enabled=true;view.capture->level="G1";view.capture->layer_two_dropped=false;
     // A shot's position with no note (a carried machine that lost it) is still said.
     view.capture.reset();
     CHECK(Contains(LivePlacementStateText(view),"撮影の後の位置で描いています"));

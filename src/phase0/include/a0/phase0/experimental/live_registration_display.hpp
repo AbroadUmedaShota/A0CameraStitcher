@@ -228,7 +228,8 @@ inline constexpr std::string_view kLiveEstimatorUnavailableReason = "live-estima
 // criterion, and none says that a composite cannot be saved. `bake_failed`: the position in force could not be drawn (the table of B could not
 // be made for it), so C keeps the last mapping that could.
 [[nodiscard]] inline std::string LivePlacementStateText(const LivePlacementView& view, bool bake_failed = false) {
-    const std::string hint = "。紙を替えた時は「自動位置合わせ」を押してください";
+    // The button is refused when the condition has no registration.live, so it is named only when it works.
+    const std::string hint = view.live_enabled ? "。紙を替えた時は「自動位置合わせ」を押してください" : std::string();
     if (view.activity != LivePlacementActivity::idle) return "自動合成中です…";
     if (bake_failed) return view.source == LivePlacementSource::after_capture ? "撮影JPEGの位置ではCを描けませんでした。直前に描けた位置のまま表示しています"
                                                                               : "推定した位置ではCを描けませんでした。直前に描けた位置のまま表示しています";
