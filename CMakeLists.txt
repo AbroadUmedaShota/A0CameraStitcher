@@ -1214,6 +1214,25 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME wpd_still_pair_contracts COMMAND a0_wpd_still_pair_tests)
     set_tests_properties(wpd_still_pair_contracts PROPERTIES TIMEOUT 120)
+    # Live-open capture probe (#426 stage 4, ADR-0044 stage P): its own allowlist, channel, event ledger and procedure on a
+    # synthetic body, and the one-owner state of a session. The header refuses to compile without
+    # A0_ENABLE_WPD_LIVE_CAPTURE_PROBE, which this test binary defines itself (it is not a product binary); the preview
+    # defines it only with A0_BUILD_WPD_LIVE_CAPTURE_PROBE below.
+    add_executable(a0_wpd_live_capture_probe_tests tests/wpd_live_capture_probe_tests.cpp)
+    target_compile_definitions(a0_wpd_live_capture_probe_tests PRIVATE A0_ENABLE_WPD_LIVE_CAPTURE_PROBE=1)
+    target_link_libraries(a0_wpd_live_capture_probe_tests PRIVATE a0_wpd_live_view_transfer ole32 PortableDeviceGuids)
+    if(MSVC)
+        target_compile_options(a0_wpd_live_capture_probe_tests PRIVATE /W4 /permissive- /EHsc)
+    endif()
+    add_test(NAME wpd_live_capture_probe_contracts COMMAND a0_wpd_live_capture_probe_tests)
+    set_tests_properties(wpd_live_capture_probe_contracts PROPERTIES TIMEOUT 60)
+    add_executable(a0_preview_session_owner_tests tests/preview_session_owner_tests.cpp)
+    target_include_directories(a0_preview_session_owner_tests PRIVATE src/phase0/include)
+    if(MSVC)
+        target_compile_options(a0_preview_session_owner_tests PRIVATE /W4 /permissive- /EHsc)
+    endif()
+    add_test(NAME preview_session_owner_contracts COMMAND a0_preview_session_owner_tests)
+    set_tests_properties(preview_session_owner_contracts PROPERTIES TIMEOUT 30)
     add_executable(a0_preview_merge_tests tests/preview_merge_tests.cpp)
     target_include_directories(a0_preview_merge_tests PRIVATE src/phase0/include src/common/include)
     target_link_libraries(a0_preview_merge_tests PRIVATE a0_m2_render a0_m2_overlap_estimation)
@@ -1535,6 +1554,47 @@ if(BUILD_TESTING)
             COMMAND "${CMAKE_COMMAND}" "-DBINARY=$<TARGET_FILE:A0CameraStitcher.WpdDualPreview>" "-DEXPECT=${a0_settings_write_binary_expect}"
                 -P "${CMAKE_SOURCE_DIR}/tests/settings_write_binary_tests.cmake")
         set_tests_properties(preview_settings_write_binary_contracts PROPERTIES TIMEOUT 30)
+        # Live-open capture probe (#426 stage 4, ADR-0044 stage P). OFF by default and separate from every other option: only with
+        # it ON does the preview include the probe headers (they refuse to compile otherwise), so an OFF build carries neither the
+        # probe's gate nor its button nor its smoke entry. Build it in its own folder (for example build-probe-on), never in
+        # build/reference, and never together with A0_BUILD_WPD_SETTINGS_WRITE (that screen stops and restarts Live; the probe's
+        # observation must not be mixed with it). Keep it OFF in any build used on the real bodies until the AGENTS.md item
+        # for ADR-0044 is in place and the owner has approved the camera, the count (one) and the stop conditions.
+        option(A0_BUILD_WPD_LIVE_CAPTURE_PROBE "Build the one-shot Live-open capture probe into the development preview (#426 stage 4, ADR-0044)" OFF)
+        if(A0_BUILD_WPD_LIVE_CAPTURE_PROBE)
+            if(A0_BUILD_WPD_SETTINGS_WRITE)
+                message(FATAL_ERROR "A0_BUILD_WPD_LIVE_CAPTURE_PROBE and A0_BUILD_WPD_SETTINGS_WRITE must not both be ON: the settings screen "
+                    "stops and restarts Live View, which would mix another cause into the probe's observation (ADR-0044).")
+            endif()
+            # The probe never goes into the reference build folder (the AGENTS.md item for ADR-0044).
+            # Compared in lower case (the file system ignores case) and as a path component, so build/Reference and
+            # build/reference/<sub> are stopped as well, while build-probe-on and build/reference-x are not.
+            file(TO_CMAKE_PATH "${CMAKE_BINARY_DIR}" a0_probe_binary_dir)
+            string(TOLOWER "${a0_probe_binary_dir}" a0_probe_binary_dir)
+            if(a0_probe_binary_dir MATCHES "(^|/)build/reference(/|$)")
+                message(FATAL_ERROR "A0_BUILD_WPD_LIVE_CAPTURE_PROBE=ON must not be used in a build folder named build/reference "
+                    "(${CMAKE_BINARY_DIR}). Configure the probe in its own folder, for example build-probe-on (ADR-0044).")
+            endif()
+            message(WARNING "A0_BUILD_WPD_LIVE_CAPTURE_PROBE=ON: this executable carries a probe that sends the shutter once with Live View open "
+                "(#426 stage 4, ADR-0044; its window title and first log line say so). Do not use it on the real bodies until the owner's approval "
+                "and the AGENTS.md item are in place.")
+            target_compile_definitions(A0CameraStitcher.WpdDualPreview PRIVATE A0_ENABLE_WPD_LIVE_CAPTURE_PROBE=1)
+            # The window side of the probe on synthetic cameras and a synthetic backend. Opens no camera, no lease.
+            add_test(NAME preview_live_capture_probe_ui_contracts COMMAND A0CameraStitcher.WpdDualPreview --live-capture-probe-ui-smoke)
+            set_tests_properties(preview_live_capture_probe_ui_contracts PROPERTIES TIMEOUT 60)
+            set(a0_live_capture_probe_binary_expect present)
+        else()
+            set(a0_live_capture_probe_binary_expect absent)
+        endif()
+        add_test(NAME preview_live_capture_probe_binary_contracts
+            COMMAND "${CMAKE_COMMAND}" "-DBINARY=$<TARGET_FILE:A0CameraStitcher.WpdDualPreview>" "-DEXPECT=${a0_live_capture_probe_binary_expect}"
+                -P "${CMAKE_SOURCE_DIR}/tests/live_capture_probe_binary_tests.cmake")
+        set_tests_properties(preview_live_capture_probe_binary_contracts PROPERTIES TIMEOUT 60)
+        # The one shutter reaches the transport only through ShutterOnce of the probe header, and the probe button is clicked
+        # by a synthetic message only in the camera-free smoke (reads the sources; runs nothing).
+        add_test(NAME preview_live_capture_probe_source_contracts
+            COMMAND "${CMAKE_COMMAND}" "-DSOURCE_ROOT=${CMAKE_SOURCE_DIR}" -P "${CMAKE_SOURCE_DIR}/tests/live_capture_probe_source_tests.cmake")
+        set_tests_properties(preview_live_capture_probe_source_contracts PROPERTIES TIMEOUT 30)
         if(MSVC)
             target_compile_options(A0CameraStitcher.WpdDualPreview PRIVATE /W4 /permissive- /EHsc /utf-8)
         endif()

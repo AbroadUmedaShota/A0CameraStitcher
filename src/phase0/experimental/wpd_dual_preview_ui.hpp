@@ -169,10 +169,16 @@ bool SettingsPanelOpen(); // the settings panel is in the place of the Live area
 int SettingsButtonRowReserve(); // the row of buttons takes room from the bottom of the settings table (defined below)
 int SettingsTableBottom(std::size_t count,int client_bottom,int reserved_bottom); // bottom edge of the last row the table draws
 #endif
+#if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
+#include "wpd_dual_preview_live_probe_ui.hpp" // #426 stage 4: the window side of the Live-open capture probe
+#endif
 bool CanFocus(Camera& camera){
     std::lock_guard lock(camera.mutex);
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
     if(SettingsWriteBusy() || SettingsPanelOpen())return false; // a settings write or reread holds the cameras, and the panel takes the place of the Live area: no AF, no capture
+#endif
+#if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
+    if(LiveProbeBusy() || !camera.owner.AdmitsFocus())return false; // a probe in progress, or a session that is not the Live worker's: no AF, no capture
 #endif
     return !stopping && !closing && !capture_pending && !capture_future.valid() && !settings_future.valid() && !camera.done && !camera.failed && camera.frames>=20 &&
         Clock::now()-camera.last<std::chrono::seconds(2) && camera.focus_mailbox.Available();
@@ -400,6 +406,9 @@ void MergeLoop(std::stop_token stop){
 }
 void StartPreview(){
     if(capture_future.valid() || settings_future.valid() || camera_workers[0].joinable() || camera_workers[1].joinable() || merge_worker.joinable())throw std::runtime_error("preview workers must be closed before restart");
+#if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
+    if(LiveProbeHoldsWindow())throw std::runtime_error("the live-open capture probe is running");
+#endif
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
     if(SettingsWriteBusy())throw std::runtime_error("a settings write or reread holds the cameras");
 #endif
@@ -447,6 +456,9 @@ void LayoutButtons(HWND hwnd){
     if(session_button)MoveWindow(session_button,std::max(12L,rect.right-430),rect.bottom/2+88,200,28,TRUE);
     if(settings_button)MoveWindow(settings_button,std::max(12L,rect.right-645),rect.bottom/2+88,200,28,TRUE);
     if(seam_button)MoveWindow(seam_button,1245,rect.bottom/2+52,140,28,TRUE);
+#if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
+    if(live_probe_button)MoveWindow(live_probe_button,std::max(12L,rect.right-300),rect.bottom/2+4,288,28,TRUE);
+#endif
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
     LayoutSettingsWriteButtons(rect);
 #endif
@@ -730,6 +742,9 @@ std::array<std::uint64_t,6> Paint(HDC dc,RECT client){
     if(panel_over_live)DrawSettingsPanel(dc,client); // the settings panel takes the place of both Live areas
 #endif
     RECT status_rect{12,client.bottom/2+4,client.right-12,client.bottom/2+86};
+#if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
+    status_rect.right=std::max<LONG>(status_rect.left+100,status_rect.right-300); // leave room for the probe button
+#endif
     DrawTextW(dc,capture_status.c_str(),-1,&status_rect,DT_LEFT|DT_WORDBREAK|DT_NOPREFIX);
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
     if(preview_joined && settings_write && settings_write->screen->View() && DrawSettingsWrite(dc,client))return drawn; // a confirmation or a result is never under the review
@@ -976,6 +991,10 @@ void AdvanceCapture(HWND hwnd){
     }
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
     if(closing && SettingsWriteHoldsWindow(hwnd))return; // a write or reread is waited for the same way
+#endif
+#if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
+    AdvanceLiveProbe();
+    if(closing && LiveProbeHoldsWindow())return; // the probe thread and a held session are waited for like a save in progress
 #endif
     // A settings read in progress is waited for: its Close must finish before the window (and the lease) goes.
     if(closing && preview_joined && !capture_future.valid() && !settings_future.valid())DestroyWindow(hwnd);
@@ -1285,6 +1304,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM w,LPARAM l){
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
         if(HandleSettingsWriteCommand(id,HIWORD(w),reinterpret_cast<HWND>(l)))return 0;
 #endif
+#if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
+        if(id==kLiveProbeButtonId && HIWORD(w)==BN_CLICKED && reinterpret_cast<HWND>(l)==live_probe_button){RequestLiveProbe();return 0;}
+#endif
         if(id==405 && HIWORD(w)==BN_CLICKED && reinterpret_cast<HWND>(l)==settings_button){RequestSettingsRead();return 0;}
         if(id==403 && HIWORD(w)==BN_CLICKED && reinterpret_cast<HWND>(l)==session_button){
             if(SettingsReadBusy()){Log("ui_live_restart_refused=1 settings_read_in_progress=1");return 0;}
@@ -1372,6 +1394,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM w,LPARAM l){
         for(int i=0;i<2;++i){const bool enabled=CanFocus(*cameras[i]);for(auto button:focus_buttons[i])if(button)EnableWindow(button,enabled);}
         for(auto button:capture_buttons)if(button)EnableWindow(button,CanFocus(*cameras[0]) && CanFocus(*cameras[1]));
         if(pair_button)EnableWindow(pair_button,CanFocus(*cameras[0]) && CanFocus(*cameras[1]));
+#if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
+        if(live_probe_button)EnableWindow(live_probe_button,LiveProbeCanPress());
+#endif
         if(review_button){EnableWindow(review_button,!review_pixels.bytes.empty());SetWindowTextW(review_button,review_visible?L"ライブCに戻す":L"撮影結果を見る");}
         if(inspect_button)EnableWindow(inspect_button,!review_path.empty());
         if(settings_button)EnableWindow(settings_button,CanReadSettings() && !PanelHoldsLive());
@@ -1472,6 +1497,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM w,LPARAM l){
     }return DefWindowProcW(hwnd,message,w,l);
 }
 #include "wpd_dual_preview_af_smoke.hpp"
+#if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
+#include "wpd_dual_preview_live_probe_smoke.hpp" // camera-free contract of the probe's window side
+#endif
 int RunLifecycleUiSmoke(){
     // Synthetic failed workers only. No Discover/Open/Run or hardware lease.
     Log("lifecycle_ui_synthetic=1 camera_operations=0");
@@ -2310,7 +2338,12 @@ int RunPreviewWindow(const std::array<std::wstring,2>& ids){
     for(int i=0;i<2;++i){cameras[i]=std::make_unique<Camera>();cameras[i]->alias=i==0?"CAM-A":"CAM-B";}
     auto instance=GetModuleHandleW(nullptr);WNDCLASSW wc{};wc.lpfnWndProc=WindowProc;wc.hInstance=instance;wc.lpszClassName=L"A0WpdDualPreview";wc.hCursor=LoadCursor(nullptr,IDC_ARROW);
     if(!RegisterClassW(&wc))throw std::runtime_error("register window failed");
-    HWND window=CreateWindowExW(0,wc.lpszClassName,L"A0 A/B Live + C 仮Merge（未校正） / 撮影・PC保存",WS_OVERLAPPEDWINDOW|WS_VISIBLE|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,1400,960,nullptr,nullptr,instance,nullptr);
+#if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
+    const wchar_t* const window_title=L"A0 [探りbuild: ライブを開いたまま1回撮る] A/B Live + C 仮Merge（未校正） / 撮影・PC保存";
+#else
+    const wchar_t* const window_title=L"A0 A/B Live + C 仮Merge（未校正） / 撮影・PC保存";
+#endif
+    HWND window=CreateWindowExW(0,wc.lpszClassName,window_title,WS_OVERLAPPEDWINDOW|WS_VISIBLE|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,1400,960,nullptr,nullptr,instance,nullptr);
     if(!window)throw std::runtime_error("create window failed");
     constexpr std::array<const wchar_t*,3> labels{L"AF",L"近くへ微調整",L"遠くへ微調整"};
     for(int i=0;i<2;++i){
@@ -2329,6 +2362,12 @@ int RunPreviewWindow(const std::array<std::wstring,2>& ids){
     settings_button=CreateWindowExW(0,L"BUTTON",L"両台の設定を読む",WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,0,0,0,0,window,reinterpret_cast<HMENU>(405),instance,nullptr);
     if(!pair_button || !review_button || !inspect_button || !session_button || !seam_button || !settings_button)throw std::runtime_error("create pair review buttons failed");EnableWindow(pair_button,FALSE);EnableWindow(review_button,FALSE);EnableWindow(inspect_button,FALSE);EnableWindow(session_button,FALSE);EnableWindow(settings_button,FALSE);
     SendMessageW(seam_button,BM_SETCHECK,BST_CHECKED,0);EnableWindow(seam_button,FALSE);
+#if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
+    // The one entry of the Live-open capture probe (ADR-0044): disabled until every condition holds, pressed by a person.
+    live_probe_button=CreateWindowExW(0,L"BUTTON",LiveProbeButtonLabel(),WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,0,0,0,0,window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(kLiveProbeButtonId)),instance,nullptr);
+    if(!live_probe_button)throw std::runtime_error("create live-open capture probe button failed");
+    EnableWindow(live_probe_button,FALSE);
+#endif
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
     CreateSettingsWriteControls(window,instance);InitProductSettingsWrite(); // before any session: a block left by an earlier run holds capture
 #endif
@@ -2342,6 +2381,9 @@ int RunPreviewWindow(const std::array<std::wstring,2>& ids){
     MSG message{};BOOL state{};
     while((state=GetMessageW(&message,nullptr,0,0))>0){if(message.message==WM_KEYDOWN && message.wParam==VK_ESCAPE){SendMessageW(window,WM_CLOSE,0,0);continue;}if(!IsDialogMessageW(window,&message)){TranslateMessage(&message);DispatchMessageW(&message);}}
     stopping=true;
+#if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
+    LiveProbeShutdown(); // nothing may stay held or lent when the workers are joined
+#endif
     if(!preview_joined)FinishPreview();
     // The lease is released only after a running settings read has ended and closed its body.
     if(settings_stop)settings_stop->store(true);

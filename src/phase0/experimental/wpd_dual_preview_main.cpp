@@ -48,6 +48,10 @@
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
 #include "a0/phase0/experimental/d810_settings_write_screen.hpp" // #416 stage B, only with A0_BUILD_WPD_SETTINGS_WRITE
 #endif
+#if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
+#include "a0/phase0/experimental/preview_session_owner.hpp" // #426 stage 4, only with A0_BUILD_WPD_LIVE_CAPTURE_PROBE
+#include "a0/phase0/experimental/wpd_live_capture_probe.hpp"
+#endif
 
 using namespace a0::phase0;
 using namespace a0::phase0::experimental;
@@ -493,8 +497,20 @@ struct Camera final:WpdLiveViewCommandChannel {
     bool admission_cancelled{},frame_dispatched{};
     std::optional<WpdLiveViewCommandResult> start_result;
     bool busy{},cancelled{},opened{},start_attempted{},started{},stopped{},closed{},live_off_confirmed{},camera_ended{};
+#if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
+    // Live-open capture probe (ADR-0044): who may send to this session. The worker owns it while Live.
+    PreviewSessionOwner owner;
+    std::atomic<int> probe_frame_state{0}; // 0 none, 1 one frame asked for, 2 read, 3 not in Live View, 4 failed
+    std::atomic<unsigned> probe_frame_mtp{0};
+    std::atomic<unsigned> held_dispatch_refused{0}; // Live-path commands refused while the session was held or lent
+    std::optional<D810AfHeader> af_words_last;D810AfReject af_reject_last{}; // latest frame header words; guarded by `mutex`
+    void HoldAtFrameBoundary(); // wpd_dual_preview_live_probe.hpp
+#endif
     WpdLiveViewExchange Dispatch(IPortableDeviceValues* request) override {
         if(!AllowedD810PreviewRequest(request))throw std::runtime_error("request rejected by allowlist");
+#if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
+        if(!owner.MayLiveSend()){++held_dispatch_refused;throw std::runtime_error("session is held or lent; the Live path does not send");}
+#endif
         std::lock_guard io_lock(wpd_io_mutex);
         DWORD operation{};request->GetUnsignedIntegerValue(WPD_PROPERTY_MTP_EXT_OPERATION_CODE,&operation);
         if(!AdmitD810PreviewDispatch(request,opened && !closed,stopping,Clock::now()>=send_deadline)){
@@ -694,6 +710,9 @@ struct Camera final:WpdLiveViewCommandChannel {
                 std::this_thread::sleep_for(std::chrono::milliseconds(500));
                 ComPtr<IWICImagingFactory> factory;Check(CoCreateInstance(CLSID_WICImagingFactory,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&factory)),"WIC factory");
                 while(!stopping){
+#if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
+                    HoldAtFrameBoundary(); // a hold request is answered here, between two frames, before any command of the turn
+#endif
                     if(const auto action=focus_mailbox.Take())ApplyFocus(*action);
                     else if(const auto point=focus_mailbox.TakeAfPoint())ApplyAfPoint(*point);
                     if(stopping)break;
@@ -723,12 +742,18 @@ struct Camera final:WpdLiveViewCommandChannel {
                             {std::lock_guard lock(mutex);failure_status=L"カメラ側でライブビューが終了しました。自動終了設定・電池・温度を確認してください";}
                             Log(alias+" camera_live_view_ended=1 cause_confirmed=0 elapsed_seconds="+std::to_string(std::chrono::duration<double>(Clock::now()-first).count()));
                         }
+#if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
+                        if(probe_frame_state==1){probe_frame_mtp=result.command_failure?static_cast<unsigned>(result.command_failure->mtp_response):0u;probe_frame_state=PreviewCameraEnded(result)?3:4;}
+#endif
                         throw std::runtime_error("frame transfer failed");
                     }
                     if(stopping)break; // Transfer was drained, do not publish a stopped frame.
                     auto next=Decode(factory.Get(),D810PreviewJpeg(result.payload));
                     const auto next_level=D810PreviewLevel(result.payload);
                     UpdateAfFrame(result.payload,next.width,next.height);
+#if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
+                    {int expected=1;if(probe_frame_state.compare_exchange_strong(expected,2))owner.RequestHold();} // the one frame after the probe: hold again at the next boundary
+#endif
                     if(!frames){
                         // Diagnostic numeric words only, never image/header dumps.
                         std::ostringstream words;words<<alias<<" level_header_words="<<std::hex;
@@ -769,6 +794,9 @@ struct Camera final:WpdLiveViewCommandChannel {
             }
         }catch(const std::exception& e){failed=true;stopping=true;Log(alias+" close failure: "+e.what());}
         if(SUCCEEDED(com_status))CoUninitialize();
+#if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
+        owner.Retire();
+#endif
         done=true;
     }
     void CancelStalled(){
@@ -780,6 +808,9 @@ struct Camera final:WpdLiveViewCommandChannel {
     }
 };
 #include "wpd_dual_preview_af.hpp"
+#if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
+#include "wpd_dual_preview_live_probe.hpp" // #426 stage 4: the session hand-over and the probe thread
+#endif
 int ReadCaptureDiagnostics(const std::array<std::wstring,2>& ids,bool inspect_events=false,bool require_live_off=false,bool extended_state=false){
     Log("capture_diagnostics=1 shutter_commands=0 setting_writes=0 live_start_commands=0");
     if(inspect_events)Log("event_diagnostics=1 polls_per_camera=4 capture_admission=not_evaluated");
@@ -954,6 +985,11 @@ int RunIsolatedAStartDiagnostics(const std::array<std::wstring,2>& ids,bool insp
 }
 int main(int argc,char** argv){
     try{
+#if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
+        // A build that contains the Live-open capture probe says so first (#426 stage 4, ADR-0044). The smoke opens no camera.
+        Log(DescribeLiveCaptureProbeBuild());
+        if(argc==2 && std::string(argv[1])=="--live-capture-probe-ui-smoke")return RunLiveCaptureProbeUiSmoke();
+#endif
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
         // A build that contains the settings write path says so first (#416 stage B). The smoke opens no camera.
         Log("settings_write_build=1 development_only=1 enabled_rows="+std::to_string(D810EnabledRowCount(kD810ProductWriteTable))+" "+D810StageMark(kD810ProductWriteTable));
