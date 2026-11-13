@@ -25,9 +25,9 @@ p_b に大きな値を入れずに profile を作り直す理由: p_b は「校�
 
 `ProposeRecalibration` は R1 から確かめまでをつなぐ。ファイルを読まず、書かない。時刻、SHA-256 の提供、推定器の設計定数、停止の合図は呼び手が渡す。
 
-## 3. 継ぎ目の列と出力の範囲（所有者の決定待ちの 2 つ）
+## 3. 継ぎ目の列と出力の範囲（所有者の決定）
 
-どちらも切り替えられる作りで、既定は推す案。
+どちらも切り替えられる作りで、既定は所有者が選んだ側（継ぎ目は重なりの真ん中、範囲は広げた分だけ広げる）。A と B を同時に動かして間隔を広げる使い方もあるので、画面と案内の文は「B を動かした時」と決め打ちせず、「カメラの間隔を変えた時」「A に対する B の位置」と書く。
 
 | 選ぶ物 | 既定 | もう一方 |
 |---|---|---|
@@ -38,7 +38,7 @@ p_b に大きな値を入れずに profile を作り直す理由: p_b は「校�
 
 `Proposal::display`。確定できない時も、出せる所まで埋める。
 
-- B の動き（図面の座標の言葉。`OutputFrameOf` を通すので取付が 180° でも向きは逆にならない）と、位置・回り・傾き・高さの大きさ
+- A に対する B の位置の変化（図面の座標の言葉。`OutputFrameOf` を通すので取付が 180° でも向きは逆にならない。左右と上下を分けて出す）と、位置・回り・傾き・高さの大きさ
 - 重なりの幅（新しいラスタの全行の最も狭い所、mm）
 - 継ぎ目の列と図面の上の位置（新旧）、ラスタの大きさ（新旧）
 - 継ぎ目が写真の端からどれだけの所か（A の右端と B の左端への距離。画素と幅に対する割合）。校正が確かな範囲の外へ寄ると、レンズの外挿が効いて誤差が出やすい（`rig-profile-v2.md`）ので、校正の画面に必ず出す
@@ -54,8 +54,23 @@ p_b に大きな値を入れずに profile を作り直す理由: p_b は「校�
 4. R2 の傾き |(rx, ry)| が `registration.envelope.tiltDeg` 以下、高さ |tz| が `heightPercent` 以下（`tilt-exceeded`、`height-exceeded`）。超えるのは「動かした」でなく「向きや高さが変わった」で、チャートでの校正が要る
 5. 作る時の検査 (a)〜(d)（`creation-check-failed`。検査の文は `detail` に入る）
 6. 出力ラスタが描画の限界以下（`raster-too-large`）で、profile の用紙の内側（`raster-outside-sheet`）
+7. 位置の計算が成り立つ（`estimate-failed`）。推定器が設定を断った、または例外を返した時
+8. 新しい profile と記録が読み手を通る（`profile-invalid`）
+9. 呼び手の中止の合図（`stopped`）。R1 と作る時の検査は合図を見ないので、待ちが数十秒になる事がある。合図には利用者の中止だけをつなぐ（期限をつなぐと `stopped` と誤って出る）
 
-継ぎ目のずれのゲートによる確かめ（GΩ）は見本の合成の側（呼び手）で行う。
+### 確かめられなかった時の扱い（所有者の決定）
+
+上の符号は、呼び手（`recalibration_job.hpp`）が三つに分ける。
+
+| 区分 | 符号 | 扱い |
+|---|---|---|
+| 何も作れなかった | `no-overlap`、`estimate-failed`、`estimate-not-verified`、`stopped` | 確定させない |
+| 確かめて合っていなかった | `tilt-exceeded`、`height-exceeded`、`creation-check-failed`、`raster-too-large`、`raster-outside-sheet`、`profile-invalid`、`reestimate-displacement`、`reestimate-not-verified`（確かめの推定が範囲の外と出た時）、見本のゲートが `fail`（原因が `lift`・`pose`・`displacement`。ずれを測って基準を超えた時） | 確定させない |
+| 確かめられなかった | `reestimate-not-verified`（確かめの推定が `undetermined`）、見本のゲートが `undetermined`・`not-run`、見本のゲートが `fail` で原因が `unmeasurable`（継ぎ目を測れなかった。目印の少ない紙で出る）、見本の推定が `undetermined` | 既定は、警告を見たうえで人が確定できる。定数 `kRecalibrationUnverifiedPolicy` で確定させない側にも切り替えられる |
+
+確かめられないまま確定した改訂は、条件 v3 の書式に印を置く場所が無いので、校正の報告（`recalibration-report.json`）と確定の記録（`confirmation.json`）とログに残る。画面は「未確認の校正」と出す。見本のゲート（GΩ）は確かめの独立した守りなので、結果（測れたか、ずれの値と基準、測れた行の割合）を必ず画面と報告に並べる。
+
+継ぎ目のずれのゲートによる確かめ（GΩ）は見本の合成の側（呼び手）で行う。計算の側の確かめ（`VerifyCandidate`）は同じ組での焼き込みの確かめで、精度の独立な確かめではない。
 
 ## 6. 記録
 

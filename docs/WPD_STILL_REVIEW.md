@@ -874,3 +874,44 @@ B の傾き 0.4°（許容 1°）、回転 0.8°（許容 2°）、高さ +3 mm�
 | `pair_review_registration_ms estimate_ms=…` | 段ごとの時間（ミリ秒。ログだけで、報告には書かない）。`estimate_ms` は推定・層 2、`composite_ms` は合成。回した段だけ `<段>_ms=` が並ぶ。`planned=` は回すと決めた段、`skipped=` は時間の都合で落とした段（無ければ `none`） |
 
 読み方の目安: 時間が足りないと `skipped=` に `fine-and-fit` などが並び、`level=` が G3 か G4 に下がる。`gate=not-run` で `skipped=` に `gate` が出ていれば、ゲートまで時間が届かなかった。`level=G4` で `estimate=undetermined` なら、推定が確かでなかった（理由は `pair_review_registration_pose` の `text=`）。
+
+## カメラの間隔を変えた後の校正のやり直し（開発用の入口、#434）
+
+設計は `docs/design/recalibration-from-pair.md`。CMake の option `A0_BUILD_WPD_RECALIBRATION`（既定 OFF）を ON にしたビルドの StillReview だけが、次の入口を持つ。OFF のビルドにこのコマンドは無い（ソースを入れず、ライブラリも結ばない）。
+
+```
+A0CameraStitcher.StillReview --recalibrate-from-pair --camera-a <JPEG> --camera-b <JPEG> --settings-folder <フォルダ> --staging <新しいフォルダ>
+    [--seam center|keep] [--raster follow-b|keep] [--unverified confirm|refuse] [--pair-id <識別子>] [--measured-at <UTC>]
+```
+
+保存済みの両台の原画像と設定フォルダから、B の位置を取り直した新しい校正を計算し、見本を合成して結果を出す。**設定フォルダは読むだけで、確定はしない。** 書くのは `--staging` の新しいフォルダ（既にあれば断る）だけで、カメラには触らない。標準出力にパスと機体の識別子は出ない。
+
+| 引数 | 意味 | 既定 |
+|---|---|---|
+| `--camera-a` `--camera-b` | 原画像（保存順のまま）。`CAM-A/original.jpg` の形でなければ、見本の合成のために staging へ写す | なし（必須） |
+| `--settings-folder` | 有効な条件 v3 のある設定フォルダ（読むだけ） | なし（必須） |
+| `--staging` | 記録を書く新しいフォルダ | なし（必須） |
+| `--seam` | `center` は新しい重なりの真ん中、`keep` は前の継ぎ目の列 | `center`（所有者の決定） |
+| `--raster` | `follow-b` は合成の範囲を B の動いた分だけ広げる、`keep` は前のまま | `follow-b`（所有者の決定） |
+| `--unverified` | 確かめられなかった時に、警告を見たうえで人が確定できる（`confirm`）か、確定させない（`refuse`） | `confirm`（所有者の決定） |
+| `--pair-id` `--measured-at` | 改訂に書く組の識別子と撮影の時刻（UTC）。無ければ画像のハッシュと現在の時刻から作る | |
+
+三つの既定は `recalibration_job.hpp` の定数（`kRecalibrationSeamPlacement`・`kRecalibrationRasterPlacement`・`kRecalibrationUnverifiedPolicy`）1 か所にある。
+
+### 結果の読み方
+
+最初の行 `recalibration_done=1 verdict=… unverified=… confirmed=0 camera_operations=0 settings_written=0` に判定が出る。
+
+| `verdict` | 意味 | 終了コード |
+|---|---|---|
+| `usable` | 確かめられた。確定してよい | 0 |
+| `usable-unverified` | 確かめられなかったが、合っていないとも分かっていない。画面は「未確認の校正」と出し、人が警告を見て確定する | 3 |
+| `unusable` | 作れなかった、または確かめて合っていなかった。確定させない | 1 |
+
+引数の誤りは 2。続く `finding class=… code=…` の行が理由で、`class` は `no-candidate`（位置が決まらず、何も作れなかった）、`rejected`（作って確かめたら合っていなかった）、`unverified`（確かめられなかった）のどれか。`gate state=… maximum_px=… limit_px=… measured_row_share=…` は見本の継ぎ目のずれ（GΩ）で、測れたかどうかとずれの値が出る。ゲートが `fail` でも原因が `unmeasurable`（測れなかった）なら `unverified`、ずれを測って基準を超えた時（`lift`・`pose`・`displacement`）は `rejected`。`screen …` の行は画面に出す文と同じ。
+
+staging には `estimate-record.json`・`candidate-profile.json`・`candidate-revision.json`（確定したら書かれる物そのもの）、`review/`（見本の合成と v8 の報告）、`seam-crops.png`（継ぎ目の上・中・下の原寸）、`recalibration-report.json`（`a0.pair-recalibration-report.v1`: 判定、理由の符号、ゲートの結果、表示の数、各ハッシュ。パスと文は入らない）が並ぶ。確定した時は `confirmation.json`（`a0.pair-recalibration-confirmation.v1`）が加わり、未確認のまま確定したかどうかが残る。条件 v3 の書式に未確認の印を置く場所は無く、変えていない。
+
+### 確定と前の校正に戻す道
+
+確定（`ConfirmRecalibration`）はこのコマンドには無く、プレビューの画面だけが呼ぶ。順は、有効な改訂が候補の親と同じか確かめる → profile の写し → 改訂 → 読み直し。途中で失敗しても前の改訂が有効なまま残る。確定した改訂へ `rollback` で戻す道は、既存の道具の決まりどおり同じ profile の改訂の間だけで、再校正の前の改訂へは戻せない（profile が違うため）。再校正の前に戻したい時は、元の間隔に直してもう一度この校正をやり直す。
