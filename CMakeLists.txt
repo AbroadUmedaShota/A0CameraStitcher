@@ -460,6 +460,19 @@ else()
     target_compile_options(a0_m2_capture_registration PRIVATE -Wall -Wextra -Wpedantic -ffp-contract=off)
 endif()
 
+# Recalibration of camera B from one pair (#434, docs/design/recalibration-from-pair.md): the wide search, the estimator in six degrees of
+# freedom, the new draft profile with B's pose baked in, the candidate revision (kind recalibrated) and its checks. Pure computation: no camera,
+# no file, no clock; the SHA-256 provider is a parameter.
+add_library(a0_m2_fixed_composite_recalibration src/m2/fixed_composite_recalibration.cpp)
+target_include_directories(a0_m2_fixed_composite_recalibration PUBLIC src/m2/include PRIVATE src/common/include)
+target_link_libraries(a0_m2_fixed_composite_recalibration PUBLIC a0_m2_fixed_composite_v2 a0_m2_content_registration a0_m2_overlap_estimation a0_m2_rig_profile_v2
+    a0_m2_fixed_composite_maps a0_m2_seam_blend a0_m2_registration_pose a0_m2_render)
+if(MSVC)
+    target_compile_options(a0_m2_fixed_composite_recalibration PRIVATE /W4 /permissive- /EHsc /fp:precise /utf-8)
+else()
+    target_compile_options(a0_m2_fixed_composite_recalibration PRIVATE -Wall -Wextra -Wpedantic -ffp-contract=off)
+endif()
+
 # Development-only probe of #417 (P0): reads a saved pair and a fixed composite condition v2, measures the
 # B-minus-A displacement field over the overlap band and fits registration models to it. Never part of the
 # product; it composes nothing and uses no camera.
