@@ -8,6 +8,8 @@
 #include <iostream>
 #include <limits>
 #include <string>
+#include <utility>
+#include <vector>
 
 using namespace a0::phase0::experimental;
 namespace ex=a0::m2::experimental;
@@ -270,6 +272,102 @@ void ConnectionTexts(){
     CHECK(Contains(start_failed,"始められませんでした") && Contains(start_failed,"固定の位置") && start_failed!=unavailable && start_failed.find('\n')==std::string::npos);
 }
 
+// The state row of the live C under the position that is confirmed once (#437 stage 1): the words of the states, which never call the picture
+// within a criterion, say where the position came from, and are one line.
+void PlacementTexts(){
+    LivePlacementView view;
+    view.live_enabled=true;
+    const auto one_line=[](const std::string& text){return !text.empty() && text.find('\n')==std::string::npos;};
+    const auto no_verdict=[](const std::string& text){
+        return !Contains(text,"基準内") && !Contains(text,"合格") && !Contains(text,"書き出せません") && !Contains(text,"保存できません");
+    };
+    // Waiting for an estimate, and running one: the same words ("composing automatically").
+    view.activity=LivePlacementActivity::requested;view.ask=LiveEstimateAsk::start;
+    CHECK(LivePlacementStateText(view)=="自動合成中です…");
+    view.activity=LivePlacementActivity::estimating;
+    CHECK(LivePlacementStateText(view)=="自動合成中です…" && LivePlacementStateText(view,true)=="自動合成中です…");
+    view.activity=LivePlacementActivity::idle;view.ask.reset();
+    // The condition's position, nothing asked yet (a session that began with an estimate that was refused or not wanted).
+    auto text=LivePlacementStateText(view);
+    CHECK(Contains(text,"条件の位置") && Contains(text,"自動位置合わせ") && one_line(text) && no_verdict(text));
+    // A condition that has no live estimate.
+    view.live_enabled=false;
+    text=LivePlacementStateText(view);
+    CHECK(Contains(text,"無効") && Contains(text,"固定の写像") && one_line(text));
+    view.live_enabled=true;
+    // Placed: where from, and the components that are outside the range, named.
+    view.source=LivePlacementSource::auto_start;view.outcome=LivePlacementOutcomeKind::placed;view.outcome_ask=LiveEstimateAsk::start;
+    text=LivePlacementStateText(view);
+    CHECK(Contains(text,"位置を確定しました（自動・開始時）") && !Contains(text,"範囲") && one_line(text) && no_verdict(text));
+    view.outcome_ask=LiveEstimateAsk::condition_changed;
+    CHECK(Contains(LivePlacementStateText(view),"（自動・開始時）"));
+    view.source=LivePlacementSource::auto_button;view.outcome_ask=LiveEstimateAsk::button;
+    CHECK(Contains(LivePlacementStateText(view),"位置を確定しました（自動・ボタン）"));
+    view.beyond_envelope=true;view.exceeded_components={"rotation","position"};
+    text=LivePlacementStateText(view);
+    CHECK(Contains(text,"許容の範囲の外の値で描いています") && Contains(text,"範囲を超えた量: 位置・回転）") && one_line(text) && no_verdict(text));
+    view.beyond_envelope=false;view.exceeded_components.clear();
+    // An estimate that decided nothing: the reason in plain words, what is kept, where it came from, and what to do.
+    view.outcome=LivePlacementOutcomeKind::not_decided;view.last_failure={"too-dark"};
+    text=LivePlacementStateText(view);
+    CHECK(Contains(text,"位置を決められませんでした（理由: 暗すぎます）") && Contains(text,"前の位置のままです（出どころ: ボタンの自動）") && Contains(text,"「自動位置合わせ」を押してください") &&
+        one_line(text) && no_verdict(text));
+    view.source=LivePlacementSource::fixed_condition;
+    CHECK(Contains(LivePlacementStateText(view),"出どころ: 条件の位置"));
+    // The reasons, one sentence each; an unknown code is "not reliable", never a sentence of another reason.
+    const std::vector<std::pair<const char*,const char*>> reasons{{"too-dark","暗すぎます"},{"no-overlap","重なりが足りません"},{"coarse-no-unique-blocks","模様が足りません"},
+        {"unique-blocks","模様が足りません"},{"too-few-points","模様が足りません"},{"repeating-only","繰り返して"},{"coarse-ambiguous","繰り返して"},
+        {"coarse-inconsistent","大まかな位置が一致しませんでした"},{"out-of-envelope","許容の範囲の外の値でした"},{kLiveEstimatorUnavailableReason.data(),"未接続"},
+        {"bake-failed","Cを描けませんでした"},{"estimate-refused","途中で失敗しました"},{"estimator-exception","途中で失敗しました"},{"prediction-uncertain","確かではありません"},
+        {"something-new","確かではありません"}};
+    for(const auto& r:reasons)CHECK(Contains(LiveEstimateReasonText({r.first}),r.second));
+    CHECK(Contains(LiveEstimateReasonText({}),"確かではありません"));
+    CHECK(LiveEstimateReasonText({"too-dark","no-overlap"})==LiveEstimateReasonText({"too-dark"}));   // the first code
+    // A position that could not be drawn.
+    view.outcome=LivePlacementOutcomeKind::placed;view.source=LivePlacementSource::after_capture;
+    text=LivePlacementStateText(view,true);
+    CHECK(Contains(text,"撮影JPEGの位置ではCを描けませんでした") && Contains(text,"直前") && one_line(text) && no_verdict(text));
+    view.source=LivePlacementSource::auto_button;
+    CHECK(Contains(LivePlacementStateText(view,true),"推定した位置ではCを描けませんでした"));
+    // After a shot: the level decides what is said, and the distance is read in the JPEG's pixels.
+    view.outcome=LivePlacementOutcomeKind::none;view.source=LivePlacementSource::after_capture;
+    LivePlacementCaptureNote note;
+    note.level="G1";note.difference_px=2.46;
+    view.capture=note;
+    text=LivePlacementStateText(view);
+    CHECK(Contains(text,"撮影の後の自動調整で位置を確定しました（G1）") && Contains(text,"ライブの位置と継ぎ目で 2.5 px（JPEGの画素）違います") && !Contains(text,"局所の補正") && one_line(text) && no_verdict(text));
+    view.capture->level="G2";
+    CHECK(Contains(LivePlacementStateText(view),"位置を確定しました（G2）"));
+    view.capture->layer_two_dropped=true;
+    CHECK(Contains(LivePlacementStateText(view),"局所の補正はライブのCには出ません"));
+    view.capture->layer_two_dropped=false;
+    view.capture->level="G3";
+    text=LivePlacementStateText(view);
+    CHECK(Contains(text,"確かな位置が出ませんでした") && Contains(text,"JPEGは目安の位置（G3）で作りました（ライブの位置と継ぎ目で 2.5 px") && !Contains(text,"位置を確定しました"));
+    view.capture->level="G4";
+    text=LivePlacementStateText(view);
+    CHECK(Contains(text,"JPEGは条件の位置で作りました（ライブの位置と継ぎ目で 2.5 px") && !Contains(text,"位置を確定しました"));
+    view.capture->difference_px=0.0;
+    CHECK(Contains(LivePlacementStateText(view),"（ライブの位置と同じです）"));
+    view.capture->difference_px=0.04;
+    CHECK(Contains(LivePlacementStateText(view),"ライブの位置と同じです"));
+    view.capture->difference_px=std::nullopt;
+    text=LivePlacementStateText(view);
+    CHECK(Contains(text,"JPEGは条件の位置で作りました") && !Contains(text,"違います") && !Contains(text,"同じです") && !Contains(text,"（ライブ"));
+    view.capture->level="G1";
+    CHECK(Contains(LivePlacementStateText(view),"位置を確定しました（G1）。紙を替えた時は") && !Contains(LivePlacementStateText(view),"違います"));
+    view.capture->difference_px=kNaN;
+    CHECK(!Contains(LivePlacementStateText(view),"違います") && !Contains(LivePlacementStateText(view),"nan"));
+    // A shot's position with no note (a carried machine that lost it) is still said.
+    view.capture.reset();
+    CHECK(Contains(LivePlacementStateText(view),"撮影の後の位置で描いています"));
+    // The source words.
+    CHECK(LivePlacementSourceText(LivePlacementSource::fixed_condition)=="条件の位置" && LivePlacementSourceText(LivePlacementSource::auto_start)=="開始時の自動" &&
+        LivePlacementSourceText(LivePlacementSource::auto_button)=="ボタンの自動" && LivePlacementSourceText(LivePlacementSource::after_capture)=="撮影の後の位置");
+    // The same view gives the same sentence.
+    CHECK(LivePlacementStateText(view)==LivePlacementStateText(view));
+}
+
 int main(){
     try{
         Tilt();
@@ -282,6 +380,7 @@ int main(){
         StateText();
         BFromPose();
         ConnectionTexts();
+        PlacementTexts();
     }catch(const std::exception& e){++failures;std::cerr<<"unexpected exception: "<<e.what()<<'\n';}
     std::cout<<checks<<" checks, "<<failures<<" failures\n";
     return failures?1:0;
