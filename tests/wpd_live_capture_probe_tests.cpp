@@ -56,8 +56,9 @@ public:
     std::function<void()> on_shutter;
     std::function<void(size_t)> on_post_events; // after the n-th events read that follows the shutter
     // What reached the body.
-    int shutters{}, object_reads{}, info_reads{}, ends{}, profile_reads{};
+    int shutters{}, object_reads{}, info_reads{}, ends{}, profile_reads{}, post_event_reads{};
     std::vector<std::string> trace;
+    std::vector<std::string> after_trace; // the operations that reached the body after the shutter (the shutter itself is not in it)
 protected:
     WpdLiveViewExchange Exchange(IPortableDeviceValues* request) override {
         DWORD id{}, code{};
@@ -75,7 +76,12 @@ protected:
         }
         const bool without = id == WPD_COMMAND_MTP_EXT_EXECUTE_COMMAND_WITHOUT_DATA_PHASE.pid;
         const bool with_read = id == WPD_COMMAND_MTP_EXT_EXECUTE_COMMAND_WITH_DATA_TO_READ.pid;
-        if (without || with_read) { char text[32]; std::snprintf(text, sizeof text, "%04x", static_cast<unsigned>(code)); trace.push_back(text); }
+        if (without || with_read) {
+            char text[32];
+            std::snprintf(text, sizeof text, "%04x", static_cast<unsigned>(code));
+            trace.push_back(text);
+            if (shutters) after_trace.push_back(text);
+        }
         if (without) {
             if (code == 0x90c0) {
                 ++shutters;
@@ -108,6 +114,7 @@ protected:
                 size_t& index = shutters ? post_index_ : pre_index_;
                 data_ = index < script.size() ? EventsOf(script[index]) : Events({});
                 ++index;
+                if (shutters) ++post_event_reads;
                 if (shutters && on_post_events) on_post_events(post_index_);
             } else if (code == 0x1008) {
                 Require(parameter == handle);
@@ -144,6 +151,7 @@ private:
     DWORD current_operation_{};
 };
 int Count(const ProbeFake& f, const char* op) { return static_cast<int>(std::count(f.trace.begin(), f.trace.end(), op)); }
+int CountAfter(const ProbeFake& f, const char* op) { return static_cast<int>(std::count(f.after_trace.begin(), f.after_trace.end(), op)); }
 WpdLiveProbeOptions Fast() {
     WpdLiveProbeOptions o;
     o.ready_wait = std::chrono::milliseconds(100); o.ready_poll = std::chrono::milliseconds(1);
@@ -327,6 +335,8 @@ int main() {
         Check(run.saved == 1 && run.partial == f.jpeg && f.object_reads == 1 && f.info_reads == 1, "clean: saved once, the partial holds the bytes, read once");
         Check(o.completion.complete_event && o.completion.complete_event_code == 0xc102 && o.completion.completion_wait == WpdStillCompletionWaitResult::AlreadySeen, "clean: the completion was seen");
         Check(o.live_after == 1u && o.out_of_focus == false && !o.sdram_may_remain, "clean: Live read on after the shot, nothing left in the camera");
+        Check(o.sequence_clean && o.anomaly == "none" && o.live_after_state == "read" && run.IndexOf("live_capture_probe_anomaly") < 0, "clean: the sequence is marked clean and no anomaly line is written");
+        Check(f.profile_reads == 2 && CountAfter(f, "1015") == 1, "clean: Live state read once after the shot");
         Check(o.object_events == 1 && o.completion_events == 1 && o.unexpected == 0 && o.after_events == "0xc101:1,0xc102:1", "clean: event counts");
         Check(Count(f, "90c0") == 1 && f.ends >= 5, "clean: one 0x90c0 and every transfer ended");
         // The lines are in the planned order and carry codes and numbers only.
@@ -340,6 +350,7 @@ int main() {
             Contains(all, "live_capture_probe_object attributed=1 bytes=8 width=7360 height=4912 published=original reason=verified"), "clean: the preflight and object lines");
         Check(!Contains(all, "badf00d") && !Contains(all, "195948557") && !Contains(all, "synthetic-probe-context"), "clean: no object handle or transfer context in the log");
         Check(Contains(DescribeLiveCaptureProbeResult(o.result, o.shutter_sent, 1234, o.stop_reason), "live_capture_probe_result=observed shutter_commands=1 resend=0 setting_writes=0 live_start_commands=0 elapsed_ms=1234"), "clean: the result line");
+        Check(Contains(DescribeLiveCaptureProbeResult(o, 1234, "ok"), "reason=none sequence_clean=1 anomaly=none live_after=read frame_after=ok"), "clean: the result line says what followed the shot");
         // Only the allowed operations ever reached the body, and none of the forbidden ones.
         for (const auto& op : f.trace) Check(op == "90c8" || op == "1015" || op == "90c7" || op == "90c0" || op == "1008" || op == "1009", "clean: only allowed operations reached the body");
     }
@@ -398,7 +409,10 @@ int main() {
             Check(f.object_reads == 0 && f.info_reads == 0 && run.saved == 0 && o.published == "none", "a refused shutter imports nothing");
             Check(o.shutter.error == WpdLiveViewResultError::MtpRejected && o.shutter.mtp_response == response && o.after_ready == response, "the response code is recorded");
             Check(run.IndexOf("shutter_result_error=" + std::to_string(static_cast<int>(WpdLiveViewResultError::MtpRejected))) >= 0 && run.IndexOf("mtp=0x") >= 0, "the response line names the code");
-            Check(o.live_after == 1u, "Live is still read once after a refusal");
+            Check(f.after_trace.empty() && f.profile_reads == 1, "a refused shutter is followed by no command at all: no 0xD1A2, no event read, no object read");
+            Check(!o.live_after && o.live_after_state == "not_read" && !o.sequence_clean && o.anomaly == "shutter_refused_by_body", "a refusal marks the sequence unclean and the Live state not read");
+            Check(run.IndexOf("live_capture_probe_live_after value=not_read reason=shutter_refused_by_body") >= 0 && run.IndexOf("live_capture_probe_anomaly reason=shutter_refused_by_body not_sent=event_read,object_read,live_state_read,frame_read") >= 0, "the log says what happened and what was not sent");
+            Check(Contains(DescribeLiveCaptureProbeResult(o, 99, "skipped"), "reason=shutter_refused_by_body sequence_clean=0 anomaly=shutter_refused_by_body live_after=not_read frame_after=skipped"), "the last line says the Live state was not read");
             Check(!o.sdram_may_remain, "a refusal leaves nothing in the camera");
         }
         {   // A transport failure: the exposure is unknown. The candidate is kept as a private partial only.
@@ -408,6 +422,8 @@ int main() {
             Check(f.shutters == 1 && o.shutter_sent && !o.shutter_result_known && o.stop_reason == "shutter_unconfirmed" && o.result == WpdLiveProbeResult::StoppedAfterShutter, "a transport failure is uncertain, not resent");
             Check(o.attributed && o.published == "partial_only" && run.saved == 0 && run.partial == f.jpeg && o.object_reason == "shutter_unconfirmed", "an uncertain shutter's image is a partial only");
             Check(run.IndexOf("shutter_result_error=none transport_exception=1") >= 0 && run.IndexOf("capture_completion") < 0, "the line says the transport failed");
+            Check(!o.sequence_clean && o.anomaly == "shutter_unconfirmed" && !o.live_after && o.live_after_state == "not_read" && f.profile_reads == 1, "an unknown shutter result is an anomaly: the Live state is not read");
+            Check(CountAfter(f, "90c8") == 0 && CountAfter(f, "1015") == 0 && f.post_event_reads >= 1 && f.info_reads == 1 && f.object_reads == 1, "after an unknown result only the event reads and the one import are sent");
         }
         {   // A transport failure with no image to find.
             ProbeFake f; f.shutter_throws = true; f.post.clear();
@@ -432,7 +448,11 @@ int main() {
             const auto run = Go(f);
             const auto& o = run.out;
             Check(o.out_of_focus && o.after_ready == 0xa002 && f.shutters == 1, "OutOfFocus after the shutter is recorded, not resent");
-            Check(o.attributed && o.published == "partial_only" && run.saved == 0 && o.object_reason == "after_shutter_not_ready" && o.result == WpdLiveProbeResult::Observed, "its image is a partial only");
+            Check(o.attributed && o.published == "partial_only" && run.saved == 0 && o.object_reason == "after_shutter_not_ready" && o.result == WpdLiveProbeResult::StoppedAfterShutter, "its image is a partial only and the run stops after the shutter");
+            Check(!o.sequence_clean && o.anomaly == "after_shutter_not_ready" && !o.live_after && o.live_after_state == "not_read" && f.profile_reads == 1 && CountAfter(f, "1015") == 0, "a not-ready answer after the shutter: the Live state is not read again");
+            Check(o.completion.completion_wait == WpdStillCompletionWaitResult::NotReached && f.post_event_reads == 1, "a not-ready answer after the shutter: the completion event is not waited for");
+            Check(run.partial == f.jpeg && f.info_reads == 1 && f.object_reads == 1 && !o.sdram_may_remain, "a not-ready answer after the shutter: the one attributed object is still imported to a partial");
+            Check(run.IndexOf("live_capture_probe_anomaly reason=after_shutter_not_ready not_sent=completion_wait,live_state_read,frame_read") >= 0, "the log names the anomaly and what was not sent");
         }
         {   // The camera stays busy after the shutter: waited, recorded, the image is a partial only.
             ProbeFake f; f.busy_after = 3;
@@ -441,18 +461,22 @@ int main() {
             ProbeFake g; g.busy_after = 100000;
             const auto timed_out = Go(g);
             Check(timed_out.out.after_ready == 0x2019 && timed_out.out.busy_polls > 0 && timed_out.out.published == "partial_only" && timed_out.saved == 0, "a camera that stays busy leaves a partial only");
+            Check(!timed_out.out.sequence_clean && g.profile_reads == 1, "a camera that stays busy: the Live state is not read");
         }
         {   // Two objects, a card image, no event at all.
             ProbeFake f; f.post = {{{0xc101, 0x0badf00d}, {0xc101, 0x0badf00e}}};
             auto run = Go(f);
             Check(f.info_reads == 0 && f.object_reads == 0 && !run.out.attributed && run.out.published == "none" && run.out.object_reason == "ambiguous_object_events" && run.saved == 0, "two objects: nothing is imported");
+            Check(!run.out.sequence_clean && run.out.anomaly == "ambiguous_object_events" && f.profile_reads == 1 && CountAfter(f, "1015") == 0, "two objects: an anomaly, the Live state is not read");
             ProbeFake g; g.post = {{{0xc101, 0x0badf00d}, {0x4002, 3}}};
             run = Go(g);
             Check(g.info_reads == 0 && g.object_reads == 0 && run.out.object_reason == "card_image_event" && run.saved == 0, "a card image event: nothing is imported");
+            Check(!run.out.sequence_clean && g.profile_reads == 1, "a card image event: an anomaly, the Live state is not read");
             ProbeFake h; h.post.clear();
             run = Go(h);
             Check(h.info_reads == 0 && run.out.object_reason == "object_event_timeout" && run.out.published == "none" && run.out.sdram_may_remain && run.out.result == WpdLiveProbeResult::StoppedAfterShutter, "no object event within the bound: nothing is imported");
             Check(Count(h, "90c0") == 1, "no resend when the image never arrives");
+            Check(!run.out.sequence_clean && h.profile_reads == 1, "no object event within the bound: an anomaly, the Live state is not read");
         }
         {   // The object arrives after a few empty reads.
             ProbeFake f; f.post = {{}, {}, {}, kClean};
@@ -464,12 +488,21 @@ int main() {
             ProbeFake f; f.post = {{{0xc101, 0x0badf00d}, {code, 0}, {0xc102, 0}}};
             const auto run = Go(f);
             Check(run.out.attributed && run.out.published == "partial_only" && run.saved == 0 && run.partial == f.jpeg && run.out.unexpected == 1 && run.out.object_reason == "unexpected_event", "an odd event after the shutter keeps the image out of original");
-            Check(Contains(run.out.after_events, WpdStillEventCodeText(code) + ":1") && run.out.result == WpdLiveProbeResult::Observed && f.shutters == 1, "the odd code is recorded and nothing is resent");
+            Check(Contains(run.out.after_events, WpdStillEventCodeText(code) + ":1") && run.out.result == WpdLiveProbeResult::StoppedAfterShutter && f.shutters == 1, "the odd code is recorded, the run stops after the shutter and nothing is resent");
+            Check(!run.out.sequence_clean && run.out.anomaly == "unexpected_event" && !run.out.live_after && run.out.live_after_state == "not_read", "an odd event after the shutter: the sequence is not clean");
+            Check(f.profile_reads == 1 && CountAfter(f, "1015") == 0 && f.post_event_reads == 1 && run.out.completion.completion_wait == WpdStillCompletionWaitResult::NotReached, "an odd event after the shutter: no Live state read, no completion wait, no further event read");
+            Check(f.info_reads == 1 && f.object_reads == 1 && !run.out.sdram_may_remain, "an odd event after the shutter: the one attributed object is imported to a partial");
         }
         {   // An odd event that arrives only after the image was read still keeps it out of original.
             ProbeFake f; f.post = {{{0xc101, 0x0badf00d}}, {{0xc10c, 0}}, {{0xc102, 0}}};
             const auto run = Go(f);
-            Check(run.out.published == "partial_only" && run.saved == 0 && run.out.unexpected == 1 && run.out.completion.complete_event, "a late odd event is still seen");
+            Check(run.out.published == "partial_only" && run.saved == 0 && run.out.unexpected == 1 && !run.out.sequence_clean, "a late odd event is still seen");
+            Check(run.out.completion.completion_wait == WpdStillCompletionWaitResult::Aborted && !run.out.completion.complete_event && f.post_event_reads == 2, "the completion observation stops at the odd event: the next batch is not read");
+            Check(!run.out.live_after && f.profile_reads == 1 && CountAfter(f, "1015") == 0, "after a late odd event the Live state is not read");
+            // The same during the completion wait itself.
+            ProbeFake g; g.post = {{{0xc101, 0x0badf00d}}, {}, {}, {{0xc10c, 0}}, {{0xc102, 0}}};
+            const auto waiting = Go(g);
+            Check(waiting.out.completion.completion_wait == WpdStillCompletionWaitResult::Aborted && !waiting.out.completion.complete_event && g.post_event_reads == 4 && waiting.out.published == "partial_only" && !waiting.out.sequence_clean, "an odd event during the completion wait ends the wait");
         }
         {   // No completion arrives: observation times out, the image is still original.
             ProbeFake f; f.post = {{{0xc101, 0x0badf00d}}};

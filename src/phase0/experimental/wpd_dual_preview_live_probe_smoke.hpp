@@ -20,6 +20,7 @@ int RunLiveCaptureProbeUiSmoke(){
     std::atomic<int> backend_camera{-1};
     std::atomic<bool> lent_state_seen{},other_held_seen{},block_backend{};
     std::optional<unsigned> backend_live_after=1u;
+    bool backend_clean=true;
     live_probe_backend=[&](Camera& camera,Clock::time_point)->LiveProbeThreadOutcome{
         ++backend_calls;backend_camera=camera.alias=="CAM-A"?0:1;
         LiveProbeThreadOutcome result;
@@ -29,7 +30,7 @@ int RunLiveCaptureProbeUiSmoke(){
         lent_state_seen=camera.owner.State()==PreviewSessionState::Lent && camera.owner.IsLentTo(*token);
         other_held_seen=cameras[other]->owner.State()==PreviewSessionState::Held;
         while(block_backend)std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        result.outcome.result=WpdLiveProbeResult::Observed;result.outcome.shutter_sent=true;result.outcome.live_after=backend_live_after;
+        result.outcome.result=WpdLiveProbeResult::Observed;result.outcome.shutter_sent=true;result.outcome.live_after=backend_live_after;result.outcome.sequence_clean=backend_clean;
         result.outcome.published="original";result.outcome.attributed=true;
         camera.owner.Return(*token);
         return result;
@@ -42,7 +43,7 @@ int RunLiveCaptureProbeUiSmoke(){
         }
         stopping=false;closing=false;preview_joined=false;capture_stop_requested=false;capture_restart_blocked=false;capture_pending.reset();
         live_probe_used=false;live_probe_phase=LiveProbePhase::Idle;live_probe_outcome.reset();live_probe_lent=false;live_probe_frame_result="skipped";
-        backend_calls=0;backend_camera=-1;lent_state_seen=false;other_held_seen=false;block_backend=false;backend_live_after=1u;
+        backend_calls=0;backend_camera=-1;lent_state_seen=false;other_held_seen=false;block_backend=false;backend_live_after=1u;backend_clean=true;
     };
     const auto tick=[&]{
         for(auto& camera:cameras){std::lock_guard lock(camera->mutex);camera->last=Clock::now();}
@@ -125,6 +126,34 @@ int RunLiveCaptureProbeUiSmoke(){
     click();for(auto& camera:cameras)camera->owner.AcknowledgeHold();tick();
     check(wait_for([&]{return live_probe_phase!=LiveProbePhase::Running;}) && live_probe_phase==LiveProbePhase::Stopping,"live_after 0 goes straight to the stop");
     check(cameras[target]->probe_frame_state==0 && live_probe_frame_result=="skipped" && stopping,"no frame is requested");
+    workers_end();tick();check(live_probe_phase==LiveProbePhase::Done,"done after the stop");
+
+    // 3b. The sequence was not clean (an anomaly): no frame is asked for even though Live View reads on.
+    reset();backend_clean=false;
+    click();for(auto& camera:cameras)camera->owner.AcknowledgeHold();tick();
+    check(wait_for([&]{return live_probe_phase!=LiveProbePhase::Running;}) && live_probe_phase==LiveProbePhase::Stopping,"an unclean sequence goes straight to the stop");
+    check(cameras[target]->probe_frame_state==0 && live_probe_frame_result=="skipped" && stopping && owner_is(target,PreviewSessionState::Live),"after an anomaly no frame is requested; both sessions are released for the stop");
+    workers_end();tick();check(live_probe_phase==LiveProbePhase::Done,"done after the stop");
+
+    // 3c. The 60-second deadline ran out while the probe thread finished: no frame is asked for.
+    reset();block_backend=true;
+    click();for(auto& camera:cameras)camera->owner.AcknowledgeHold();tick();
+    wait_for([&]{return backend_calls==1;});
+    live_probe_deadline=Clock::now()-std::chrono::seconds(1);
+    block_backend=false;
+    check(wait_for([&]{return live_probe_phase!=LiveProbePhase::Running;}) && live_probe_phase==LiveProbePhase::Stopping,"a run that ends after the deadline goes straight to the stop");
+    check(cameras[target]->probe_frame_state==0 && live_probe_frame_result=="skipped" && stopping,"after the deadline no frame is requested");
+    workers_end();tick();check(live_probe_phase==LiveProbePhase::Done,"done after the stop");
+
+    // 3d. A frame is still asked for when the run ends just inside the deadline.
+    reset();block_backend=true;
+    click();for(auto& camera:cameras)camera->owner.AcknowledgeHold();tick();
+    wait_for([&]{return backend_calls==1;});
+    live_probe_deadline=Clock::now()+std::chrono::seconds(30);
+    block_backend=false;
+    check(wait_for([&]{return live_probe_phase!=LiveProbePhase::Running;}) && live_probe_phase==LiveProbePhase::AfterFrame && cameras[target]->probe_frame_state==1,"a run that ends inside the deadline still asks for its one frame");
+    cameras[target]->probe_frame_state=2;cameras[target]->owner.RequestHold();cameras[target]->owner.AcknowledgeHold();tick();
+    check(live_probe_phase==LiveProbePhase::Stopping,"then it stops");
     workers_end();tick();check(live_probe_phase==LiveProbePhase::Done,"done after the stop");
 
     // 4. A worker that does not answer in time: nothing is sent, the holds are given back, Live runs on.

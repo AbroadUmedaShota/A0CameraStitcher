@@ -266,8 +266,14 @@ struct WpdLiveProbeOutcome {
     std::string published{"none"}, object_reason{"not_attributed"};
     WpdStillCaptureObservation completion;
     std::optional<unsigned> live_after;
-    // The image may still be in the camera's memory (the import did not finish): Live may be refused until a power cycle.
+    // "read", "unreadable" (tried, or no longer admitted) or "not_read" (an anomaly stopped the run before it).
+    std::string live_after_state{"not_read"};
+    // The image may still be in the camera's memory (the import did not finish): Live View may be refused until a power cycle.
     bool sdram_may_remain{};
+    // True only when the shutter was confirmed and nothing outside the expected sequence happened. The window asks for
+    // its one frame after the shot only when this is true. `anomaly` names the first thing outside the sequence.
+    bool sequence_clean{};
+    std::string anomaly{"none"};
 };
 
 struct WpdLiveProbeOptions {
@@ -381,6 +387,7 @@ inline WpdLiveProbeOutcome RunLiveCaptureProbe(WpdLiveCaptureProbeChannel& chann
 
     // ---- The one shutter.
     if (!channel.Admitted()) { out.stop_reason = "deadline_or_stop"; return out; }
+    struct AnnouncementGuard { WpdLiveCaptureProbeChannel& channel; ~AnnouncementGuard() { channel.SetShutterAnnouncement({}); } } announcement_guard{channel};
     channel.SetShutterAnnouncement([&] { log("shutter_no_af_once=1 card_write_command=0 live_open=1"); });
     try { channel.ShutterOnce(); } catch (const std::exception&) {}
     out.shutter_sent = channel.ShutterAttempted();
@@ -398,11 +405,24 @@ inline WpdLiveProbeOutcome RunLiveCaptureProbe(WpdLiveCaptureProbeChannel& chann
     // failure) is uncertain: an exposure may exist.
     const bool refused_by_body = !confirmed && out.shutter_result_known && out.shutter.error == WpdLiveViewResultError::MtpRejected;
     const bool uncertain = !confirmed && !refused_by_body;
+    // The first thing outside the expected sequence. Once it is set the probe sends no new kind of command: it only
+    // reads events inside the existing bound to find the one attributed object and imports that object once into a
+    // private partial. It does not wait for the completion event, does not read 0xD1A2 again and asks for no frame.
+    bool anomaly = false;
+    const auto flag = [&](const std::string& why) { if (!anomaly) { anomaly = true; out.anomaly = why; } };
     if (!confirmed) {
         out.stop_reason = refused_by_body ? "shutter_refused_by_body" : "shutter_unconfirmed";
+        flag(out.stop_reason);
         if (refused_by_body) out.after_ready = out.shutter.mtp_response;
     }
+    if (refused_by_body) {
+        // The body refused: nothing was exposed, so there is nothing to wait for, import or read back.
+        log("live_capture_probe_live_after value=not_read reason=" + out.anomaly);
+        log("live_capture_probe_anomaly reason=" + out.anomaly + " not_sent=event_read,object_read,live_state_read,frame_read");
+        return out;
+    }
     bool imported = false;
+    bool skipped_completion = false;
 
     // ---- After the shutter: ready state, events, the one object, completion.
     WpdLiveProbeEventLedger ledger;
@@ -426,11 +446,12 @@ inline WpdLiveProbeOutcome RunLiveCaptureProbe(WpdLiveCaptureProbeChannel& chann
         out.after_ready = code;
         out.ready_waited_ms = elapsed_ms(start);
         out.out_of_focus = code == 0xa002;
+        if (code != 0x2001) flag("after_shutter_not_ready");
         log("live_capture_probe_after_shutter_ready=" + Hex(code, 4) + " busy_polls=" + std::to_string(out.busy_polls) + " waited_ms=" + std::to_string(out.ready_waited_ms));
     }
-    // An uncertain shutter is observed the same way but never promoted (and nothing after the image is read). A
-    // refusal by the body exposed nothing, so there is nothing to wait for.
-    if (confirmed || uncertain) {
+    // An uncertain shutter is observed the same way but never promoted (and nothing after the image is read). The
+    // event reads below are the only commands sent after an anomaly, and only until the one object is found.
+    {
         const auto until = now() + options.event_wait;
         out.object_reason = "object_event_timeout";
         for (;;) {
@@ -442,6 +463,8 @@ inline WpdLiveProbeOutcome RunLiveCaptureProbe(WpdLiveCaptureProbeChannel& chann
             if (now() >= until) break;
             sleep(options.event_poll);
         }
+        if (out.object_reason != "attributed") flag(out.object_reason);
+        if (ledger.Unexpected() > 0) flag("unexpected_event");
         if (ledger.ImportAllowed()) {
             out.attributed = true;
             try {
@@ -455,28 +478,36 @@ inline WpdLiveProbeOutcome RunLiveCaptureProbe(WpdLiveCaptureProbeChannel& chann
                 payload = WpdStillPayload{std::move(bytes), info, false};
                 imported = true;
                 out.object_reason = "imported";
-            } catch (const std::exception&) { if (out.object_reason == "attributed") out.object_reason = "import_failed"; }
+            } catch (const std::exception&) { if (out.object_reason == "attributed") out.object_reason = "import_failed"; flag(out.object_reason); }
         }
-        // Events that arrive around the import and the completion event, observed inside the existing bound.
+        // Events that arrive around the import and the completion event, observed inside the existing bound. Skipped
+        // once an anomaly is flagged, and left at once when an unexpected event shows up during it.
         if (confirmed && ledger.ObjectEvents() > 0) {
-            for (int i = 0; i < 2 && channel.Admitted(); ++i) {
-                if (i) sleep(options.event_poll);
-                try { ledger.Observe(read_events(), true); } catch (const std::exception&) { break; }
-            }
-            if (ledger.Completed()) { out.completion.completion_wait = WpdStillCompletionWaitResult::AlreadySeen; }
-            else {
-                const auto start = now();
-                out.completion.completion_wait = WpdStillCompletionWaitResult::Aborted;
-                for (;;) {
-                    const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(now() - start);
-                    if (!channel.Admitted()) break;
-                    if (waited >= options.completion.max) { out.completion.completion_wait = WpdStillCompletionWaitResult::TimedOut; break; }
-                    sleep(std::min(options.completion.poll, options.completion.max - waited));
-                    if (!channel.Admitted()) break;
+            if (anomaly) {
+                skipped_completion = true;
+            } else {
+                for (int i = 0; i < 2 && channel.Admitted(); ++i) {
+                    if (i) sleep(options.event_poll);
                     try { ledger.Observe(read_events(), true); } catch (const std::exception&) { break; }
-                    if (ledger.Completed()) { out.completion.completion_wait = WpdStillCompletionWaitResult::Seen; break; }
+                    if (ledger.Unexpected() > 0) break;
                 }
-                out.completion.completion_wait_ms = elapsed_ms(start);
+                out.completion.completion_wait = WpdStillCompletionWaitResult::Aborted;
+                if (ledger.Unexpected() > 0) { flag("unexpected_event"); }
+                else if (ledger.Completed()) { out.completion.completion_wait = WpdStillCompletionWaitResult::AlreadySeen; }
+                else {
+                    const auto start = now();
+                    for (;;) {
+                        const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(now() - start);
+                        if (!channel.Admitted()) break;
+                        if (waited >= options.completion.max) { out.completion.completion_wait = WpdStillCompletionWaitResult::TimedOut; break; }
+                        sleep(std::min(options.completion.poll, options.completion.max - waited));
+                        if (!channel.Admitted()) break;
+                        try { ledger.Observe(read_events(), true); } catch (const std::exception&) { break; }
+                        if (ledger.Unexpected() > 0) { flag("unexpected_event"); break; }
+                        if (ledger.Completed()) { out.completion.completion_wait = WpdStillCompletionWaitResult::Seen; break; }
+                    }
+                    out.completion.completion_wait_ms = elapsed_ms(start);
+                }
             }
         }
         out.completion.complete_event = ledger.Completed();
@@ -489,7 +520,7 @@ inline WpdLiveProbeOutcome RunLiveCaptureProbe(WpdLiveCaptureProbeChannel& chann
             " completion_events=" + std::to_string(out.completion_events) + " unexpected=" + std::to_string(out.unexpected));
         // Publication: only a confirmed shutter, a ready camera and a clean event sequence make original.jpg.
         if (payload) {
-            const bool clean = confirmed && ledger.Pristine() && out.after_ready == 0x2001;
+            const bool clean = confirmed && !anomaly && ledger.Pristine() && out.after_ready == 0x2001;
             out.published = "partial_only";
             out.object_reason = clean ? "verified" : !confirmed ? "shutter_unconfirmed" : !ledger.Pristine() ? "unexpected_event" : "after_shutter_not_ready";
             if (clean && hooks.save_original) {
@@ -507,15 +538,23 @@ inline WpdLiveProbeOutcome RunLiveCaptureProbe(WpdLiveCaptureProbeChannel& chann
         }
     }
     out.sdram_may_remain = (confirmed || uncertain) && !imported;
-    // The state of Live View after the shot (read once).
-    try {
-        if (channel.Admitted()) {
-            const auto live = channel.Read(WpdStillOperation::LiveStatus, 16);
-            if (live.size() == 1) out.live_after = live[0];
-        }
-    } catch (const std::exception&) {}
-    log("live_capture_probe_live_after value=" + (out.live_after ? Hex(*out.live_after, 2) : std::string("unreadable")));
-    if (confirmed && imported && out.live_after) out.result = WpdLiveProbeResult::Observed;
+    // The state of Live View after the shot (read once), only when the sequence stayed clean. After an anomaly the
+    // log says it was not read.
+    if (!anomaly) {
+        out.live_after_state = "unreadable";
+        try {
+            if (channel.Admitted()) {
+                const auto live = channel.Read(WpdStillOperation::LiveStatus, 16);
+                if (live.size() == 1) { out.live_after = live[0]; out.live_after_state = "read"; }
+            }
+        } catch (const std::exception&) {}
+        log("live_capture_probe_live_after value=" + (out.live_after ? Hex(*out.live_after, 2) : std::string("unreadable")));
+    } else {
+        log("live_capture_probe_live_after value=not_read reason=" + out.anomaly);
+        log("live_capture_probe_anomaly reason=" + out.anomaly + " not_sent=" + std::string(skipped_completion ? "completion_wait," : "") + "live_state_read,frame_read");
+    }
+    out.sequence_clean = confirmed && !anomaly;
+    if (out.sequence_clean && imported && out.live_after) out.result = WpdLiveProbeResult::Observed;
     if (out.result != WpdLiveProbeResult::Observed && out.stop_reason.empty()) out.stop_reason = out.object_reason;
     return out;
 }
@@ -523,6 +562,13 @@ inline WpdLiveProbeOutcome RunLiveCaptureProbe(WpdLiveCaptureProbeChannel& chann
 inline std::string DescribeLiveCaptureProbeResult(WpdLiveProbeResult result, bool shutter_sent, long long elapsed_ms, const std::string& reason) {
     return std::string("live_capture_probe_result=") + WpdLiveProbeResultText(result) + " shutter_commands=" + (shutter_sent ? "1" : "0") +
         " resend=0 setting_writes=0 live_start_commands=0 elapsed_ms=" + std::to_string(elapsed_ms) + " reason=" + (reason.empty() ? std::string("none") : reason);
+}
+// The same line with what the run did after the shot: whether the sequence stayed clean, the first anomaly, whether the
+// Live state was read ("not_read" says it was not sent) and what happened to the one frame the window may ask for.
+inline std::string DescribeLiveCaptureProbeResult(const WpdLiveProbeOutcome& outcome, long long elapsed_ms, const std::string& frame_result) {
+    return DescribeLiveCaptureProbeResult(outcome.result, outcome.shutter_sent, elapsed_ms, outcome.stop_reason) +
+        " sequence_clean=" + (outcome.sequence_clean ? "1" : "0") + " anomaly=" + outcome.anomaly +
+        " live_after=" + outcome.live_after_state + " frame_after=" + frame_result;
 }
 inline std::string DescribeLiveCaptureProbeBuild() {
     return std::string("live_capture_probe_build=1 cameras=") + kLiveCaptureProbeCameras[0] + " shutter_commands=0 setting_writes=0";

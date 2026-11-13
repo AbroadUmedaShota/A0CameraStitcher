@@ -105,6 +105,7 @@ std::wstring LiveProbeFinalText(){
     else if(o.published=="partial_only")text+=L" 画像は検証できず、非公開の一時ファイルにだけ残しました。";
     else if(o.shutter_sent)text+=L" 画像は取り込めていません。";
     else text+=L" シャッターは送っていません。";
+    if(o.shutter_sent && !o.sequence_clean)text+=L" 想定外の事が起きたため、撮影後のライブの状態の読み取りと、ライブの1枚読みは送っていません（原因: "+WidenUtf8(o.anomaly)+L"）。";
     if(o.sdram_may_remain)text+=L" 本体に画像が残っている可能性があります。「ライブ再開」が拒まれたら、本体の電源を入れ直してください。";
     text+=L" 結果: "+WidenUtf8(WpdLiveProbeResultText(o.result));
     return text;
@@ -125,9 +126,11 @@ void AdvanceLiveProbe(){
         try{got=live_probe_future.get();}catch(const std::exception&){got.outcome.stop_reason="probe_exception";}
         live_probe_outcome=got.outcome;live_probe_lent=got.lent;
         Camera& camera=*cameras[target];
-        // One frame through the unchanged Live path, only when Live View still reads on. The worker holds again
-        // right after it, so exactly one frame is read.
-        const bool want_frame=got.lent && got.outcome.live_after==1u && !closing && !capture_stop_requested && !stopping && !camera.failed && !camera.done;
+        // One frame through the unchanged Live path, only when the whole sequence stayed clean, Live View still reads
+        // on and the 60-second deadline has not run out. The worker holds again right after it, so exactly one frame
+        // is read. After anything outside the expected sequence no frame is asked for.
+        const bool want_frame=got.lent && got.outcome.sequence_clean && got.outcome.live_after==1u && Clock::now()<live_probe_deadline &&
+            !closing && !capture_stop_requested && !stopping && !camera.failed && !camera.done;
         if(want_frame){
             camera.probe_frame_state=1;live_probe_frame_started=Clock::now();
             camera.owner.Release();
@@ -153,7 +156,8 @@ void AdvanceLiveProbe(){
         // The existing shutdown has run: both workers are joined and closed.
         if(preview_joined){
             const auto& o=live_probe_outcome;
-            Log(DescribeLiveCaptureProbeResult(o?o->result:WpdLiveProbeResult::StoppedBeforeShutter,o && o->shutter_sent,LiveProbeElapsedMs(),o?o->stop_reason:std::string("probe_exception")));
+            if(o)Log(DescribeLiveCaptureProbeResult(*o,LiveProbeElapsedMs(),live_probe_frame_result));
+            else Log(DescribeLiveCaptureProbeResult(WpdLiveProbeResult::StoppedBeforeShutter,false,LiveProbeElapsedMs(),std::string("probe_exception")));
             capture_status=LiveProbeFinalText();
             live_probe_phase=LiveProbePhase::Done;
         }
