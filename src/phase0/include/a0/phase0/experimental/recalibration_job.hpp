@@ -20,7 +20,8 @@
 //                            kRecalibrationUnverifiedPolicy, one place. An estimate that is undetermined counts as this only when ALL of
 //                            its reasons are of the "too few marks" family (content_registration::AssessEvidenceShortage, the one place
 //                            that decides it); one other reason, or one that is not known, makes it `rejected`. The gate is told apart by
-//                            the codes of its findings (ClassifySample), not by its state.
+//                            the codes of its findings (ClassifySample), not by its state. A gate that did not run, or whose own setting
+//                            is inconsistent (gate-undetermined), is a check that did not work: it is `rejected`.
 // Nothing about "unchecked" is stored in the condition (its format is not changed): the mark is in the record of the staging folder
 // (recalibration-report.json, and confirmation.json after a confirmation) and in the log.
 //
@@ -146,19 +147,23 @@ struct RecalibrationSampleFacts {
     a0::m2::experimental::registration_gate::GateCause gate_cause{a0::m2::experimental::registration_gate::GateCause::none};
     // The codes of the gate's own findings (the `reason` of each entry of RegistrationGateResult::gate_findings).
     std::vector<std::string> gate_findings;
+    // Why the gate did not run (the reason of its entry in the time budget's skipped stages: time-budget or stage-failed); empty when it
+    // ran or when no entry is found. Only carried to the finding, which tells the person what to do next.
+    std::string gate_skipped_reason;
 };
 
 // One finding of the gate (the codes of registration_gate.hpp's GateFinding): how it counts, and the code that carries its sentence.
-//   too little to measure (unverified)   nothing-measured, content-unmeasured, dx-unmeasured, placement-unverified, gate-undetermined
+//   too little to measure (unverified)   nothing-measured, content-unmeasured, dx-unmeasured, placement-unverified
 //   measured and it looked wrong         unconfirmed-content, one-sided-content: by `policy` (kRecalibrationSuspectContentPolicy)
 //   a problem of the composite itself    transition-outside-band, and a code that is not known here (never confirmed)
+//   the check itself is broken           gate-undetermined (the setting of the seam measurement is inconsistent): never confirmed
 [[nodiscard]] inline RecalibrationFinding ClassifyGateFinding(std::string_view symbol,SuspectContentPolicy policy){
     const auto suspect=policy==SuspectContentPolicy::allow_with_warning?FindingClass::unverified:FindingClass::rejected;
     if(symbol=="nothing-measured")return {FindingClass::unverified,"gate-nothing-measured",{}};
     if(symbol=="content-unmeasured")return {FindingClass::unverified,"gate-content-unmeasured",{}};
     if(symbol=="dx-unmeasured")return {FindingClass::unverified,"gate-dx-unmeasured",{}};
     if(symbol=="placement-unverified")return {FindingClass::unverified,"gate-placement-unverified",{}};
-    if(symbol=="gate-undetermined")return {FindingClass::unverified,"gate-undetermined",{}};
+    if(symbol=="gate-undetermined")return {FindingClass::rejected,"gate-undetermined",{}};
     if(symbol=="unconfirmed-content")return {suspect,"gate-unconfirmed-content",{}};
     if(symbol=="one-sided-content")return {suspect,"gate-one-sided-content",{}};
     if(symbol=="transition-outside-band")return {FindingClass::rejected,"gate-transition-outside-band",{}};
@@ -169,7 +174,10 @@ struct RecalibrationSampleFacts {
 // displacement: checked and wrong, rejected) and a seam that it could not measure (cause unmeasurable). The second, and `undetermined`,
 // are told apart by the codes of the gate's findings (ClassifyGateFinding), not by the state: a paper with few marks ends in "too little
 // to measure", the case the owner wants a person to be able to decide; a finding of another kind is never confirmed. A gate that is not
-// `pass` and gives no finding to explain it is not trusted either (`gate-unknown`). The estimate is told apart by all of its reasons.
+// `pass` and gives no finding to explain it is not trusted either (`gate-unknown`), nor is a state that this function does not know. A
+// gate that did not run (`not_run`) is never confirmed, whatever the cause (the time ran short, or the stage failed): that is a check that
+// did not work, not too little to measure; the cause is carried in the finding's reason, and only the sentence differs. The estimate is
+// told apart by all of its reasons.
 [[nodiscard]] inline std::vector<RecalibrationFinding> ClassifySample(const RecalibrationSampleFacts& facts,
     const a0::m2::experimental::content_registration::RegistrationLimits& limits,
     SuspectContentPolicy policy=kRecalibrationSuspectContentPolicy){
@@ -187,10 +195,11 @@ struct RecalibrationSampleFacts {
         else add(FindingClass::rejected,"sample-estimate-doubtful",assessed.doubt);
     }
     else if(facts.estimate==cr::RegistrationState::out_of_envelope)add(FindingClass::rejected,"sample-estimate-out-of-envelope");
-    const bool by_findings=facts.gate==gate::GateState::undetermined || (facts.gate==gate::GateState::fail && facts.gate_cause==gate::GateCause::unmeasurable);
-    if(facts.gate==gate::GateState::not_run)add(FindingClass::unverified,"gate-not-run");
-    else if(facts.gate==gate::GateState::fail && !by_findings)add(FindingClass::rejected,"gate-fail");
-    else if(by_findings){
+    const bool unmeasurable=facts.gate==gate::GateState::fail && facts.gate_cause==gate::GateCause::unmeasurable;
+    if(facts.gate==gate::GateState::pass){}
+    else if(facts.gate==gate::GateState::not_run)add(FindingClass::rejected,"gate-not-run",facts.gate_skipped_reason);
+    else if(facts.gate==gate::GateState::fail && !unmeasurable)add(FindingClass::rejected,"gate-fail");
+    else if(facts.gate==gate::GateState::undetermined || unmeasurable){
         std::vector<std::string> seen;
         for(const auto& symbol:facts.gate_findings){
             if(std::find(seen.begin(),seen.end(),symbol)!=seen.end())continue;
@@ -199,6 +208,7 @@ struct RecalibrationSampleFacts {
         }
         if(seen.empty())add(FindingClass::rejected,"gate-unknown");
     }
+    else add(FindingClass::rejected,"gate-unknown");   // a state that is not known here is not trusted: only `pass` passes
     return findings;
 }
 
@@ -621,6 +631,8 @@ inline bool IsCanonicalOriginal(const fs::path& file,const wchar_t* alias){
             sample.estimate_reasons=capture.registration.reasons;
             sample.estimate_inliers=capture.registration.diagnostics.inliers;sample.estimate_points=capture.registration.diagnostics.points;
             for(const auto& gate_finding:capture.gate.gate_findings)sample.gate_findings.push_back(gate_finding.reason);
+            for(const auto& skipped:capture.time_budget.skipped)
+                if(skipped.stage==m2e::ReviewStage::gate)sample.gate_skipped_reason=skipped.reason;
             auto& gate_facts=out.facts.gate;
             gate_facts.known=true;gate_facts.state=capture.gate.state;gate_facts.cause=capture.gate.cause;
             gate_facts.maximum_px=registration_text_detail::GateMaximum(capture.gate);

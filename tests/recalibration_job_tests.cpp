@@ -246,7 +246,7 @@ bool HasCode(const RecalibrationJobOutcome& o, const std::string& code) {
     return std::any_of(o.findings.begin(), o.findings.end(), [&](const RecalibrationFinding& f) { return f.code == code; });
 }
 
-// The condition's limits of the estimator's first check (alpha 8, beta 0.3: V1 needs more than 11.4 inliers when no point is an outlier). A value of this test.
+// The condition's limits of the estimator's first check (alpha 8, beta 0.3: with no outlier, V1 is passed only by 12 points or more). A value of this test.
 cr::RegistrationLimits Limits() {
     cr::RegistrationLimits limits;
     limits.brown_lowe_alpha = 8.0;
@@ -310,8 +310,15 @@ void Decisions() {
             {"no reason", {}, 0, 0, FindingClass::rejected, "reestimate-doubtful", ""},
             {"the estimate failed", {"estimate-failed"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "estimate-failed"},
             {"the displacement could not be found", {"displacement-failed"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "displacement-failed"},
-            {"brown-lowe, few inliers (the boundary 11.4: 11)", {"brown-lowe"}, 11, 30, FindingClass::unverified, "reestimate-not-verified", "brown-lowe"},
-            {"brown-lowe, more inliers (12)", {"brown-lowe"}, 12, 30, FindingClass::rejected, "reestimate-doubtful", "brown-lowe"},
+            {"brown-lowe, few points (the boundary: 11 points of 11 inliers)", {"brown-lowe"}, 11, 11, FindingClass::unverified, "reestimate-not-verified", "brown-lowe"},
+            {"brown-lowe, few points beside a few outliers", {"brown-lowe"}, 5, 11, FindingClass::unverified, "reestimate-not-verified", "brown-lowe"},
+            {"brown-lowe, the same inliers among outliers (11 of 40)", {"brown-lowe"}, 11, 40, FindingClass::rejected, "reestimate-doubtful", "brown-lowe"},
+            {"brown-lowe, 11 of 12 points: the outlier decides", {"brown-lowe"}, 11, 12, FindingClass::rejected, "reestimate-doubtful", "brown-lowe"},
+            {"brown-lowe, 12 of 12", {"brown-lowe"}, 12, 12, FindingClass::rejected, "reestimate-doubtful", "brown-lowe"},
+            {"brown-lowe, 12 of 30", {"brown-lowe"}, 12, 30, FindingClass::rejected, "reestimate-doubtful", "brown-lowe"},
+            {"brown-lowe, nothing counted", {"brown-lowe"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "brown-lowe"},
+            {"brown-lowe, no inlier", {"brown-lowe"}, 0, 5, FindingClass::rejected, "reestimate-doubtful", "brown-lowe"},
+            {"brown-lowe, more inliers than points", {"brown-lowe"}, 11, 5, FindingClass::rejected, "reestimate-doubtful", "brown-lowe"},
             {"brown-lowe beside a shortage", {"unique-blocks", "brown-lowe"}, 5, 9, FindingClass::unverified, "reestimate-not-verified", "unique-blocks"},
             {"brown-lowe beside a doubt", {"brown-lowe", "starts-disagree"}, 5, 9, FindingClass::rejected, "reestimate-doubtful", "starts-disagree"},
         };
@@ -364,10 +371,26 @@ void Decisions() {
         s.composed = true; s.estimate = cr::RegistrationState::verified; s.gate = gate::GateState::pass;
         CHECK(ClassifySample(s, kLimits).empty());
         auto one = [&](auto edit, SuspectContentPolicy policy = kRecalibrationSuspectContentPolicy) { auto t = s; edit(t); return ClassifySample(t, kLimits, policy); };
+        // A gate whose own setting is inconsistent did not check anything: it is never confirmed. One that did not run is the same, whatever
+        // the cause; the cause (time-budget, stage-failed, or nothing found) is carried in the reason.
         auto f = one([](auto& t) { t.gate = gate::GateState::undetermined; t.gate_findings = {"gate-undetermined"}; });
-        CHECK(Is(f, FindingClass::unverified, "gate-undetermined"));
-        f = one([](auto& t) { t.gate = gate::GateState::not_run; });
-        CHECK(Is(f, FindingClass::unverified, "gate-not-run"));
+        CHECK(Is(f, FindingClass::rejected, "gate-undetermined"));
+        f = one([](auto& t) { t.gate = gate::GateState::undetermined; t.gate_findings = {"placement-unverified", "gate-undetermined"}; });
+        CHECK(f.size() == 2 && f[0].klass == FindingClass::unverified && f[1].klass == FindingClass::rejected &&
+            DecideVerdict(f, UnverifiedPolicy::confirm_with_warning, true) == RecalibrationVerdict::unusable);
+        for (const char* why : {"time-budget", "stage-failed", ""}) {
+            f = one([&](auto& t) { t.gate = gate::GateState::not_run; t.gate_skipped_reason = why; });
+            CHECK(Is(f, FindingClass::rejected, "gate-not-run") && f[0].reason == why &&
+                DecideVerdict(f, UnverifiedPolicy::confirm_with_warning, true) == RecalibrationVerdict::unusable);
+        }
+        // Only `pass` passes: a state that is not known here is not trusted.
+        f = one([](auto& t) { t.gate = static_cast<gate::GateState>(99); t.gate_findings = {"nothing-measured"}; });
+        CHECK(Is(f, FindingClass::rejected, "gate-unknown"));
+        // What was not measured stays a doubt that a person may decide (the other states that findings explain).
+        f = one([](auto& t) { t.gate = gate::GateState::undetermined; t.gate_findings = {"dx-unmeasured"}; });
+        CHECK(Is(f, FindingClass::unverified, "gate-dx-unmeasured"));
+        f = one([](auto& t) { t.gate = gate::GateState::fail; t.gate_cause = gate::GateCause::unmeasurable; t.gate_findings = {"nothing-measured"}; });
+        CHECK(Is(f, FindingClass::unverified, "gate-nothing-measured"));
         // Over the line (an excess that was measured): by the state and the cause, whatever the findings say.
         for (const auto cause : {gate::GateCause::lift, gate::GateCause::pose, gate::GateCause::displacement, gate::GateCause::none}) {
             f = one([&](auto& t) { t.gate = gate::GateState::fail; t.gate_cause = cause; });
@@ -399,7 +422,7 @@ void Decisions() {
             {"content-unmeasured", U, U, "gate-content-unmeasured"},
             {"dx-unmeasured", U, U, "gate-dx-unmeasured"},
             {"placement-unverified", U, U, "gate-placement-unverified"},
-            {"gate-undetermined", U, U, "gate-undetermined"},
+            {"gate-undetermined", R, R, "gate-undetermined"},
             {"unconfirmed-content", R, U, "gate-unconfirmed-content"},   // Q1: the only two codes that the owner's answer changes
             {"one-sided-content", R, U, "gate-one-sided-content"},
             {"transition-outside-band", R, R, "gate-transition-outside-band"},
@@ -448,7 +471,7 @@ void Decisions() {
     }
     // The verdict, for each policy. Nothing without a candidate is usable; anything found wrong is not; only a doubt follows the policy.
     {
-        const RecalibrationFinding doubt{FindingClass::unverified, "gate-undetermined", {}}, wrong{FindingClass::rejected, "gate-fail", {}}, none{FindingClass::no_candidate, "no-overlap", {}};
+        const RecalibrationFinding doubt{FindingClass::unverified, "gate-nothing-measured", {}}, wrong{FindingClass::rejected, "gate-fail", {}}, none{FindingClass::no_candidate, "no-overlap", {}};
         for (const auto policy : {UnverifiedPolicy::confirm_with_warning, UnverifiedPolicy::refuse_to_confirm}) {
             CHECK(DecideVerdict({}, policy, true) == RecalibrationVerdict::usable);
             CHECK(DecideVerdict({}, policy, false) == RecalibrationVerdict::unusable);
@@ -793,8 +816,8 @@ void WholeJob(const Pair& pair) {
     // A flat sheet: the estimate lacks marks and the gate measured nothing. Told by the codes of the reasons and of the gate's findings, not by the state.
     CHECK(HasCode(o, "sample-estimate-undetermined") && HasCode(o, "gate-nothing-measured") && !HasCode(o, "sample-estimate-doubtful") && !HasCode(o, "gate-unknown"));
     CHECK(Has(o.screen_lines.front(), "未確認の校正"));
-    CHECK(HasLine(o.screen_lines, "継ぎ目のずれ: 確かめられませんでした") || HasLine(o.screen_lines, "継ぎ目のずれ: 確かめが行われませんでした") ||
-        HasLine(o.screen_lines, "継ぎ目のずれ: 測れない所があり、確かめられませんでした"));   // the gate's result is on the screen
+    CHECK(HasLine(o.screen_lines, "継ぎ目のずれ: 測れ"));   // the gate's result is on the screen, as a fact (what was measured)
+    CHECK(HasLine(o.screen_lines, "継ぎ目のずれを確かめられませんでした"));   // and the finding says that it was not checked
     CHECK(HasLine(o.screen_lines, "A に対する B の位置の変化: 図面の右へ約 ") && HasLine(o.screen_lines, "範囲の検査: 通りました"));
     CHECK(o.facts.display.has_motion && std::abs(o.facts.display.motion.camera_motion_mm.x - 30.0) < 0.5);
     CHECK(o.thumbnail.width > 0 && o.thumbnail.height > 0);
