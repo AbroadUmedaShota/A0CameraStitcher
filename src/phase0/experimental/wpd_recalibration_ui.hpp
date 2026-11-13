@@ -456,7 +456,7 @@ CaptureUiOutcome SaveRecalibrationPair(const std::array<std::wstring,2>& ids,Clo
         EvidenceWriter evidence(RecalibrationReviewRoot(),NewRunId(),"wpd-recalibration-pair");
         evidence.RecordState("pair","BothLiveViewsClosed");
         auto pair=pair_capture_backend(ids,deadline);
-        if(!pair.complete){result.capture.out_of_focus=pair.out_of_focus;result.preflight_refused=!pair.shutter_dispatched[0] && !pair.shutter_dispatched[1];throw std::runtime_error(pair.error);}
+        if(!pair.complete){RecordIncompletePair(result,pair);throw std::runtime_error(pair.error);}
         const auto& a=pair.originals[0];const auto& b=pair.originals[1];
         result.capture={true,true,a.path,a.bytes,a.sha256,{}};result.originals={a.path,b.path};
         record->run_root=evidence.RunRoot();record->originals={a.path,b.path};record->sha={a.sha256,b.sha256};record->measured_at_utc=RecalibrationUtcNow();

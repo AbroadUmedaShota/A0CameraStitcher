@@ -890,6 +890,13 @@ void RequestCapture(int index){
 std::function<VerifiedStillPair(const std::array<std::wstring,2>&,Clock::time_point)> pair_capture_backend=
     [](const std::array<std::wstring,2>& ids,Clock::time_point deadline){return CaptureStillPairShutterFirst(ids,deadline);};
 std::optional<std::filesystem::path> pair_settings_folder_override,pair_review_root_override;
+// How a pair that did not complete is put into the outcome (#430): out of focus, whether the preflight stopped it before either shutter,
+// what each body answered, and the image notices a body left. The pair capture and the calibration's pair capture both call this, so the
+// status row (AdvanceCapture) says the same thing for the same failure. The caller then throws pair.error.
+void RecordIncompletePair(CaptureUiOutcome& result,const VerifiedStillPair& pair){
+    result.capture.out_of_focus=pair.out_of_focus;result.preflight_refused=!pair.shutter_dispatched[0] && !pair.shutter_dispatched[1];
+    result.preflight_status=DescribeStillPairPreflightRefusal(pair);result.late_object_status=DescribeStillPairLateObjects(pair);
+}
 CaptureUiOutcome SavePairReview(const std::array<std::wstring,2>& ids,ReviewGeometry geometry,Clock::time_point deadline){
     CaptureUiOutcome result;
     const auto root=pair_review_root_override?*pair_review_root_override:DefaultIdentityMapPath().parent_path().parent_path()/"wpd-pair-reviews";
@@ -908,11 +915,7 @@ CaptureUiOutcome SavePairReview(const std::array<std::wstring,2>& ids,ReviewGeom
         if(!selection.loaded && selection.reason!=a0::m2::experimental::FixedCompositeSkip::condition_absent)Log("pair_fixed_composite_condition_unusable reason="+std::string(a0::m2::experimental::FixedCompositeSkipCode(selection.reason))+" detail="+RedactPaths(selection.detail));
         // #389: both shutters precede either import, all under this one deadline.
         auto pair=pair_capture_backend(ids,deadline);
-        if(!pair.complete){
-            result.capture.out_of_focus=pair.out_of_focus;result.preflight_refused=!pair.shutter_dispatched[0] && !pair.shutter_dispatched[1];
-            result.preflight_status=DescribeStillPairPreflightRefusal(pair);result.late_object_status=DescribeStillPairLateObjects(pair);
-            throw std::runtime_error(pair.error);
-        }
+        if(!pair.complete){RecordIncompletePair(result,pair);throw std::runtime_error(pair.error);}
         const auto& a=pair.originals[0];const auto& b=pair.originals[1];
         result.capture={true,true,a.path,a.bytes,a.sha256,{}};result.originals={a.path,b.path};originals_saved=true;
         a0::m2::experimental::StillReviewRequest request{a.path,b.path,review_directory,a.sha256,b.sha256,evidence.RunId(),geometry,deadline};

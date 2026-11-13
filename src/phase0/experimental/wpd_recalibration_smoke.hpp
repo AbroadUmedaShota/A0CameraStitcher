@@ -76,11 +76,17 @@ int RunRecalibrationUiSmoke(const std::filesystem::path& fixtures,const std::fil
         make_settings(base_settings);
         const auto frames=ps::WriteFrames(work/"pair",ps::Flat(128),ps::Flat(131));
         pair_review_root_override=work/"reviews";
-        unsigned backend_calls{};bool backend_fails=false;
+        unsigned backend_calls{};bool backend_fails=false,backend_preflight_stop=false,backend_late_image=false;
         pair_capture_backend=[&](const std::array<std::wstring,2>&,Clock::time_point)->VerifiedStillPair{
             ++backend_calls;
             VerifiedStillPair pair;
             if(backend_fails){pair.complete=false;pair.shutter_dispatched={true,false};pair.error="synthetic capture failure";return pair;}   // A's shutter went, B's did not
+            if(backend_preflight_stop){   // both bodies still hold a completion notice: stopped before either shutter
+                pair.complete=false;pair.error="synthetic preflight stop";
+                for(int i=0;i<2;++i){pair.preflight_checked[i]=true;pair.preflight[i].closed=true;pair.preflight[i].kind=StillPreflightKind::Event;pair.preflight[i].event_code=0xc102;}
+                return pair;
+            }
+            if(backend_late_image){pair.complete=false;pair.shutter_dispatched={true,true};pair.error="synthetic late image";pair.originals[1].late_object_event=true;return pair;}
             pair.complete=true;pair.preflight_complete=true;pair.shutter_dispatched={true,true};
             const std::array<fs::path,2> paths{frames.a,frames.b};
             for(size_t i=0;i<2;++i){auto& o=pair.originals[i];o.success=true;o.closed=true;o.path=paths[i];o.bytes=fs::file_size(paths[i]);o.sha256=ps::Sha(paths[i]);}
@@ -561,6 +567,19 @@ int RunRecalibrationUiSmoke(const std::filesystem::path& fixtures,const std::fil
             check(has(capture_status,L"再撮影せず停止中"),"failed shot: the status line is the capture's own");
             tick();check(!IsWindowEnabled(recal_enter_button),"failed shot: nothing more is offered until the program is started again");
             backend_fails=false;
+        }
+        // The same words as the pair capture says for the same failure: one function fills both (RecordIncompletePair), and AdvanceCapture words it.
+        for(const int kind:{0,1}){
+            settings=scenario(kind==0?"s8b":"s8c");
+            backend_preflight_stop=kind==0;backend_late_image=kind==1;
+            VerifiedStillPair expected;
+            if(kind==0){for(int i=0;i<2;++i){expected.preflight_checked[i]=true;expected.preflight[i].closed=true;expected.preflight[i].kind=StillPreflightKind::Event;expected.preflight[i].event_code=0xc102;}}
+            else expected.originals[1].late_object_event=true;
+            const std::wstring want=kind==0?DescribeStillPairPreflightRefusal(expected):DescribeStillPairLateObjects(expected);
+            click(kRecalEnterId,recal_enter_button);tick();fresh();press(kRecalStart);finish_workers();
+            check(wait_until([&]{return phase()==RecalPhase::idle && !capture_future.valid() && capture_restart_blocked;},20000),"failed shot with a notice: the failure is kept");
+            check(!want.empty() && has(capture_status,want.c_str()),kind==0?"failed shot: the preflight text of the pair capture is shown":"failed shot: the leftover image notice of the pair capture is shown");
+            backend_preflight_stop=false;backend_late_image=false;
         }
         {   // Live could not be confirmed closed: the capture does not start and the calibration does not wait for it.
             settings=scenario("s9");
