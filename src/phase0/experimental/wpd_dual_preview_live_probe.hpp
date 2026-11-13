@@ -88,7 +88,11 @@ LiveProbeThreadOutcome RunLiveProbeOnCamera(Camera& camera,Clock::time_point dea
     };
     hooks.log=[](const std::string& line){Log(line);};
     try{result.outcome=RunLiveCaptureProbe(channel,camera.alias,hooks);}
-    catch(const std::exception&){result.outcome.stop_reason="probe_exception";Log(camera.alias+" live_capture_probe_exception=1");}
+    catch(...){
+        // Whatever was sent before the exception stays true: a shutter that was attempted is reported as sent.
+        result.outcome=WpdLiveProbeOutcomeAfterException(channel.ShutterAttempted());
+        Log(camera.alias+" live_capture_probe_exception=1 shutter_commands="+(result.outcome.shutter_sent?"1":"0"));
+    }
     try{
         if(result.outcome.result==WpdLiveProbeResult::StoppedBeforeShutter)evidence.RecordState("live-capture-probe","StoppedBeforeShutter",camera.alias,result.outcome.stop_reason);
         else evidence.RecordState("live-capture-probe",WpdLiveProbeResultText(result.outcome.result),camera.alias,result.outcome.stop_reason);

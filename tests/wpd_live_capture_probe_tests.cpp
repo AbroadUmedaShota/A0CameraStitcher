@@ -536,6 +536,19 @@ int main() {
             Check(!expired.out.live_after && expired.IndexOf("live_after value=unreadable") >= 0 && expired.out.result == WpdLiveProbeResult::StoppedAfterShutter, "Live state not readable after the deadline is recorded as such");
         }
     }
+    // ---- An exception that leaves RunLiveCaptureProbe after the shutter does not turn into "no shutter was sent".
+    {
+        const auto before = WpdLiveProbeOutcomeAfterException(false);
+        Check(!before.shutter_sent && before.result == WpdLiveProbeResult::StoppedBeforeShutter && !before.sdram_may_remain && before.stop_reason == "probe_exception", "an exception before the shutter reports no shutter");
+        ProbeFake f;
+        bool threw = false;
+        try { Go(f, false, false, [](const std::string& line) { if (Contains(line, "live_capture_probe_events phase=after_shutter")) throw std::runtime_error("synthetic log failure"); }); }
+        catch (const std::runtime_error&) { threw = true; }
+        Check(threw && f.ShutterAttempted() && f.shutters == 1, "a failure inside the run after the shutter escapes with the shutter attempted");
+        const auto after = WpdLiveProbeOutcomeAfterException(f.ShutterAttempted());
+        Check(after.shutter_sent && after.result == WpdLiveProbeResult::StoppedAfterShutter && after.sdram_may_remain && after.stop_reason == "probe_exception" && !after.sequence_clean && after.live_after_state == "not_read", "an exception after the shutter reports the shutter, the stop after it and the image that may remain");
+        Check(Contains(DescribeLiveCaptureProbeResult(after, 5, "skipped"), "shutter_commands=1 resend=0 setting_writes=0 live_start_commands=0 elapsed_ms=5 reason=probe_exception"), "its last line says the shutter was sent");
+    }
     std::cout << "wpd_live_capture_probe_checks=" << checks << " failures=" << failures << '\n';
     CoUninitialize();
     return failures ? 1 : 0;

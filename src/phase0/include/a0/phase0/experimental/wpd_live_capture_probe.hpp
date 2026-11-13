@@ -275,6 +275,19 @@ struct WpdLiveProbeOutcome {
     bool sequence_clean{};
     std::string anomaly{"none"};
 };
+// What to report when RunLiveCaptureProbe was left by an exception: all that is known is whether the shutter was attempted.
+// If it was, an exposure may exist and the image may still be in the camera.
+inline WpdLiveProbeOutcome WpdLiveProbeOutcomeAfterException(bool shutter_attempted) {
+    WpdLiveProbeOutcome out;
+    out.stop_reason = "probe_exception";
+    out.anomaly = "probe_exception";
+    if (shutter_attempted) {
+        out.shutter_sent = true;
+        out.result = WpdLiveProbeResult::StoppedAfterShutter;
+        out.sdram_may_remain = true;
+    }
+    return out;
+}
 
 struct WpdLiveProbeOptions {
     std::chrono::milliseconds ready_wait{10000}, ready_poll{50};
