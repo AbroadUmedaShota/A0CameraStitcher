@@ -3,6 +3,7 @@
 #include "a0/phase0/experimental/wpd_live_view_transfer.hpp"
 #include "a0/phase0/experimental/preview_back_buffer.hpp"
 #include "a0/phase0/experimental/preview_focus.hpp"
+#include "a0/phase0/experimental/preview_af_point.hpp"
 #include "a0/phase0/experimental/preview_shutdown.hpp"
 #include "a0/phase0/experimental/preview_lifecycle.hpp"
 #include "a0/phase0/experimental/wpd_still_capture.hpp"
@@ -442,6 +443,10 @@ struct Camera final:WpdLiveViewCommandChannel {
     std::wstring failure_status{L"映像取得・制御に失敗しました"};
     std::array<unsigned,3> focus_success{};unsigned focus_requests{};
     DWORD focus_mode{0xffffffff};
+    PreviewAfState af; // AF frame the body reports (#426); guarded by `mutex`
+    void UpdateAfFrame(std::span<const unsigned char> payload,unsigned width,unsigned height); // wpd_dual_preview_af.hpp
+    void ApplyAfPoint(const PreviewAfPointRequest& point); // one AF frame move; the worker only
+    WpdLiveViewExchange DispatchAfPoint(IPortableDeviceValues* request); // its own gate; Dispatch refuses 0x9205
     Clock::time_point first{},last{},busy_since{};std::atomic<bool> done{},failed{};
     Clock::time_point send_deadline{Clock::time_point::max()};
     bool admission_cancelled{},frame_dispatched{};
@@ -649,6 +654,7 @@ struct Camera final:WpdLiveViewCommandChannel {
                 ComPtr<IWICImagingFactory> factory;Check(CoCreateInstance(CLSID_WICImagingFactory,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&factory)),"WIC factory");
                 while(!stopping){
                     if(const auto action=focus_mailbox.Take())ApplyFocus(*action);
+                    else if(const auto point=focus_mailbox.TakeAfPoint())ApplyAfPoint(*point);
                     if(stopping)break;
                     const auto deadline=Clock::now()+std::chrono::seconds(10);
                     send_deadline=deadline;
@@ -681,6 +687,7 @@ struct Camera final:WpdLiveViewCommandChannel {
                     if(stopping)break; // Transfer was drained, do not publish a stopped frame.
                     auto next=Decode(factory.Get(),D810PreviewJpeg(result.payload));
                     const auto next_level=D810PreviewLevel(result.payload);
+                    UpdateAfFrame(result.payload,next.width,next.height);
                     if(!frames){
                         // Diagnostic numeric words only, never image/header dumps.
                         std::ostringstream words;words<<alias<<" level_header_words="<<std::hex;
@@ -731,6 +738,7 @@ struct Camera final:WpdLiveViewCommandChannel {
             std::ostringstream event;event<<alias<<" transport_cancel_complete=1 hr=0x"<<std::hex<<static_cast<unsigned long>(hr);Log(event.str());}
     }
 };
+#include "wpd_dual_preview_af.hpp"
 int ReadCaptureDiagnostics(const std::array<std::wstring,2>& ids,bool inspect_events=false,bool require_live_off=false,bool extended_state=false){
     Log("capture_diagnostics=1 shutter_commands=0 setting_writes=0 live_start_commands=0");
     if(inspect_events)Log("event_diagnostics=1 polls_per_camera=4 capture_admission=not_evaluated");
@@ -913,13 +921,15 @@ int main(int argc,char** argv){
         // nothing else. No other argument reaches a camera, a lease or the window.
         if(argc==2 && std::string(argv[1])=="--settings-write-confirm-smoke")return RunSettingsWriteConfirmSmoke();
         if(argc==2 && std::string(argv[1])=="--settings-write-chosen-smoke")return RunSettingsWriteChosenSmoke();
-        Log("settings_write_test_build=1 only --settings-write-confirm-smoke and --settings-write-chosen-smoke run here; nothing was opened");
+        if(argc==2 && std::string(argv[1])=="--af-point-panel-smoke")return RunAfPanelUiSmoke(); // #426: the AF frame while the settings panel is up
+        Log("settings_write_test_build=1 only --settings-write-confirm-smoke, --settings-write-chosen-smoke and --af-point-panel-smoke run here; nothing was opened");
         return 2;
 #else
         if(argc==2 && std::string(argv[1])=="--settings-write-ui-smoke")return RunSettingsWriteUiSmoke();
 #endif
 #endif
         if(argc==2 && std::string(argv[1])=="--level-ui-smoke")return RunLevelUiSmoke();
+        if(argc==2 && std::string(argv[1])=="--af-point-ui-smoke")return RunAfPointUiSmoke();
         if(argc==2 && std::string(argv[1])=="--lifecycle-ui-smoke")return RunLifecycleUiSmoke();
         if(argc==2 && std::string(argv[1])=="--fixed-c-ui-smoke")return RunFixedCUiSmoke();
         if(argc==2 && std::string(argv[1])=="--live-c-ui-smoke")return RunLiveCUiSmoke();

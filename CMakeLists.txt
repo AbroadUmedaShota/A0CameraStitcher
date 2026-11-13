@@ -1203,6 +1203,11 @@ if(BUILD_TESTING)
     target_link_libraries(a0_preview_focus_mailbox_tests PRIVATE a0_wpd_live_view_codec)
     add_test(NAME preview_focus_mailbox_contracts COMMAND a0_preview_focus_mailbox_tests)
     set_tests_properties(preview_focus_mailbox_contracts PROPERTIES TIMEOUT 15)
+    # AF frame of the development preview (#426): header words, validity, display mapping, log throttle; no device.
+    add_executable(a0_preview_af_point_tests tests/preview_af_point_tests.cpp)
+    target_link_libraries(a0_preview_af_point_tests PRIVATE a0_wpd_live_view_codec ole32 PortableDeviceGuids)
+    add_test(NAME preview_af_point_contracts COMMAND a0_preview_af_point_tests)
+    set_tests_properties(preview_af_point_contracts PROPERTIES TIMEOUT 30)
     add_executable(a0_preview_shutdown_tests tests/preview_shutdown_tests.cpp)
     target_include_directories(a0_preview_shutdown_tests PRIVATE src/phase0/include)
     add_test(NAME preview_shutdown_contracts COMMAND a0_preview_shutdown_tests)
@@ -1500,6 +1505,9 @@ if(BUILD_TESTING)
         target_compile_definitions(A0CameraStitcher.WpdDualPreview PRIVATE UNICODE _UNICODE NOMINMAX)
         add_test(NAME preview_level_ui_contracts COMMAND A0CameraStitcher.WpdDualPreview --level-ui-smoke)
         set_tests_properties(preview_level_ui_contracts PROPERTIES TIMEOUT 15)
+        # AF frame display (#426): the body's frame over each picture, on synthetic cameras and our own bitmap.
+        add_test(NAME preview_af_point_ui_contracts COMMAND A0CameraStitcher.WpdDualPreview --af-point-ui-smoke)
+        set_tests_properties(preview_af_point_ui_contracts PROPERTIES TIMEOUT 30)
         add_test(NAME preview_lifecycle_ui_contracts COMMAND A0CameraStitcher.WpdDualPreview --lifecycle-ui-smoke)
         set_tests_properties(preview_lifecycle_ui_contracts PROPERTIES TIMEOUT 15)
         # C drawn with the fixed composite condition (#401): the real merge worker, Paint, position buttons and
@@ -1547,6 +1555,9 @@ if(BUILD_TESTING)
             # The settings panel (#416, ADR-0041): its drop-downs, picks and buttons in the window's own code, with a table of the test's own.
             add_test(NAME preview_settings_write_chosen_contracts COMMAND a0_preview_settings_write_confirm_tests --settings-write-chosen-smoke)
             set_tests_properties(preview_settings_write_chosen_contracts PROPERTIES TIMEOUT 60)
+            # The AF frame (#426) while the settings panel is up: no picture is selectable and no frame is drawn over the panel.
+            add_test(NAME preview_af_point_panel_contracts COMMAND a0_preview_settings_write_confirm_tests --af-point-panel-smoke)
+            set_tests_properties(preview_af_point_panel_contracts PROPERTIES TIMEOUT 60)
             # The test binary carries its own entries (the preview itself must not: see preview_settings_write_binary_contracts).
             add_test(NAME preview_settings_write_test_binary_contracts
                 COMMAND "${CMAKE_COMMAND}" "-DBINARY=$<TARGET_FILE:a0_preview_settings_write_confirm_tests>" "-DEXPECT=present" "-DTEST_STRINGS=present"

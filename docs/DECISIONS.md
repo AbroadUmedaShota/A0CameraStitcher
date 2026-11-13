@@ -1152,7 +1152,7 @@ CCP2はWBのプリセットを、**PCから白を測って保存先を選べる*
 |---|---|---|---|
 | `Do not change firmware or camera settings outside the documented test profile.` | AGENTS.md | 外す。開発用プレビューの中で、5つのプロパティをCAM-Bに書くことだけを例外にする | 外す。本番の画面の「写す」操作で、同じ5つをCAM-Bに書くことだけを例外にする。どちらの段もfirmwareとほかの設定は変えない |
 | `This does not authorize capture, camera-setting writes, ...`（開発用のWPD二台ライブビューの文） | AGENTS.md | 外す。同上。ライブビューの経路（`AllowedD810PreviewRequest`）からは今までどおり書けない | 当たらない（開発用の文） |
-| `No exposure/AF-mode setting writes, capture, or AF-point movement is included.`（#331のフォーカスの文） | AGENTS.md | 外す範囲は露出モードをMにする書き込みだけ。AFモードの書き込みとAF点の移動は禁止のまま | 当たらない（開発用の文） |
+| `No exposure/AF-mode setting writes, capture, or AF-point movement is included.`（#331のフォーカスの文。#426で、AF点の移動の部分は別の項目に分けた） | AGENTS.md | 外す範囲は露出モードをMにする書き込みだけ。AFモードの書き込みは禁止のまま。AF点の移動（0x9205）はこの行の範囲ではなく、#426の項目（AGENTS.md）が、クリックで置いた1か所への枠の移動だけを、専用のgateで1クリックにつき最大1回認める | 当たらない（開発用の文） |
 | `it does not permit 0x9207, camera-setting writes, card deletion/format, ...`（AGENTS.mdのno-AFのSDRAM撮影を認めた文。前の下書きでは#343の文と書いたが、文の中にIssueの番号は無く、`docs/WPD_STILL_CAPTURE.md`の#332の文と読める。※要確認） | AGENTS.md | 外す範囲は5つのプロパティだけ。撮影の経路の中では書かない（決定6）。`0x9207`、カードの削除・フォーマット、画像の再利用、シャッターの自動の再試行は禁止のまま | 当たらない（開発用の文。製品の経路の撮影の命令は、本番の経路をWPDへ移すADR（未承認の下書き）で扱う） |
 | `This adapter can never dispatch capture/property writes.`（`AllowedD810PreviewRequest`の注記） | `d810_preview.hpp` | 外さない。ライブビューのgateは`0x1016`を拒否したまま。書き込みは別のgateだけが通す（決定9） | 外さない。本番の経路のライブビューと撮影のgateも`0x1016`を拒否する作りにする（※案） |
 | 段Aの読むだけのgate（`D810SettingsReadGate`。`0x1016`・WITH_DATA_TO_WRITE・WRITE_DATAを常に拒否） | 段AのAGENTS.mdの1行と`wpd_settings_read.hpp` | 外さない。段Aのgateは段Bの後も書けない作りのまま | 外さない |
