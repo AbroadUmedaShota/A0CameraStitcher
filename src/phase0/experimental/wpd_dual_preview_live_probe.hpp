@@ -58,6 +58,7 @@ LiveProbeThreadOutcome RunLiveProbeOnCamera(Camera& camera,Clock::time_point dea
     const auto token=camera.owner.Lend();
     if(!token){result.outcome.stop_reason="session_not_held";Log(camera.alias+" live_capture_probe_lend refused=1 shutter_commands=0");return result;}
     result.lent=true;
+    Log(camera.alias+" live_capture_probe_lend lent=1");
     struct Giveback {Camera& camera;PreviewSessionOwner::Token token;~Giveback(){camera.owner.Return(token);}} giveback{camera,*token};
     EvidenceWriter evidence(DefaultIdentityMapPath().parent_path().parent_path()/"wpd-live-capture-probes",NewRunId(),"wpd-live-capture-probe-development");
     const auto partial_path=evidence.RunRoot()/(camera.alias+"-transport.jpg.partial");

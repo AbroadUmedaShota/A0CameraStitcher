@@ -80,7 +80,7 @@ void RequestLiveProbe(){
 void LiveProbeStartRun(){
     const int target=LiveCaptureProbeCameraIndex();
     const auto waited=std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now()-live_probe_hold_started).count();
-    for(int i=0;i<2;++i)Log(cameras[i]->alias+" live_capture_probe_hold acknowledged=1 waited_ms="+std::to_string(waited)+(i==target?" lent=1":""));
+    for(int i=0;i<2;++i)Log(cameras[i]->alias+" live_capture_probe_hold acknowledged=1 waited_ms="+std::to_string(waited)+(i==target?" lend_next=1":""));
     Log(LiveProbeAfLine(*cameras[target],"before"));
     live_probe_future=std::async(std::launch::async,[backend=live_probe_backend,deadline=live_probe_deadline,target]()->LiveProbeThreadOutcome{
         try{return backend(*cameras[target],deadline);}
