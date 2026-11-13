@@ -1558,6 +1558,12 @@ if(BUILD_TESTING)
                 message(FATAL_ERROR "A0_BUILD_WPD_LIVE_CAPTURE_PROBE and A0_BUILD_WPD_SETTINGS_WRITE must not both be ON: the settings screen "
                     "stops and restarts Live View, which would mix another cause into the probe's observation (ADR-0044).")
             endif()
+            # The probe never goes into the reference build folder (the AGENTS.md item for ADR-0044).
+            file(TO_CMAKE_PATH "${CMAKE_BINARY_DIR}" a0_probe_binary_dir)
+            if(a0_probe_binary_dir MATCHES "(^|/)build/reference/*$")
+                message(FATAL_ERROR "A0_BUILD_WPD_LIVE_CAPTURE_PROBE=ON must not be used in a build folder named build/reference "
+                    "(${CMAKE_BINARY_DIR}). Configure the probe in its own folder, for example build-probe-on (ADR-0044).")
+            endif()
             message(WARNING "A0_BUILD_WPD_LIVE_CAPTURE_PROBE=ON: this executable carries a probe that sends the shutter once with Live View open "
                 "(#426 stage 4, ADR-0044; its window title and first log line say so). Do not use it on the real bodies until the owner's approval "
                 "and the AGENTS.md item are in place.")
