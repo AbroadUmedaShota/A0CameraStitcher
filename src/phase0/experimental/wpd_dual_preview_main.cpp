@@ -36,6 +36,7 @@
 #include "a0/m2/experimental/overlap_estimation.hpp"
 #include "a0/phase0/experimental/still_pair.hpp"
 #include "a0/phase0/experimental/wpd_still_pair.hpp"
+#include "a0/phase0/experimental/still_pair_text.hpp"
 #include "a0/phase0/experimental/wpd_still_persist.hpp"
 #include "a0/phase0/experimental/pair_cycle_probe.hpp"
 #include "a0/phase0/experimental/preview_end_restart_probe.hpp"
@@ -144,10 +145,11 @@ public:
     StillLane& operator=(const StillLane&)=delete;
     ~StillLane(){try{Finish();}catch(...){}}
     bool OpenSession(){
+        bool identity_mismatch=false;
         try{
             device_=Open(id_,GENERIC_READ|GENERIC_WRITE);opened_=true;
             auto map_path=DefaultIdentityMapPath();map_path.replace_filename("camera-map-wpd.json");IdentityMap map(map_path);
-            if(map.FindAlias(Identity(device_.Get()))!=std::optional<std::string>(alias_))throw std::runtime_error("still camera alias mismatch");
+            if(map.FindAlias(Identity(device_.Get()))!=std::optional<std::string>(alias_)){identity_mismatch=true;throw std::runtime_error("still camera alias mismatch");}
             if(!preflight_only_){
                 partial_=CreateFileW(partial_path_.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL|FILE_FLAG_OPEN_REPARSE_POINT|FILE_FLAG_WRITE_THROUGH,nullptr);
                 if(partial_==INVALID_HANDLE_VALUE)throw std::runtime_error("cannot create private capture partial");
@@ -166,14 +168,24 @@ public:
             channel_=std::make_unique<Channel>(*this);
             evidence_->RecordState(preflight_only_?"preflight":"capture","BothLiveViewsClosed",alias_);
             return true;
-        }catch(const std::exception& error){Fail(error.what(),dynamic_cast<const WpdStillOutOfFocus*>(&error)!=nullptr);return false;}
+        }catch(const std::exception& error){
+            refusal_.kind=identity_mismatch?StillPreflightKind::Identity:StillPreflightKind::Transport;
+            Fail(error.what(),dynamic_cast<const WpdStillOutOfFocus*>(&error)!=nullptr);return false;
+        }
     }
-    // Non-exposing check: Ready, capture profile and a clean event baseline.
+    // Non-exposing check: Ready, capture profile and a clean event baseline. Every notice the
+    // reads returned is logged by code and count, whether or not the check passed (#430).
     void RunPreflightOnly(){
         try{
             Log(alias_+" preflight_only=1 shutter_commands=0 setting_writes=0");
-            ReadWpdStillPreflight(*channel_,[this]{return Admitted();});outcome_.success=true;
-        }catch(const std::exception& error){Fail(error.what(),dynamic_cast<const WpdStillOutOfFocus*>(&error)!=nullptr);}
+            ReadWpdStillPreflight(*channel_,[this]{return Admitted();},&preflight_record_);outcome_.success=true;
+            Log(alias_+" "+DescribeWpdStillPreflightEvents("check",preflight_record_,nullptr));
+        }catch(const std::exception& error){
+            refusal_=ClassifyWpdStillRefusal(error);
+            if(refusal_.kind==StillPreflightKind::Transport && !Admitted())refusal_.kind=StillPreflightKind::DeadlineStop;
+            Log(alias_+" "+DescribeWpdStillPreflightEvents("check",preflight_record_,&refusal_));
+            Fail(error.what(),dynamic_cast<const WpdStillOutOfFocus*>(&error)!=nullptr);
+        }
     }
     // Recheck the capture state of this open body. No exposure.
     StillPairPrepared PrepareForExposure(){
@@ -183,7 +195,9 @@ public:
             run_.emplace(*channel_,[this]{return Admitted();},[this](std::span<const unsigned char> bytes){
                 DWORD written{};if(!WriteFile(partial_,bytes.data(),static_cast<DWORD>(bytes.size()),&written,nullptr) || written!=bytes.size())throw std::runtime_error("capture partial write failed");
             },&observed_);
-            prepared=PrepareWpdStillRun(*run_);
+            WpdStillRefusal refusal;
+            prepared=PrepareWpdStillRun(*run_,&preflight_record_,&refusal);
+            Log(alias_+" "+DescribeWpdStillPreflightEvents("recheck",preflight_record_,prepared.ready?nullptr:&refusal));
         }catch(const std::exception& error){prepared.error=error.what();}
         if(!prepared.ready)Fail(prepared.error,prepared.out_of_focus);
         return prepared;
@@ -220,6 +234,8 @@ public:
         Collect();
     }
     const std::string& Error()const{return outcome_.error;}
+    // Why the read-only preflight stopped, for the pair transaction (#430).
+    WpdStillRefusal Refusal()const{return refusal_;}
     // Always closes the session and the partial. `external_error` names a failure
     // decided outside this lane (e.g. its shutter was never sent) so the log and
     // the journal state agree with the pair result.
@@ -230,8 +246,16 @@ public:
         // One line per capture, success or failure: was this capture's completion
         // event read before the session closed (#381). Not a success condition.
         if(acquisition_entered_){
+            // #430: a dispatched shutter whose capture failed before the completion wait still
+            // reads the notice queue once, bounded, so the completion it is about to emit is not
+            // left for the next press. Read-only notices; nothing is imported or resent.
+            if(run_ && shutter_dispatched_ && opened_ && !cancelled_)run_->ObserveCompletionBeforeClose();
             Log(alias_+" capture_completion "+DescribeWpdStillCaptureObservation(observed_));
             if(observed_.shutter_attempted)Log(alias_+" completion_wait "+DescribeWpdStillCompletionWait(observed_));
+            if(observed_.failure.result!=WpdStillFailureObservationResult::NotRun){
+                Log(alias_+" completion_after_failure "+DescribeWpdStillFailureObservation(observed_.failure));
+                outcome_.late_object_event=observed_.failure.late_object_event;
+            }
         }
         if(partial_!=INVALID_HANDLE_VALUE){CloseHandle(partial_);partial_=INVALID_HANDLE_VALUE;}
         if(opened_){
@@ -283,30 +307,47 @@ private:
     bool opened_{},shutter_dispatched_{},acquisition_entered_{},finished_{};
     std::atomic<bool> cancelled_{},busy_{};std::atomic<ULONGLONG> busy_tick_{};
     WpdStillCaptureObservation observed_;
+    WpdStillPreflightRecord preflight_record_;
+    WpdStillRefusal refusal_{StillPreflightKind::None,std::nullopt};
     StillCaptureOutcome outcome_;
     std::unique_ptr<Channel> channel_;
     std::optional<WpdStillCaptureRun> run_;
     std::jthread watchdog_; // Last: joined first, before the state it reads goes away.
 };
+// `refusal` (preflight only, #430) receives why a refused preflight stopped.
 StillCaptureOutcome RunStillOnce(const std::wstring& id,const std::string& alias,bool both_live_sessions_closed,
-    Clock::time_point outer_deadline,bool preflight_only){
+    Clock::time_point outer_deadline,bool preflight_only,WpdStillRefusal* refusal=nullptr){
     StillCaptureOutcome outcome;
     if(!both_live_sessions_closed){outcome.error="both Live View sessions must be closed before capture";return outcome;}
     const auto deadline=std::min(outer_deadline,Clock::now()+std::chrono::seconds(180));
-    if(Clock::now()>=deadline || capture_stop_requested){outcome.error="capture deadline/stop before open";return outcome;}
+    if(Clock::now()>=deadline || capture_stop_requested){
+        outcome.error="capture deadline/stop before open";
+        if(refusal)*refusal=WpdStillRefusal{StillPreflightKind::DeadlineStop,std::nullopt};
+        return outcome;
+    }
     StillLane lane(id,alias,outer_deadline,preflight_only);
     if(lane.OpenSession()){
         if(preflight_only)lane.RunPreflightOnly();else lane.CaptureSingle();
     }
-    return lane.Finish();
+    outcome=lane.Finish();
+    if(refusal)*refusal=lane.Refusal();
+    return outcome;
 }
 StillCaptureOutcome SaveStillOnce(const std::wstring& id,const std::string& alias,bool both_live_sessions_closed,
     Clock::time_point deadline=Clock::time_point::max()){
     return RunStillOnce(id,alias,both_live_sessions_closed,deadline,false);
 }
 VerifiedStillPreflight CheckStillOnce(const std::wstring& id,const std::string& alias,Clock::time_point deadline){
-    const auto result=RunStillOnce(id,alias,true,deadline,true);
-    return {result.success,result.closed,result.error,result.out_of_focus};
+    WpdStillRefusal refusal;
+    const auto result=RunStillOnce(id,alias,true,deadline,true,&refusal);
+    VerifiedStillPreflight status{result.success,result.closed,result.error,result.out_of_focus,StillPreflightKind::None,std::nullopt};
+    if(!result.success){
+        // A Close that failed, or a deadline that passed after a clean read, is not the camera's own state.
+        status.kind=refusal.kind;status.event_code=refusal.event_code;
+        if(!result.closed && (status.kind==StillPreflightKind::None || StillPreflightIsBodyState(status.kind)))status.kind=StillPreflightKind::Close;
+        else if(status.kind==StillPreflightKind::None)status.kind=StillPreflightKind::DeadlineStop;
+    }
+    return status;
 }
 // A and B as one 180 s transaction (#389): both bodies stay open from the
 // exposure recheck until both imports are saved. Closing A or opening B between

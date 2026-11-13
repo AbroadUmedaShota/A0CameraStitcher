@@ -4,6 +4,7 @@
 // window runs after each import (#408) is tested on a private temporary folder.
 #include "wpd_still_fake.hpp"
 #include "a0/phase0/experimental/wpd_still_pair.hpp"
+#include "a0/phase0/experimental/still_pair_text.hpp"
 #include "a0/phase0/experimental/wpd_still_persist.hpp"
 #include <wincodec.h>
 #include <array>
@@ -163,6 +164,7 @@ struct Harness {
     Clock::time_point deadline=Clock::now()+std::chrono::seconds(60);
     std::function<void()> after_prepare_b;
     std::function<void(int)> close_hook;
+    WpdStillCompletionWait wait=kWait;
     Harness(){
         lane[0].fake.jpeg={0xff,0xd8,1,1,1,1,0xff,0xd9};
         lane[1].fake.jpeg={0xff,0xd8,2,2,2,2,2,2,0xff,0xd9};
@@ -179,7 +181,7 @@ struct Harness {
         steps.preflight=[&](int i,Clock::time_point){events.push_back(std::string("preflight:")+Name(i));return VerifiedStillPreflight{true,true,{}};};
         steps.prepare=[&](int i,Clock::time_point){
             events.push_back(std::string("open:")+Name(i));auto& l=lane[i];
-            l.run.emplace(l.fake,[&l]{return l.fake.admission();},[&l](std::span<const unsigned char> bytes){l.partial.insert(l.partial.end(),bytes.begin(),bytes.end());},&l.observation,kWait);
+            l.run.emplace(l.fake,[&l]{return l.fake.admission();},[&l](std::span<const unsigned char> bytes){l.partial.insert(l.partial.end(),bytes.begin(),bytes.end());},&l.observation,wait);
             const auto prepared=PrepareWpdStillRun(*l.run);
             if(i==1 && after_prepare_b)after_prepare_b();
             return prepared;
@@ -200,6 +202,9 @@ struct Harness {
         };
         steps.rescue=[&](int i){++lane[i].rescues;lane[i].run->RetainUncertainShutterCandidate();};
         steps.close=[&](int i,VerifiedStillOriginal& original){
+            // As StillLane::Finish (#430): a dispatched shutter whose capture did not reach the completion
+            // wait polls its notices once before the session closes.
+            if(lane[i].run && lane[i].fake.shutters>0)lane[i].run->ObserveCompletionBeforeClose();
             events.push_back(std::string("close:")+Name(i));
             if(close_hook)close_hook(i);
             lane[i].closed=true;original.closed=true;
@@ -229,6 +234,37 @@ void CheckSent(const Harness& h){
     for(const auto& entry:h.trace)Check(!Contains(entry,"9207"));
 }
 void CheckClosedBoth(const Harness& h){Check(h.lane[0].closed && h.lane[1].closed);}
+// The pair transaction with real synthetic bodies in the preflight step only (#430): what
+// StillLane::RunPreflightOnly does, without the device. The exposure recheck refuses, so the run
+// ends right after the preflight, with no exposure possible.
+struct PreflightPair {
+    std::array<Fake,2> fake;
+    std::array<std::vector<WpdStillEvent>,2> queue;
+    std::array<WpdStillPreflightRecord,2> record;
+    std::vector<std::string> calls,log;
+    PreflightPair(){for(int i=0;i<2;++i)fake[i].camera_queue=&queue[i];}
+    VerifiedStillPair Run(){
+        StillPairSteps steps;
+        steps.preflight=[&](int i,Clock::time_point){
+            calls.push_back(std::string("preflight")+Name(i));record[i]={};
+            VerifiedStillPreflight status;status.closed=true;
+            try{ReadWpdStillPreflight(fake[i],[]{return true;},&record[i]);status.ready=true;}
+            catch(const std::exception& error){
+                const auto refusal=ClassifyWpdStillRefusal(error);
+                status.error=error.what();status.kind=refusal.kind;status.event_code=refusal.event_code;
+                status.out_of_focus=dynamic_cast<const WpdStillOutOfFocus*>(&error)!=nullptr;
+            }
+            return status;};
+        steps.prepare=[&](int i,Clock::time_point){calls.push_back(std::string("prepare")+Name(i));return StillPairPrepared{false,"stopped after the preflight",false};};
+        steps.shutter=[&](int i){calls.push_back(std::string("shutter")+Name(i));return StillShutterOutcome{};};
+        steps.collect=[&](int){return VerifiedStillOriginal{};};
+        steps.rescue=[](int){};
+        steps.close=[&](int,VerifiedStillOriginal& original){original.closed=true;};
+        steps.log=[&](const std::string& line){log.push_back(line);};
+        return CaptureStillPairShutterFirstOnce(steps,[]{return true;},Clock::now()+std::chrono::seconds(60));
+    }
+    bool Exposed()const{return fake[0].shutters+fake[1].shutters>0;}
+};
 }
 int main(){
     if(FAILED(CoInitializeEx(nullptr,COINIT_MULTITHREADED)))return 2;
@@ -387,6 +423,93 @@ int main(){
             const auto r=h.Run();CheckSent(h);CheckClosedBoth(h);
             Check(!r.complete && Contains(r.error,"ambiguous SDRAM object") && h.lane[0].persisted && r.originals[0].success);
             Check(!h.lane[1].persisted && h.lane[1].partial==h.lane[1].fake.jpeg);}
+        // #430 C3 in a pair. A is refused OutOfFocus after its shutter while B was already exposed:
+        // B is imported first, and only then does A's session poll its notices once before Close.
+        // A's completion is consumed there; no object of A is read or authorized; no shutter is resent.
+        {Harness h;h.wait={std::chrono::milliseconds(5000),std::chrono::milliseconds(2)}; // Long bound: the notice arrives on the third poll.
+            auto& a=h.lane[0].fake;a.out_of_focus_after_shutter=true;a.use_script=true;a.post_script={{},{},{{0xc102,0}}};
+            const auto r=h.Run();CheckSent(h);CheckClosedBoth(h);
+            Check(!r.complete && r.out_of_focus && !h.lane[0].persisted && h.lane[0].fake.object_reads==0 && h.lane[1].persisted && r.originals[1].success);
+            const auto& observed=h.lane[0].observation;
+            Check(observed.failure.result==WpdStillFailureObservationResult::Seen && observed.complete_event && observed.complete_event_code==0xc102 && !observed.failure.late_object_event);
+            Check(a.post_reads==3 && a.shutters==1 && h.lane[1].fake.shutters==1);
+            const auto b_object=Index(h.trace,"B:1009(0000007b)");
+            size_t a_event=std::string::npos;
+            for(size_t i=Index(h.trace,kShutterA)+1;i<h.trace.size();++i)if(h.trace[i]=="A:90c7"){a_event=i;break;}
+            Check(b_object!=std::string::npos && a_event!=std::string::npos && b_object<a_event);
+            for(const auto& entry:h.trace)Check(!(entry[0]=='A' && IsImageOperation(entry)));
+            Check(h.events==std::vector<std::string>{"preflight:A","preflight:B","open:A","open:B","close:A","close:B"});}
+        // The same, with an image notice instead: recorded as late, nothing read for it, B unaffected.
+        {Harness h;auto& a=h.lane[0].fake;a.out_of_focus_after_shutter=true;a.use_script=true;a.post_script={{{0xc101,123}}};
+            const auto r=h.Run();CheckSent(h);CheckClosedBoth(h);
+            const auto& observed=h.lane[0].observation;
+            Check(!r.complete && observed.failure.result==WpdStillFailureObservationResult::ObjectEvent && observed.failure.late_object_event && !observed.complete_event);
+            for(const auto& entry:h.trace)Check(!(entry[0]=='A' && IsImageOperation(entry)));
+            Check(!h.lane[0].persisted && h.lane[0].partial.empty() && h.lane[1].persisted && r.originals[1].success);}
+        // A completion never comes: the bound passes, the capture fails as it did (OutOfFocus), B is kept.
+        {Harness h;auto& a=h.lane[0].fake;a.out_of_focus_after_shutter=true;
+            a.use_script=true;a.post_script.assign(1000,{});
+            const auto r=h.Run();CheckSent(h);CheckClosedBoth(h);
+            Check(!r.complete && r.out_of_focus && h.lane[0].observation.failure.result==WpdStillFailureObservationResult::TimedOut && !h.lane[0].observation.complete_event);
+            Check(h.lane[1].persisted && r.originals[1].success);}
+        // A stop or the deadline before the observation: no notice is read after the shutter.
+        {Harness h;auto& a=h.lane[0].fake;a.out_of_focus_after_shutter=true;a.use_script=true;a.post_script={{{0xc102,0}}};
+            h.lane[1].fake.on_shutter=[&]{h.deadline_passed=true;};
+            const auto r=h.Run();CheckSent(h);CheckClosedBoth(h);
+            Check(!r.complete && a.post_reads==0 && h.lane[0].observation.failure.result==WpdStillFailureObservationResult::Aborted && !h.lane[0].observation.complete_event);}
+        // A failure that never dispatched a shutter observes nothing.
+        {Harness h;h.lane[1].fake.preflight_event=0x4005;const auto r=h.Run();CheckSent(h);CheckClosedBoth(h);
+            Check(!r.complete && h.lane[0].observation.failure.result==WpdStillFailureObservationResult::NotRun && h.lane[1].observation.failure.result==WpdStillFailureObservationResult::NotRun);}
+        // The success path is unchanged: both completions are read as before and neither body polls again.
+        {Harness h;const auto r=h.Run();CheckSent(h);
+            Check(r.complete && h.lane[0].observation.failure.result==WpdStillFailureObservationResult::NotRun && h.lane[1].observation.failure.result==WpdStillFailureObservationResult::NotRun);
+            Check(h.lane[0].observation.completion_wait==WpdStillCompletionWaitResult::AlreadySeen && h.lane[1].observation.completion_wait==WpdStillCompletionWaitResult::AlreadySeen);}
+
+        // #430 C2: one press reads what both bodies hold. A and B each carry a leftover completion:
+        // the first transaction stops on both and names both, the second passes.
+        {PreflightPair p;p.queue[0]={{0xc102,0}};p.queue[1]={{0xc102,0}};
+            const auto first=p.Run();
+            Check(!first.complete && !first.preflight_complete && p.calls==std::vector<std::string>{"preflightA","preflightB"} && !p.Exposed());
+            Check(first.preflight_checked[0] && first.preflight_checked[1] && first.preflight[0].kind==StillPreflightKind::Event && first.preflight[1].kind==StillPreflightKind::Event);
+            Check(first.preflight[0].event_code==0xc102 && first.preflight[1].event_code==0xc102 && !first.shutter_dispatched[0] && !first.shutter_dispatched[1]);
+            Check(first.error=="CAM-A preflight: pending capture completion code=0xc102 phase=before_shutter; CAM-B preflight: pending capture completion code=0xc102 phase=before_shutter");
+            Check(p.record[0].codes.Describe()=="0xc102:1" && p.record[1].codes.Describe()=="0xc102:1" && p.queue[0].empty() && p.queue[1].empty());
+            Check(p.log==std::vector<std::string>{"pair_preflight_result a=refused b=refused a_kind=event b_kind=event a_code=0xc102 b_code=0xc102 shutter_commands=0"});
+            p.calls.clear();p.log.clear();
+            const auto second=p.Run();
+            Check(second.preflight_complete && p.calls==std::vector<std::string>{"preflightA","preflightB","prepareA"} && p.log.empty() && !p.Exposed());
+            Check(second.preflight[0].ready && second.preflight[1].ready && p.record[0].polls==2 && p.record[1].polls==2);}
+        // Several notices in one read, then the next press passes (what an unlucky restart-and-retry cost before).
+        {PreflightPair p;p.queue[0]={{0xc102,0},{0x4005,0}};
+            const auto first=p.Run();
+            Check(!first.preflight_complete && first.preflight[0].kind==StillPreflightKind::Event && first.preflight[0].event_code==0xc102 && first.preflight[1].ready);
+            Check(p.record[0].codes.Describe()=="0x4005:1,0xc102:1" && p.record[0].polls==1);
+            Check(p.log==std::vector<std::string>{"pair_preflight_result a=refused b=ready a_kind=event b_kind=none a_code=0xc102 b_code=none shutter_commands=0"});
+            Check(p.Run().preflight_complete);}
+        // A refused for a capture setting or for focus: B is still read; no shutter.
+        {PreflightPair p;p.fake[0].out_of_focus_before_shutter=true;p.fake[1].bad_quality=true;
+            const auto r=p.Run();
+            Check(!r.preflight_complete && r.out_of_focus && r.preflight[0].kind==StillPreflightKind::OutOfFocus && r.preflight[0].out_of_focus && r.preflight[1].kind==StillPreflightKind::Quality);
+            Check(p.calls==std::vector<std::string>{"preflightA","preflightB"} && !p.Exposed());
+            const auto text=DescribeStillPairPreflightRefusal(r);
+            Check(text.find(L"A：ピントが合っていないと本体が答えました。")!=std::wstring::npos && text.find(L"B：画質が JPEG Fine になっていません。")!=std::wstring::npos);}
+        {PreflightPair p;p.fake[1].live_on=true;const auto r=p.Run();
+            Check(!r.preflight_complete && r.preflight[0].ready && r.preflight[1].kind==StillPreflightKind::LiveViewOn && r.error=="CAM-B preflight: capture requires Live View off");}
+        // Classification of what a preflight threw, and the log line for a read.
+        {Fake f;f.preflight_event=0x4fff;StillPreflightKind kind{};std::optional<std::uint16_t> code;
+            try{ReadWpdStillPreflight(f,[]{return true;});}catch(const std::exception& error){const auto r=ClassifyWpdStillRefusal(error);kind=r.kind;code=r.event_code;}
+            Check(kind==StillPreflightKind::Event && code==0x4fff);}
+        {const auto refusal=ClassifyWpdStillRefusal(std::runtime_error("still data transfer failed: 3"));Check(refusal.kind==StillPreflightKind::Transport && !refusal.event_code);
+            Check(ClassifyWpdStillRefusal(std::runtime_error("still transaction deadline/stop")).kind==StillPreflightKind::Transport);
+            Check(ClassifyWpdStillRefusal(WpdStillOutOfFocus{}).kind==StillPreflightKind::OutOfFocus);
+            Check(ClassifyWpdStillRefusal(WpdStillStateRefused(WpdStillStateRefusal::Size,"x")).kind==StillPreflightKind::Size);}
+        {WpdStillPreflightRecord ready;ready.polls=2;
+            Check(DescribeWpdStillPreflightEvents("check",ready,nullptr)=="preflight_events stage=check polls=2 codes=none refresh=0 result=ready refused_code=none kind=none");
+            WpdStillPreflightRecord refused;refused.polls=1;refused.refresh=true;const std::vector<WpdStillEvent> events{{0xc102,0x7b},{0x4006,1}};refused.codes.Add(events);
+            const WpdStillRefusal why{StillPreflightKind::Event,0xc102};
+            const auto line=DescribeWpdStillPreflightEvents("recheck",refused,&why);
+            Check(line=="preflight_events stage=recheck polls=1 codes=0x4006:1,0xc102:1 refresh=1 result=refused refused_code=0xc102 kind=event");
+            Check(line.find("7b")==std::string::npos);}
         try{PersistContracts();}catch(const std::exception& error){Check(false);std::cerr<<"persist contracts: "<<error.what()<<"\n";}
     }
     CoUninitialize();std::cout<<checks<<" checks, "<<failures<<" failures\n";return failures?1:0;
