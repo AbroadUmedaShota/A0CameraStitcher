@@ -39,7 +39,13 @@ unsigned captures_saved{},preview_sessions{};
 std::optional<int> capture_once_alias,capture_pending;
 // composite_skip: the originals were saved but no composite was made (#400); the text is shown on screen and in the evidence record.
 struct CaptureUiOutcome {StillCaptureOutcome capture;std::optional<a0::m2::experimental::StillReviewResult> review;bool preflight_refused{};
-    std::optional<a0::m2::experimental::FixedCompositeSkip> composite_skip;std::string composite_detail;std::array<std::filesystem::path,2> originals;};
+    std::optional<a0::m2::experimental::FixedCompositeSkip> composite_skip;std::string composite_detail;std::array<std::filesystem::path,2> originals;
+    // Both originals are saved and the composite step threw (the 180-second window, memory, a size mismatch, the gate). Set with
+    // capture.success: the next shot is allowed exactly as after a skip. composite_cleanup is what became of a JPEG without a report.
+    std::optional<CompositeFailureReason> composite_failure;ReportlessCleanup composite_cleanup{};
+    // The composite and its report are both saved and the 180-second window closed before the writer returned. The composite is kept;
+    // the row says the window was passed.
+    bool deadline_passed{};};
 std::future<CaptureUiOutcome> capture_future;
 using ReviewGeometry=a0::m2::experimental::PreviewReviewGeometry;
 ReviewGeometry pending_geometry;
@@ -70,6 +76,14 @@ struct MergeView {
 // thread while no merge worker exists; the merge worker and the UI only read it.
 FixedPreviewSource fixed_source;
 bool FixedConditionPresent(){return fixed_source.Present();}
+// The live registration of C for a condition v3 (#417 LC). live_runtime is replaced only by PrepareLiveRuntime (or the smoke), on the
+// UI thread while no merge worker exists; the merge worker, its helper thread and Paint only call the runtime's own thread-safe members.
+// live_estimator_override and live_design_override are replaced only by --live-c-ui-smoke, which runs without a camera.
+std::shared_ptr<LiveRegistrationRuntime> live_runtime;
+LiveEstimator live_estimator_override;
+std::optional<LiveTrackerDesign> live_design_override;
+std::string live_condition_sha;
+unsigned live_captures_seen{};
 // Read again at every preview session start, so a condition made between sessions is used.
 void LoadFixedSource(){
     try{
@@ -79,7 +93,7 @@ void LoadFixedSource(){
         fixed_source={};fixed_source.reason=a0::m2::experimental::FixedCompositeSkip::condition_invalid;fixed_source.detail=error.what();
     }
     std::ostringstream line;line.imbue(std::locale::classic());
-    line<<"C fixed_composite_condition="<<(fixed_source.loaded || fixed_source.loaded_v2?"present":fixed_source.reason==a0::m2::experimental::FixedCompositeSkip::condition_absent?"absent":"invalid");
+    line<<"C fixed_composite_condition="<<(fixed_source.loaded || fixed_source.loaded_v2 || fixed_source.loaded_v3?"present":fixed_source.reason==a0::m2::experimental::FixedCompositeSkip::condition_absent?"absent":"invalid");
     if(fixed_source.loaded){const auto& c=fixed_source.loaded->condition;
         line<<" version=1 sha256="<<fixed_source.loaded->file_sha256<<" seam_column="<<c.seam.column<<" seam_origin="<<a0::m2::experimental::FixedSeamOriginName(c.seam.origin)
             <<" orientation="<<a0::m2::experimental::MountOrientationName(c.orientation)<<" approval=unapproved";}
@@ -87,8 +101,50 @@ void LoadFixedSource(){
         line<<" version=2 sha256="<<fixed_source.loaded_v2->file_sha256<<" profile_sha256="<<p.profile_file_sha256<<" profile_fingerprint_sha256="<<p.profile_fingerprint_sha256
             <<" raster="<<c.raster.width_pixels<<"x"<<c.raster.height_pixels<<"@"<<c.raster.dpi<<"dpi seam_column="<<c.seam.column<<" seam_origin="<<a0::m2::experimental::FixedSeamOriginName(c.seam.origin)
             <<" orientation="<<a0::m2::experimental::MountOrientationName(c.orientation)<<" approval=unapproved";}
+    else if(fixed_source.loaded_v3){const auto& c=fixed_source.loaded_v3->condition;const auto& p=fixed_source.loaded_v3->profile;
+        line<<" version=3 sha256="<<fixed_source.loaded_v3->file_sha256<<" profile_sha256="<<p.profile_file_sha256<<" profile_fingerprint_sha256="<<p.profile_fingerprint_sha256
+            <<" raster="<<c.raster.width_pixels<<"x"<<c.raster.height_pixels<<"@"<<c.raster.dpi<<"dpi seam_column="<<c.seam.column<<" seam_origin="<<a0::m2::experimental::FixedSeamOriginName(c.seam.origin)
+            <<" orientation="<<a0::m2::experimental::MountOrientationName(c.orientation)<<" revision="<<c.revision.sequence<<" registration_live="<<(c.registration.live?1:0)<<" approval=unapproved";}
     else if(!fixed_source.loaded && fixed_source.reason!=a0::m2::experimental::FixedCompositeSkip::condition_absent)line<<" reason="<<a0::m2::experimental::FixedCompositeSkipCode(fixed_source.reason);
     Log(line.str());
+}
+// The live registration of C (#417 LC): a runtime for a condition v3, made at every preview session start (the condition is read
+// again there). A session that follows a capture asks for its first full estimate with the reason after-capture, and a session whose
+// condition file differs from the one before with condition-reloaded; the first one is session-start. Without a v3 condition there
+// is no runtime, and C is drawn as before. A setup failure leaves no runtime: C is drawn with the fixed mapping and says so.
+void PrepareLiveRuntime(){
+    live_runtime.reset();
+    if(!fixed_source.loaded_v3)return;
+    const auto& loaded=*fixed_source.loaded_v3;
+    try{
+        LiveRegistrationRuntime::Config config;
+        if(live_design_override)config.design=*live_design_override;
+        config.base_pose=loaded.condition.base_pose;
+        config.live_enabled=loaded.condition.registration.live.has_value();
+        config.mount=mount_orientation;
+        const auto origin=Clock::now();
+        config.clock=[origin]{return std::chrono::duration<double>(Clock::now()-origin).count();};
+        config.log=[](const std::string& line){Log(line);};
+        auto runtime=std::make_shared<LiveRegistrationRuntime>(config,loaded.profile.parameters);
+        const bool captured=captures_saved!=live_captures_seen;
+        const bool reread=!live_condition_sha.empty() && live_condition_sha!=loaded.file_sha256;
+        const auto reason=captured?LiveFullReason::after_capture:reread?LiveFullReason::condition_reloaded:LiveFullReason::session_start;
+        if(reason!=LiveFullReason::session_start)runtime->Restart(reason);
+        live_captures_seen=captures_saved;live_condition_sha=loaded.file_sha256;
+        live_runtime=std::move(runtime);
+        const auto& t=config.design.tracker;
+        std::ostringstream line;line.imbue(std::locale::classic());
+        line<<"C live_registration_session reason="<<LiveFullReasonCode(reason)<<" live_enabled="<<(config.live_enabled?1:0)
+            <<" design=draft follow_interval_s="<<t.follow_interval_seconds<<" hold_s="<<t.hold_seconds<<" full_retry_s="<<t.full_retry_seconds
+            <<" follow_change_limit_px="<<t.follow_change_limit_px<<" inlier_fraction_floor="<<t.inlier_fraction_floor
+            <<" brightness_change_limit="<<t.brightness_change_limit<<" tau_bake_px="<<t.bake_threshold_px
+            <<" adopt_threshold_px="<<t.adopt_threshold_px<<" adopt_sigma_factor="<<t.adopt_sigma_factor
+            <<" difference_samples_per_axis="<<config.design.difference_samples_per_axis<<" quality_accepted=0";
+        Log(line.str());
+    }catch(const std::exception& error){
+        live_runtime.reset();
+        Log(std::string("C live_registration_session setup_failed=1 detail=")+error.what());
+    }
 }
 void LogPreviewChoice(const FixedPreviewChoice& choice){
     std::ostringstream line;line.imbue(std::locale::classic());
@@ -218,9 +274,47 @@ void PublishFixedC(const FixedPreviewChoice& choice,const a0::m2::render::BgrIma
         merged.error=L"固定の合成条件でCを描けませんでした。A/Bのフレームの大きさを確認してください";
     }
 }
+// The frames that the worker of the live registration estimates from (#417 LC): the same reduced and oriented pair that C is drawn
+// from. LivePairReady is cheap (timestamps only); SnapshotLivePair copies and reduces. Neither holds a camera lock longer than a copy.
+bool LivePairReady(){
+    std::array<Clock::time_point,2> time{};std::array<bool,2> present{};
+    for(int i=0;i<2;++i){auto& c=*cameras[i];std::lock_guard lock(c.mutex);time[i]=c.last;present[i]=!c.pixels.bytes.empty();}
+    return !stopping && present[0] && present[1] && PreviewPairFresh(Clock::now(),time[0],time[1]);
+}
+bool SnapshotLivePair(a0::m2::render::BgrImage& small_a,a0::m2::render::BgrImage& small_b){
+    Pixels a,b;Clock::time_point time_a{},time_b{};
+    for(int i=0;i<2;++i){auto& c=*cameras[i];std::lock_guard lock(c.mutex);
+        if(i==0){a=c.pixels;time_a=c.last;}else{b=c.pixels;time_b=c.last;}}
+    if(a.bytes.empty() || b.bytes.empty() || !PreviewPairFresh(Clock::now(),time_a,time_b))return false;
+    small_a=SmallBgr(a);small_b=SmallBgr(b);
+    a0::m2::experimental::OrientRenderInput(small_a,mount_orientation);a0::m2::experimental::OrientRenderInput(small_b,mount_orientation);
+    return true;
+}
+// The loop of C. With a live registration (condition v3) a second thread runs for as long as this loop does: the worker that
+// estimates, bakes camera B's table again and swaps the plan. This loop only reads the plan in force (a shared_ptr under a mutex), so
+// the 80 ms pass never estimates and never bakes.
 void MergeLoop(std::stop_token stop){
     std::uint64_t last_a{},last_b{},last_revision=~std::uint64_t{};
     std::optional<FixedPreviewChoice> choice;unsigned choice_width{},choice_height{};
+    const auto runtime=live_runtime;
+    std::jthread live_worker;
+    if(runtime){
+        try{
+            // The estimator is made here, before the worker exists: what making it throws is logged below and C stays on the fixed
+            // mapping. Inside the worker's own function nothing would catch it. The condition's ranges go with it (the plan does not
+            // carry them); fixed_source is only read while this loop runs.
+            const LiveEstimator estimator=live_estimator_override?live_estimator_override:
+                MakeLiveEstimator([runtime]{return runtime->BasePlan();},runtime->Design(),ConnectedLiveEstimatorEntrance(),
+                    fixed_source.loaded_v3?std::optional<LiveRegistrationRanges>(LiveRegistrationRangesOf(fixed_source.loaded_v3->condition.registration)):std::nullopt);
+            live_worker=std::jthread([runtime,estimator](std::stop_token live_stop){
+                LiveFrameSource frames;
+                frames.ready=[]{return LivePairReady();};
+                frames.snapshot=[](a0::m2::render::BgrImage& a,a0::m2::render::BgrImage& b){return SnapshotLivePair(a,b);};
+                runtime->Work(live_stop,[]{return stopping.load();},frames,estimator,std::chrono::milliseconds(50));
+            });
+        }catch(const std::exception& error){Log("C live_registration worker_start_failed=1 detail="+LiveLogSafeText(error.what()));}
+        catch(...){Log("C live_registration worker_start_failed=1 detail=an exception of an unknown kind");}
+    }
     while(!stop.stop_requested() && !stopping){
         Pixels a,b;Clock::time_point time_a{},time_b{};std::uint64_t sequence_a{},sequence_b{},revision{};unsigned overlap{};int vertical{};
         {std::lock_guard lock(merged.mutex);overlap=merged.overlap_pixels;vertical=merged.vertical_pixels;revision=merged.revision;}
@@ -238,19 +332,26 @@ void MergeLoop(std::stop_token stop){
                 if(!choice || choice_width!=small_a.width || choice_height!=small_a.height){
                     choice=ChoosePreviewC(fixed_source,mount_orientation,small_a.width,small_a.height);choice_width=small_a.width;choice_height=small_a.height;
                     LogPreviewChoice(*choice);
+                    // #417: the plan chosen for this size is the fixed mapping; the worker bakes B's table from it.
+                    if(runtime){if(choice->mode==PreviewCMode::fixed_composite && choice->plan.live)runtime->PublishBase(choice->plan);else runtime->ClearBase();}
+                }
+                // The plan in force: the base plan until the worker has baked one for the mapping that it estimated.
+                const FixedPreviewChoice* shown=&*choice;FixedPreviewChoice baked_choice;
+                if(runtime && choice->mode==PreviewCMode::fixed_composite && choice->plan.live){
+                    if(const auto current=runtime->CurrentPlan()){baked_choice.mode=choice->mode;baked_choice.plan=*current;shown=&baked_choice;}
                 }
                 bool align=false;
                 {std::lock_guard lock(merged.mutex);
                     merged.source_width=small_a.width;merged.source_height=small_a.height;
                     if(!merged.overlap_pixels)merged.overlap_pixels=small_a.width*30/100;
                     overlap=merged.overlap_pixels;
-                    merged.decided=true;merged.mode=choice->mode;merged.fixed_plan=choice->plan;
+                    merged.decided=true;merged.mode=choice->mode;merged.fixed_plan=shown->plan;
                     // With a fixed condition no alignment request moves C (#401): nothing is estimated or applied.
                     if(choice->mode!=PreviewCMode::uncalibrated){merged.auto_requested=false;merged.auto_busy=false;}
                     else if(merged.auto_requested && merged.revision==revision){merged.auto_requested=false;align=true;}
                 }
                 if(choice->mode!=PreviewCMode::uncalibrated){
-                    PublishFixedC(*choice,small_a,small_b,time_a,time_b,revision,stop);
+                    PublishFixedC(*shown,small_a,small_b,time_a,time_b,revision,stop);
                     last_a=sequence_a;last_b=sequence_b;last_revision=revision;
                     std::this_thread::sleep_for(std::chrono::milliseconds(80));
                     continue;
@@ -300,7 +401,7 @@ void StartPreview(){
     if(SettingsWriteBusy())throw std::runtime_error("a settings write or reread holds the cameras");
 #endif
     stopping=false;camera_end_observed=false;ready_count=0;preview_joined=false;ClearMerge();DiscardSettingsView();
-    if(!cleanup_only)LoadFixedSource(); // before the merge worker exists (#401)
+    if(!cleanup_only){LoadFixedSource();PrepareLiveRuntime();} // before the merge worker exists (#401, #417)
     for(int i=0;i<2;++i){cameras[i]=std::make_unique<Camera>();cameras[i]->id=registered_ids[i];cameras[i]->alias=i==0?"CAM-A":"CAM-B";}
     camera_workers[0]=std::jthread([]{cameras[0]->Run();});
     try{camera_workers[1]=std::jthread([]{cameras[1]->Run();});}
@@ -582,6 +683,23 @@ void RequestSettingsRead(){
         }
     });
 }
+// The two rows above the picture of a registered C (#417 LC): what C is drawn with, and the direction of the two cameras so that they
+// can be adjusted before the shot (B is the value against A now; A is the value at calibration). Both sentences come from
+// live_registration_display.hpp. Without a runtime (its setup failed) C is the fixed mapping and the rows say so.
+inline constexpr int kLiveRowsHeight=46;
+void DrawLiveRows(HDC dc,const RECT& client){
+    std::string state,orientation;
+    if(live_runtime){const auto status=live_runtime->Status();state=status.state_text;orientation=status.orientation_line;}
+    else{state=LiveRegistrationStartFailedText();orientation=LiveOrientationRowText(LiveOrientationTextsOf(std::nullopt,std::nullopt));}
+    const auto wide_state=WidenUtf8(state),wide_orientation=WidenUtf8(orientation);
+    RECT state_rect{12,client.bottom/2+140,client.right-12,client.bottom/2+161};
+    RECT orientation_rect{12,client.bottom/2+163,client.right-12,client.bottom/2+184};
+    DrawTextW(dc,wide_state.c_str(),-1,&state_rect,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
+    // The direction is what the person adjusts by: a warmer colour than the notes.
+    SetTextColor(dc,RGB(255,224,160));
+    DrawTextW(dc,wide_orientation.c_str(),-1,&orientation_rect,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
+    SetTextColor(dc,RGB(240,240,240));
+}
 std::array<std::uint64_t,6> Paint(HDC dc,RECT client){
     std::array<std::uint64_t,6> drawn{};
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
@@ -606,7 +724,7 @@ std::array<std::uint64_t,6> Paint(HDC dc,RECT client){
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
     if(panel_over_live)DrawSettingsPanel(dc,client); // the settings panel takes the place of both Live areas
 #endif
-    RECT status_rect{12,client.bottom/2+4,client.right-12,client.bottom/2+48};
+    RECT status_rect{12,client.bottom/2+4,client.right-12,client.bottom/2+86};
     DrawTextW(dc,capture_status.c_str(),-1,&status_rect,DT_LEFT|DT_WORDBREAK|DT_NOPREFIX);
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
     if(preview_joined && settings_write && settings_write->screen->View() && DrawSettingsWrite(dc,client))return drawn; // a confirmation or a result is never under the review
@@ -628,9 +746,11 @@ std::array<std::uint64_t,6> Paint(HDC dc,RECT client){
     // The title and the standing note name the kind of C (#401): drawn with the fixed composite condition,
     // not drawn although a condition exists, or the uncalibrated C when there is none.
     std::wstring title,status;
+    bool live_rows=false; // #417: two more rows (the state of the registration, the direction of the cameras) for a condition v3
     if(merged.decided && merged.mode==PreviewCMode::fixed_composite){
         title=FixedPreviewTitle(mount_orientation,merged.fixed_plan);
         status=merged.position_refusal.empty()?FixedPreviewNote(merged.fixed_plan):merged.position_refusal;
+        live_rows=merged.fixed_plan.live!=nullptr;
     }else if(FixedConditionPresent()){
         title=FixedPreviewUnavailableTitle(fixed_source);
         status=merged.decided?merged.position_refusal:L"固定の合成条件を確認しています…";
@@ -641,13 +761,16 @@ std::array<std::uint64_t,6> Paint(HDC dc,RECT client){
     TextOutW(dc,12,client.bottom/2+88,title.c_str(),static_cast<int>(title.size()));
     RECT status_line{12,client.bottom/2+110,client.right-12,client.bottom/2+138};
     DrawTextW(dc,status.c_str(),-1,&status_line,DT_LEFT|DT_WORDBREAK|DT_NOPREFIX);
+    // The picture of C starts lower by the two rows, only for a registered C; every other C keeps its place.
+    const int picture_top=client.bottom/2+140+(live_rows?kLiveRowsHeight:0),picture_height=client.bottom/2-155-(live_rows?kLiveRowsHeight:0);
+    if(live_rows && !stopping)DrawLiveRows(dc,client);
     if(!stopping && merged.rendered_revision==merged.revision && !merged.pixels.bytes.empty() && PreviewPairFresh(Clock::now(),merged.source_a,merged.source_b)){
-        if(DrawPixels(dc,merged.pixels,12,client.bottom/2+140,client.right-24,client.bottom/2-155)){
+        if(DrawPixels(dc,merged.pixels,12,picture_top,client.right-24,picture_height)){
             drawn[2]=merged.frames;
             if(merged.decided && merged.mode==PreviewCMode::fixed_composite && merged.show_seam)
-                DrawSeamLine(dc,FitPixels(merged.pixels,12,client.bottom/2+140,client.right-24,client.bottom/2-155),merged.pixels,merged.seam_column);
+                DrawSeamLine(dc,FitPixels(merged.pixels,12,picture_top,client.right-24,picture_height),merged.pixels,merged.seam_column);
         }
-    }else{const auto text=stopping?L"C: ライブビュー停止中です":merged.error.empty()?L"C: 両方の新しいフレームを待っています":merged.error.c_str();TextOutW(dc,12,client.bottom/2+145,text,lstrlenW(text));}
+    }else{const auto text=stopping?L"C: ライブビュー停止中です":merged.error.empty()?L"C: 両方の新しいフレームを待っています":merged.error.c_str();TextOutW(dc,12,picture_top+5,text,lstrlenW(text));}
     return drawn;
 }
 void RequestCapture(int index){
@@ -669,52 +792,51 @@ void RequestCapture(int index){
     if(index==2)capture_status=L"両台撮影・確認用JPEG Mergeの準備中：両Liveを停止しています…";
     stopping=true;ClearMerge();Log("ui_capture_requested="+std::to_string(index)+" both_live_stop_required=1");
 }
+// Seams that only --pair-v3-ui-smoke replaces (a synthetic pair, a temporary settings folder and review root). The defaults are
+// what the preview always did: the real pair capture, the settings beside the identity map, the private review root.
+std::function<VerifiedStillPair(const std::array<std::wstring,2>&,Clock::time_point)> pair_capture_backend=
+    [](const std::array<std::wstring,2>& ids,Clock::time_point deadline){return CaptureStillPairShutterFirst(ids,deadline);};
+std::optional<std::filesystem::path> pair_settings_folder_override,pair_review_root_override;
 CaptureUiOutcome SavePairReview(const std::array<std::wstring,2>& ids,ReviewGeometry geometry,Clock::time_point deadline){
     CaptureUiOutcome result;
-    const auto root=DefaultIdentityMapPath().parent_path().parent_path()/"wpd-pair-reviews";
+    const auto root=pair_review_root_override?*pair_review_root_override:DefaultIdentityMapPath().parent_path().parent_path()/"wpd-pair-reviews";
     EvidenceWriter evidence(root,NewRunId(),"wpd-uncalibrated-pair-review");
+    const auto review_directory=evidence.RunRoot()/"review";
+    // True from the moment both originals are on disk. A throw after that is a composite that was not made, never a lost capture.
+    bool originals_saved=false;
     try{
         evidence.RecordState("pair","BothLiveViewsClosed");
         // Read first and on every capture, so a condition made between captures is used. The v1 (similarity) and
-        // v2 (lens-aware, with its profile) records share the file name; the schema decides (#405 W4).
+        // v2 (lens-aware, with its profile) records share the file name; the schema decides (#405 W4). A v3 record is the
+        // revision in force in the revisions folder beside it (#417); a v1 or v2 file together with a revision is condition-invalid.
         auto condition_file=DefaultIdentityMapPath();condition_file.replace_filename(a0::m2::experimental::kFixedCompositeConditionName);
+        if(pair_settings_folder_override)condition_file=*pair_settings_folder_override/a0::m2::experimental::kFixedCompositeConditionName;
         const auto selection=a0::m2::experimental::SelectFixedComposite(condition_file,[](const std::vector<unsigned char>& bytes){return a0::phase0::Sha256Hex(bytes);});
-        const a0::m2::experimental::LoadedFixedCompositeCondition* condition=selection.loaded?std::get_if<a0::m2::experimental::LoadedFixedCompositeCondition>(&*selection.loaded):nullptr;
-        const a0::m2::experimental::LoadedFixedCompositeConditionV2* condition_v2=selection.loaded?std::get_if<a0::m2::experimental::LoadedFixedCompositeConditionV2>(&*selection.loaded):nullptr;
-        const auto condition_skip=selection.reason;
-        if(!selection.loaded && selection.reason!=a0::m2::experimental::FixedCompositeSkip::condition_absent)Log("pair_fixed_composite_condition_unusable reason="+std::string(a0::m2::experimental::FixedCompositeSkipCode(selection.reason))+" detail="+selection.detail);
+        if(!selection.loaded && selection.reason!=a0::m2::experimental::FixedCompositeSkip::condition_absent)Log("pair_fixed_composite_condition_unusable reason="+std::string(a0::m2::experimental::FixedCompositeSkipCode(selection.reason))+" detail="+RedactPaths(selection.detail));
         // #389: both shutters precede either import, all under this one deadline.
-        auto pair=CaptureStillPairShutterFirst(ids,deadline);
+        auto pair=pair_capture_backend(ids,deadline);
         if(!pair.complete){result.capture.out_of_focus=pair.out_of_focus;result.preflight_refused=!pair.shutter_dispatched[0] && !pair.shutter_dispatched[1];throw std::runtime_error(pair.error);}
         const auto& a=pair.originals[0];const auto& b=pair.originals[1];
-        a0::m2::experimental::StillReviewRequest request{a.path,b.path,evidence.RunRoot()/"review",a.sha256,b.sha256,evidence.RunId(),geometry,deadline};
+        result.capture={true,true,a.path,a.bytes,a.sha256,{}};result.originals={a.path,b.path};originals_saved=true;
+        a0::m2::experimental::StillReviewRequest request{a.path,b.path,review_directory,a.sha256,b.sha256,evidence.RunId(),geometry,deadline};
         // #400: geometry and seam come from the fixed composite condition beside the
         // merge policy. Its absence or damage never stops the capture: the originals
         // are kept and only the composite is skipped, with the reason on screen.
+        // v1, v2 or v3 by the selected record (pair_review_registration.hpp). The v3 composite takes the deadline of this capture as
+        // the time left for its stages: the 180-second window is the one RequestCapture set and is not extended here.
         namespace m2e=a0::m2::experimental;
-        std::optional<m2e::FixedCompositeSkip> skip;
-        if(condition){
-            const auto policy_scale=merge_policy?merge_policy->scale_max_percent:std::nullopt;
-            request.fixed_composite=m2e::StillReviewRequest::FixedComposite{&condition->condition,condition->file_sha256,
-                m2e::ComparePolicyLimit(condition->condition.scale_auto_correction_max_percent,policy_scale,merge_policy?m2e::FixedPolicyCheck::policy_without_scale_limit:m2e::FixedPolicyCheck::policy_absent)};
-            try{result.review=m2e::WriteUncalibratedStillReview(request);}
-            catch(const m2e::FixedCompositeUnavailable& unavailable){skip=unavailable.Skip();result.composite_detail=unavailable.what();}
-        }else if(condition_v2){
-            const auto policy_scale=merge_policy?merge_policy->scale_max_percent:std::nullopt;
-            request.fixed_composite_lens=m2e::StillReviewRequest::FixedCompositeLens{&condition_v2->condition,&condition_v2->profile,condition_v2->file_sha256,
-                m2e::ComparePolicyLimit(condition_v2->condition.scale_auto_correction_max_percent,policy_scale,merge_policy?m2e::FixedPolicyCheck::policy_without_scale_limit:m2e::FixedPolicyCheck::policy_absent)};
-            try{result.review=m2e::WriteUncalibratedStillReview(request);}
-            catch(const m2e::FixedCompositeUnavailable& unavailable){skip=unavailable.Skip();result.composite_detail=unavailable.what();}
-        }else skip=condition_skip;
+        auto composed=ComposePairWithSelection(selection,request,merge_policy);
+        result.review=std::move(composed.review);result.composite_detail=composed.detail;
+        const auto skip=composed.skip;
         if(!result.review){
             result.composite_skip=skip;
-            result.capture={true,true,a.path,a.bytes,a.sha256,{}};
-            result.originals={a.path,b.path};
             evidence.RecordState("pair","OriginalsSavedCompositeSkipped",{},m2e::FixedCompositeSkipCode(*skip));
             Log("pair_composite_skipped=1 reason="+std::string(m2e::FixedCompositeSkipCode(*skip))+" originals_saved=2 calibrated=0");
             return result;
         }
-        if(Clock::now()>=deadline)throw std::runtime_error("pair deadline after review; all files retained");
+        // The composite and its report are both written and verified: a window that closed meanwhile does not undo them (owner's
+        // decision). The row says the window was passed; the gate is not_run when it had no time.
+        if(result.review->deadline_passed || Clock::now()>=deadline){result.deadline_passed=true;Log("pair_review_after_deadline=1 files_retained=1");}
         result.capture={true,true,result.review->jpeg,std::filesystem::file_size(result.review->jpeg),result.review->sha256,{}};
         evidence.RecordState("pair","UncalibratedReviewReady");
         Log("pair_review_saved=1 width="+std::to_string(result.review->width)+" height="+std::to_string(result.review->height)+" mount_orientation="+a0::m2::experimental::MountOrientationName(geometry.orientation)+" originals_rotated=0 calibrated=0");
@@ -727,11 +849,53 @@ CaptureUiOutcome SavePairReview(const std::array<std::wstring,2>& ids,ReviewGeom
                 <<" scale_reason="<<a0::m2::experimental::FixedScaleReasonCode(lens->scale.reason)<<" applied_scale="<<lens->scale.applied_scale<<" limit_percent="<<lens->scale.limit_percent
                 <<" used_tiles="<<lens->scale.used_tiles<<" policy_check="<<a0::m2::experimental::FixedPolicyCheckCode(lens->policy_limit.check)<<" estimate_ms="<<result.review->alignment_milliseconds<<" quality_accepted=0";Log(line.str());}
         if(const auto& seam=result.review->blend){std::ostringstream line;line.imbue(std::locale::classic());
-            line<<"pair_review_blend method="<<(result.review->fixed_composite || result.review->fixed_composite_lens?"fixed-seam":"seam-cut")<<" seam_x="<<seam->summary.x_minimum<<".."<<seam->summary.x_maximum<<" ratio="<<seam->ratio_minimum<<".."<<seam->ratio_maximum
+            line<<"pair_review_blend method="<<(result.review->fixed_composite || result.review->fixed_composite_lens || result.review->fixed_composite_registration?"fixed-seam":"seam-cut")<<" seam_x="<<seam->summary.x_minimum<<".."<<seam->summary.x_maximum<<" ratio="<<seam->ratio_minimum<<".."<<seam->ratio_maximum
                 <<" saturation_limited="<<seam->saturation_limited_pixels<<" ms="<<result.review->blend_milliseconds<<" quality_accepted=0";Log(line.str());}
+        // v8 (#417): the level, the pose of B and the paper surface, the gate, every warning and the time of each stage. No path and
+        // no camera identifier is in these lines.
+        if(result.review->fixed_composite_registration)for(const auto& line:DescribeRegistrationReview(*result.review).log)Log(line);
         std::wcout<<L"saved_review="<<result.review->jpeg.wstring()<<std::endl;
-    }catch(const std::exception& error){result.capture.success=false;result.capture.error=error.what();evidence.RecordState("pair","FailedPartial",{},error.what());Log(std::string("pair_review_failure: ")+error.what());}
+    }catch(const std::exception& error){
+        // The screen and the log get a summary with no path in it (a filesystem_error carries full paths); the evidence record keeps the text.
+        const auto summary=ErrorSummary(error);
+        if(originals_saved){
+            // Both originals were written before the composite began. Whatever threw (the 180-second window, memory, a size mismatch,
+            // the gate), the capture is complete: no composite, originals kept, the next shot allowed as after a skip. A composite JPEG
+            // that has no report is removed so that it cannot pass for a finished one. No retry, and no session is touched here.
+            const auto reason=ClassifyCompositeFailure(error,Clock::now()>=deadline);
+            result.review.reset();result.composite_skip.reset();
+            result.composite_failure=reason;result.composite_cleanup=RemoveReportlessComposite(review_directory);
+            result.capture.success=true;result.capture.closed=true;
+            const std::string code(CompositeFailureCode(reason));
+            try{evidence.RecordState("pair","OriginalsSavedCompositeFailed",{},code);}catch(const std::exception&){}
+            Log("pair_composite_failed=1 reason="+code+" originals_saved=2 calibrated=0 report_less_jpeg="+std::string(ReportlessCleanupCode(result.composite_cleanup)));
+            Log("pair_composite_failure: "+summary);
+        }else{
+            result.capture.success=false;result.capture.error=summary;
+            try{evidence.RecordState("pair","FailedPartial",{},error.what());}catch(const std::exception&){}
+            Log("pair_review_failure: "+summary);
+        }
+    }
     return result;
+}
+// The status row of a saved capture. A v8 review adds one sentence per line under the path (#417): the level, the pose of B and
+// the paper surface, the gate, the warnings, the stages the time budget dropped. Every other review has the one line it always had.
+std::wstring SavedCaptureStatus(const CaptureUiOutcome& result){
+    std::wstring status=L"保存済み: "+result.capture.path.wstring();
+    if(result.review && result.deadline_passed)status+=L"（制限時間の180秒を過ぎましたが、合成は作れています）";
+    if(result.composite_skip)status=L"原画像2枚を保存しました（A: "+result.originals[0].wstring()+L"）。合成はしていません: "+WidenUtf8(a0::m2::experimental::FixedCompositeSkipText(*result.composite_skip));
+    if(result.composite_failure){
+        // The composite step threw after both originals were saved: not a failed capture. The reason is a few words, never the exception's text.
+        status=L"合成は作れませんでした。原画像2枚は保存済みです（A: "+result.originals[0].wstring()+L"）。理由: "+WidenUtf8(CompositeFailureText(*result.composite_failure))+L"。";
+        if(result.composite_cleanup==ReportlessCleanup::not_removed)status+=L" 報告のない合成画像が残っているかもしれません。その画像は使わないでください。";
+        else if(result.composite_cleanup==ReportlessCleanup::complete_kept)status+=L" 合成画像と報告が保存先に残っていますが、完了を確認できていません。";
+    }
+    if(result.review && result.review->fixed_composite)status+=L" / "+FixedCompositeLine(*result.review->fixed_composite);
+    if(result.review && result.review->fixed_composite_lens)status+=L" / "+FixedCompositeLensLine(*result.review->fixed_composite_lens);
+    if(result.review && result.review->fixed_composite_registration)
+        for(const auto& line:DescribeRegistrationReview(*result.review).status)status+=std::wstring(L"\n")+WidenUtf8(line);
+    if(result.review && result.review->automatic)status+=L" / "+StillAlignmentLine(*result.review->automatic);
+    return status;
 }
 void AdvanceCapture(HWND hwnd){
     if(settings_future.valid() && settings_future.wait_for(std::chrono::seconds(0))==std::future_status::ready){
@@ -750,7 +914,7 @@ void AdvanceCapture(HWND hwnd){
                 capture_status=index==2?L"AとBのシャッターを続けて1回ずつ切り、原画像と確認用Merge JPEGを保存しています…":index==0?L"Aを1回撮影してPCへ保存しています…":L"Bを1回撮影してPCへ保存しています…";
                 capture_future=std::async(std::launch::async,[ids=registered_ids,index,geometry=pending_geometry,deadline=capture_deadline]{
                     try{ComScope com;if(index==2)return SavePairReview(ids,geometry,deadline);return CaptureUiOutcome{SaveStillOnce(ids[index],index==0?"CAM-A":"CAM-B",true,deadline),{}};}
-                    catch(const std::exception& error){CaptureUiOutcome result;result.capture.error=error.what();return result;}
+                    catch(const std::exception& error){CaptureUiOutcome result;result.capture.error=ErrorSummary(error);return result;}
                 });
             }else capture_status=L"Liveの安全な終了を確認できません。撮影せず停止しました。";
         }else if(!closing){
@@ -767,11 +931,7 @@ void AdvanceCapture(HWND hwnd){
     if(capture_future.valid() && capture_future.wait_for(std::chrono::seconds(0))==std::future_status::ready){
         auto result=capture_future.get();
         if(result.capture.success && result.capture.closed){
-            captures_saved+=(result.review || result.composite_skip)?2:1;capture_status=L"保存済み: "+result.capture.path.wstring();
-            if(result.composite_skip)capture_status=L"原画像2枚を保存しました（A: "+result.originals[0].wstring()+L"）。合成はしていません: "+WidenUtf8(a0::m2::experimental::FixedCompositeSkipText(*result.composite_skip));
-            if(result.review && result.review->fixed_composite)capture_status+=L" / "+FixedCompositeLine(*result.review->fixed_composite);
-            if(result.review && result.review->fixed_composite_lens)capture_status+=L" / "+FixedCompositeLensLine(*result.review->fixed_composite_lens);
-            if(result.review && result.review->automatic)capture_status+=L" / "+StillAlignmentLine(*result.review->automatic);
+            captures_saved+=(result.review || result.composite_skip || result.composite_failure)?2:1;capture_status=SavedCaptureStatus(result);
             if(result.review){
                 ++pair_reviews;review_path=result.review->jpeg;const auto& thumbnail=result.review->thumbnail;
                 if(pair_cycle_smoke){pair_cycle_reports.push_back(result.review->report);std::wcout<<L"pair_cycle_report="<<result.review->report.wstring()<<std::endl;}
@@ -779,13 +939,16 @@ void AdvanceCapture(HWND hwnd){
                 for(size_t i=0,j=0;i<thumbnail.bgr.size();i+=3,j+=4)std::copy_n(thumbnail.bgr.data()+i,3,review_pixels.bytes.data()+j);
                 // The seam is one vertical column (#400): drawn on this display copy only, never in the saved JPEG.
                 const auto seam_column=result.review->fixed_composite?std::optional<std::uint32_t>(result.review->fixed_composite->seam_column):
-                    result.review->fixed_composite_lens?std::optional<std::uint32_t>(result.review->fixed_composite_lens->seam_column):std::nullopt;
+                    result.review->fixed_composite_lens?std::optional<std::uint32_t>(result.review->fixed_composite_lens->seam_column):
+                    result.review->fixed_composite_registration?std::optional<std::uint32_t>(result.review->fixed_composite_registration->seam_column):std::nullopt;
                 if(seam_column){
                     const auto divisor=std::max(1u,(std::max(result.review->width,result.review->height)+1199)/1200);const auto column=*seam_column/divisor;
                     if(column<thumbnail.width)for(unsigned y=0;y<thumbnail.height;++y){auto* pixel=review_pixels.bytes.data()+(static_cast<size_t>(y)*thumbnail.width+column)*4;pixel[0]=255;pixel[1]=0;pixel[2]=255;}
                 }
                 review_visible=true;
             }
+            // #417 LC: the live registration is asked for a full pass after a shot here, with the originals of this shot gone from
+            // the live view: tracker.RequestFull(now, after_capture). J8w does not call it; the tracker is LC's.
             if(!closing)StartPreview();
         }else{
             capture_restart_blocked=true;
@@ -802,6 +965,261 @@ void AdvanceCapture(HWND hwnd){
 #endif
     // A settings read in progress is waited for: its Close must finish before the window (and the lease) goes.
     if(closing && preview_joined && !capture_future.valid() && !settings_future.valid())DestroyWindow(hwnd);
+}
+// --pair-v3-ui-smoke <rig profile v2 fixture folder> (#417 J8w): the pair capture's saving path with the conditions of a setup, through the
+// real SavePairReview and the status row, on a synthetic pair. No camera and no window; the settings folder and the review root are
+// temporary folders, so nothing of the machine is read or written. The frames are flat, so the estimate of B's pose is not trusted
+// and the level is G4 (the textured pair, G1 and the dropped stages are in pair_review_registration_contracts).
+int RunPairV3UiSmoke(const std::filesystem::path& fixtures){
+    Log("pair_v3_ui_synthetic=1 camera_operations=0");
+    namespace ps=a0::phase0::experimental::pair_synthetic;
+    namespace m2e=a0::m2::experimental;
+    unsigned checks{},failures{};
+    const auto check=[&](bool ok,const char* what){++checks;if(!ok){++failures;Log(std::string("pair_v3_ui_failed_check=")+what);}};
+    const auto work=std::filesystem::temp_directory_path()/("a0-pair-v3-ui-smoke-"+std::to_string(GetCurrentProcessId())+"-"+std::to_string(GetTickCount64()));
+    std::ostringstream captured;
+    auto* const original_buffer=std::cout.rdbuf(captured.rdbuf());
+    try{
+        ComScope com;
+        std::filesystem::create_directories(work);
+        const auto base_profile=ps::ReadText(fixtures/"calibrated-draft.json");
+        if(base_profile.empty())throw std::runtime_error("the rig profile fixture is missing");
+        const auto profile=ps::ProfileText(base_profile,false);
+        const auto raster=ps::TallRaster();
+        // One flat pair for every case: the originals are read, never changed.
+        const auto frames=ps::WriteFrames(work/"pair",ps::Flat(128),ps::Flat(128));
+        pair_review_root_override=work/"reviews";
+        pair_capture_backend=[&](const std::array<std::wstring,2>&,Clock::time_point){
+            VerifiedStillPair pair;pair.complete=true;pair.preflight_complete=true;pair.shutter_dispatched={true,true};
+            const std::array<std::filesystem::path,2> paths{frames.a,frames.b};
+            for(size_t i=0;i<2;++i){auto& o=pair.originals[i];o.success=true;o.closed=true;o.path=paths[i];o.bytes=std::filesystem::file_size(paths[i]);o.sha256=ps::Sha(paths[i]);}
+            return pair;
+        };
+        const std::array<std::wstring,2> ids{L"synthetic-a",L"synthetic-b"};
+        const auto good_backend=pair_capture_backend;
+        const auto capture=[&](const std::filesystem::path& settings,m2e::MountOrientation orientation=m2e::MountOrientation::normal,std::optional<Clock::time_point> deadline=std::nullopt){
+            pair_settings_folder_override=settings;
+            // A case that waits for its window to close passes the time of the close itself, so that the wait and the writer share one deadline.
+            return SavePairReview(ids,ReviewGeometry{460,307,229,3,11,orientation},deadline?*deadline:Clock::now()+std::chrono::seconds(900));
+        };
+        const auto kept=[&](const CaptureUiOutcome& r){return r.capture.success && r.capture.closed && !r.review && r.composite_skip && std::filesystem::exists(r.originals[0]) && std::filesystem::exists(r.originals[1]);};
+
+        // 1. A condition v3: the registered composite and the report v8, the sentences on the status row, the lines in the log.
+        const auto v3=ps::MakeSettings(work/"settings-v3",profile,m2e::MountOrientation::normal,raster);
+        const auto first_started=Clock::now();
+        const auto first=capture(v3.folder);
+        const auto first_took=Clock::now()-first_started;
+        check(first.capture.success && first.capture.closed && first.review && !first.composite_skip,"v3: a composite is made");
+        if(first.review){
+            check(first.review->fixed_composite_registration && !first.review->fixed_composite_lens && !first.review->fixed_composite,"v3: the review is a registered one");
+            if(first.review->fixed_composite_registration){
+                const auto& record=*first.review->fixed_composite_registration;
+                check(record.registration.level.level==m2e::GeometryLevel::g4,"v3: flat frames give G4");
+                check(record.condition_sha256==v3.loaded.file_sha256 && record.condition_sequence==1,"v3: the revision in force is the one recorded");
+                const auto saved=m2e::LoadSavedStillReview(first.review->report);
+                check(saved.fixed_composite_registration.has_value() && ps::ReadText(first.review->report).find("a0.uncalibrated-still-review.v8")!=std::string::npos,"v3: the report is v8 and reads back");
+                const auto lines=DescribeRegistrationReview(*first.review);
+                check(lines.status.size()>=4 && lines.log.size()>=4,"v3: the status and the log have their lines");
+                const auto status=SavedCaptureStatus(first);
+                check(status.find(L"保存済み: ")==0 && status.find(L"G4")!=std::wstring::npos && status.find(L"警告")!=std::wstring::npos && status.find(L'\n')!=std::wstring::npos,"v3: the status row names the level and the warnings");
+                check(lines.warnings.size()==record.warnings.size(),"v3: every warning has its sentence");
+            }
+        }
+        const auto log_after_first=captured.str();
+        check(log_after_first.find("pair_review_registration level=G4 ")!=std::string::npos && log_after_first.find("pair_review_registration_pose ")!=std::string::npos &&
+            log_after_first.find("pair_review_registration_gate ")!=std::string::npos && log_after_first.find("pair_review_registration_ms estimate_ms=")!=std::string::npos &&
+            log_after_first.find("pair_review_blend method=fixed-seam")!=std::string::npos,"v3: the log names the level, the pose, the gate and the time of each stage");
+        check(log_after_first.find("quality_accepted=0")!=std::string::npos && log_after_first.find(work.string())==std::string::npos &&
+            log_after_first.find("synthetic-a")==std::string::npos && log_after_first.find("CAM-A")==std::string::npos,"v3: the log has no path and no camera identifier");
+
+        // 2. A revision chain with a gap is a damaged condition: no composite, the originals are kept, the reason is on the row.
+        {
+            const auto gap=ps::MakeSettings(work/"settings-gap",profile,m2e::MountOrientation::normal,raster);
+            const auto revisions=gap.folder/std::string(m2e::kFixedCompositeRevisionFolderName);
+            const auto second=ps::SampleCondition(gap.folder,profile,m2e::MountOrientation::normal,raster,2,ps::Sha(revisions/"r000001.json"),m2e::FixedCompositeRevisionKind::values);
+            m2e::WriteFixedCompositeConditionV3(revisions,second);
+            std::filesystem::remove(revisions/"r000001.json");
+            const auto r=capture(gap.folder);
+            check(kept(r) && *r.composite_skip==m2e::FixedCompositeSkip::condition_invalid,"gap: condition-invalid, originals kept");
+            check(SavedCaptureStatus(r).find(L"合成はしていません")!=std::wstring::npos,"gap: the row says the composite was not made");
+        }
+        // 2b. A hand adjustment beyond the pose range is a condition that is intact: the composite is not made, the originals are kept,
+        // and the row says the adjustment is beyond the range (not that the condition must be made again).
+        {
+            const auto beyond=ps::MakeSettings(work/"settings-beyond",profile,m2e::MountOrientation::normal,raster);
+            const auto revisions=beyond.folder/std::string(m2e::kFixedCompositeRevisionFolderName);
+            auto second=ps::SampleCondition(beyond.folder,profile,m2e::MountOrientation::normal,raster,2,ps::Sha(revisions/"r000001.json"),m2e::FixedCompositeRevisionKind::values);
+            second.revision.change={};second.revision.change.kind=m2e::FixedCompositeRevisionKind::manual_adjustment;
+            second.revision.change.entered=m2e::FixedCompositeRevisionChangeV3::Entered{1,0,0};second.revision.change.maximum_seam_displacement_px=1;
+            second.base_pose.tx_mm=second.registration.envelope.position_mm*8;
+            m2e::WriteFixedCompositeConditionV3(revisions,second);
+            const auto r=capture(beyond.folder);
+            check(kept(r) && *r.composite_skip==m2e::FixedCompositeSkip::pose_outside_envelope,"beyond the range: pose-outside-envelope, originals kept");
+            const auto row=SavedCaptureStatus(r);
+            check(row.find(L"手直しが、範囲の外です")!=std::wstring::npos && row.find(L"rollback")!=std::wstring::npos && row.find(L"作り直してください")==std::wstring::npos,
+                "beyond the range: the row says the adjustment is beyond the range, not that the condition is broken");
+        }
+        // 3. A v2 file together with a revision is two sources.
+        {
+            const auto both=ps::MakeSettings(work/"settings-both",profile,m2e::MountOrientation::normal,raster);
+            m2e::FixedCompositeV2Request request;
+            request.profile_file=m2e::CopyFixedCompositeProfile(both.folder,profile,ps::Hash());request.profile_bytes=profile;request.orientation=m2e::MountOrientation::normal;
+            request.raster=raster;request.scale_auto_correction_max_percent=1;request.seam_column=ps::kSeam;request.seam_origin=m2e::FixedSeamOrigin::operator_set;
+            const auto v2=m2e::MakeFixedCompositeConditionV2(request,std::chrono::system_clock::now(),ps::Hash(),m2e::FixedCompositeCreationCheck([](const m2e::FixedCompositeConditionV2&,const m2e::FixedCompositeProfileBinding&){}));
+            m2e::WriteFixedCompositeConditionV2(both.folder/m2e::kFixedCompositeConditionName,v2);
+            const auto r=capture(both.folder);
+            check(kept(r) && *r.composite_skip==m2e::FixedCompositeSkip::condition_invalid,"v2 with a revision: condition-invalid, originals kept");
+            check(captured.str().find("two sources")!=std::string::npos,"v2 with a revision: the log says why");
+            // 4. The v2 file alone is the composite it always was (report v7, no v8 lines on the row).
+            std::filesystem::remove_all(both.folder/std::string(m2e::kFixedCompositeRevisionFolderName));
+            const auto before=captured.str().size();
+            const auto only=capture(both.folder);
+            check(only.review && only.review->fixed_composite_lens && !only.review->fixed_composite_registration && !only.composite_skip,"v2 alone: the v7 composite");
+            check(captured.str().find("pair_review_fixed_composite_lens ",before)!=std::string::npos && captured.str().find("pair_review_registration",before)==std::string::npos,"v2 alone: its own log lines, none of v8");
+            if(only.review)check(SavedCaptureStatus(only).find(L"位置合わせを")==std::wstring::npos && SavedCaptureStatus(only).find(L'\n')==std::wstring::npos,"v2 alone: one line on the row");
+        }
+        // 5. No condition at all: the originals are kept, the reason is condition-absent, nothing is logged as unusable.
+        {
+            std::filesystem::create_directories(work/"settings-none");
+            const auto before=captured.str().size();
+            const auto r=capture(work/"settings-none");
+            check(kept(r) && *r.composite_skip==m2e::FixedCompositeSkip::condition_absent,"none: condition-absent");
+            check(captured.str().find("pair_fixed_composite_condition_unusable",before)==std::string::npos,"none: not logged as unusable");
+        }
+        // 6. A condition v3 for the other mounting: the writer refuses before it creates anything, the originals are kept.
+        {
+            const auto r=capture(v3.folder,m2e::MountOrientation::rotated_180);
+            check(kept(r) && *r.composite_skip==m2e::FixedCompositeSkip::orientation_differs,"v3: orientation-differs, originals kept");
+        }
+        // 7. The composite step throws after both originals are saved (#417 M2). The capture is complete: the originals stay, the row says
+        // so and why, no composite is left behind, and the next shot is allowed (success and closed, as after a skip).
+        const auto composites_under_reviews=[&]{
+            unsigned count=0;std::error_code ec;
+            for(const auto& entry:std::filesystem::recursive_directory_iterator(work/"reviews",ec))if(entry.path().filename()==L"uncalibrated-review.jpg")++count;
+            return count;
+        };
+        const auto failed_but_kept=[&](const CaptureUiOutcome& r){
+            return r.capture.success && r.capture.closed && !r.review && !r.composite_skip && r.composite_failure && std::filesystem::exists(r.originals[0]) && std::filesystem::exists(r.originals[1]);
+        };
+        {   // 7a. The 180-second window is over before the composite begins.
+            const auto before=captured.str().size();const auto composites=composites_under_reviews();
+            const auto r=capture(v3.folder,m2e::MountOrientation::normal,Clock::now()+std::chrono::milliseconds(1));
+            check(failed_but_kept(r) && *r.composite_failure==CompositeFailureReason::time_limit,"expired window: originals kept, reason time_limit");
+            const auto status=SavedCaptureStatus(r);
+            check(status.find(L"合成は作れませんでした")!=std::wstring::npos && status.find(L"原画像2枚は保存済みです")!=std::wstring::npos && status.find(L"180秒")!=std::wstring::npos &&
+                status.find(L"撮影・保存に失敗")==std::wstring::npos,"expired window: the row says the composite was not made and the originals are saved");
+            const auto log=captured.str().substr(before);
+            check(log.find("pair_composite_failed=1 reason=time_limit originals_saved=2")!=std::string::npos && log.find("pair_review_failure")==std::string::npos &&
+                log.find(work.string())==std::string::npos,"expired window: logged as a composite failure, no path in the log");
+            check(composites_under_reviews()==composites,"expired window: no composite left behind");
+        }
+        {   // 7b. Another failure after the JPEG is renamed and before its report exists: the JPEG would pass for a finished composite.
+            static std::filesystem::path reviews_root;reviews_root=work/"reviews";
+            a0::m2::detail::SetBeforePartialFlushTestHook([]{
+                // Takes the report's partial name, so that writing the report fails after the JPEG is in place.
+                std::error_code ec;
+                for(const auto& entry:std::filesystem::recursive_directory_iterator(reviews_root,ec))
+                    if(entry.path().filename()==L"uncalibrated-review.jpg.partial"){std::ofstream blocker(entry.path().parent_path()/L"uncalibrated-review.json.partial",std::ios::binary);blocker<<"x";}
+            });
+            const auto before=captured.str().size();const auto composites=composites_under_reviews();
+            const auto r=capture(v3.folder);
+            a0::m2::detail::SetBeforePartialFlushTestHook(nullptr);
+            check(failed_but_kept(r) && *r.composite_failure==CompositeFailureReason::other,"report blocked: originals kept, reason error");
+            check(r.composite_cleanup==ReportlessCleanup::removed && composites_under_reviews()==composites,"report blocked: the JPEG without a report is removed");
+            const auto status=SavedCaptureStatus(r);
+            check(status.find(L"合成は作れませんでした")!=std::wstring::npos && status.find(L"原画像2枚は保存済みです")!=std::wstring::npos && status.find(L"詳細はログ")!=std::wstring::npos,"report blocked: the row says why in a few words");
+            const auto log=captured.str().substr(before);
+            check(log.find("pair_composite_failed=1 reason=error originals_saved=2 calibrated=0 report_less_jpeg=removed")!=std::string::npos && log.find(work.string())==std::string::npos,"report blocked: logged, no path in the log");
+        }
+        {   // 7c. The shot after a failed composite is an ordinary one.
+            const auto composites=composites_under_reviews();
+            const auto r=capture(v3.folder);
+            check(r.capture.success && r.capture.closed && r.review && !r.composite_failure && composites_under_reviews()==composites+1,"after a failed composite: the next shot makes its composite");
+        }
+        // The window of the next two cases. 7d needs every stage planned (the plan keeps all of them from a little over 90 s: the stage
+        // costs and the tail reserve of the design), so that the gate is dropped by the closed window and not by the first plan. 7e needs
+        // only that the composite and its report are written inside it: four times what the first shot took.
+        const Clock::duration window_all_stages=std::chrono::seconds(100);
+        const auto closing_window=std::max<Clock::duration>(std::chrono::seconds(15),first_took*4);
+        static Clock::time_point window_closes;
+        const auto sleep_until_window_closes=[]{std::this_thread::sleep_until(window_closes+std::chrono::milliseconds(50));};
+        {   // 7d. The window closes after the composite JPEG is saved and verified, before the gate and the report (the owner's decision): the
+            // composite is kept, the gate is not run, the report is written and the row says the window was passed.
+            window_closes=Clock::now()+window_all_stages;
+            a0::m2::detail::SetAfterReviewJpegTestHook(+sleep_until_window_closes);
+            const auto before=captured.str().size();const auto composites=composites_under_reviews();
+            const auto r=capture(v3.folder,m2e::MountOrientation::normal,window_closes);
+            a0::m2::detail::SetAfterReviewJpegTestHook(nullptr);
+            check(r.capture.success && r.capture.closed && r.review && !r.composite_failure && !r.composite_skip,"window closed after the JPEG: the composite is kept");
+            check(r.deadline_passed && r.review && r.review->deadline_passed && Clock::now()>window_closes,"window closed after the JPEG: the outcome says the window was passed");
+            check(composites_under_reviews()==composites+1 && r.review && std::filesystem::exists(r.review->jpeg) && std::filesystem::exists(r.review->report),"window closed after the JPEG: the JPEG and its report are both there");
+            if(r.review){
+                bool loads=false;m2e::SavedStillReview saved;
+                try{saved=m2e::LoadSavedStillReview(r.review->report);loads=true;}catch(const std::exception&){}
+                check(loads && saved.fixed_composite_registration && saved.fixed_composite_registration->registration.gate.state==m2e::registration_gate::GateState::not_run,
+                    "window closed after the JPEG: the report reads back with the gate not run");
+                bool gate_dropped=false;
+                if(loads && saved.fixed_composite_registration)for(const auto& skipped:saved.fixed_composite_registration->registration.time_budget.skipped)gate_dropped=gate_dropped || skipped.stage==m2e::ReviewStage::gate;
+                check(gate_dropped,"window closed after the JPEG: the time budget in the report names the gate as dropped");
+                check(r.review->fixed_composite_registration && r.review->fixed_composite_registration->registration.gate.state==m2e::registration_gate::GateState::not_run,"window closed after the JPEG: the result has the gate not run");
+            }
+            const auto status=SavedCaptureStatus(r);
+            check(status.find(L"保存済み: ")==0 && status.find(L"制限時間")!=std::wstring::npos && status.find(L"合成は作れています")!=std::wstring::npos &&
+                status.find(L"合成は作れませんでした")==std::wstring::npos,"window closed after the JPEG: the row says the window was passed and the composite was made");
+            const auto log=captured.str().substr(before);
+            check(log.find("pair_review_after_deadline=1 files_retained=1")!=std::string::npos && log.find("pair_composite_failed")==std::string::npos && log.find("pair_review_failure")==std::string::npos,
+                "window closed after the JPEG: logged as kept, not as a failure");
+        }
+        {   // 7e. The window closes after the report is saved and before the writer returns: both files stay and the row says the composite was made
+            // (this used to be a failure that left the JPEG and the report in place and told the operator that nothing was made).
+            window_closes=Clock::now()+closing_window;
+            a0::m2::detail::SetBeforeReviewReturnTestHook(+sleep_until_window_closes);
+            const auto before=captured.str().size();const auto composites=composites_under_reviews();
+            const auto r=capture(v3.folder,m2e::MountOrientation::normal,window_closes);
+            a0::m2::detail::SetBeforeReviewReturnTestHook(nullptr);
+            check(r.capture.success && r.capture.closed && r.review && !r.composite_failure && !r.composite_skip && r.deadline_passed,"window closed after the report: the composite is kept and the window was passed");
+            check(composites_under_reviews()==composites+1 && r.review && std::filesystem::exists(r.review->jpeg) && std::filesystem::exists(r.review->report),"window closed after the report: the JPEG and its report are both there");
+            if(r.review){
+                bool loads=false;m2e::SavedStillReview saved;
+                try{saved=m2e::LoadSavedStillReview(r.review->report);loads=true;}catch(const std::exception&){}
+                check(loads && saved.fixed_composite_registration,"window closed after the report: the report reads back");
+            }
+            const auto status=SavedCaptureStatus(r);
+            check(status.find(L"制限時間")!=std::wstring::npos && status.find(L"合成は作れています")!=std::wstring::npos && status.find(L"合成は作れませんでした")==std::wstring::npos,
+                "window closed after the report: the row says the window was passed and the composite was made");
+            check(captured.str().substr(before).find("pair_composite_failed")==std::string::npos,"window closed after the report: not logged as a failure");
+        }
+        // 8. The originals themselves are not saved: the failure it always was (no composite step, no 'originals saved').
+        {
+            const auto before=captured.str().size();
+            pair_capture_backend=[](const std::array<std::wstring,2>&,Clock::time_point){VerifiedStillPair pair;pair.complete=false;pair.error="synthetic save failure";pair.shutter_dispatched={true,true};return pair;};
+            const auto r=capture(v3.folder);
+            pair_capture_backend=good_backend;
+            check(!r.capture.success && !r.composite_failure && !r.review && !r.composite_skip && r.originals[0].empty(),"original save failure: still a failure, nothing claimed as saved");
+            check(captured.str().substr(before).find("pair_review_failure: synthetic save failure")!=std::string::npos && captured.str().substr(before).find("pair_composite_failed")==std::string::npos,"original save failure: logged as before");
+        }
+        // 9. An exception that carries a path (a filesystem_error) is summarised: no path on the screen's error text or in the log.
+        {
+            const auto before=captured.str().size();
+            pair_capture_backend=[&](const std::array<std::wstring,2>&,Clock::time_point)->VerifiedStillPair{
+                throw std::filesystem::filesystem_error("create",work/"private-folder"/"pair.jpg",std::make_error_code(std::errc::permission_denied));
+            };
+            const auto r=capture(v3.folder);
+            pair_capture_backend=good_backend;
+            const auto log=captured.str().substr(before);
+            check(!r.capture.success && r.capture.error.find("private-folder")==std::string::npos && r.capture.error.find(work.string())==std::string::npos && !r.capture.error.empty(),"filesystem_error: the error text has no path");
+            check(log.find("pair_review_failure: filesystem error:")!=std::string::npos && log.find("private-folder")==std::string::npos && log.find(work.string())==std::string::npos,"filesystem_error: the log has no path");
+        }
+    }catch(const std::exception& error){
+        ++failures;captured<<"pair_v3_ui_exception: "<<error.what()<<'\n';
+    }
+    std::cout.rdbuf(original_buffer);
+    std::cout<<captured.str();
+    pair_capture_backend=[](const std::array<std::wstring,2>& ids,Clock::time_point deadline){return CaptureStillPairShutterFirst(ids,deadline);};
+    pair_settings_folder_override.reset();pair_review_root_override.reset();
+    std::error_code ignored;std::filesystem::remove_all(work,ignored);
+    Log(std::string("pair_v3_ui_result=")+(failures?"FAIL":"PASS")+" checks="+std::to_string(checks)+" failures="+std::to_string(failures));
+    return failures?1:0;
 }
 LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM w,LPARAM l){
     switch(message){
@@ -1457,7 +1875,7 @@ int RunFixedCUiSmoke(){
 
     // 3. A damaged file, a version 2 condition without its profile, and one whose profile differs: the same,
     // each with its own reason, and the profile reasons worded as the pair capture words them.
-    for(const auto reason:{m2::FixedCompositeSkip::condition_invalid,m2::FixedCompositeSkip::profile_absent,m2::FixedCompositeSkip::profile_differs}){
+    for(const auto reason:{m2::FixedCompositeSkip::condition_invalid,m2::FixedCompositeSkip::profile_absent,m2::FixedCompositeSkip::profile_differs,m2::FixedCompositeSkip::pose_outside_envelope}){
         fixed_source={};fixed_source.reason=reason;
         check(FixedConditionPresent());
         check(start_worker([]{return merged.decided && merged.mode==PreviewCMode::unavailable && merged.rendered_revision==merged.revision && merged.source_a.time_since_epoch().count()>0;}));
@@ -1494,6 +1912,320 @@ int RunFixedCUiSmoke(){
     SelectObject(dc,old);DeleteObject(bitmap);DeleteDC(dc);DestroyWindow(window);
     fixed_source={};stopping=true;
     Log("fixed_c_ui_checks="+std::to_string(checks)+" failures="+std::to_string(failures)+" camera_operations=0");return failures?1:0;
+}
+// Camera-free contract of the registered live C (condition v3, #417 LC), on synthetic frames. The real merge worker with its helper
+// thread (the worker of the live registration), Paint with its two rows, the position buttons and the pair-capture admission run;
+// the condition comes from memory (two pinhole cameras built here), the estimator is a scripted function (live_estimator_override,
+// as preview_restart_override is for the settings smoke), and the design constants are shortened so that holding ends within the
+// run. No settings file is read or written, and no Discover/Open/Run or hardware lease exists.
+int RunLiveCUiSmoke(){
+    Log("live_c_ui_synthetic=1 camera_operations=0");
+    namespace m2=a0::m2::experimental;
+    namespace render=a0::m2::render;
+    namespace cr=a0::m2::experimental::content_registration;
+    using namespace std::chrono_literals;
+    unsigned checks{},failures{};const auto check=[&](bool ok){++checks;if(!ok){++failures;Log("live_c_ui_failed_check="+std::to_string(checks));}};
+
+    // ---- the rig: A level, B turned by 1 degree and tilted by 0.5, both seeing the whole raster of the condition ----
+    using Mat=std::array<double,9>;
+    const auto mul=[](const Mat& a,const Mat& b){Mat r{};for(int i=0;i<3;++i)for(int j=0;j<3;++j)for(int k=0;k<3;++k)r[i*3+j]+=a[i*3+k]*b[k*3+j];return r;};
+    const auto rot_x=[](double degrees){const double c=std::cos(degrees*std::numbers::pi/180),s=std::sin(degrees*std::numbers::pi/180);return Mat{1,0,0,0,c,-s,0,s,c};};
+    const auto rot_z=[](double degrees){const double c=std::cos(degrees*std::numbers::pi/180),s=std::sin(degrees*std::numbers::pi/180);return Mat{c,-s,0,s,c,0,0,0,1};};
+    const auto pinhole=[&](const Mat& r,double x0,double y0,double height){
+        constexpr double focal=6000,cx=3680,cy=2456;
+        const std::array<double,3> t{-(r[0]*x0+r[1]*y0+r[2]*(-height)),-(r[3]*x0+r[4]*y0+r[5]*(-height)),-(r[6]*x0+r[7]*y0+r[8]*(-height))};
+        Mat h=mul(Mat{focal,0,cx,0,focal,cy,0,0,1},Mat{r[0],r[1],t[0],r[3],r[4],t[1],r[6],r[7],t[2]});
+        for(auto& v:h)v/=h[8];
+        return render::CameraProjection(render::CameraIntrinsics(focal,focal,cx,cy),render::LensDistortion(0,0,0,0,0),h);
+    };
+    const render::OutputRaster raster{render::DocumentRegionUm{450000,60000,650000,160000},254,2000,1000};
+    const auto profile=[&](){
+        return m2::FixedCompositeProfileBinding{render::DocumentRenderParameters{raster,pinhole(rot_x(0),520,110,1100),pinhole(mul(rot_z(1.0),rot_x(0.5)),580,110,1100),
+            a0::m2::StitchLayout::camera_a_left_camera_b_right,render::Resampling::bilinear},std::string("smoke-profile"),std::string(64,'d'),std::string(64,'e')};
+    };
+    const auto condition=[&](bool live,const std::string& sha){
+        m2::FixedCompositeConditionV3 c;
+        c.created_utc="2026-01-01T00:00:00Z";c.revision.sequence=1;
+        c.source.profile_file="profile.json";c.source.profile_file_sha256=std::string(64,'a');c.source.profile_fingerprint_sha256=std::string(64,'b');c.source.policy_sha256=std::string(64,'c');
+        c.orientation=mount_orientation;c.raster=raster;c.seam.column=1000;c.seam.origin=m2::FixedSeamOrigin::operator_set;
+        c.registration.envelope.position_mm=10;c.registration.envelope.rotation_deg=2;c.registration.envelope.tilt_deg=1;c.registration.envelope.height_percent=5;
+        c.registration.geometry={8,16,256};c.registration.surface_envelope=m2::SurfaceEnvelope{20,4};c.registration.apply_beyond_envelope=true;
+        c.registration.parallax=m2::FixedCompositeConditionV3::Registration::Parallax{1};
+        if(live){m2::FixedCompositeConditionV3::Registration::Live l;l.limits.brown_lowe_alpha=8;l.limits.brown_lowe_beta=0.3;l.limits.minimum_unique_blocks=3;
+            l.limits.maximum_prediction_sigma_px=0.25;l.limits.maximum_residual_rms_px=0.3;l.limits.maximum_residual_p95_px=0.6;l.limits.maximum_bin_bias_px=0.25;
+            l.limits.convergence_px=0.05;l.limits.start_agreement_px=0.25;c.registration.live=l;}
+        c.seam_gate.limit_px=1;c.seam_gate.guard_band_px=0.2;
+        return m2::LoadedFixedCompositeConditionV3{c,sha,profile()};
+    };
+    const auto lens_condition=[&](){
+        m2::FixedCompositeConditionV2 c;
+        c.created_utc="2026-11-04T12:00:00Z";c.orientation=mount_orientation;c.raster=raster;c.scale_auto_correction_max_percent=1;
+        c.seam={1000,m2::FixedSeamOrigin::operator_set};
+        return m2::LoadedFixedCompositeConditionV2{c,std::string(64,'c'),profile()};
+    };
+
+    // ---- the scripted estimator: what it is asked on which thread, and what it answers ----
+    struct Script {
+        std::atomic<int> mode{0};         // 0: pose A, 1: not usable, 2: a pose that cannot be drawn, 3: pose B
+        std::atomic<int> calls{0};
+        std::atomic<int> wrong_frames{0};
+        std::mutex mutex;
+        std::vector<std::thread::id> threads;
+        std::vector<LiveJobKind> kinds;
+    };
+    const auto script=std::make_shared<Script>();
+    const cr::PoseParameters pose_a{0.3,-0.2,0.5,1.5,-1.0,0.0},pose_b{0.1,0.1,0.2,5.0,2.0,0.0};
+    const auto install_estimator=[&]{
+        live_estimator_override=[script,pose_a,pose_b](const LiveJob& job,const render::BgrImage& a,const render::BgrImage& b){
+            ++script->calls;
+            if(a.width!=400 || a.height!=267 || b.width!=400 || b.height!=267)++script->wrong_frames;
+            {std::lock_guard lock(script->mutex);script->threads.push_back(std::this_thread::get_id());script->kinds.push_back(job.kind);}
+            LiveEstimateOutcome outcome;
+            const int mode=script->mode;
+            if(mode==1){outcome.reasons.emplace_back("too-few-points");return outcome;}
+            outcome.usable=true;
+            outcome.pose=mode==2?cr::PoseParameters{0,0,0.4,3000.0,0,0}:mode==3?pose_b:pose_a;
+            outcome.band_brightness=100;
+            if(job.kind==LiveJobKind::follow){outcome.change_px=0.1;outcome.inlier_fraction=0.9;}
+            return outcome;
+        };
+    };
+    // Shortened lines so that holding ends within the run; the other values are the draft design's. The significance line is off here:
+    // the scripted estimator moves between two poses with the change of a small step, and the run checks the plumbing (threads, frames,
+    // what the window shows), not the policy of when an estimate replaces the one in force.
+    LiveTrackerDesign shortened=kLiveTrackerDesignDraft;
+    shortened.tracker.follow_interval_seconds=0.15;shortened.tracker.hold_seconds=0.8;shortened.tracker.full_retry_seconds=0.3;
+    shortened.tracker.adopt_threshold_px=0;shortened.tracker.adopt_sigma_factor=0;
+
+    const auto frame=[](BYTE b,BYTE g,BYTE r){Pixels p{400,267,{}};p.bytes.assign(static_cast<size_t>(p.width)*p.height*4,0);
+        for(size_t i=0;i<p.bytes.size();i+=4){p.bytes[i]=b;p.bytes[i+1]=g;p.bytes[i+2]=r;}return p;};
+    for(int i=0;i<2;++i){cameras[i]=std::make_unique<Camera>();auto& c=*cameras[i];
+        c.alias=i==0?"CAM-A":"CAM-B";c.pixels=i==0?frame(100,100,100):frame(200,200,200);
+        c.frames=25;c.first=Clock::now()-std::chrono::seconds(3);c.last=Clock::now();}
+    stopping=false;run_seconds=0;run_start=Clock::now();
+    const auto refresh=[&]{for(const auto& camera:cameras){std::lock_guard lock(camera->mutex);camera->last=Clock::now();++camera->frames;}};
+    auto instance=GetModuleHandleW(nullptr);WNDCLASSW wc{};wc.lpfnWndProc=WindowProc;wc.hInstance=instance;wc.lpszClassName=L"A0LiveCUiSmoke";
+    if(!RegisterClassW(&wc))return 2;
+    HWND window=CreateWindowExW(0,wc.lpszClassName,L"synthetic live C test",WS_OVERLAPPEDWINDOW,0,0,1400,960,nullptr,nullptr,instance,nullptr);
+    if(!window)return 2;
+    for(int j=0;j<5;++j)merge_buttons[j]=CreateWindowExW(0,L"BUTTON",L"x",WS_CHILD,0,0,10,10,window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(300+j)),instance,nullptr);
+    seam_button=CreateWindowExW(0,L"BUTTON",L"x",WS_CHILD|BS_AUTOCHECKBOX,0,0,10,10,window,reinterpret_cast<HMENU>(404),instance,nullptr);
+    bool controls=seam_button!=nullptr;for(const auto button:merge_buttons)controls=controls && button!=nullptr;
+    if(!controls){DestroyWindow(window);return 2;}
+    SendMessageW(seam_button,BM_SETCHECK,BST_CHECKED,0);
+    HDC dc=CreateCompatibleDC(nullptr);BITMAPINFO info{};info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);info.bmiHeader.biWidth=1400;info.bmiHeader.biHeight=-960;
+    info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;void* bits{};auto bitmap=CreateDIBSection(dc,&info,DIB_RGB_COLORS,&bits,nullptr,0);
+    if(!dc || !bitmap){DestroyWindow(window);return 2;}
+    auto old=SelectObject(dc,bitmap);SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(240,240,240));
+    const RECT client{0,0,1400,960};
+    const auto paint=[&]{refresh();Paint(dc,client);GdiFlush();};
+    const auto wait_for=[&](auto ready,int milliseconds=10000){
+        for(int i=0;i<milliseconds/50;++i){refresh();std::this_thread::sleep_for(50ms);if(ready())return true;}
+        return false;
+    };
+    const auto press=[&](int id){SendMessageW(window,WM_COMMAND,MAKEWPARAM(id,BN_CLICKED),reinterpret_cast<LPARAM>(id==404?seam_button:merge_buttons[id-300]));};
+    const auto capture_admitted=[&]{
+        capture_pending.reset();RequestCapture(2);const bool admitted=capture_pending.has_value() && *capture_pending==2;
+        capture_pending.reset();return admitted;
+    };
+    // The pair must be fresh when the capture is asked for, and a busy machine can make a check or a paint take longer than that:
+    // ask again with fresh frames a few times; a refusal is still a failure after that.
+    const auto capture_admitted_soon=[&]{
+        for(int i=0;i<40;++i){refresh();std::this_thread::sleep_for(60ms);if(capture_admitted())return true;}
+        return false;
+    };
+    const auto rearm=[&]{stopping=false;capture_stop_requested=false;capture_pending.reset();};
+    const auto drawn_plan=[&]{std::lock_guard lock(merged.mutex);return merged.fixed_plan;};
+    const auto drawn_frames=[&]{std::lock_guard lock(merged.mutex);return merged.frames;};
+    const auto picture_ready=[&]{std::lock_guard lock(merged.mutex);return merged.decided && merged.mode==PreviewCMode::fixed_composite && merged.frames>=3 && !merged.pixels.bytes.empty();};
+    // The picture of a registered C starts below the two rows.
+    const auto picture_rect=[&]{std::lock_guard lock(merged.mutex);
+        return FitPixels(merged.pixels,12,client.bottom/2+140+kLiveRowsHeight,client.right-24,client.bottom/2-155-kLiveRowsHeight);};
+    const auto pink=[&](const PixelRect& rect){unsigned count{};
+        for(int y=rect.top;y<rect.top+rect.height;++y)for(int x=rect.left;x<rect.left+rect.width;++x)if(GetPixel(dc,x,y)==kSeamLineColor)++count;return count;};
+    const auto lit=[&](int top,int bottom){unsigned count{};for(int y=top;y<bottom;++y)for(int x=12;x<900;++x)if(GetPixel(dc,x,y)!=RGB(0,0,0))++count;return count;};
+    const auto start=[&](bool live,bool scripted){
+        fixed_source={};fixed_source.loaded_v3=condition(live,std::string(64,'1'));
+        live_design_override=shortened;
+        if(scripted)install_estimator();else live_estimator_override=nullptr;
+        script->mode=0;script->calls=0;script->wrong_frames=0;{std::lock_guard lock(script->mutex);script->threads.clear();script->kinds.clear();}
+        PrepareLiveRuntime();
+        merge_worker=std::jthread(MergeLoop);
+    };
+    const auto finish=[&]{
+        merge_worker.request_stop();merge_worker.join();rearm();ClearMerge();
+    };
+    const auto state_text=[&]{return live_runtime?live_runtime->Status().state_text:std::string();};
+    const auto contains=[](const std::string& text,const char* part){return text.find(part)!=std::string::npos;};
+
+    // 1. The connected estimate (the real connection, with the condition's ranges) on frames that are plain grey: there is nothing
+    //    to estimate from, and it says so. C is drawn with the condition's fixed mapping, the rows say that nothing could be
+    //    estimated (not that C is registered, and not that the estimate is unconnected), A's direction is shown and B's is not
+    //    measured; the position requests change nothing and the pair capture stays admitted.
+    check(captures_saved==0);
+    start(true,false);
+    check(live_runtime!=nullptr && live_runtime->Enabled());
+    check(wait_for(picture_ready));
+    check(wait_for([&]{return contains(state_text(),"推定できない");}));
+    {
+        const auto plan=drawn_plan();
+        check(plan.live!=nullptr && plan.live->baked.pose.IsZero() && plan.lens_aware);
+        const auto status=live_runtime->Status();
+        check(status.view.state==LiveRegistrationState::fixed && status.view.counters.full_jobs>=1 && status.rebakes==0);
+        check(contains(status.state_text,"固定の写像") && !contains(status.state_text,"未接続") && !contains(status.state_text,"目安"));
+        check(status.view.fixed_reason=="estimate-failed" && !status.view.last_failure.empty() &&
+            std::find(status.view.last_failure.begin(),status.view.last_failure.end(),std::string(kLiveEstimatorUnavailableReason))==status.view.last_failure.end());
+        check(contains(status.orientation_line,"B: 向きを測れていません") && contains(status.orientation_line,"A（校正時）: ") && !contains(status.orientation.a_short,"測れていません"));
+    }
+    paint();
+    {
+        const auto rect=picture_rect();
+        check(rect.width>0 && rect.height>0);
+        const auto pink_count=pink(rect);
+        check(pink_count+2>=static_cast<unsigned>(rect.height) && pink_count<=static_cast<unsigned>(rect.height));
+        check(rect.top>=client.bottom/2+140+kLiveRowsHeight);
+        check(lit(client.bottom/2+140,client.bottom/2+161)>100 && lit(client.bottom/2+163,client.bottom/2+184)>100); // both rows have text
+    }
+    {
+        std::uint64_t revision{};{std::lock_guard lock(merged.mutex);revision=merged.revision;}
+        for(int id=300;id<=304;++id)press(id);
+        std::lock_guard lock(merged.mutex);
+        check(merged.revision==revision && !merged.auto_requested && !merged.position_refusal.empty());
+    }
+    check(capture_admitted_soon());
+    finish();
+    check(live_runtime->WorkersRunning()==0);
+    live_runtime.reset();
+
+    // 2. A scripted estimate: the worker (not the loop of C, not this thread) estimates and bakes, the loop draws with the new plan,
+    //    the picture goes on, and the rows follow.
+    start(true,true);
+    check(wait_for(picture_ready));
+    check(wait_for([&]{const auto plan=drawn_plan();return plan.live && plan.live->baked.pose.tx_mm==pose_a.tx_mm;}));
+    {
+        const auto plan=drawn_plan();
+        check(plan.live && plan.live->baked.pose.rx_deg==pose_a.rx_deg && plan.live->baked.surface.IsZero());
+        const auto status=live_runtime->Status();
+        check(status.view.state==LiveRegistrationState::tracking && contains(status.state_text,"目安") && status.rebakes>=1 && !status.bake_failed);
+        check(!contains(status.orientation.b_short,"測れていません") && contains(status.orientation.b_short,"B: "));
+        check(plan.output_width>0 && plan.output_width==plan.mapped->width);
+        std::lock_guard lock(script->mutex);
+        check(!script->threads.empty());
+        bool separate=true;
+        for(const auto id:script->threads)separate=separate && id!=std::this_thread::get_id() && id!=merge_worker.get_id();
+        check(separate);                      // neither this thread nor the loop of C estimates
+        check(script->kinds.front()==LiveJobKind::full);
+    }
+    {
+        // The loop of C keeps drawing while the worker follows: the number of drawn frames grows and follow-ups arrive.
+        const auto before=drawn_frames();const int calls=script->calls;
+        check(wait_for([&]{return drawn_frames()>before+2 && script->calls>calls+1;}));
+        check(script->wrong_frames==0);
+    }
+    paint();
+    {
+        const auto rect=picture_rect();
+        const auto pink_count=pink(rect);
+        check(rect.width>0 && pink_count+2>=static_cast<unsigned>(rect.height));
+        std::lock_guard lock(merged.mutex);
+        check(merged.error.empty() && merged.pixels.width==merged.fixed_plan.output_width && merged.pixels.height==merged.fixed_plan.output_height);
+    }
+    // The pose moves a long way: a follow-up (a change under the line) is taken and the plan is baked again.
+    script->mode=3;
+    check(wait_for([&]{const auto plan=drawn_plan();return plan.live && plan.live->baked.pose.tx_mm==pose_b.tx_mm;}));
+    check(live_runtime->Status().rebakes>=2 && live_runtime->Status().view.state==LiveRegistrationState::tracking);
+    // A pose that cannot be drawn: the sentence says so, the plan in force is kept, and the picture goes on.
+    script->mode=2;
+    check(wait_for([&]{return live_runtime->Status().bake_failed;}));
+    {
+        const auto status=live_runtime->Status();
+        check(contains(status.state_text,"描けませんでした") && status.rebake_failures>=1);
+        const auto plan=drawn_plan();
+        check(plan.live && plan.live->baked.pose.tx_mm==pose_b.tx_mm);
+        const auto before=drawn_frames();
+        check(wait_for([&]{return drawn_frames()>before+2;}));
+        paint();
+        check(pink(picture_rect())>0);
+    }
+    // A pose that can be drawn again clears the sentence.
+    script->mode=0;
+    check(wait_for([&]{const auto plan=drawn_plan();return !live_runtime->Status().bake_failed && plan.live && plan.live->baked.pose.tx_mm==pose_a.tx_mm;}));
+    // No estimate can be made: the last one is held, then C goes back to the fixed mapping and B's direction is not measured.
+    script->mode=1;
+    check(wait_for([&]{return live_runtime->Status().view.state==LiveRegistrationState::holding;}));
+    check(contains(live_runtime->Status().state_text,"直前の推定"));
+    check(wait_for([&]{return live_runtime->Status().view.state==LiveRegistrationState::fixed;}));
+    check(wait_for([&]{const auto plan=drawn_plan();return plan.live && plan.live->baked.pose.IsZero();}));
+    check(contains(live_runtime->Status().orientation.b_short,"B: 向きを測れていません"));
+    // The estimate comes back.
+    script->mode=0;
+    check(wait_for([&]{return live_runtime->Status().view.state==LiveRegistrationState::tracking;}));
+    check(capture_admitted_soon());
+    finish();
+    check(live_runtime->WorkersRunning()==0);
+    {
+        // After the loop has ended nobody estimates any more.
+        const int calls=script->calls;
+        std::this_thread::sleep_for(300ms);
+        check(script->calls==calls);
+    }
+    live_runtime.reset();
+
+    // 3. The reasons of the first full estimate of a session: a start, a session after a capture, a condition read again.
+    fixed_source={};fixed_source.loaded_v3=condition(true,std::string(64,'1'));
+    live_captures_seen=captures_saved;live_condition_sha.clear();
+    PrepareLiveRuntime();
+    check(live_runtime && live_runtime->Status().view.full_reason==LiveFullReason::session_start);
+    PrepareLiveRuntime();
+    check(live_runtime && live_runtime->Status().view.full_reason==LiveFullReason::session_start);
+    ++captures_saved;
+    PrepareLiveRuntime();
+    check(live_runtime && live_runtime->Status().view.full_reason==LiveFullReason::after_capture);
+    fixed_source.loaded_v3=condition(true,std::string(64,'2'));
+    PrepareLiveRuntime();
+    check(live_runtime && live_runtime->Status().view.full_reason==LiveFullReason::condition_reloaded);
+    PrepareLiveRuntime();
+    check(live_runtime && live_runtime->Status().view.full_reason==LiveFullReason::session_start);
+    captures_saved=0;live_captures_seen=0;live_condition_sha.clear();live_runtime.reset();
+
+    // 4. A condition without registration.live: nothing is estimated, the rows say so, the pair capture stays admitted.
+    start(false,true);
+    check(live_runtime!=nullptr && !live_runtime->Enabled());
+    check(wait_for(picture_ready));
+    std::this_thread::sleep_for(300ms);
+    paint();
+    {
+        const auto status=live_runtime->Status();
+        check(!status.live_enabled && contains(status.state_text,"無効") && contains(status.orientation.b_short,"測れていません"));
+        check(script->calls==0 && live_runtime->CurrentPlan()==nullptr);
+        check(lit(client.bottom/2+140,client.bottom/2+161)>100 && lit(client.bottom/2+163,client.bottom/2+184)>100);
+        check(pink(picture_rect())>0);
+    }
+    check(capture_admitted_soon());
+    finish();
+    live_runtime.reset();
+
+    // 5. A condition v2: no runtime, no rows; the picture starts where it always did.
+    fixed_source={};fixed_source.loaded_v2=lens_condition();
+    live_estimator_override=nullptr;
+    PrepareLiveRuntime();
+    check(live_runtime==nullptr);
+    merge_worker=std::jthread(MergeLoop);
+    check(wait_for(picture_ready));
+    paint();
+    {
+        const auto plan=drawn_plan();
+        check(plan.live==nullptr && plan.lens_aware);
+        const PixelRect rect = [&]{std::lock_guard lock(merged.mutex);return FitPixels(merged.pixels,12,client.bottom/2+140,client.right-24,client.bottom/2-155);}();
+        const auto pink_count=pink(rect);
+        check(rect.width>0 && pink_count+2>=static_cast<unsigned>(rect.height) && pink_count<=static_cast<unsigned>(rect.height));
+    }
+    check(capture_admitted_soon());
+    finish();
+
+    SelectObject(dc,old);DeleteObject(bitmap);DeleteDC(dc);DestroyWindow(window);
+    fixed_source={};live_runtime.reset();live_estimator_override=nullptr;live_design_override.reset();stopping=true;
+    Log("live_c_ui_checks="+std::to_string(checks)+" failures="+std::to_string(failures)+" camera_operations=0");return failures?1:0;
 }
 int RunPreviewWindow(const std::array<std::wstring,2>& ids){
     registered_ids=ids;

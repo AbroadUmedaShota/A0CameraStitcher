@@ -1,0 +1,44 @@
+{
+  "schema": "a0.wpd-registration-policy.v1",
+  "registration": {
+    "envelope": {
+      "positionMm": 10,
+      "rotationDeg": 2,
+      "tiltDeg": 1,
+      "heightPercent": 1
+    },
+    "limits": {
+      "brownLoweAlpha": 8,
+      "brownLoweBeta": 0.3,
+      "minimumUniqueBlocks": 2,
+      "maximumPredictionSigmaPx": 1,
+      "maximumResidualRmsPx": 3,
+      "maximumResidualP95Px": 6,
+      "maximumBinBiasPx": 4,
+      "convergencePx": 2,
+      "startAgreementPx": 2
+    },
+    "geometry": {
+      "omegaMarginPx": 8,
+      "guardPx": 72,
+      "bandHalfWidthPx": 1024
+    },
+    "surfaceEnvelope": {
+      "heightMm": 40,
+      "tiltDeg": 8
+    },
+    "applyBeyondEnvelope": true,
+    "surfaceScaleWarnPercent": null,
+    "parallax": {
+      "maxLiftMm": 1
+    },
+    "live": null
+  },
+  "seamGate": {
+    "limitPx": 1,
+    "guardBandPx": 0.2
+  },
+  "revisionRules": {
+    "manualAdjustmentMaxSeamPx": null
+  }
+}

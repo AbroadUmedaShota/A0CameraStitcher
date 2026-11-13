@@ -262,6 +262,39 @@ struct MappedOverlapRow {std::uint32_t first{},end{};};
 [[nodiscard]] bool CanRenderDocumentFixedSeam(const render::BgrImage& a,const render::BgrImage& b,
     const render::DocumentRenderParameters& parameters,std::uint32_t seam_column,const SeamBlendSettings& settings);
 
+// ---- Threads (#417) ----
+// The fixed-seam functions above also take a thread_count (1..256, else std::invalid_argument) after the
+// last argument they had (the colour match, or the settings for the Can... functions and the input for
+// MappedFixedSeamBand). The forms without it run on the calling thread, exactly as before (thread_count 1).
+// The output rows are independent, so the sampling of the band, the measurement of the paper pixels of
+// the colour match and the mixing run on up to thread_count threads, taking the rows in increasing order.
+// The result does not depend on thread_count: the image bytes, the record, row_ratio and row_gain are
+// identical, floating-point bits included, for every value. Every sum of doubles is added in the order of
+// a single pass over the rows: the window sums of a row only add that row's cells in column order, and
+// the sums over the whole band are added by one thread, row after row, from the samples that the
+// threads kept for a block of rows. The pixels whose gain was lowered are counted per row and added as
+// integers. An exception is that of the lowest output row that fails, as with one thread.
+// The mappings of the input are called from several threads at once, so, as stated above, they must be
+// immutable and deterministic. The searched seam cut (RenderPairSeamCut) always runs on one thread.
+// Memory in addition to what one thread needs: the samples that the colour match keeps for one block of
+// 128 rows (48 bytes per kept cell: 40 MB when the rows are 6600 cells wide), and the quantile samples
+// (at most about two million cells, taken at a fixed stride) held per row until they are joined. No
+// thread has a buffer of its own beyond a row.
+[[nodiscard]] SeamBlendResult RenderPairFixedSeam(const render::BgrImage& a,const render::BgrImage& b,
+    const render::PairRenderParameters& parameters,std::uint32_t seam_column,const SeamBlendSettings& settings,const ColorMatch& color,unsigned thread_count);
+[[nodiscard]] bool CanRenderFixedSeam(const render::BgrImage& a,const render::BgrImage& b,
+    const render::PairRenderParameters& parameters,std::uint32_t seam_column,const SeamBlendSettings& settings,unsigned thread_count);
+[[nodiscard]] std::vector<MappedOverlapRow> MappedFixedSeamBand(const render::BgrImage& a,const render::BgrImage& b,
+    const MappedFixedSeamInput& input,unsigned thread_count);
+[[nodiscard]] SeamBlendResult RenderMappedFixedSeam(const render::BgrImage& a,const render::BgrImage& b,
+    const MappedFixedSeamInput& input,std::uint32_t seam_column,const SeamBlendSettings& settings,const ColorMatch& color,unsigned thread_count);
+[[nodiscard]] bool CanRenderMappedFixedSeam(const render::BgrImage& a,const render::BgrImage& b,
+    const MappedFixedSeamInput& input,std::uint32_t seam_column,const SeamBlendSettings& settings,unsigned thread_count);
+[[nodiscard]] SeamBlendResult RenderDocumentFixedSeam(const render::BgrImage& a,const render::BgrImage& b,
+    const render::DocumentRenderParameters& parameters,std::uint32_t seam_column,const SeamBlendSettings& settings,const ColorMatch& color,unsigned thread_count);
+[[nodiscard]] bool CanRenderDocumentFixedSeam(const render::BgrImage& a,const render::BgrImage& b,
+    const render::DocumentRenderParameters& parameters,std::uint32_t seam_column,const SeamBlendSettings& settings,unsigned thread_count);
+
 // A composition condition for a vertical seam: the pair mapping with its crop
 // and the seam column, all in the pixels of the image size it was made for.
 struct FixedSeamCondition {render::PairRenderParameters parameters;std::uint32_t seam_column{};};

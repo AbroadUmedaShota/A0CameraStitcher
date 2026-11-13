@@ -31,6 +31,7 @@
 #include "a0/phase0/experimental/still_alignment_text.hpp"
 #include "a0/phase0/experimental/fixed_composite_text.hpp"
 #include "a0/phase0/experimental/fixed_composite_preview.hpp"
+#include "a0/phase0/experimental/live_registration_runtime.hpp"
 #include "a0/m2/experimental/overlap_estimation.hpp"
 #include "a0/phase0/experimental/still_pair.hpp"
 #include "a0/phase0/experimental/wpd_still_pair.hpp"
@@ -40,6 +41,8 @@
 #include "a0/m2/experimental/still_review.hpp"
 #include "a0/m2/experimental/fixed_composite_selection.hpp"
 #include "a0/phase0/experimental/fixed_composite_lens_text.hpp"
+#include "a0/phase0/experimental/pair_review_registration.hpp"
+#include "a0/phase0/experimental/pair_review_synthetic.hpp"
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
 #include "a0/phase0/experimental/d810_settings_write_screen.hpp" // #416 stage B, only with A0_BUILD_WPD_SETTINGS_WRITE
 #endif
@@ -919,7 +922,9 @@ int main(int argc,char** argv){
         if(argc==2 && std::string(argv[1])=="--level-ui-smoke")return RunLevelUiSmoke();
         if(argc==2 && std::string(argv[1])=="--lifecycle-ui-smoke")return RunLifecycleUiSmoke();
         if(argc==2 && std::string(argv[1])=="--fixed-c-ui-smoke")return RunFixedCUiSmoke();
+        if(argc==2 && std::string(argv[1])=="--live-c-ui-smoke")return RunLiveCUiSmoke();
         if(argc==2 && std::string(argv[1])=="--settings-ui-smoke")return RunSettingsUiSmoke();
+        if(argc==3 && std::string(argv[1])=="--pair-v3-ui-smoke")return RunPairV3UiSmoke(argv[2]);
         if(argc==2 && std::string(argv[1])=="--settings-read-diagnostics"){
             ComScope com;HardwareProcessLease lease;return RunSettingsReadDiagnostics(Discover());
         }
