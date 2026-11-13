@@ -723,6 +723,7 @@ inline std::wstring FixedPreviewUnavailableText(a0::m2::experimental::FixedCompo
     // Worded as the pair capture's FixedCompositeSkipText, followed by what C does.
     case S::profile_absent:return L"固定の合成条件が参照する校正ファイル（profile）が、条件と同じフォルダにありません。Cを描きません";
     case S::profile_differs:return L"固定の合成条件が参照する校正ファイル（profile）が、条件の記録と違うか使えません。設置の時に作り直してください。Cを描きません";
+    case S::pose_outside_envelope:return L"固定の合成条件の手直しが、範囲の外です。rollback するか、校正をやり直してください。Cを描きません";
     }
     throw std::invalid_argument("unknown fixed composite skip");
 }

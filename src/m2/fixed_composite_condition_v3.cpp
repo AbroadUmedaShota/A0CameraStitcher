@@ -225,7 +225,7 @@ void RequireFixedCompositeBasePoseInEnvelopeV3(const FixedCompositeConditionV3& 
     const auto& p=c.base_pose;const auto& e=c.registration.envelope;
     if(std::hypot(p.tx_mm,p.ty_mm)>e.position_mm || std::abs(p.rz_deg)>e.rotation_deg || std::hypot(p.rx_deg,p.ry_deg)>e.tilt_deg ||
         std::abs(p.tz_percent)>e.height_percent)
-        Reject("basePose is outside registration.envelope; start again from the calibration");
+        throw FixedCompositePoseOutsideEnvelope("fixed composite condition v3: basePose is outside registration.envelope; start again from the calibration");
 }
 namespace {
 

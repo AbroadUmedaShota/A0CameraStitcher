@@ -777,7 +777,7 @@ A0CameraStitcher.StillReview --make-fixed-composite-condition-v3 <種類> --sett
 | `registration.limits` | 推定の検査 V1〜V6 の閾値 9 値（`brownLoweAlpha`・`brownLoweBeta`・`minimumUniqueBlocks`・`maximumPredictionSigmaPx`・`maximumResidualRmsPx`・`maximumResidualP95Px`・`maximumBinBiasPx`・`convergencePx`・`startAgreementPx`。出力 px、`minimumUniqueBlocks` は個数） | 開発の仮の値（未承認）。ひな形は `registration_probe_main.cpp` の開発用の値（草稿の校正が残す誤差に合わせて緩い） |
 | `registration.geometry` | 遷移帯 Ω の余白 `omegaMarginPx`・Ω から推定の点までの間隔 `guardPx`・帯の半幅 `bandHalfWidthPx`（出力 px、整数）。混ぜ幅は合成の設計 `kSeamBlendDesign` から取り、報告に記録する | 開発の仮の値（未承認）。帯の半幅は重なりの全幅が入る広さ（※仮定） |
 
-- 範囲（`envelope`）の意味: 条件の記録に基準の姿勢 `basePose`（校正に対する 6 自由度。`created`・`migrated-from-v2` は全部 0）を持ち、撮影ごとの推定値と基準の差をこの範囲に当てる（追補 11.19.2）。基準の姿勢そのものも校正からこの範囲の内でなければならず、外なら改訂を作らない（手直しの書き込みを除く。範囲の外の手直しは書くが、条件を使う読み手が断る）
+- 範囲（`envelope`）の意味: 条件の記録に基準の姿勢 `basePose`（校正に対する 6 自由度。`created`・`migrated-from-v2` は全部 0）を持ち、撮影ごとの推定値と基準の差をこの範囲に当てる（追補 11.19.2）。基準の姿勢そのものも校正からこの範囲の内でなければならず、外なら改訂を作らない（手直しの書き込みを除く。範囲の外の手直しは書くが、条件を使う読み手が理由 `pose-outside-envelope` で断る）
 - 紙面の範囲（`surfaceEnvelope`）は、粗の段の探索の半径と作る時の検査の大きさを決める。大きくすると推定の時間と周期の模様の取り違えが増える（追補 11.20.3）。範囲を超えた紙面も、推定が確かなら当てて警告する（`applyBeyondEnvelope` = true）
 - `registration.limits` と `geometry` は撮影の経路の合否の線ではなく、推定器が自分の結果を信用する条件。承認された値ではなく、実写の分析（M1）と所有者の確認を経て置き換える。置き換えは方針ファイルを書き換えて `values` で改訂する
 
@@ -830,6 +830,7 @@ check_seconds=<検査の秒数>
 | v1 または v2 の条件と、改訂が両方ある | 合成しない。原画像 2 枚を残す。理由 `condition-invalid`（出どころが 2 つ）。ログに `pair_fixed_composite_condition_unusable reason=condition-invalid detail=…` |
 | 改訂の番号の途切れ、親の hash の不一致、改訂でない名前のファイル、書式の誤り | 同じく `condition-invalid`（推測しない。`.partial` で終わる名前は数えない） |
 | 改訂が指す profile が設定のフォルダに無い・一致しない | 合成しない。`profile-absent` / `profile-differs` |
+| 範囲（`registration.envelope`）の外の手直し（`manual-adjustment`）が有効な改訂 | 合成しない。原画像 2 枚を残す。理由 `pose-outside-envelope`（条件は壊れていない）。画面の文は「固定の合成条件の手直しが、範囲の外です。rollback するか、校正をやり直してください」（ライブの C は後ろに「。Cを描きません」）。手直しを書いた道具の出力も同じ事を言う（「範囲の外のため、撮影とライブの C には使われません。rollback で戻せます」。`--dry-run` なら「書いても」）。断る・断らないの判断は変えていない |
 | 取付の向きが撮影と違う、原画像が profile の大きさでない、継ぎ目が重なりの外 | 合成しない。それぞれ `orientation-differs` / `size-differs` / `seam-outside-overlap`（v7 と同じ符号。書き手が何も作る前に断る） |
 | どの段も推定できない | 合成する。G4（条件のままの写像）。理由と警告が行とログに出る |
 

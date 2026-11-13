@@ -186,6 +186,8 @@ void Chain(){
     manual.entered=m2::FixedCompositeRevisionChangeV3::Entered{12.5,-7.25,0.1};
     r=px::MakeFixedCompositeConditionV3File(manual,kHash,kNow);
     Check(r.made,("manual: "+r.message).c_str());
+    // Inside the pose range the message is what it was: nothing about the range.
+    CHECK(!r.outside_envelope && !Contains(r.message,"範囲の外") && !Contains(r.message,"rollback"));
     {
         const auto active=m2::LoadActiveFixedCompositeRevisionV3(root/kRevisions,kHash);
         CHECK(active && active->condition.revision.sequence==3 && active->condition.revision.change.kind==Kind::manual_adjustment);
@@ -245,8 +247,17 @@ void Chain(){
         const auto length_before=Listing(root/kRevisions).size();
         auto beyond=Request(root,Kind::manual_adjustment);
         beyond.entered=m2::FixedCompositeRevisionChangeV3::Entered{80,0,0};
+        // A dry run says it already; the written revision says that a capture and the live view do not use it and that a rollback
+        // brings it back, and does not send anyone to calibrate again.
+        {
+            auto beyond_dry_run=beyond;beyond_dry_run.dry_run=true;
+            const auto d=px::MakeFixedCompositeConditionV3File(beyond_dry_run,kHash,kNow);
+            CHECK(d.checked && !d.made && d.outside_envelope && Contains(d.message,"範囲の外のため、書いても撮影とライブの C には使われません"));
+            CHECK(Listing(root/kRevisions).size()==length_before);
+        }
         r=px::MakeFixedCompositeConditionV3File(beyond,kHash,kNow);
         Check(r.made,("manual beyond the range: "+r.message).c_str());
+        CHECK(r.outside_envelope && Contains(r.message,"範囲の外のため、撮影とライブの C には使われません。rollback で戻せます") && !Contains(r.message,"作り直"));
         CHECK(Listing(root/kRevisions).size()==length_before+1);
         const auto active=m2::LoadActiveFixedCompositeRevisionV3(root/kRevisions,kHash);
         CHECK(active && active->condition.revision.change.kind==Kind::manual_adjustment);
@@ -255,7 +266,7 @@ void Chain(){
             CHECK(std::hypot(c.base_pose.tx_mm,c.base_pose.ty_mm)>c.registration.envelope.position_mm);
         }
         const auto drawn=m2::SelectFixedComposite(root/m2::kFixedCompositeConditionName,kHash);
-        CHECK(!drawn.loaded && drawn.reason==m2::FixedCompositeSkip::condition_invalid);
+        CHECK(!drawn.loaded && drawn.reason==m2::FixedCompositeSkip::pose_outside_envelope);
         auto restore=Request(root,Kind::rollback);restore.restore_sequence=1;
         CHECK(px::MakeFixedCompositeConditionV3File(restore,kHash,kNow).made);
         CHECK(m2::SelectFixedComposite(root/m2::kFixedCompositeConditionName,kHash).IsV3());

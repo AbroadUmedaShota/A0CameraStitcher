@@ -997,9 +997,10 @@ int RunPairV3UiSmoke(const std::filesystem::path& fixtures){
         };
         const std::array<std::wstring,2> ids{L"synthetic-a",L"synthetic-b"};
         const auto good_backend=pair_capture_backend;
-        const auto capture=[&](const std::filesystem::path& settings,m2e::MountOrientation orientation=m2e::MountOrientation::normal,std::chrono::milliseconds window=std::chrono::seconds(900)){
+        const auto capture=[&](const std::filesystem::path& settings,m2e::MountOrientation orientation=m2e::MountOrientation::normal,std::optional<Clock::time_point> deadline=std::nullopt){
             pair_settings_folder_override=settings;
-            return SavePairReview(ids,ReviewGeometry{460,307,229,3,11,orientation},Clock::now()+window);
+            // A case that waits for its window to close passes the time of the close itself, so that the wait and the writer share one deadline.
+            return SavePairReview(ids,ReviewGeometry{460,307,229,3,11,orientation},deadline?*deadline:Clock::now()+std::chrono::seconds(900));
         };
         const auto kept=[&](const CaptureUiOutcome& r){return r.capture.success && r.capture.closed && !r.review && r.composite_skip && std::filesystem::exists(r.originals[0]) && std::filesystem::exists(r.originals[1]);};
 
@@ -1041,6 +1042,22 @@ int RunPairV3UiSmoke(const std::filesystem::path& fixtures){
             const auto r=capture(gap.folder);
             check(kept(r) && *r.composite_skip==m2e::FixedCompositeSkip::condition_invalid,"gap: condition-invalid, originals kept");
             check(SavedCaptureStatus(r).find(L"合成はしていません")!=std::wstring::npos,"gap: the row says the composite was not made");
+        }
+        // 2b. A hand adjustment beyond the pose range is a condition that is intact: the composite is not made, the originals are kept,
+        // and the row says the adjustment is beyond the range (not that the condition must be made again).
+        {
+            const auto beyond=ps::MakeSettings(work/"settings-beyond",profile,m2e::MountOrientation::normal,raster);
+            const auto revisions=beyond.folder/std::string(m2e::kFixedCompositeRevisionFolderName);
+            auto second=ps::SampleCondition(beyond.folder,profile,m2e::MountOrientation::normal,raster,2,ps::Sha(revisions/"r000001.json"),m2e::FixedCompositeRevisionKind::values);
+            second.revision.change={};second.revision.change.kind=m2e::FixedCompositeRevisionKind::manual_adjustment;
+            second.revision.change.entered=m2e::FixedCompositeRevisionChangeV3::Entered{1,0,0};second.revision.change.maximum_seam_displacement_px=1;
+            second.base_pose.tx_mm=second.registration.envelope.position_mm*8;
+            m2e::WriteFixedCompositeConditionV3(revisions,second);
+            const auto r=capture(beyond.folder);
+            check(kept(r) && *r.composite_skip==m2e::FixedCompositeSkip::pose_outside_envelope,"beyond the range: pose-outside-envelope, originals kept");
+            const auto row=SavedCaptureStatus(r);
+            check(row.find(L"手直しが、範囲の外です")!=std::wstring::npos && row.find(L"rollback")!=std::wstring::npos && row.find(L"作り直してください")==std::wstring::npos,
+                "beyond the range: the row says the adjustment is beyond the range, not that the condition is broken");
         }
         // 3. A v2 file together with a revision is two sources.
         {
@@ -1086,7 +1103,7 @@ int RunPairV3UiSmoke(const std::filesystem::path& fixtures){
         };
         {   // 7a. The 180-second window is over before the composite begins.
             const auto before=captured.str().size();const auto composites=composites_under_reviews();
-            const auto r=capture(v3.folder,m2e::MountOrientation::normal,std::chrono::milliseconds(1));
+            const auto r=capture(v3.folder,m2e::MountOrientation::normal,Clock::now()+std::chrono::milliseconds(1));
             check(failed_but_kept(r) && *r.composite_failure==CompositeFailureReason::time_limit,"expired window: originals kept, reason time_limit");
             const auto status=SavedCaptureStatus(r);
             check(status.find(L"合成は作れませんでした")!=std::wstring::npos && status.find(L"原画像2枚は保存済みです")!=std::wstring::npos && status.find(L"180秒")!=std::wstring::npos &&
@@ -1131,7 +1148,7 @@ int RunPairV3UiSmoke(const std::filesystem::path& fixtures){
             window_closes=Clock::now()+window_all_stages;
             a0::m2::detail::SetAfterReviewJpegTestHook(+sleep_until_window_closes);
             const auto before=captured.str().size();const auto composites=composites_under_reviews();
-            const auto r=capture(v3.folder,m2e::MountOrientation::normal,std::chrono::duration_cast<std::chrono::milliseconds>(window_all_stages));
+            const auto r=capture(v3.folder,m2e::MountOrientation::normal,window_closes);
             a0::m2::detail::SetAfterReviewJpegTestHook(nullptr);
             check(r.capture.success && r.capture.closed && r.review && !r.composite_failure && !r.composite_skip,"window closed after the JPEG: the composite is kept");
             check(r.deadline_passed && r.review && r.review->deadline_passed && Clock::now()>window_closes,"window closed after the JPEG: the outcome says the window was passed");
@@ -1158,7 +1175,7 @@ int RunPairV3UiSmoke(const std::filesystem::path& fixtures){
             window_closes=Clock::now()+closing_window;
             a0::m2::detail::SetBeforeReviewReturnTestHook(+sleep_until_window_closes);
             const auto before=captured.str().size();const auto composites=composites_under_reviews();
-            const auto r=capture(v3.folder,m2e::MountOrientation::normal,std::chrono::duration_cast<std::chrono::milliseconds>(closing_window));
+            const auto r=capture(v3.folder,m2e::MountOrientation::normal,window_closes);
             a0::m2::detail::SetBeforeReviewReturnTestHook(nullptr);
             check(r.capture.success && r.capture.closed && r.review && !r.composite_failure && !r.composite_skip && r.deadline_passed,"window closed after the report: the composite is kept and the window was passed");
             check(composites_under_reviews()==composites+1 && r.review && std::filesystem::exists(r.review->jpeg) && std::filesystem::exists(r.review->report),"window closed after the report: the JPEG and its report are both there");
@@ -1858,7 +1875,7 @@ int RunFixedCUiSmoke(){
 
     // 3. A damaged file, a version 2 condition without its profile, and one whose profile differs: the same,
     // each with its own reason, and the profile reasons worded as the pair capture words them.
-    for(const auto reason:{m2::FixedCompositeSkip::condition_invalid,m2::FixedCompositeSkip::profile_absent,m2::FixedCompositeSkip::profile_differs}){
+    for(const auto reason:{m2::FixedCompositeSkip::condition_invalid,m2::FixedCompositeSkip::profile_absent,m2::FixedCompositeSkip::profile_differs,m2::FixedCompositeSkip::pose_outside_envelope}){
         fixed_source={};fixed_source.reason=reason;
         check(FixedConditionPresent());
         check(start_worker([]{return merged.decided && merged.mode==PreviewCMode::unavailable && merged.rendered_revision==merged.revision && merged.source_a.time_since_epoch().count()>0;}));

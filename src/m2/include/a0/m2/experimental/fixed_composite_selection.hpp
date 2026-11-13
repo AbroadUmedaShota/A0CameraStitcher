@@ -14,7 +14,8 @@ namespace a0::m2::experimental {
 //   condition_absent  no file;
 //   condition_invalid the record is damaged, of an unknown schema, or unreadable;
 //   profile_absent    a v2 record whose profile file is not beside it;
-//   profile_differs   a v2 record whose profile is there but is not the one it names or cannot be used.
+//   profile_differs   a v2 record whose profile is there but is not the one it names or cannot be used;
+//   pose_outside_envelope  a v3 record whose hand adjustment put the base pose beyond registration.envelope (the record is intact).
 // `detail` carries the reader's own message (English, for logs).
 struct FixedCompositeSelection {
     std::optional<LoadedFixedCompositeConditionAny> loaded;
@@ -32,6 +33,7 @@ struct FixedCompositeSelection {
         selection.reason=error.GetKind()==FixedCompositeProfileError::Kind::missing?FixedCompositeSkip::profile_absent:FixedCompositeSkip::profile_differs;
         selection.detail=error.what();
     }
+    catch(const FixedCompositePoseOutsideEnvelope& error){selection.reason=FixedCompositeSkip::pose_outside_envelope;selection.detail=error.what();}
     catch(const std::exception& error){selection.reason=FixedCompositeSkip::condition_invalid;selection.detail=error.what();}
     return selection;
 }

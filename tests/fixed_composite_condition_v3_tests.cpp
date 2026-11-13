@@ -936,7 +936,15 @@ void ManualBeyondEnvelope(){
     REJECT(LoadFixedCompositeConditionAny(chain.revisions/"r000002.json",kHash));
     {
         const auto selection=SelectFixedComposite(legacy_name,kHash);
-        CHECK(!selection.loaded && selection.reason==FixedCompositeSkip::condition_invalid && selection.detail.find("registration.envelope")!=std::string::npos);
+        CHECK(!selection.loaded && selection.reason==FixedCompositeSkip::pose_outside_envelope && selection.detail.find("registration.envelope")!=std::string::npos);
+    }
+    // The reason is told apart by its own exception, which is still a std::invalid_argument for a caller that does not tell them apart.
+    {
+        bool dedicated{};
+        try{RequireFixedCompositeBasePoseInEnvelopeV3(manual);}
+        catch(const FixedCompositePoseOutsideEnvelope&){dedicated=true;}
+        catch(const std::exception&){}
+        CHECK(dedicated);
     }
     // A rollback to the first revision brings the base pose back: the reader accepts the chain again.
     Append(chain,Rollback(HashOf(chain.texts[0])),[&](FixedCompositeV3Request& r){

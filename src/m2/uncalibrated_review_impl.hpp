@@ -115,6 +115,7 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
         reg_condition=g.condition;reg_profile=g.profile;
         // A capture draws with the condition, so a base pose outside the envelope is refused here whatever the revision's kind.
         try{ValidateFixedCompositeConditionV3(*reg_condition);RequireFixedCompositeBasePoseInEnvelopeV3(*reg_condition);}
+        catch(const FixedCompositePoseOutsideEnvelope& error){throw FixedCompositeUnavailable(FixedCompositeSkip::pose_outside_envelope,error.what());}
         catch(const std::invalid_argument& error){throw FixedCompositeUnavailable(FixedCompositeSkip::condition_invalid,error.what());}
         if(reg_profile->profile_file_sha256!=reg_condition->source.profile_file_sha256 || reg_profile->profile_fingerprint_sha256!=reg_condition->source.profile_fingerprint_sha256 ||
             !SameLensRaster(reg_profile->parameters.raster,reg_condition->raster))

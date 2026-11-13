@@ -94,6 +94,9 @@ struct FixedConditionV3MakeResult {
     std::string parent_sha256;               // empty for revision 1
     std::string policy_sha256;               // of the policy file the values come from (the restored one for a rollback)
     std::string condition_sha256;            // of the revision file as written; empty unless made
+    // True when the base pose of the record lies beyond registration.envelope (only a manual adjustment can). The record is valid and
+    // is written, but a capture and the live view do not draw with it; the message says so (set with the other facts, also for a dry run).
+    bool outside_envelope{};
 };
 
 namespace fixed_tool_v3_detail {
@@ -317,10 +320,13 @@ inline double MaximumSeamDisplacement(const cr::PoseModel& model,const cr::Plane
     result.details.insert(result.details.begin(),"revision="+std::to_string(condition.revision.sequence)+" kind="+std::string(m2::FixedCompositeRevisionKindText(condition.revision.change.kind)));
     result.details.push_back("raster_dpi="+std::to_string(condition.raster.dpi)+" width_pixels="+std::to_string(condition.raster.width_pixels)+" height_pixels="+std::to_string(condition.raster.height_pixels));
     result.details.push_back("seam_column="+std::to_string(condition.seam.column)+" mount_orientation="+std::string(m2::MountOrientationName(condition.orientation)));
+    try{m2::RequireFixedCompositeBasePoseInEnvelopeV3(condition);}
+    catch(const m2::FixedCompositePoseOutsideEnvelope&){result.outside_envelope=true;result.details.push_back("base_pose_outside_envelope=1");}
     if(condition.revision.change.maximum_seam_displacement_px)
         result.details.push_back("maximum_seam_displacement_px="+fixed_tool_v2_detail::Number(*condition.revision.change.maximum_seam_displacement_px));
     if(request.dry_run){
         result.message="検査に通りました。--dry-run のため何も書いていません";
+        if(result.outside_envelope)result.message+="。この手直しは範囲の外のため、書いても撮影とライブの C には使われません";
         return result;
     }
     const auto profile_target=folder/(*profile_name);
@@ -340,6 +346,7 @@ inline double MaximumSeamDisplacement(const cr::PoseModel& model,const cr::Plane
     if(const auto written=ReadSmallRegularFile(result.file,m2::kMaximumFixedCompositeConditionV3Bytes))result.condition_sha256=hash(bytes_of(*written));
     result.message="固定の合成条件 v3 の改訂（未承認）を書きました。範囲と線は"+std::string(first_kind||request.kind==Kind::values?"方針ファイルの値を写しました":"有効な改訂の値を引き継ぎました")+
         "。既存の改訂は変えていません";
+    if(result.outside_envelope)result.message+="。この手直しは範囲の外のため、撮影とライブの C には使われません。rollback で戻せます";
     return result;
 }
 }

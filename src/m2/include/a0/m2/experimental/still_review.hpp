@@ -380,7 +380,10 @@ struct StillReviewRequest {
 // before any output exists, so the caller knows that only the originals remain.
 // profile_absent / profile_differs (#405 W4): a lens-aware (v2) condition whose profile file is not
 // beside it, or is there but is not the one the condition names or cannot be used.
-enum class FixedCompositeSkip {condition_absent,condition_invalid,orientation_differs,size_differs,seam_outside_overlap,profile_absent,profile_differs};
+// pose_outside_envelope (#417): a condition v3 whose hand adjustment (manual-adjustment) took the base pose beyond
+// registration.envelope. The record is intact (it is written, read back and rolled back by the tools); only the capture and the
+// live view refuse to draw with it, until a rollback or a new calibration brings the base pose back inside.
+enum class FixedCompositeSkip {condition_absent,condition_invalid,orientation_differs,size_differs,seam_outside_overlap,profile_absent,profile_differs,pose_outside_envelope};
 constexpr std::string_view FixedCompositeSkipCode(FixedCompositeSkip v){
     switch(v){
     case FixedCompositeSkip::condition_absent:return "condition-absent";
@@ -390,6 +393,7 @@ constexpr std::string_view FixedCompositeSkipCode(FixedCompositeSkip v){
     case FixedCompositeSkip::seam_outside_overlap:return "seam-outside-overlap";
     case FixedCompositeSkip::profile_absent:return "profile-absent";
     case FixedCompositeSkip::profile_differs:return "profile-differs";
+    case FixedCompositeSkip::pose_outside_envelope:return "pose-outside-envelope";
     }
     return {};
 }

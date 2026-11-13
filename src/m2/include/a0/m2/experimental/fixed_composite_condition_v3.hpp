@@ -11,6 +11,7 @@
 #include <functional>
 #include <limits>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -149,7 +150,14 @@ struct FixedCompositeConditionV3 {
 // capture or for the live view still refuses a base pose outside the envelope: RequireFixedCompositeBasePoseInEnvelopeV3, which
 // LoadFixedCompositeConditionAny (and so SelectFixedComposite) applies to every record it returns.
 void ValidateFixedCompositeConditionV3(const FixedCompositeConditionV3& c);
-// Throws std::invalid_argument when the base pose is outside registration.envelope, whatever the kind of the revision.
+// What RequireFixedCompositeBasePoseInEnvelopeV3 throws. A std::invalid_argument, so a caller that does not tell the reasons apart
+// treats it as any other unusable record; a caller that does (the capture and the live view) says that the record is intact and the
+// hand adjustment is beyond the range.
+class FixedCompositePoseOutsideEnvelope : public std::invalid_argument {
+public:
+    using std::invalid_argument::invalid_argument;
+};
+// Throws FixedCompositePoseOutsideEnvelope when the base pose is outside registration.envelope, whatever the kind of the revision.
 void RequireFixedCompositeBasePoseInEnvelopeV3(const FixedCompositeConditionV3& c);
 // Canonical text of a validated record, no trailing newline. Always carries "approval":"unapproved".
 [[nodiscard]] std::string FormatFixedCompositeConditionV3(const FixedCompositeConditionV3& c);
