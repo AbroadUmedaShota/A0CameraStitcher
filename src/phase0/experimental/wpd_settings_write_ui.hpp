@@ -389,11 +389,11 @@ void CreateSettingsWriteControls(HWND window,HINSTANCE instance){
     SetWindowTextW(window,(title+L" ／ 設定の書き込みあり（開発用・#416 段B）").c_str());
 }
 void LayoutSettingsWriteButtons(const RECT& rect){
+    // One row at the bottom; a narrow window wraps the row upward, the same flow as the buttons of the lower half.
     const int y=std::max(0L,rect.bottom-kD810ButtonRowGap);
-    if(settings_copy_button)MoveWindow(settings_copy_button,12,y,230,28,TRUE);
-    if(settings_reread_button)MoveWindow(settings_reread_button,252,y,170,28,TRUE);
-    if(settings_confirm_button)MoveWindow(settings_confirm_button,kD810ConfirmButtonLeft,y,kD810ConfirmButtonWidth,kD810ConfirmButtonHeight,TRUE);
-    if(settings_discard_button)MoveWindow(settings_discard_button,642,y,110,28,TRUE);
+    const auto flow=FlowButtons({{230},{170},{kD810ConfirmButtonWidth},{110}},kLayoutMargin,rect.right-kLayoutMargin,y,-kLowerRowPitch);
+    const auto place=[&](HWND button,std::size_t index){const auto& box=flow.boxes[index];if(button)MoveWindow(button,box.x,box.y,box.width,box.height,TRUE);};
+    place(settings_copy_button,0);place(settings_reread_button,1);place(settings_confirm_button,2);place(settings_discard_button,3);
     LayoutSettingsPanel(rect);
 }
 // The button's own WS_VISIBLE (IsWindowVisible also depends on the parent, which a smoke never shows).
@@ -1064,6 +1064,7 @@ int RunSettingsWriteUiSmoke(){
     settings_write.reset();
     std::filesystem::remove_all(folder,ignored);
     stopping=true;
+    CheckButtonLayouts([&](bool ok){check(ok);}); // #437: the buttons at the width of a narrow screen and at a wide one
     Log("settings_write_ui_checks="+std::to_string(checks)+" failures="+std::to_string(failures)+" camera_operations=0 camera_opens_attempted="+std::to_string(opens->load()));
     return failures?1:0;
 }

@@ -45,6 +45,7 @@
 #include "a0/phase0/experimental/fixed_composite_lens_text.hpp"
 #include "a0/phase0/experimental/pair_review_registration.hpp"
 #include "a0/phase0/experimental/pair_review_synthetic.hpp"
+#include "a0/phase0/experimental/preview_button_layout.hpp" // #437: where the buttons stand
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
 #include "a0/phase0/experimental/d810_settings_write_screen.hpp" // #416 stage B, only with A0_BUILD_WPD_SETTINGS_WRITE
 #endif

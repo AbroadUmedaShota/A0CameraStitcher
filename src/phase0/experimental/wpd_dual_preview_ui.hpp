@@ -169,6 +169,7 @@ bool SettingsPanelOpen(); // the settings panel is in the place of the Live area
 int SettingsButtonRowReserve(); // the row of buttons takes room from the bottom of the settings table (defined below)
 int SettingsTableBottom(std::size_t count,int client_bottom,int reserved_bottom); // bottom edge of the last row the table draws
 #endif
+void CheckButtonLayouts(const std::function<void(bool)>& check); // the button layout checks of the window smokes (defined before them)
 #if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
 #include "wpd_dual_preview_live_probe_ui.hpp" // #426 stage 4: the window side of the Live-open capture probe
 #endif
@@ -443,21 +444,26 @@ bool FinishPreview(){
     Log("simultaneous_overlap_seconds="+std::to_string(overlap)+" result="+(passed?"PASS":"FAIL"));
     all_sessions_passed=all_sessions_passed && passed;return passed;
 }
+// How far the wrapped rows of buttons push the content under them (preview_button_layout.hpp): the Live panes, and the lower half.
+int PreviewTopShift(int client_width){return PlanPreviewButtons(client_width).top_shift;}
+int PreviewLowerShift(int client_width){return PlanPreviewButtons(client_width).lower_shift;}
+void MoveBox(HWND button,const LayoutBox& box,int y_offset=0){if(button)MoveWindow(button,box.x,box.y+y_offset,box.width,box.height,TRUE);}
 void LayoutButtons(HWND hwnd){
-    RECT rect{};GetClientRect(hwnd,&rect);const int pane=rect.right/2;
+    RECT rect{};GetClientRect(hwnd,&rect);const auto plan=PlanPreviewButtons(rect.right);const int middle=rect.bottom/2;
     for(int i=0;i<2;++i){
-        for(int j=0;j<3;++j)if(focus_buttons[i][j])MoveWindow(focus_buttons[i][j],i*pane+12+j*125,40,115,28,TRUE);
-        if(capture_buttons[i])MoveWindow(capture_buttons[i],i*pane+387,40,145,28,TRUE);
+        const auto& boxes=plan.pane[static_cast<std::size_t>(i)];
+        for(int j=0;j<3;++j)MoveBox(focus_buttons[i][j],boxes[static_cast<std::size_t>(j)]);
+        MoveBox(capture_buttons[i],boxes[3]);
     }
-    for(int j=0;j<5;++j)if(merge_buttons[j])MoveWindow(merge_buttons[j],12+j*145,rect.bottom/2+52,135,28,TRUE);
-    if(pair_button)MoveWindow(pair_button,755,rect.bottom/2+52,235,28,TRUE);
-    if(review_button)MoveWindow(review_button,1005,rect.bottom/2+52,225,28,TRUE);
-    if(inspect_button)MoveWindow(inspect_button,std::max(12L,rect.right-215),rect.bottom/2+88,200,28,TRUE);
-    if(session_button)MoveWindow(session_button,std::max(12L,rect.right-430),rect.bottom/2+88,200,28,TRUE);
-    if(settings_button)MoveWindow(settings_button,std::max(12L,rect.right-645),rect.bottom/2+88,200,28,TRUE);
-    if(seam_button)MoveWindow(seam_button,1245,rect.bottom/2+52,140,28,TRUE);
+    for(int j=0;j<5;++j)MoveBox(merge_buttons[j],plan.lower[kLowerMerge0+j],middle);
+    MoveBox(pair_button,plan.lower[kLowerPair],middle);
+    MoveBox(review_button,plan.lower[kLowerReview],middle);
+    MoveBox(seam_button,plan.lower[kLowerSeam],middle);
+    MoveBox(inspect_button,plan.lower[kLowerInspect],middle);
+    MoveBox(session_button,plan.lower[kLowerSession],middle);
+    MoveBox(settings_button,plan.lower[kLowerSettings],middle);
 #if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
-    if(live_probe_button)MoveWindow(live_probe_button,std::max(12L,rect.right-300),rect.bottom/2+4,288,28,TRUE);
+    LayoutLiveProbeButton(rect);
 #endif
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
     LayoutSettingsWriteButtons(rect);
@@ -504,7 +510,7 @@ bool DrawSeamLine(HDC dc,const PixelRect& rect,const Pixels& p,unsigned column){
     const bool drawn=MoveToEx(dc,x,rect.top,nullptr)!=FALSE && LineTo(dc,x,rect.top+rect.height)!=FALSE;
     RestoreDC(dc,saved);return drawn;
 }
-bool DrawLevel(HDC dc,int left,int width,const Camera& c){
+bool DrawLevel(HDC dc,int left,int width,const Camera& c,int y_offset=0){
     const bool active=!stopping && !c.done && !c.failed;
     const auto now=Clock::now();
     const bool visible=D810LevelVisible(c.level,active,c.last,now);
@@ -513,9 +519,9 @@ bool DrawLevel(HDC dc,int left,int width,const Camera& c){
     else if(!active)text+=L"停止中";
     else if(c.frames && now-c.last>=std::chrono::seconds(2))text+=L"更新待ち（数値非表示）";
     else text+=L"データ未取得 / 利用不可";
-    RECT label{left,104,left+width-100,126};
+    RECT label{left,104+y_offset,left+width-100,126+y_offset};
     const bool text_drawn=DrawTextW(dc,text.c_str(),-1,&label,DT_LEFT|DT_SINGLELINE|DT_NOPREFIX)>0;
-    RECT note{left,128,left+width-100,170};
+    RECT note{left,128+y_offset,left+width-100,170+y_offset};
     DrawTextW(dc,L"精度・有効性は未検証。大きな前後傾斜・真下向きでは使用できない場合があります。",-1,&note,DT_LEFT|DT_WORDBREAK|DT_NOPREFIX);
     if(!visible || width<300)return false;
     // Positive roll rotates clockwise in screen coordinates, matching the
@@ -523,7 +529,7 @@ bool DrawLevel(HDC dc,int left,int width,const Camera& c){
     const auto saved=SaveDC(dc);if(!saved)return false;
     SelectObject(dc,GetStockObject(DC_PEN));SelectObject(dc,GetStockObject(NULL_BRUSH));
     SetDCPenColor(dc,RGB(110,110,110));
-    const int x=left+width-48,y=134;
+    const int x=left+width-48,y=134+y_offset;
     bool drawn=Ellipse(dc,x-38,y-28,x+39,y+29)!=FALSE;
     drawn=(MoveToEx(dc,x-35,y,nullptr)!=FALSE) && drawn;
     drawn=(LineTo(dc,x+36,y)!=FALSE) && drawn;
@@ -615,9 +621,9 @@ int SettingsButtonRowReserve(){
     return 0;
 }
 // Top of the first table row, and the layout of the table for a client area whose bottom reserved_bottom is kept free.
-int SettingsTableFirstRowY(int client_bottom){return client_bottom/2+88+34+24;}
-SettingsTableLayout LayoutSettingsTableIn(std::size_t count,int client_bottom,int reserved_bottom){
-    return LayoutSettingsTable(count,client_bottom-SettingsTableFirstRowY(client_bottom)-4-reserved_bottom);
+int SettingsTableFirstRowY(int client_bottom,int lower_shift=0){return client_bottom/2+88+lower_shift+34+24;}
+SettingsTableLayout LayoutSettingsTableIn(std::size_t count,int client_bottom,int reserved_bottom,int lower_shift=0){
+    return LayoutSettingsTable(count,client_bottom-SettingsTableFirstRowY(client_bottom,lower_shift)-4-reserved_bottom);
 }
 // Bottom edge of the last row the table draws.
 int SettingsTableBottom(std::size_t count,int client_bottom,int reserved_bottom){
@@ -627,11 +633,11 @@ int SettingsTableBottom(std::size_t count,int client_bottom,int reserved_bottom)
 // The side-by-side table of the two bodies' settings (#416, #427). Display only: nothing here sends a command.
 bool DrawSettingsView(HDC dc,RECT client){
     if(!settings_view)return false;
-    const int top=client.bottom/2+88,left=12;
+    const int shift=PreviewLowerShift(client.right),top=client.bottom/2+88+shift,left=12;
     const wchar_t* title=L"両台のカメラ設定（読み取り専用・カメラの設定は変えていません）";
     TextOutW(dc,left,top,title,lstrlenW(title));
-    const int head_y=top+34,first_y=SettingsTableFirstRowY(client.bottom);
-    const auto layout=LayoutSettingsTableIn(settings_view->rows.size(),client.bottom,SettingsButtonRowReserve());
+    const int head_y=top+34,first_y=SettingsTableFirstRowY(client.bottom,shift);
+    const auto layout=LayoutSettingsTableIn(settings_view->rows.size(),client.bottom,SettingsButtonRowReserve(),shift);
     const int block_width=(client.right-2*left)/layout.blocks;
     const int label_width=layout.blocks==1?236:std::min(200,block_width/3);
     const int column=std::max<int>(layout.blocks==1?100:60,(block_width-label_width-12)/3);
@@ -708,13 +714,22 @@ void DrawLiveRows(HDC dc,const RECT& client){
     if(live_runtime){const auto status=live_runtime->Status();state=status.state_text;orientation=status.orientation_line;}
     else{state=LiveRegistrationStartFailedText();orientation=LiveOrientationRowText(LiveOrientationTextsOf(std::nullopt,std::nullopt));}
     const auto wide_state=WidenUtf8(state),wide_orientation=WidenUtf8(orientation);
-    RECT state_rect{12,client.bottom/2+140,client.right-12,client.bottom/2+161};
-    RECT orientation_rect{12,client.bottom/2+163,client.right-12,client.bottom/2+184};
+    const int shift=PreviewLowerShift(client.right);
+    RECT state_rect{12,client.bottom/2+140+shift,client.right-12,client.bottom/2+161+shift};
+    RECT orientation_rect{12,client.bottom/2+163+shift,client.right-12,client.bottom/2+184+shift};
     DrawTextW(dc,wide_state.c_str(),-1,&state_rect,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
     // The direction is what the person adjusts by: a warmer colour than the notes.
     SetTextColor(dc,RGB(255,224,160));
     DrawTextW(dc,wide_orientation.c_str(),-1,&orientation_rect,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
     SetTextColor(dc,RGB(240,240,240));
+}
+// The status text above the row of buttons in the lower half. It ends above the first row of buttons (kLowerStatusBottom <= kLowerButtonsTop).
+RECT PreviewStatusRect(const RECT& client){
+    RECT rect{12,client.bottom/2+kLowerStatusTop,client.right-12,client.bottom/2+kLowerStatusBottom};
+#if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
+    rect.right=std::max<LONG>(rect.left+100,rect.right-300); // leave room for the probe button
+#endif
+    return rect;
 }
 std::array<std::uint64_t,6> Paint(HDC dc,RECT client){
     std::array<std::uint64_t,6> drawn{};
@@ -729,11 +744,11 @@ std::array<std::uint64_t,6> Paint(HDC dc,RECT client){
     const bool panel_over_live=false;
 #endif
     for(int i=0;i<2;++i){auto& c=*cameras[i];std::lock_guard lock(c.mutex);
-        const int pane=client.right/2,left=i*pane+12,top=174;
+        const int pane=client.right/2,left=i*pane+12,top_shift=PreviewTopShift(client.right),top=174+top_shift;
         std::wstring title=i==0?L"CAM-A（左）":L"CAM-B（右）";title+=L"   frames: "+std::to_wstring(c.frames);
         if(c.failed)title+=L"   FAILED";else if(stopping)title+=L"   STOPPED / STOPPING";else if(c.frames)title+=L"   LIVE";else title+=L"   STARTING";
-        TextOutW(dc,left,16,title.c_str(),static_cast<int>(title.size()));TextOutW(dc,left,82,c.focus_status.c_str(),static_cast<int>(c.focus_status.size()));
-        if(!panel_over_live && DrawLevel(dc,left,pane-24,c))drawn[4+i]=c.frames;
+        TextOutW(dc,left,16,title.c_str(),static_cast<int>(title.size()));TextOutW(dc,left,82+top_shift,c.focus_status.c_str(),static_cast<int>(c.focus_status.size()));
+        if(!panel_over_live && DrawLevel(dc,left,pane-24,c,top_shift))drawn[4+i]=c.frames;
         if(!panel_over_live && !c.pixels.bytes.empty() && Clock::now()-c.last<std::chrono::seconds(2) && !stopping &&
             DrawPixels(dc,c.pixels,left,top,pane-24,client.bottom/2-top-8))drawn[i]=c.frames;
         if(!panel_over_live && drawn[i]==c.frames && !c.pixels.bytes.empty())DrawAfOverlay(dc,c,client,i); // #426: the body's AF frame over the picture
@@ -741,20 +756,18 @@ std::array<std::uint64_t,6> Paint(HDC dc,RECT client){
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
     if(panel_over_live)DrawSettingsPanel(dc,client); // the settings panel takes the place of both Live areas
 #endif
-    RECT status_rect{12,client.bottom/2+4,client.right-12,client.bottom/2+86};
-#if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
-    status_rect.right=std::max<LONG>(status_rect.left+100,status_rect.right-300); // leave room for the probe button
-#endif
+    RECT status_rect=PreviewStatusRect(client);
     DrawTextW(dc,capture_status.c_str(),-1,&status_rect,DT_LEFT|DT_WORDBREAK|DT_NOPREFIX);
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
     if(preview_joined && settings_write && settings_write->screen->View() && DrawSettingsWrite(dc,client))return drawn; // a confirmation or a result is never under the review
 #endif
     if(review_visible && !review_pixels.bytes.empty()){
         const wchar_t* title=L"撮影JPEGの合成結果（静止画／未校正・確認用）";
-        TextOutW(dc,12,client.bottom/2+88,title,lstrlenW(title));
+        const int shift=PreviewLowerShift(client.right);
+        TextOutW(dc,12,client.bottom/2+88+shift,title,lstrlenW(title));
         const wchar_t* text=L"現在のライブ映像とは別の撮影結果です。「ライブCに戻す」で切り替えられます";
-        TextOutW(dc,12,client.bottom/2+110,text,lstrlenW(text));
-        if(DrawPixels(dc,review_pixels,12,client.bottom/2+140,client.right-24,client.bottom/2-155))drawn[3]=1;
+        TextOutW(dc,12,client.bottom/2+110+shift,text,lstrlenW(text));
+        if(DrawPixels(dc,review_pixels,12,client.bottom/2+140+shift,client.right-24,client.bottom/2-155-shift))drawn[3]=1;
         return drawn;
     }
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
@@ -778,11 +791,12 @@ std::array<std::uint64_t,6> Paint(HDC dc,RECT client){
         title=PreviewMergeTitle(mount_orientation,merged.overlap_pixels,merged.vertical_pixels);
         status=std::wstring(kUncalibratedPreviewNotice)+L" / "+merged.alignment_status;
     }
-    TextOutW(dc,12,client.bottom/2+88,title.c_str(),static_cast<int>(title.size()));
-    RECT status_line{12,client.bottom/2+110,client.right-12,client.bottom/2+138};
+    const int shift=PreviewLowerShift(client.right);
+    TextOutW(dc,12,client.bottom/2+88+shift,title.c_str(),static_cast<int>(title.size()));
+    RECT status_line{12,client.bottom/2+110+shift,client.right-12,client.bottom/2+138+shift};
     DrawTextW(dc,status.c_str(),-1,&status_line,DT_LEFT|DT_WORDBREAK|DT_NOPREFIX);
     // The picture of C starts lower by the two rows, only for a registered C; every other C keeps its place.
-    const int picture_top=client.bottom/2+140+(live_rows?kLiveRowsHeight:0),picture_height=client.bottom/2-155-(live_rows?kLiveRowsHeight:0);
+    const int picture_top=client.bottom/2+140+shift+(live_rows?kLiveRowsHeight:0),picture_height=client.bottom/2-155-shift-(live_rows?kLiveRowsHeight:0);
     if(live_rows && !stopping)DrawLiveRows(dc,client);
     if(!stopping && merged.rendered_revision==merged.revision && !merged.pixels.bytes.empty() && PreviewPairFresh(Clock::now(),merged.source_a,merged.source_b)){
         if(DrawPixels(dc,merged.pixels,12,picture_top,client.right-24,picture_height)){
@@ -1269,6 +1283,7 @@ int RunPairV3UiSmoke(const std::filesystem::path& fixtures){
     pair_capture_backend=[](const std::array<std::wstring,2>& ids,Clock::time_point deadline){return CaptureStillPairShutterFirst(ids,deadline);};
     pair_settings_folder_override.reset();pair_review_root_override.reset();
     std::error_code ignored;std::filesystem::remove_all(work,ignored);
+    CheckButtonLayouts([&](bool ok){check(ok,"button layout");}); // #437
     Log(std::string("pair_v3_ui_result=")+(failures?"FAIL":"PASS")+" checks="+std::to_string(checks)+" failures="+std::to_string(failures));
     return failures?1:0;
 }
@@ -1496,6 +1511,128 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM w,LPARAM l){
     case WM_DESTROY:PostQuitMessage(0);return 0;
     }return DefWindowProcW(hwnd,message,w,l);
 }
+// #437: a window of the given client size gets the real set of buttons (also the ones of an option that is built in), laid out by the
+// real window procedure, and the rules that keep it usable are checked against the places the buttons ended up in: every button is
+// inside the client area, no two overlap, a click at the middle of a button reaches that button, no button touches a picture or the
+// text under its row, the status text of the lower half stays clear of every button, and the content under a wrapped row has moved
+// down. Returns false when the window could not be made.
+// A folder in A0_LAYOUT_SHOT_DIR (set by a person, never by the program) gets a picture of the window as <width>.bmp.
+bool CheckButtonLayoutAt(int width,int height,const std::function<void(bool)>& check){
+    static bool registered=false;
+    const auto instance=GetModuleHandleW(nullptr);
+    WNDCLASSW wc{};wc.lpfnWndProc=WindowProc;wc.hInstance=instance;wc.lpszClassName=L"A0ButtonLayoutUiSmoke";
+    if(!registered)registered=RegisterClassW(&wc)!=0;
+    if(!registered)return false;
+    std::vector<HWND*> slots;
+    for(auto& row:focus_buttons)for(auto& h:row)slots.push_back(&h);
+    for(auto& h:capture_buttons)slots.push_back(&h);
+    for(auto& h:merge_buttons)slots.push_back(&h);
+    for(HWND* h:{&pair_button,&review_button,&inspect_button,&session_button,&seam_button,&settings_button})slots.push_back(h);
+#if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
+    slots.push_back(&live_probe_button);
+#endif
+#if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
+    for(HWND* h:{&settings_copy_button,&settings_reread_button,&settings_confirm_button,&settings_discard_button})slots.push_back(h);
+#endif
+    std::vector<HWND> saved;for(auto* slot:slots)saved.push_back(*slot);
+    HWND window=CreateWindowExW(0,wc.lpszClassName,L"button layout",WS_POPUP,0,0,width,height,nullptr,nullptr,instance,nullptr);
+    if(!window)return false;
+    const wchar_t* labels[]{L"AF",L"近くへ微調整",L"遠くへ微調整"};
+    const wchar_t* merge_labels[]{L"重なり −1px",L"重なり ＋1px",L"Bを上へ 1px",L"Bを下へ 1px",L"自動位置合わせ"};
+    const auto make=[&](HWND& slot,const wchar_t* text,DWORD style=BS_PUSHBUTTON){
+        slot=CreateWindowExW(0,L"BUTTON",text,WS_CHILD|WS_VISIBLE|style,0,0,10,10,window,nullptr,instance,nullptr);return slot!=nullptr;
+    };
+    bool made=true;
+    for(int i=0;i<2;++i){for(int j=0;j<3;++j)made=make(focus_buttons[i][j],labels[j]) && made;made=make(capture_buttons[i],i==0?L"Aを撮影・保存":L"Bを撮影・保存") && made;}
+    for(int j=0;j<5;++j)made=make(merge_buttons[j],merge_labels[j]) && made;
+    made=make(pair_button,L"両台撮影 → 仮Merge保存") && make(review_button,L"撮影結果を見る") && make(inspect_button,L"拡大確認・再Merge") &&
+        make(session_button,L"ライブ停止") && make(seam_button,L"継ぎ目の線を表示",BS_AUTOCHECKBOX) && make(settings_button,L"両台の設定を読む") && made;
+#if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
+    made=make(live_probe_button,LiveProbeButtonLabel()) && made;
+#endif
+#if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
+    made=make(settings_copy_button,L"A の設定を B に写す") && make(settings_reread_button,L"設定を読み直す") && make(settings_confirm_button,L"書き込む（1回だけ）") &&
+        make(settings_discard_button,L"やめる") && made;
+#endif
+    RECT client{};GetClientRect(window,&client);
+    check(made && client.right==width && client.bottom==height);
+    SendMessageW(window,WM_SIZE,SIZE_RESTORED,MAKELPARAM(client.right,client.bottom)); // the real window procedure lays the buttons out
+    std::vector<std::pair<HWND,RECT>> boxes;
+    for(HWND* slot:slots)if(*slot){RECT r{};GetWindowRect(*slot,&r);MapWindowPoints(nullptr,window,reinterpret_cast<POINT*>(&r),2);boxes.push_back({*slot,r});}
+    const auto overlaps=[](const RECT& a,const RECT& b){return a.left<b.right && b.left<a.right && a.top<b.bottom && b.top<a.bottom;};
+    const int middle=client.bottom/2,top_shift=PreviewTopShift(client.right),lower_shift=PreviewLowerShift(client.right);
+    // The pictures of the two panes and of C, as Paint and the AF click conversion place them.
+    Pixels sample;sample.width=640;sample.height=424;sample.bytes.assign(static_cast<std::size_t>(sample.width)*sample.height*4,0x60);
+    std::vector<RECT> pictures;
+    for(int i=0;i<2;++i){const auto r=PanePictureRect(client,i,sample);pictures.push_back({r.left,r.top,r.left+r.width,r.top+r.height});}
+    {const auto r=FitPixels(sample,12,middle+140+lower_shift,client.right-24,middle-155-lower_shift);pictures.push_back({r.left,r.top,r.left+r.width,r.top+r.height});}
+    const RECT status=PreviewStatusRect(client);
+    unsigned bad_inside{},bad_overlap{},bad_click{},bad_picture{},bad_text{},bad_status{};
+    for(std::size_t a=0;a<boxes.size();++a){
+        const RECT& r=boxes[a].second;
+        if(r.left<0 || r.top<0 || r.right>client.right || r.bottom>client.bottom)++bad_inside;
+        for(std::size_t b=a+1;b<boxes.size();++b)if(overlaps(r,boxes[b].second))++bad_overlap;
+        const POINT centre{(r.left+r.right)/2,(r.top+r.bottom)/2};
+        if(ChildWindowFromPointEx(window,centre,CWP_SKIPINVISIBLE)!=boxes[a].first)++bad_click;
+        // The row of the settings write buttons stands at the bottom of the window, over the area of C: it is shown only while the settings
+        // table or a confirmation takes the place of C, so it is not held clear of C's picture.
+        bool in_place_of_c=false;
+#if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
+        in_place_of_c=boxes[a].first==settings_copy_button || boxes[a].first==settings_reread_button || boxes[a].first==settings_confirm_button || boxes[a].first==settings_discard_button;
+#endif
+        if(!in_place_of_c)for(const auto& picture:pictures)if(overlaps(r,picture))++bad_picture;
+        if(overlaps(r,status))++bad_status;
+        // Upper half: the status text of a pane starts at 82 + the shift. Lower half: the title, the notes and C start at 88 + the shift
+        // from the middle, so a button of a row that is not the shared one must end above that.
+        if(r.top<middle){if(r.bottom>82+top_shift && r.top>=kPaneButtonsTop && r.top<82+top_shift)++bad_text;}
+        else if(r.top>=middle+kLowerButtonsTop && r.top<middle+kLowerTitleRow+lower_shift && r.bottom>middle+kLowerTitleRow+lower_shift)++bad_text;
+    }
+    check(boxes.size()==slots.size());
+    check(bad_inside==0);check(bad_overlap==0);check(bad_click==0);check(bad_picture==0);check(bad_text==0);check(bad_status==0);
+    Log("button_layout_ui width="+std::to_string(width)+" height="+std::to_string(height)+" client="+std::to_string(client.right)+"x"+std::to_string(client.bottom)+" buttons="+std::to_string(boxes.size())+" top_shift="+std::to_string(top_shift)+" lower_shift="+std::to_string(lower_shift)+
+        " outside="+std::to_string(bad_inside)+" overlapping="+std::to_string(bad_overlap)+" unreachable="+std::to_string(bad_click)+" on_picture="+std::to_string(bad_picture)+" on_text="+std::to_string(bad_text)+" on_status="+std::to_string(bad_status));
+    wchar_t shot_folder[MAX_PATH]{};const DWORD shot_length=GetEnvironmentVariableW(L"A0_LAYOUT_SHOT_DIR",shot_folder,MAX_PATH);
+    if(const wchar_t* folder=shot_folder; shot_length>0 && shot_length<MAX_PATH){
+        // Paint on synthetic gradient frames and print the real buttons on top of it.
+        auto saved_cameras=std::move(cameras);
+        for(int i=0;i<2;++i){cameras[i]=std::make_unique<Camera>();auto& c=*cameras[i];c.alias=i==0?"CAM-A":"CAM-B";c.frames=25;c.last=Clock::now();
+            c.pixels.width=640;c.pixels.height=424;c.pixels.bytes.resize(640*424*4);
+            for(unsigned y=0;y<424;++y)for(unsigned x=0;x<640;++x){auto* p=&c.pixels.bytes[(static_cast<std::size_t>(y)*640+x)*4];p[0]=static_cast<BYTE>(60+x/4);p[1]=static_cast<BYTE>(80+y/4);p[2]=static_cast<BYTE>(i?160:90);p[3]=255;}}
+        {std::lock_guard lock(merged.mutex);merged.pixels=cameras[0]->pixels;merged.source_a=merged.source_b=Clock::now();merged.rendered_revision=merged.revision;merged.decided=false;}
+        const bool was_stopping=stopping;stopping=false;
+        BITMAPINFO info{};info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);info.bmiHeader.biWidth=client.right;info.bmiHeader.biHeight=-client.bottom;info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;
+        void* bits{};HDC dc=CreateCompatibleDC(nullptr);HBITMAP bitmap=CreateDIBSection(dc,&info,DIB_RGB_COLORS,&bits,nullptr,0);
+        if(dc && bitmap){
+            auto old=SelectObject(dc,bitmap);Paint(dc,client);
+            for(const auto& box:boxes){
+                const int w=box.second.right-box.second.left,h=box.second.bottom-box.second.top;
+                HDC part=CreateCompatibleDC(dc);HBITMAP image=CreateCompatibleBitmap(dc,w,h);auto old_part=SelectObject(part,image);
+                SendMessageW(box.first,WM_PRINT,reinterpret_cast<WPARAM>(part),PRF_CLIENT|PRF_NONCLIENT|PRF_ERASEBKGND);
+                BitBlt(dc,box.second.left,box.second.top,w,h,part,0,0,SRCCOPY);
+                SelectObject(part,old_part);DeleteObject(image);DeleteDC(part);
+            }
+            GdiFlush();
+            std::filesystem::create_directories(folder);
+            std::ofstream out(std::filesystem::path(folder)/(std::to_string(width)+".bmp"),std::ios::binary);
+            BITMAPFILEHEADER file{};file.bfType=0x4d42;file.bfOffBits=sizeof(file)+sizeof(info.bmiHeader);
+            const std::size_t bytes=static_cast<std::size_t>(client.right)*static_cast<std::size_t>(client.bottom)*4;
+            file.bfSize=static_cast<DWORD>(file.bfOffBits+bytes);
+            out.write(reinterpret_cast<const char*>(&file),sizeof(file));out.write(reinterpret_cast<const char*>(&info.bmiHeader),sizeof(info.bmiHeader));
+            out.write(static_cast<const char*>(bits),static_cast<std::streamsize>(bytes));
+            SelectObject(dc,old);
+        }
+        if(bitmap)DeleteObject(bitmap);
+        if(dc)DeleteDC(dc);
+        stopping=was_stopping;ClearMerge();cameras=std::move(saved_cameras);
+    }
+    DestroyWindow(window);
+    for(std::size_t i=0;i<slots.size();++i)*slots[i]=saved[i];
+    return true;
+}
+// Called at the end of a window smoke: the width a window can really have on a narrow screen (about 1000 in the client area) and a wide one.
+void CheckButtonLayouts(const std::function<void(bool)>& check){
+    for(const int width:{1000,1032,1064,1400,1920})if(!CheckButtonLayoutAt(width,1800,check))check(false);
+}
 #include "wpd_dual_preview_af_smoke.hpp"
 #if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
 #include "wpd_dual_preview_live_probe_smoke.hpp" // camera-free contract of the probe's window side
@@ -1560,13 +1697,13 @@ int RunLifecycleUiSmoke(){
             VerifiedStillPair late;late.originals[0].late_object_event=late.originals[1].late_object_event=true;
             texts.push_back(DescribeStillPairLateObjects(late));texts.push_back(DescribeStillSingleLateObject());
             check(texts.size()>100);
-            for(const int width:{1400,1064}){
+            for(const int width:{1400,1064,1000}){
                 LONG worst=0;
                 for(const auto& text:texts){
                     RECT need{0,0,width-24,0};DrawTextW(dc,text.c_str(),-1,&need,DT_CALCRECT|DT_LEFT|DT_WORDBREAK|DT_NOPREFIX);
                     worst=(std::max)(worst,need.bottom);
                 }
-                check(worst<=82 && worst<=4*(metrics.tmHeight+metrics.tmExternalLeading));
+                check(worst<=kLowerStatusBottom-kLowerStatusTop && worst<=4*(metrics.tmHeight+metrics.tmExternalLeading));
                 Log("pair_status_width="+std::to_string(width)+" texts="+std::to_string(texts.size())+" worst_height="+std::to_string(worst)+" line_height="+std::to_string(metrics.tmHeight+metrics.tmExternalLeading));
             }
             DeleteDC(dc);
@@ -1574,6 +1711,7 @@ int RunLifecycleUiSmoke(){
     }
     // The same failure still ends a finite test, so it cannot hang CI.
     run_seconds=20;SendMessageW(window,WM_TIMER,1,0);check(!IsWindow(window) && closing);
+    CheckButtonLayouts([&](bool ok){check(ok);}); // #437: the buttons at the width of a narrow screen and at a wide one
     Log("lifecycle_ui_checks="+std::to_string(checks)+" failures="+std::to_string(failures)+" camera_operations=0");return failures?1:0;
 }
 // Camera-free contract of the read-only settings table (#416 stage A). The real window procedure, timer,
@@ -1735,9 +1873,12 @@ int RunSettingsUiSmoke(){
                 DeleteDC(dc);
             }
         }
-        // Layout: the sixteen rows fit the test window (1400 x 960) in one column; more rows share two blocks.
-        const auto fit=LayoutSettingsTable(settings_view->rows.size(),960-(960/2+88+58)-4);
-        check(fit.blocks==1 && fit.shown==16 && fit.row_height==kSettingsCompactRowHeight);
+        // Layout: the table starts one row of buttons lower than before the status text had its own rows, so the sixteen rows of the test
+        // window (1400 x 960) are shown in two blocks; a window 80 px taller keeps them in one column. More rows than fit share two blocks.
+        const auto fit=LayoutSettingsTable(settings_view->rows.size(),960-(960/2+88+PreviewLowerShift(1400)+58)-4);
+        check(fit.blocks==2 && fit.shown==16 && fit.row_height==kSettingsCompactRowHeight);
+        const auto taller=LayoutSettingsTableIn(16,1040,0,PreviewLowerShift(1400));
+        check(taller.blocks==1 && taller.shown==16 && taller.row_height==kSettingsCompactRowHeight);
         {   // With no reserve the table keeps its place: the last row ends above the bottom edge, whatever the height.
             bool inside=true;
             for(int bottom=600;bottom<=1400;++bottom){
@@ -1745,7 +1886,7 @@ int RunSettingsUiSmoke(){
                 if(layout.shown==16 && SettingsTableFirstRowY(bottom)+layout.rows_per_block*layout.row_height>bottom-4)inside=false;
             }
             check(inside && SettingsButtonRowReserve()==0);
-            const auto same=LayoutSettingsTableIn(16,960,0);
+            const auto same=LayoutSettingsTableIn(16,960,0,PreviewLowerShift(1400));
             check(same.blocks==fit.blocks && same.shown==fit.shown && same.row_height==fit.row_height);
         }
         const auto roomy=LayoutSettingsTable(16,16*kSettingsRowHeight);
@@ -1790,6 +1931,7 @@ int RunSettingsUiSmoke(){
 
     if(IsWindow(window))DestroyWindow(window);
     settings_backend=RealSettingsBackend;preview_restart_override=nullptr;stopping=true;
+    CheckButtonLayouts([&](bool ok){check(ok);}); // #437: the buttons at the width of a narrow screen and at a wide one
     Log("settings_ui_checks="+std::to_string(checks)+" failures="+std::to_string(failures)+" camera_operations=0");return failures?1:0;
 }
 // Camera-free contract of C with a fixed composite condition (#401), on synthetic frames. The real merge
@@ -1867,7 +2009,7 @@ int RunFixedCUiSmoke(){
         capture_pending.reset();return admitted;
     };
     const auto rearm=[&]{stopping=false;capture_stop_requested=false;capture_pending.reset();};
-    const auto picture_rect=[&]{std::lock_guard lock(merged.mutex);return FitPixels(merged.pixels,12,client.bottom/2+140,client.right-24,client.bottom/2-155);};
+    const auto picture_rect=[&]{std::lock_guard lock(merged.mutex);return FitPixels(merged.pixels,12,client.bottom/2+140+PreviewLowerShift(client.right),client.right-24,client.bottom/2-155-PreviewLowerShift(client.right));};
 
     // 1. A condition that applies: C is drawn with it, the seam line is over the picture, and no position request moves C.
     fixed_source={};fixed_source.loaded=m2::LoadedFixedCompositeCondition{condition(mount_orientation),std::string(64,'b')};
@@ -1968,7 +2110,7 @@ int RunFixedCUiSmoke(){
     }
     paint();
     {
-        PixelRect lower{12,client.bottom/2+140,client.right-24,client.bottom/2-155};
+        PixelRect lower{12,client.bottom/2+140+PreviewLowerShift(client.right),client.right-24,client.bottom/2-155-PreviewLowerShift(client.right)};
         check(pink(lower)==0);
         std::uint64_t revision{};{std::lock_guard lock(merged.mutex);revision=merged.revision;}
         press(300);press(304);
@@ -2016,6 +2158,7 @@ int RunFixedCUiSmoke(){
 
     SelectObject(dc,old);DeleteObject(bitmap);DeleteDC(dc);DestroyWindow(window);
     fixed_source={};stopping=true;
+    CheckButtonLayouts([&](bool ok){check(ok);}); // #437: the buttons at the width of a narrow screen and at a wide one
     Log("fixed_c_ui_checks="+std::to_string(checks)+" failures="+std::to_string(failures)+" camera_operations=0");return failures?1:0;
 }
 // Camera-free contract of the registered live C (condition v3, #417 LC), on synthetic frames. The real merge worker with its helper
@@ -2145,7 +2288,7 @@ int RunLiveCUiSmoke(){
     const auto picture_ready=[&]{std::lock_guard lock(merged.mutex);return merged.decided && merged.mode==PreviewCMode::fixed_composite && merged.frames>=3 && !merged.pixels.bytes.empty();};
     // The picture of a registered C starts below the two rows.
     const auto picture_rect=[&]{std::lock_guard lock(merged.mutex);
-        return FitPixels(merged.pixels,12,client.bottom/2+140+kLiveRowsHeight,client.right-24,client.bottom/2-155-kLiveRowsHeight);};
+        return FitPixels(merged.pixels,12,client.bottom/2+140+PreviewLowerShift(client.right)+kLiveRowsHeight,client.right-24,client.bottom/2-155-PreviewLowerShift(client.right)-kLiveRowsHeight);};
     const auto pink=[&](const PixelRect& rect){unsigned count{};
         for(int y=rect.top;y<rect.top+rect.height;++y)for(int x=rect.left;x<rect.left+rect.width;++x)if(GetPixel(dc,x,y)==kSeamLineColor)++count;return count;};
     const auto lit=[&](int top,int bottom){unsigned count{};for(int y=top;y<bottom;++y)for(int x=12;x<900;++x)if(GetPixel(dc,x,y)!=RGB(0,0,0))++count;return count;};
@@ -2188,8 +2331,8 @@ int RunLiveCUiSmoke(){
         check(rect.width>0 && rect.height>0);
         const auto pink_count=pink(rect);
         check(pink_count+2>=static_cast<unsigned>(rect.height) && pink_count<=static_cast<unsigned>(rect.height));
-        check(rect.top>=client.bottom/2+140+kLiveRowsHeight);
-        check(lit(client.bottom/2+140,client.bottom/2+161)>100 && lit(client.bottom/2+163,client.bottom/2+184)>100); // both rows have text
+        check(rect.top>=client.bottom/2+140+PreviewLowerShift(client.right)+kLiveRowsHeight);
+        check(lit(client.bottom/2+140+PreviewLowerShift(client.right),client.bottom/2+161+PreviewLowerShift(client.right))>100 && lit(client.bottom/2+163+PreviewLowerShift(client.right),client.bottom/2+184+PreviewLowerShift(client.right))>100); // both rows have text
     }
     {
         std::uint64_t revision{};{std::lock_guard lock(merged.mutex);revision=merged.revision;}
@@ -2303,7 +2446,7 @@ int RunLiveCUiSmoke(){
         const auto status=live_runtime->Status();
         check(!status.live_enabled && contains(status.state_text,"無効") && contains(status.orientation.b_short,"測れていません"));
         check(script->calls==0 && live_runtime->CurrentPlan()==nullptr);
-        check(lit(client.bottom/2+140,client.bottom/2+161)>100 && lit(client.bottom/2+163,client.bottom/2+184)>100);
+        check(lit(client.bottom/2+140+PreviewLowerShift(client.right),client.bottom/2+161+PreviewLowerShift(client.right))>100 && lit(client.bottom/2+163+PreviewLowerShift(client.right),client.bottom/2+184+PreviewLowerShift(client.right))>100);
         check(pink(picture_rect())>0);
     }
     check(capture_admitted_soon());
@@ -2321,7 +2464,7 @@ int RunLiveCUiSmoke(){
     {
         const auto plan=drawn_plan();
         check(plan.live==nullptr && plan.lens_aware);
-        const PixelRect rect = [&]{std::lock_guard lock(merged.mutex);return FitPixels(merged.pixels,12,client.bottom/2+140,client.right-24,client.bottom/2-155);}();
+        const PixelRect rect = [&]{std::lock_guard lock(merged.mutex);return FitPixels(merged.pixels,12,client.bottom/2+140+PreviewLowerShift(client.right),client.right-24,client.bottom/2-155-PreviewLowerShift(client.right));}();
         const auto pink_count=pink(rect);
         check(rect.width>0 && pink_count+2>=static_cast<unsigned>(rect.height) && pink_count<=static_cast<unsigned>(rect.height));
     }
@@ -2330,6 +2473,7 @@ int RunLiveCUiSmoke(){
 
     SelectObject(dc,old);DeleteObject(bitmap);DeleteDC(dc);DestroyWindow(window);
     fixed_source={};live_runtime.reset();live_estimator_override=nullptr;live_design_override.reset();stopping=true;
+    CheckButtonLayouts([&](bool ok){check(ok);}); // #437: the buttons at the width of a narrow screen and at a wide one
     Log("live_c_ui_checks="+std::to_string(checks)+" failures="+std::to_string(failures)+" camera_operations=0");return failures?1:0;
 }
 int RunPreviewWindow(const std::array<std::wstring,2>& ids){

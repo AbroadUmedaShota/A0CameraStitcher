@@ -1190,6 +1190,11 @@ if(BUILD_TESTING)
     target_link_libraries(a0_preview_focus_mailbox_tests PRIVATE a0_wpd_live_view_codec)
     add_test(NAME preview_focus_mailbox_contracts COMMAND a0_preview_focus_mailbox_tests)
     set_tests_properties(preview_focus_mailbox_contracts PROPERTIES TIMEOUT 15)
+    # Where the buttons of the development preview stand (#437): pure arithmetic, no window.
+    add_executable(a0_preview_button_layout_tests tests/preview_button_layout_tests.cpp)
+    target_include_directories(a0_preview_button_layout_tests PRIVATE src/phase0/include)
+    add_test(NAME preview_button_layout_contracts COMMAND a0_preview_button_layout_tests)
+    set_tests_properties(preview_button_layout_contracts PROPERTIES TIMEOUT 15)
     # AF frame of the development preview (#426): header words, validity, display mapping, log throttle; no device.
     add_executable(a0_preview_af_point_tests tests/preview_af_point_tests.cpp)
     target_link_libraries(a0_preview_af_point_tests PRIVATE a0_wpd_live_view_codec ole32 PortableDeviceGuids)

@@ -284,6 +284,7 @@ int RunLiveCaptureProbeUiSmoke(){
     live_probe_future=std::future<LiveProbeThreadOutcome>();
     DestroyWindow(window);live_probe_button=nullptr;
     stopping=true;
+    CheckButtonLayouts([&](bool ok){check(ok,"button layout");}); // #437
     Log("live_capture_probe_ui_checks="+std::to_string(checks)+" failures="+std::to_string(failures)+" camera_operations=0");
     return failures?1:0;
 }

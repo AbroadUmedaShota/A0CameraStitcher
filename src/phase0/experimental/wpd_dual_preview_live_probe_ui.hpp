@@ -13,6 +13,11 @@ enum class LiveProbePhase {Idle,Holding,Running,AfterFrame,Stopping,Done};
 bool live_probe_used=false; // set at the press and never cleared: one press for the life of the process
 LiveProbePhase live_probe_phase=LiveProbePhase::Idle;
 HWND live_probe_button{};
+// The probe button stands at the right end of the status row, under the middle of the client area.
+void LayoutLiveProbeButton(const RECT& client){
+    const auto flow=FlowButtons({{288,kLayoutGap,true}},kLayoutMargin,client.right-kLayoutMargin,4,kLowerRowPitch);
+    if(live_probe_button)MoveWindow(live_probe_button,flow.boxes[0].x,client.bottom/2+flow.boxes[0].y,flow.boxes[0].width,flow.boxes[0].height,TRUE);
+}
 Clock::time_point live_probe_pressed{},live_probe_deadline{},live_probe_hold_started{},live_probe_frame_started{};
 using LiveProbeBackend=std::function<LiveProbeThreadOutcome(Camera&,Clock::time_point)>;
 // Replaced only by --live-capture-probe-ui-smoke, which has no camera.

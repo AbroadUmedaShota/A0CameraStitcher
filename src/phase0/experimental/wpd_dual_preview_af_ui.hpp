@@ -21,7 +21,7 @@ inline constexpr int kAfStripHeight=22;
 // Where Paint puts the picture of camera `index`. Paint calls DrawPixels with the same numbers; the
 // click conversion uses this function so that a click and the drawing never disagree.
 PixelRect PanePictureRect(const RECT& client,int index,const Pixels& pixels){
-    const int pane=client.right/2,left=index*pane+12,top=174;
+    const int pane=client.right/2,left=index*pane+12,top=174+PreviewTopShift(client.right);
     return FitPixels(pixels,left,top,pane-24,client.bottom/2-top-8);
 }
 const wchar_t* AfRejectText(D810AfReject reason){
