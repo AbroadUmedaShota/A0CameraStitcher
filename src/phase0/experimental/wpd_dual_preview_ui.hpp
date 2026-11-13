@@ -57,7 +57,7 @@ a0::m2::experimental::MountOrientation mount_orientation{};
 // Read once at startup (#365). Absent: values are recorded, nothing is corrected.
 std::optional<a0::m2::experimental::StillMergePolicy> merge_policy;
 Clock::time_point capture_deadline;
-Pixels review_pixels;bool review_visible=false;
+Pixels review_pixels;bool review_visible=false,review_calibrated=false;
 std::filesystem::path review_path;
 std::wstring capture_status=L"撮影すると両Liveを停止 → 選択カメラを撮影・PC保存 → 両Liveを再開";
 struct MergeView {
@@ -817,7 +817,7 @@ std::array<std::uint64_t,6> Paint(HDC dc,RECT client){
     if(DrawRecalibrationScreen(dc,client))return drawn; // the guide, the progress or the result of the calibration takes the place of C (#434)
 #endif
     if(review_visible && !review_pixels.bytes.empty()){
-        const wchar_t* title=L"撮影JPEGの合成結果（静止画／未校正・確認用）";
+        const wchar_t* title=PreviewReviewHeading(review_calibrated);
         const int shift=PreviewLowerShift(client.right);
         TextOutW(dc,12,client.bottom/2+88+shift,title,lstrlenW(title));
         const wchar_t* text=L"現在のライブ映像とは別の撮影結果です。「ライブCに戻す」で切り替えられます";
@@ -978,6 +978,10 @@ CaptureUiOutcome SavePairReview(const std::array<std::wstring,2>& ids,ReviewGeom
     }
     return result;
 }
+// A review made with a fixed composite condition (v1, v2 or v3) is a calibrated composite (the heading over it says so, #432).
+bool ReviewIsCalibrated(const a0::m2::experimental::StillReviewResult& review){
+    return review.fixed_composite || review.fixed_composite_lens || review.fixed_composite_registration;
+}
 // The status row of a saved capture. A v8 review adds one sentence per line under the path (#417): the level, the pose of B and
 // the paper surface, the gate, the warnings, the stages the time budget dropped. Every other review has the one line it always had.
 std::wstring SavedCaptureStatus(const CaptureUiOutcome& result){
@@ -1066,7 +1070,7 @@ void AdvanceCapture(HWND hwnd){
                     const auto divisor=std::max(1u,(std::max(result.review->width,result.review->height)+1199)/1200);const auto column=*seam_column/divisor;
                     if(column<thumbnail.width)for(unsigned y=0;y<thumbnail.height;++y){auto* pixel=review_pixels.bytes.data()+(static_cast<size_t>(y)*thumbnail.width+column)*4;pixel[0]=255;pixel[1]=0;pixel[2]=255;}
                 }
-                review_visible=true;
+                review_visible=true;review_calibrated=ReviewIsCalibrated(*result.review);
             }
             // #417 LC: the live registration is asked for a full pass after a shot here, with the originals of this shot gone from
             // the live view: tracker.RequestFull(now, after_capture). J8w does not call it; the tracker is LC's.
@@ -1145,6 +1149,8 @@ int RunPairV3UiSmoke(const std::filesystem::path& fixtures){
         check(first.capture.success && first.capture.closed && first.review && !first.composite_skip,"v3: a composite is made");
         if(first.review){
             check(first.review->fixed_composite_registration && !first.review->fixed_composite_lens && !first.review->fixed_composite,"v3: the review is a registered one");
+            check(ReviewIsCalibrated(*first.review) && std::wstring(PreviewReviewHeading(ReviewIsCalibrated(*first.review))).find(L"未校正")==std::wstring::npos &&
+                std::wstring(PreviewReviewHeading(false)).find(L"未校正")!=std::wstring::npos,"v3: the heading over the saved composite does not say uncalibrated");
             if(first.review->fixed_composite_registration){
                 const auto& record=*first.review->fixed_composite_registration;
                 check(record.registration.level.level==m2e::GeometryLevel::g4,"v3: flat frames give G4");

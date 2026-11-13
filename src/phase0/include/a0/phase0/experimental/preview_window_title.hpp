@@ -65,6 +65,11 @@ inline constexpr const wchar_t* kPreviewSettingsWriteMark=L" ／ 設定の書き
     return source.loaded_v3.has_value() || source.loaded_v2.has_value() || source.loaded.has_value();
 }
 
+// The heading over the saved composite that the review button shows: a composite made with a calibration is not called uncalibrated.
+[[nodiscard]] inline const wchar_t* PreviewReviewHeading(bool calibrated){
+    return calibrated?L"撮影JPEGの合成結果（静止画／校正あり・確認用）":L"撮影JPEGの合成結果（静止画／未校正・確認用）";
+}
+
 [[nodiscard]] inline const wchar_t* PairButtonLabel(const FixedPreviewSource& source){
     return PreviewCalibrated(source)?L"両台撮影 → 合成を保存":L"両台撮影 → 仮Merge保存";
 }
