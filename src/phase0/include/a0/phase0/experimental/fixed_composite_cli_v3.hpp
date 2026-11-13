@@ -82,6 +82,7 @@ inline std::optional<std::uint64_t> Whole(const std::wstring& text,std::size_t m
     const auto kind_text=fixed_cli_v3_detail::Ascii(args[0]);
     const auto kind=kind_text?m2::ParseFixedCompositeRevisionKind(*kind_text):std::nullopt;
     if(!kind)return refuse("the kind is not one of created, migrated-from-v2, values, manual-adjustment, rollback, saved-estimate");
+    if(*kind==Kind::recalibrated)return refuse("recalibrated is made by the recalibration of the preview (#434), not by this command");
 
     FixedConditionV3Request request;request.kind=*kind;
     std::optional<double> dx,dy,rotation,falloff,strain;
@@ -134,7 +135,7 @@ inline std::optional<std::uint64_t> Whole(const std::wstring& text,std::size_t m
         request.entered=m2::FixedCompositeRevisionChangeV3::Entered{*dx,*dy,*rotation};break;
     case Kind::rollback:if(!have_restore)return refuse("rollback needs --restore-sequence");break;
     case Kind::saved_estimate:if(!have_report)return refuse("saved-estimate needs --report");break;
-    case Kind::values:break;
+    case Kind::values:case Kind::recalibrated:break;
     }
     request.dry_run=dry_run;
     out.request=std::move(request);

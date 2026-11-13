@@ -13,7 +13,7 @@ Issue #417（撮影ごとに図面の中身で左右のカメラの継ぎ目を�
 5. 数は有限で、丸めない。書き方は 2 節
 6. 符号（列挙）は kebab-case の文字列。符号を足す時は、書き手、読み手、TXT の文、試験を同じ commit で足す
 7. 試験は v3・v8 の文字列を直書きせず、`registration_fixtures.hpp` の関数を通す
-8. main に入った後の変更は新しい版（v4・v9）にし、古い読み手を残す。別の版を並べて作らない（設計 11.15 の「版の分かれ」）
+8. main に入った後の変更は新しい版（v4・v9）にし、古い読み手を残す。別の版を並べて作らない（設計 11.15 の「版の分かれ」）。例外として、閉じた符号の欄に符号を足すだけの変更は版を上げない。その時は次の 4 つを同じ commit で満たす。(a) 既にある欄の名前・型・単位・意味と、既にある符号の意味を変えない。新しい符号が使う欄は既にある欄だけ。(b) 古い読み手は知らない符号を拒否し、使う側は当てない・合成しない・原画像を残す側に倒れる。これを知らない符号を入れた試験の入力で確かめる。(c) 新しい読み手は今あるファイルを前と同じに読み、既存の試験が試験のコードを変えずに通る。(d) 足した符号と、それを読めない版の境目を表の注に書く
 
 ## 2. 書き方の共通事項
 
@@ -37,10 +37,10 @@ Issue #417（撮影ごとに図面の中身で左右のカメラの継ぎ目を�
 | `createdUtc` | `created_utc` | 日時 | — | 必須 | V3 | |
 | `revision.sequence` | `revision.sequence` | 整数 1〜999999 | — | 必須 | V3 | |
 | `revision.parentSha256` | `revision.parent_sha256` | ハッシュか null | — | 必須 | V3 | |
-| `revision.change.kind` | `revision.change.kind` | `created`／`migrated-from-v2`／`saved-estimate`／`manual-adjustment`／`rollback`／`values` | — | 必須 | V3 | |
+| `revision.change.kind` | `revision.change.kind` | `created`／`migrated-from-v2`／`saved-estimate`／`manual-adjustment`／`rollback`／`values`／`recalibrated` | — | 必須 | V3（`recalibrated` は #434） | |
 | `revision.change.v2Sha256` | `change.v2_sha256` | ハッシュ | — | `migrated-from-v2` の時だけ | V3 | |
-| `revision.change.reportSha256` | `change.report_sha256` | ハッシュ | — | `saved-estimate` の時だけ | V3 | |
-| `revision.change.pairId` | `change.pair_id` | 文字列 | — | `saved-estimate` の時だけ | V3 | |
+| `revision.change.reportSha256` | `change.report_sha256` | ハッシュ | — | `saved-estimate`・`recalibrated` の時だけ | V3 | `recalibrated` では取り直しの推定の記録（`a0.pair-recalibration-estimate.v1`）の SHA-256 |
+| `revision.change.pairId` | `change.pair_id` | 文字列 | — | `saved-estimate`・`recalibrated` の時だけ | V3 | `recalibrated` では取り直しに使った撮影の組 |
 | `revision.change.entered` | `change.entered` | `{seamDxPx, seamDyPx, rotationDeg}` 有限 | 出力 px・度 | `manual-adjustment` の時だけ | V3（画面の入口は #418 段 2） | |
 | `revision.change.maximumSeamDisplacementPx` | `change.maximum_seam_displacement_px` | 有限 ≥ 0 | 出力 px | `manual-adjustment` の時だけ | V3 | |
 | `revision.change.restoredSha256` | `change.restored_sha256` | ハッシュ | — | `rollback` の時だけ | V3 | |
@@ -66,7 +66,9 @@ Issue #417（撮影ごとに図面の中身で左右のカメラの継ぎ目を�
 注:
 
 - `registration.limits` の 9 値は `RegistrationLimits` の名前を camelCase にした `brownLoweAlpha`、`brownLoweBeta`、`minimumUniqueBlocks`（整数）、`maximumPredictionSigmaPx`、`maximumResidualRmsPx`、`maximumResidualP95Px`、`maximumBinBiasPx`、`convergencePx`、`startAgreementPx`。開発の仮の値。`registration.live.limits` も同じ 9 値
-- 種類ごとの `revision.change` の欄の組は固定。`created` と `values` は `kind` だけ、`migrated-from-v2` は `kind`＋`v2Sha256`、`saved-estimate` は `kind`＋`reportSha256`＋`pairId`、`manual-adjustment` は `kind`＋`entered`＋`maximumSeamDisplacementPx`、`rollback` は `kind`＋`restoredSha256`。この順で書く
+- 種類ごとの `revision.change` の欄の組は固定。`created` と `values` は `kind` だけ、`migrated-from-v2` は `kind`＋`v2Sha256`、`saved-estimate` と `recalibrated` は `kind`＋`reportSha256`＋`pairId`、`manual-adjustment` は `kind`＋`entered`＋`maximumSeamDisplacementPx`、`rollback` は `kind`＋`restoredSha256`。この順で書く
+- `recalibrated` は撮影の 1 組から CAM-B の写像を取り直した改訂（#434）。番号 2 以上だけで、`basePose` は全部 0（B の姿勢は profile の中にある）。親から変えてよいのは `source` の profile の 3 欄（`profileFile`・`profileFileSha256`・`profileFingerprintSha256`）・`outputRaster`・`seam`・`basePose` だけで、`mountOrientation`・`source.policySha256`・`registration`・`seamGate`・`revisionRules` は親の値を写す（方針ファイルは読み直さない。値を変えるのは `values` の役で、1 つの改訂に 2 つの変更を混ぜない）。profile を変えてよい種類はこれだけ。`rollback` で profile の違う改訂へ戻すのは、今のまま作る道具が断る。決まり 8 の例外で版は上げていない。この符号を知らない読み手（#434 より前）は改訂の列全体を拒否し（`condition_invalid`）、C を描かず合成しない。前の改訂へは倒れない。原画像は残る。報告 v8 が条件について持つのは `condition{sha256, sequence}` だけで、種類は持たないので v8 は変わらない
+- `recalibrated` が指す profile の `calibration` の意味は `rig-profile-v2.md` 7 節の注（`toolId` が `a0-pair-reanchor`）。状態は常に draft で、`profileId` は null、親の承認は引き継がない
 - `revision.parentSha256` が null なのは `sequence` が 1 の時だけ
 - `registration.geometry.guardPx` は、推定の細の段のパッチ（`kRegistrationDesignDraft.fine_patch_px`、案で 64 px）の半分より大きい。半分以下だと推定の点が Ω の画素を読み、ゲートが推定の材料を測る事になる。読む時と作る時に弾く（`condition_invalid`）
 - `registration.parallax` が null でない時、Ω の半幅 `(混ぜ幅 + 1) / 2 + omegaMarginPx`（混ぜ幅は `kSeamBlendDesign.width_pixels`）は層 2 の a（`kParallaxDesignDraft.weight_flat_px`、案で 48 px）以下。超えると層 2 が毎回拒むので、読む時と作る時に弾く

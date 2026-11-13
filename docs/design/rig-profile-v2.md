@@ -223,6 +223,15 @@ us = fx * xd + cx;   vs = fy * yd + cy   # 生 pixel
 | `/approval/decisionRef` | 文字列 | | | 所有者の決定の参照（Issue のコメントなど）。人名は書かない |
 | `/approval/approvedAt`、`/validUntil` | 文字列 | | | UTC、秒まで、`Z` |
 
+`/calibration` の注（#434）:
+
+- `/calibration/tool/toolId` が `a0-pair-reanchor` の profile は、親の profile のレンズの値と CAM-A の写像をそのまま持ち、CAM-B の `documentToImage` だけを撮影の 1 組の図面の中身から取り直した物。`method` はレンズと CAM-A の測り方を表すので `chart-fiducial-planar` のまま
+- `chartId`、`inputSha256/CAM-A`、`fitResidualPixels/CAM-A`、`rigMeasurements/lensFocalLengthMm`、`rigMeasurements/cameraToDocumentMm/CAM-A` は親の値を写す。`inputSha256/CAM-B` はその 1 組の CAM-B の原画像、`fitResidualPixels/CAM-B` はその推定に使った点の残差（CAM-B の pixel。出力 pixel の値は入れない）
+- `baselineMm`、`overlapMm`、`cameraToDocumentMm/CAM-B` は測り直していないので null
+- `provenanceId` は取り直しの記録（`a0.pair-recalibration-estimate.v1`）を指し、その記録は親の profile の SHA-256・fingerprint・`provenanceId` を持つ
+- 状態は常に draft で、`profileId` は null、親の承認は引き継がない（内容を変えたら新しい profileId）
+- 合成には `calibration` を使わない（fingerprint には入る）ので、読み手は変わらない。`method` に値を足す案は、B の写像が撮影から来たかで処理を変える読み手が出た時に改めて検討する
+
 v1 にあった自由記述の `qualityContract.notes` は持たない。公開リポジトリで PC 名などが紛れ込む入口になり、機械が読む意味も無い。
 
 ### 9.3 schema が検査すること、実行時に検査すること
