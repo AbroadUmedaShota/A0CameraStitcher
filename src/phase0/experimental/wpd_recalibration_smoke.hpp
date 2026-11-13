@@ -502,6 +502,8 @@ int RunRecalibrationUiSmoke(const std::filesystem::path& fixtures,const std::fil
             check(shown_lines.lines.size()==2 && shown_lines.lines[1].find("新しいフォルダ")==std::string::npos && shown_lines.lines[1].find("技術担当")!=std::string::npos,"mistake: the sentence for a caller is not shown");
             mistaken.findings={{FindingClass::no_candidate,"live-not-stopped",""}};
             check(RecalibrationDisplayLines(mistaken).lines.size()==2,"mistake: nor is the other one");
+            mistaken.findings={{FindingClass::no_candidate,"staging-in-settings",""}};
+            check(RecalibrationDisplayLines(mistaken).lines.size()==2,"mistake: nor is the one for a folder among the settings");
         }
 
         // ================= 6. Retake, and the condition that changed while the result was on the screen =================

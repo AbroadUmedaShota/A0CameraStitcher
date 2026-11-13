@@ -139,17 +139,25 @@ std::optional<bool> RecalibrationRecordedAsUnchecked(const std::filesystem::path
     }
     return std::nullopt;
 }
-// Called where the condition is read (every session start): looks the answer up once per revision.
+// The one place that says whether the revision with this SHA-256 is an unchecked calibration: the run that confirmed it knows; after a
+// restart the record of the run folder is read. Nothing else on the screen asks anyone else. A later version reads a small record in the
+// settings folder instead (named by the first 16 hex digits of the revision's SHA-256); only this function changes then.
+// Empty: not known (nothing is shown).
+std::optional<bool> RecalibrationUncheckedMarkOf(const std::string& revision_sha256){
+    if(revision_sha256==recal_ui.confirmed_unchecked_sha){Log("recalibration_unchecked_mark source=this-run unchecked=1");return true;}
+    const auto found=RecalibrationRecordedAsUnchecked(RecalibrationReviewRoot(),revision_sha256);
+    if(found)Log(std::string("recalibration_unchecked_mark source=record unchecked=")+(*found?"1":"0"));
+    else Log("recalibration_unchecked_mark source=none reason=no-record-found");
+    return found;
+}
+// Called where the condition is read (every session start): asks once per revision.
 void RecalibrationRefreshUncheckedMark(){
     auto& r=recal_ui;
     if(!fixed_source.loaded_v3){r.scanned_sha.clear();r.scanned_unchecked=false;return;}
     const auto& sha=fixed_source.loaded_v3->file_sha256;
     if(sha==r.scanned_sha)return;
-    r.scanned_sha=sha;r.scanned_unchecked=false;
-    if(sha==r.confirmed_unchecked_sha){r.scanned_unchecked=true;Log("recalibration_unchecked_mark source=this-run unchecked=1");return;}
-    const auto found=RecalibrationRecordedAsUnchecked(RecalibrationReviewRoot(),sha);
-    if(found){r.scanned_unchecked=*found;Log(std::string("recalibration_unchecked_mark source=record unchecked=")+(*found?"1":"0"));}
-    else Log("recalibration_unchecked_mark source=none reason=no-record-found");
+    r.scanned_sha=sha;
+    r.scanned_unchecked=RecalibrationUncheckedMarkOf(sha).value_or(false);
 }
 bool RecalibrationUncheckedInForce(){
     return fixed_source.loaded_v3 && recal_ui.scanned_unchecked && recal_ui.scanned_sha==fixed_source.loaded_v3->file_sha256;
@@ -271,7 +279,7 @@ RecalibrationLines RecalibrationDisplayLines(const a0::phase0::experimental::Rec
     using namespace a0::phase0::experimental;
     RecalibrationLines result;
     for(const auto& finding:outcome.findings)
-        if(finding.code=="staging-exists" || finding.code=="live-not-stopped"){
+        if(finding.code=="staging-exists" || finding.code=="live-not-stopped" || finding.code=="staging-in-settings"){
             result.lines={RecalibrationVerdictLine(RecalibrationVerdict::unusable),"校正を始められませんでした。技術担当へ知らせてください。前の校正のままです。"};
             result.reasons_end=2;return result;
         }
@@ -426,7 +434,7 @@ bool DrawRecalibrationScreen(HDC dc,const RECT& client){
         for(size_t i=1;i<reasons_end;++i)line(utf8(lines[i]),outcome.verdict==RecalibrationVerdict::usable?kRecalTextColor:kRecalWarnColor);
         if(outcome.verdict==RecalibrationVerdict::unusable)line(L"この校正は保存できません。前の校正のままです。",kRecalNgColor);
         else{
-            line(L"確定すると、前の校正へはボタンでは戻せません（もう一度校正が要ります）。",kRecalHeadColor);
+            line(L"確定すると、前の校正へは今はボタンで戻せません（もう一度校正が要ります）。",kRecalHeadColor);
             if(outcome.unverified())line(std::wstring(L"「未確認のまま使う」を押すと、画面の題と C の欄に「")+kRecalUncheckedMark+L"」と出し続けます。",kRecalWarnColor);
         }
         for(size_t i=reasons_end;i<lines.size();++i)line(utf8(lines[i]));
