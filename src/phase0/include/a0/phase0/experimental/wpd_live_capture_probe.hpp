@@ -9,6 +9,11 @@
 #if !defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
 #error "wpd_live_capture_probe.hpp belongs to the probe build only (A0_BUILD_WPD_LIVE_CAPTURE_PROBE, ADR-0044)"
 #endif
+// The settings write path restarts Live View; its observation must not be mixed with the probe's (ADR-0044). CMake stops
+// the combination at configure time; this stops a hand-made compile.
+#if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
+#error "the Live-open capture probe and the settings write path must not be compiled together (ADR-0044)"
+#endif
 #include "a0/phase0/experimental/wpd_still_capture.hpp"
 #include <array>
 #include <chrono>
