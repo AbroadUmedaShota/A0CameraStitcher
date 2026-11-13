@@ -4,8 +4,10 @@
 #include "a0/m2/experimental/registration_mapping.hpp"
 #include "a0/m2/render.hpp"
 #include "a0/phase0/experimental/fixed_composite_preview.hpp"
+#include "a0/phase0/experimental/live_placement.hpp"
 #include "a0/phase0/experimental/live_registration_display.hpp"
 #include "a0/phase0/experimental/live_registration_tracker.hpp"
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -25,25 +27,29 @@
 #include <vector>
 
 namespace a0::phase0::experimental {
-// The part of the live C's registration that runs beside the window (#417 LC; docs/design/fixed-composite-registration.md 4 "the
-// live C", 11.9, addendum 11.21). The state machine (LiveRegistrationTracker) decides what to run; this file runs it on one worker
-// thread of its own, bakes camera B's table again when the mapping in force has moved, and keeps the plan that the 80 ms loop of C
-// draws with and the sentences that the window shows.
+// The part of the live C's registration that runs beside the window (#417 LC; docs/design/fixed-composite-registration.md 4 "the live
+// C", 11.9, addendum 11.21; #437 stage 1). The machine (LivePlacementMachine, live_placement.hpp) holds the one confirmed position P that
+// C is drawn with and says what to run: one estimate when the first session begins, one when the button is pressed. This file runs it on
+// one worker thread of its own, bakes camera B's table again whenever P is to be replaced, and keeps the plan that the 80 ms loop of C draws
+// with and the sentences that the window shows. No estimate runs unless one was asked for: there is no follow-up, no change detection, no
+// holding time and no retry.
 //
 // Who calls what:
 //  - the loop of C (merge worker): PublishBase when it has chosen the plan for a frame size, CurrentPlan on every pass. It never
 //    estimates and never bakes; it only reads a shared_ptr under a mutex;
-//  - the worker (Work / RunPass): the only caller of the tracker's BeginJob / Accept / DecideRebake, of the estimator and of
-//    RebakePreviewB. A new plan is swapped in under the mutex when the bake is done, so a frame being drawn keeps the plan it started
-//    with (the two faces of B's table);
-//  - the window (UI thread): Status, once per paint.
+//  - the worker (Work / RunPass): the only caller of the machine's BeginJob / Accept, of the estimator and of RebakePreviewB. A new plan
+//    is swapped in under the mutex when the bake is done, so a frame being drawn keeps the plan it started with (the two faces of B's
+//    table). P is replaced only after the bake that draws it has passed;
+//  - the window (UI thread): Status once per paint, RequestEstimate when the button is pressed, ApplyCapture when a shot ended with a JPEG.
 // Every member is safe to call from any of those threads. The estimator and the bake run with no lock held.
 
 // ---- Design constants of the live view: a DRAFT -------------------------------------------------------------------------------
 //
-// The values that decide how the live C follows the paper. They are one proposal for the first run on a real rig, NOT decided by
-// measurement and NOT part of the condition (the condition v3 carries none of them); whether the condition should carry them is
-// the designer's to decide. Units: seconds; C pixels (the pixels of C's grid); a fraction; the brightness unit of A's band.
+// The values that decided how the live C followed the paper (#417). They are one proposal, NOT decided by measurement and NOT part of the
+// condition (the condition v3 carries none of them). Since #437 stage 1 the runtime reads none of the lines of the follow-up, of holding and
+// of the replacement of an estimate, nor the lattice of difference_samples_per_axis (LiveRegistrationTracker, which still reads them, is not
+// used by the runtime; the struct is kept so that the estimator's connection and the tracker's own tests keep their shape). Units: seconds;
+// C pixels (the pixels of C's grid); a fraction; the brightness unit of A's band.
 struct LiveTrackerDesign {
     LiveTrackerSettings tracker;
     unsigned difference_samples_per_axis{};   // the lattice that LiveMappingDifferencePx measures on (samples per axis)
@@ -113,8 +119,8 @@ struct LiveEstimatorInputs {
 };
 using LiveEstimatorEntrance=std::function<LiveEstimateOutcome(const LiveEstimatorInputs&)>;
 
-// An estimate that cannot be used because the estimate is not connected (the window words it "not connected"). The live C is then
-// drawn with the condition's fixed mapping.
+// An estimate that cannot be used because the estimate is not connected (the window words it "not connected"). The machine then keeps
+// the position it has (the condition's position until another one is decided) and records the reason.
 [[nodiscard]] inline LiveEstimateOutcome LiveEstimatorNotConnected(const LiveEstimatorInputs&){
     LiveEstimateOutcome outcome;
     outcome.usable=false;
@@ -187,9 +193,9 @@ inline constexpr std::string_view kLiveEstimateRefusedReason="estimate-refused";
 }
 
 // One job on the inputs. Never throws for what the frames show: an estimate that cannot be trusted is an outcome that is not
-// usable, with the estimator's reasons, and the tracker then holds the last estimate or goes back to the fixed mapping. A full
-// estimate is usable when it is verified, or trusted but outside a range that the condition applies anyway
-// (applyBeyondEnvelope); a follow-up when V1 and V3 pass.
+// usable, with the estimator's reasons; the machine then keeps the position it has and records them. A full estimate is usable when it is
+// verified, or trusted but outside a range that the condition applies anyway (applyBeyondEnvelope); a follow-up when V1 and V3 pass (the
+// runtime asks for full estimates only; the follow-up stays for the estimator's own tests).
 [[nodiscard]] inline LiveEstimateOutcome EstimateLiveRegistration(const LiveEstimatorInputs& in,const LiveEstimatorDesign& design){
     namespace cr=a0::m2::experimental::content_registration;
     LiveEstimateOutcome outcome;
@@ -263,7 +269,7 @@ inline constexpr std::string_view kLiveEstimateRefusedReason="estimate-refused";
 }
 
 using LivePlanSource=std::function<std::shared_ptr<const FixedPreviewPlan>()>;
-// The estimator that the tracker runs: it prepares the inputs from the plan in force and calls the entrance. A plan without a
+// The estimator that runs a job of the machine: it prepares the inputs from the plan in force and calls the entrance. A plan without a
 // registered context gives an estimate that cannot be used (reason "no-registered-plan"). `ranges` is what the condition says
 // about the registration (LiveRegistrationRangesOf); without it the connected entrance answers "not connected".
 [[nodiscard]] inline LiveEstimator MakeLiveEstimator(LivePlanSource plan_source,const LiveTrackerDesign& design,LiveEstimatorEntrance entrance,
@@ -327,12 +333,21 @@ using LivePlanSource=std::function<std::shared_ptr<const FixedPreviewPlan>()>;
 }
 inline constexpr unsigned kLiveSeamDifferenceRows=17;
 
+// The same distance in pixels of the JPEG's raster (the condition's), which is what a person reads: C's pixels times C's pitch over the
+// raster's pitch. +infinity where the mapping cannot place a sample. Throws what LiveSeamMappingDifferencePx throws.
+[[nodiscard]] inline double LiveSeamMappingDifferenceOutputPx(const FixedPreviewPlan& plan,const a0::m2::experimental::RegisteredMapping& a,
+    const a0::m2::experimental::RegisteredMapping& b,unsigned rows){
+    const double in_c=LiveSeamMappingDifferencePx(plan,a,b,rows);
+    if(!plan.live || !plan.live->raster.dpi)throw std::invalid_argument("no registered plan");
+    return in_c*plan.live->grid.pitch_mm/(25.4/static_cast<double>(plan.live->raster.dpi));
+}
+
 // ---- What the window shows ------------------------------------------------------------------------------------------------------
 struct LiveStatus {
     bool live_enabled{false};              // the condition has registration.live
-    LiveRegistrationView view;
-    bool bake_failed{false};               // the estimate in force could not be drawn; C keeps the last mapping that could
-    std::string state_text;                // LiveRegistrationStateText (UTF-8, one line)
+    LivePlacementView placement;           // P, where it came from, what the last estimate came to
+    bool bake_failed{false};               // P could not be drawn; C keeps the last mapping that could
+    std::string state_text;                // LivePlacementStateText (UTF-8, one line)
     LiveOrientationTexts orientation;
     std::string orientation_line;          // LiveOrientationRowText (UTF-8, one line)
     std::uint64_t rebakes{},rebake_failures{};
@@ -345,9 +360,9 @@ struct LiveFrameSource {
 };
 
 struct LivePassResult {
-    bool job_ran{false};
+    bool job_ran{false};                   // the estimator was called
     std::optional<LiveJobKind> kind;
-    LiveAcceptKind accept{LiveAcceptKind::discarded_stale};
+    LiveAcceptKind accept{LiveAcceptKind::discarded_stale};   // applied: a position waits to be drawn; kept_previous: nothing was decided
     bool rebaked{false};
     bool rebake_failed{false};
 };
@@ -364,21 +379,23 @@ struct LivePassResult {
 class LiveRegistrationRuntime {
 public:
     struct Config {
-        LiveTrackerDesign design{kLiveTrackerDesignDraft};
+        LiveTrackerDesign design{kLiveTrackerDesignDraft};   // the estimator's connection reads it; the lines of the follow-up and of holding are not used
         a0::m2::experimental::content_registration::PoseParameters base_pose;   // p_b of the condition
         bool live_enabled{false};                                               // the condition has registration.live
         a0::m2::experimental::MountOrientation mount{a0::m2::experimental::MountOrientation::normal};
-        std::function<double()> clock;                                          // seconds on a clock of its own (only differences are read)
+        std::string condition_sha256;                                           // the file that this session was read from (not empty)
+        std::optional<LivePlacementMachine> placement;                          // the machine of the sessions before: P is carried across them
         std::function<void(const std::string&)> log;                            // one line per event; may be empty
     };
     // `profile` is the condition's verified profile: A's calibrated direction and B's moved direction come from it.
     LiveRegistrationRuntime(Config config,a0::m2::render::DocumentRenderParameters profile)
         :config_(std::move(config)),profile_(std::move(profile)){
-        if(!config_.clock)throw std::invalid_argument("live runtime: no clock");
-        if(config_.live_enabled)tracker_.emplace(config_.design.tracker,config_.base_pose);
+        if(config_.placement)machine_=*config_.placement;
+        config_.placement.reset();
+        machine_.BeginSession(config_.condition_sha256,config_.base_pose,config_.live_enabled);
         orientation_a_=CameraOrientationOfCalibratedA(profile_.camera_a,config_.mount);
         std::lock_guard lock(mutex_);
-        PublishStatusLocked(config_.clock());
+        PublishStatusLocked();
     }
     LiveRegistrationRuntime(const LiveRegistrationRuntime&)=delete;
     LiveRegistrationRuntime& operator=(const LiveRegistrationRuntime&)=delete;
@@ -386,65 +403,79 @@ public:
     [[nodiscard]] const LiveTrackerDesign& Design() const {return config_.design;}
     [[nodiscard]] bool Enabled() const {return config_.live_enabled;}
 
-    // The session starts again for a reason other than the first start (a capture happened, the condition was read again).
-    void Restart(LiveFullReason reason){
+    // The button: one estimate is asked for (refused while one is asked for or running, and when the condition has no live estimate).
+    LiveAskResult RequestEstimate(LiveEstimateAsk ask){
         std::lock_guard lock(mutex_);
-        if(tracker_)tracker_->Restart(config_.clock(),reason,config_.base_pose);
-        PublishStatusLocked(config_.clock());
+        const auto result=machine_.RequestEstimate(ask);
+        PublishStatusLocked();
+        return result;
     }
-    // A full estimate is wanted now; the estimate in force stays on screen until the new one arrives.
-    void RequestFull(LiveFullReason reason){
-        std::lock_guard lock(mutex_);
-        if(tracker_)tracker_->RequestFull(config_.clock(),reason);
-        PublishStatusLocked(config_.clock());
+    // A capture ended with a JPEG made with `mapping` (the mapping of the geometry level it chose) from the condition of `condition_sha256`:
+    // P becomes that mapping, with layer 2 left out. False (nothing changed) when the condition is not the session's.
+    // `layer_two_max_px`: the largest shift of the JPEG's layer 2 (LivePlacementLayerTwoMaxPx), for the sentence and the log.
+    bool ApplyCapture(const a0::m2::experimental::RegisteredMapping& mapping,const std::string& level,const std::string& condition_sha256,
+        std::optional<double> layer_two_max_px=std::nullopt){
+        std::optional<std::string> line;
+        bool applied=false;
+        {
+            std::lock_guard lock(mutex_);
+            applied=machine_.ApplyCapture(mapping,level,condition_sha256,layer_two_max_px);
+            if(applied){
+                bake_failed_=false;failed_wanted_serial_.reset();
+                MeasureCaptureLocked();
+                line=CaptureLineLocked();
+            }
+            PublishStatusLocked();
+        }
+        if(line)Log(*line);
+        return applied;
     }
+    // The machine as it is now: the window keeps it across the sessions (the runtime of the next session starts from it).
+    [[nodiscard]] LivePlacementMachine PlacementMachine() const {std::lock_guard lock(mutex_);return machine_;}
 
     // The loop of C has chosen the plan (the fixed mapping of the condition) for the frame size. A plan chosen again for another
-    // size drops the plan baked for the old one and asks for a full estimate.
+    // size drops the plan baked for the old one; P is baked into the new one by the worker.
     void PublishBase(const FixedPreviewPlan& plan){
         std::lock_guard lock(mutex_);
         base_=std::make_shared<const FixedPreviewPlan>(plan);
         ++base_serial_;current_.reset();
-        bake_failed_=false;failed_view_serial_.reset();
-        if(tracker_ && base_->live){
-            tracker_->MarkBaked(base_->live->baked);
-            if(published_once_)tracker_->RequestFull(config_.clock(),LiveFullReason::session_start);
-        }
-        published_once_=true;
-        PublishStatusLocked(config_.clock());
+        bake_failed_=false;failed_wanted_serial_.reset();
+        MeasureCaptureLocked();
+        PublishStatusLocked();
     }
     // C is not drawn with a registered plan (no condition v3 plan for this size).
     void ClearBase(){
         std::lock_guard lock(mutex_);
         base_.reset();current_.reset();++base_serial_;
-        bake_failed_=false;failed_view_serial_.reset();
-        PublishStatusLocked(config_.clock());
+        bake_failed_=false;failed_wanted_serial_.reset();
+        PublishStatusLocked();
     }
     [[nodiscard]] std::shared_ptr<const FixedPreviewPlan> BasePlan() const {std::lock_guard lock(mutex_);return base_;}
-    // The plan with B's table baked for the mapping in force; null until the first bake (draw with the base plan).
+    // The plan with B's table baked for P; null until the first bake (draw with the base plan).
     [[nodiscard]] std::shared_ptr<const FixedPreviewPlan> CurrentPlan() const {std::lock_guard lock(mutex_);return current_;}
     [[nodiscard]] LiveStatus Status() const {std::lock_guard lock(mutex_);return status_;}
     [[nodiscard]] int WorkersRunning() const {return workers_running_.load();}
 
-    // One pass of the worker: a job when one is due, then the bake when the mapping in force has moved, then the status. `stop` is
-    // the worker's stop: the job carries it to the estimator, and after it answers true nothing is baked. The outcome of a stopped
-    // job is still handed to the tracker (it is not usable), so no job stays in flight.
+    // One pass of the worker: the estimate when one is asked for, then the bake when P is to be replaced or has not been drawn, then the
+    // status. `stop` is the worker's stop: the job carries it to the estimator, and after it answers true nothing is baked. A job that
+    // was stopped, or that had no frames, did not estimate anything: it is asked for again (not counted as an estimate that decided nothing).
     LivePassResult RunPass(const LiveFrameSource& frames,const LiveEstimator& estimator,const std::function<bool()>& stop={}){
         if(!estimator)throw std::invalid_argument("live runtime: no estimator");
         LivePassResult result;
         std::shared_ptr<const FixedPreviewPlan> base;
+        bool asked=false;
         {
             std::lock_guard lock(mutex_);
             base=base_;
-            if(!tracker_ || !base || !base->live){PublishStatusLocked(config_.clock());return result;}
+            asked=machine_.Activity()==LivePlacementActivity::requested;
+            if(!base || !base->live){PublishStatusLocked();return result;}
         }
         std::optional<LiveJob> job;
-        if(frames.ready && frames.ready()){
+        if(asked && frames.ready && frames.ready()){
             std::lock_guard lock(mutex_);
-            job=tracker_->BeginJob(config_.clock());
+            job=machine_.BeginJob();
         }
         if(job){
-            result.job_ran=true;result.kind=job->kind;
             job->stop=stop;
             a0::m2::render::BgrImage a,b;
             bool got=false;
@@ -452,9 +483,13 @@ public:
                 got=frames.snapshot && frames.snapshot(a,b) && a.width==base->view_width && a.height==base->view_height &&
                     b.width==base->view_width && b.height==base->view_height;
             }catch(...){got=false;}
-            LiveEstimateOutcome outcome;
-            if(got){
-                // Whatever the estimator throws is an outcome that is not usable: the tracker must get an answer for the job.
+            if(!got){
+                std::lock_guard lock(mutex_);
+                machine_.Release(*job);   // nothing was estimated
+            }else{
+                result.job_ran=true;result.kind=job->kind;
+                LiveEstimateOutcome outcome;
+                // Whatever the estimator throws is an outcome that is not usable: the machine must get an answer for the job.
                 try{outcome=estimator(*job,a,b);}
                 catch(const std::exception& error){
                     outcome=LiveEstimateOutcome{};
@@ -465,23 +500,24 @@ public:
                     outcome.reasons.emplace_back("estimator-exception");
                     outcome.detail="an exception of an unknown kind";
                 }
-            }else outcome.reasons.emplace_back("frames-unavailable");
-            std::optional<std::string> line,summary;
-            {
-                std::lock_guard lock(mutex_);
-                const double now=config_.clock();
-                const auto accepted=tracker_->Accept(*job,outcome,now,[&base](const a0::m2::experimental::RegisteredMapping& in_force,
-                    const a0::m2::experimental::RegisteredMapping& candidate){return LiveSeamMappingDifferencePx(*base,in_force,candidate,kLiveSeamDifferenceRows);});
-                result.accept=accepted.kind;
-                line=JobLineLocked(*job,accepted,outcome,now);
-                summary=SummaryLineLocked(*job,outcome,now);
+                const bool interrupted=std::find(outcome.reasons.begin(),outcome.reasons.end(),std::string(kLiveEstimateStoppedReason))!=outcome.reasons.end();
+                std::optional<std::string> line;
+                {
+                    std::lock_guard lock(mutex_);
+                    if(interrupted){machine_.Release(*job);result.accept=LiveAcceptKind::discarded_stale;}
+                    else{
+                        const auto accepted=machine_.Accept(*job,outcome);
+                        result.accept=accepted==LivePlacementMachine::AcceptKind::pending_draw?LiveAcceptKind::applied:
+                            accepted==LivePlacementMachine::AcceptKind::not_decided?LiveAcceptKind::kept_previous:LiveAcceptKind::discarded_stale;
+                        line=JobLineLocked(*job,result.accept,outcome);
+                    }
+                }
+                if(line)Log(*line);   // with no lock held: a log that blocks must not stop Status() or CurrentPlan()
             }
-            if(line)Log(*line);   // with no lock held: a log that blocks must not stop Status() or CurrentPlan()
-            if(summary)Log(*summary);
         }
         if(!(stop && stop()))Rebake(result,stop);
         std::lock_guard lock(mutex_);
-        PublishStatusLocked(config_.clock());
+        PublishStatusLocked();
         return result;
     }
 
@@ -514,116 +550,120 @@ private:
     // Never called with mutex_ held.
     void Log(const std::string& line) const {if(config_.log)config_.log(line);}
 
-    // Bakes B's table again when the mapping in force is further than tau_bake from the baked one. The bake runs with no lock held;
-    // the result is taken only if the base plan is still the one it was made for and the mapping in force is still the one that
-    // was baked (a restart, a request for a full estimate or the end of the holding time may have changed it meanwhile).
+    // Bakes camera B's table again whenever the mapping that is wanted (a position that waits to be drawn, else P) is not the one the plan in
+    // use was baked for; there is no distance below which a bake is skipped, so what C draws is P itself. The bake runs with no lock held; the
+    // result is taken only if the base plan is still the one it was made for and the wanted mapping is still the one that was baked (a shot or
+    // a new condition may have changed it meanwhile). A position that waits becomes P when it has been drawn, and is dropped when it could not be.
     void Rebake(LivePassResult& result,const std::function<bool()>& stop){
         std::shared_ptr<const Plan> from;
-        std::uint64_t serial{},view_serial{};
-        LiveRebakeDecision decision;
+        std::uint64_t serial{},wanted_serial{};
+        a0::m2::experimental::RegisteredMapping wanted;
+        std::optional<std::string> line;
         {
             std::lock_guard lock(mutex_);
             if(!base_ || !base_->live)return;
-            const double now=config_.clock();
             serial=base_serial_;from=current_?current_:base_;
-            view_serial=tracker_->View(now).serial;
-            if(bake_failed_ && failed_view_serial_==view_serial)return;   // the same mapping failed already; wait for another
-            const unsigned samples=config_.design.difference_samples_per_axis;
-            decision=tracker_->DecideRebake(now,[&](const a0::m2::experimental::RegisteredMapping& baked,const a0::m2::experimental::RegisteredMapping& wanted){
-                try{return LiveMappingDifferencePx(*from,baked,wanted,samples);}
-                catch(const std::exception&){return std::numeric_limits<double>::infinity();}
-            });
-            if(!decision.rebake){bake_failed_=false;failed_view_serial_.reset();return;}
-        }
-        if(stop && stop())return;
-        const auto started=std::chrono::steady_clock::now();
-        auto baked=RebakePreviewB(*from,decision.wanted);
-        const auto milliseconds=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
-        std::ostringstream line;line.imbue(std::locale::classic());
-        {
-            std::lock_guard lock(mutex_);
-            if(base_serial_!=serial)return;   // another base plan was published meanwhile; the tracker has asked for a new estimate
-            if(tracker_->View(config_.clock()).serial!=view_serial)return;   // the mapping in force changed meanwhile; the next pass bakes it
-            line<<"C live_rebake difference_px="<<decision.difference_px<<" ms="<<milliseconds;
-            if(baked.ok){
-                current_=std::make_shared<const Plan>(std::move(baked.plan));
-                tracker_->MarkBaked(decision.wanted);
-                bake_failed_=false;failed_view_serial_.reset();
-                ++rebakes_;result.rebaked=true;
-                line<<" ok=1";
-            }else{
-                bake_failed_=true;failed_view_serial_=view_serial;
-                ++rebake_failures_;result.rebake_failed=true;
-                line<<" ok=0 detail="<<LiveLogSafeText(baked.detail);
+            wanted_serial=machine_.WantedSerial();wanted=machine_.Wanted();
+            if(failed_wanted_serial_==wanted_serial)return;   // the same mapping failed already; wait for another
+            if(LivePlacementSameMapping(from->live->baked,wanted)){
+                // Already drawn (P itself, or a position that came out the same as P).
+                if(machine_.HasPending())machine_.Committed();
+                bake_failed_=false;failed_wanted_serial_.reset();
+                line=PlacementLineLocked(*from);
+                if(!line)return;
             }
         }
-        Log(line.str());
+        if(line){Log(*line);return;}
+        if(stop && stop())return;
+        const auto started=std::chrono::steady_clock::now();
+        auto baked=RebakePreviewB(*from,wanted);
+        const auto milliseconds=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
+        std::ostringstream text;text.imbue(std::locale::classic());
+        std::optional<std::string> placement_line;
+        {
+            std::lock_guard lock(mutex_);
+            if(base_serial_!=serial)return;   // another base plan was published meanwhile; P is baked into it by the next pass
+            if(machine_.WantedSerial()!=wanted_serial)return;   // the wanted mapping changed meanwhile; the next pass bakes it
+            text<<"C live_rebake wanted_serial="<<wanted_serial<<" ms="<<milliseconds;
+            if(baked.ok){
+                current_=std::make_shared<const Plan>(std::move(baked.plan));
+                if(machine_.HasPending())machine_.Committed();
+                bake_failed_=false;failed_wanted_serial_.reset();
+                ++rebakes_;result.rebaked=true;
+                text<<" ok=1";
+                placement_line=PlacementLineLocked(*current_);
+            }else{
+                ++rebake_failures_;result.rebake_failed=true;
+                if(machine_.HasPending())machine_.DrawFailed("bake-failed");
+                else{bake_failed_=true;failed_wanted_serial_=wanted_serial;}
+                text<<" ok=0 detail="<<LiveLogSafeText(baked.detail);
+            }
+        }
+        Log(text.str());
+        if(placement_line)Log(*placement_line);
     }
 
-    // The line of a job when what it ended with differs from the line before (a steady train of the same follow-up result is one
-    // line); nullopt otherwise. The caller writes it after it has released the lock.
-    [[nodiscard]] std::optional<std::string> JobLineLocked(const LiveJob& job,const LiveAcceptResult& accepted,const LiveEstimateOutcome& outcome,double now){
-        const auto view=tracker_->View(now);
-        std::ostringstream key;
-        key<<LiveJobKindCode(job.kind)<<' '<<LiveAcceptKindCode(accepted.kind)<<' '<<LiveRegistrationStateCode(view.state)<<' '<<(accepted.replaced?"replaced":"held");
-        for(const auto& code:view.last_failure)key<<' '<<code;
-        if(key.str()==last_logged_)return std::nullopt;
-        last_logged_=key.str();
+    // The line of a job: what asked for it, what it came to, what the estimator measured (outcome.detail). Written for every job (there are
+    // two a session at the most, so no line is dropped).
+    [[nodiscard]] std::optional<std::string> JobLineLocked(const LiveJob& job,LiveAcceptKind accept,const LiveEstimateOutcome& outcome){
         std::ostringstream line;line.imbue(std::locale::classic());
         line<<"C live_registration job="<<LiveJobKindCode(job.kind);
         if(job.full_reason)line<<" reason="<<LiveFullReasonCode(*job.full_reason);
-        line<<" accept="<<LiveAcceptKindCode(accepted.kind)<<" state="<<LiveRegistrationStateCode(view.state);
-        if(!view.last_failure.empty()){
+        line<<" accept="<<LiveAcceptKindCode(accept);
+        if(accept!=LiveAcceptKind::applied && !outcome.reasons.empty()){
             line<<" failure=";
-            for(size_t i=0;i<view.last_failure.size();++i)line<<(i?",":"")<<view.last_failure[i];
+            for(size_t i=0;i<outcome.reasons.size();++i)line<<(i?",":"")<<outcome.reasons[i];
         }
         if(!outcome.detail.empty())line<<" detail="<<outcome.detail;
-        if(accepted.kind==LiveAcceptKind::applied){
-            // Whether the estimate replaced the one in force, how far from it it was along the seam, the line it was judged by, and what
-            // C is drawn with now (the estimate in force; it is not the estimate of this job when that one only confirmed it).
-            line<<" replaced="<<(accepted.replaced?1:0)<<" seam_diff_px="<<accepted.seam_difference_px<<" adopt_line_px="<<accepted.adopt_line_px;
-        }
-        const auto& m=view.mapping;
-        line<<" drawn_rx_deg="<<m.pose.rx_deg<<" drawn_ry_deg="<<m.pose.ry_deg<<" drawn_rz_deg="<<m.pose.rz_deg<<" drawn_tx_mm="<<m.pose.tx_mm
-            <<" drawn_ty_mm="<<m.pose.ty_mm<<" drawn_tz_percent="<<m.pose.tz_percent<<" drawn_h0_mm="<<m.surface.h0_mm<<" drawn_slope_x="<<m.surface.slope_x
-            <<" drawn_slope_y="<<m.surface.slope_y;
-        if(!view.exceeded_components.empty()){
-            line<<" drawn_exceeded=";
-            for(size_t i=0;i<view.exceeded_components.size();++i)line<<(i?",":"")<<LiveLogSafeText(view.exceeded_components[i]);
-        }
         line<<" quality_accepted=0";
         return line.str();
     }
 
-    // A line every kSummaryIntervalSeconds: the counts since the session began and the largest change a follow-up reported since the
-    // last line. The job line is written only when something differs from the line before, so on a still scene this is the line that
-    // shows how many estimates were taken and how many of them replaced the one in force.
-    [[nodiscard]] std::optional<std::string> SummaryLineLocked(const LiveJob& job,const LiveEstimateOutcome& outcome,double now){
-        if(job.kind==LiveJobKind::follow && std::isfinite(outcome.change_px))window_largest_change_px_=std::max(window_largest_change_px_,outcome.change_px);
-        if(!(now-last_summary_>=kSummaryIntervalSeconds))return std::nullopt;
-        last_summary_=now;
-        const auto view=tracker_->View(now);
-        const auto& c=view.counters;
+    // P as the live C draws it, in the one form of LivePlacementFields (the capture's log writes the JPEG's position with the same function).
+    // Written once for each P, after the plan in use was baked for it. nullopt when it has been written, or when the plan is not baked for P.
+    [[nodiscard]] std::optional<std::string> PlacementLineLocked(const Plan& drawn){
+        if(!LivePlacementSameMapping(drawn.live->baked,machine_.Placement()))return std::nullopt;
+        if(logged_serial_==machine_.Serial())return std::nullopt;
+        logged_serial_=machine_.Serial();
         std::ostringstream line;line.imbue(std::locale::classic());
-        line<<"C live_registration_summary full_jobs="<<c.full_jobs<<" follow_jobs="<<c.follow_jobs<<" applied="<<c.applied<<" held="<<c.held
-            <<" kept_previous="<<c.kept_previous<<" changes_detected="<<c.changes_detected<<" discarded_stale="<<c.discarded_stale<<" rebakes="<<rebakes_
-            <<" rebake_failures="<<rebake_failures_<<" largest_follow_change_px="<<window_largest_change_px_;
-        window_largest_change_px_=0;
+        line<<"C live_placement serial="<<machine_.Serial()<<" source="<<LivePlacementSourceCode(machine_.Source())<<' '<<LivePlacementFields(machine_.Placement())
+            <<" condition_sha256="<<machine_.ConditionSha256()<<" drawn=1 quality_accepted=0";
         return line.str();
     }
+    // What a shot did, once: P before the shot, the level, how far P moved (seam_difference_px, when it was measured) and layer 2 that C does not draw.
+    [[nodiscard]] std::optional<std::string> CaptureLineLocked() const {
+        const auto& note=machine_.Capture();
+        if(!note)return std::nullopt;
+        std::ostringstream line;line.imbue(std::locale::classic());
+        line<<"C live_placement_after_capture serial="<<machine_.Serial()<<" level="<<note->level<<" before_source="<<LivePlacementSourceCode(note->before_source)
+            <<' '<<LivePlacementFields(note->before,"before_")<<' '<<LivePlacementLayerTwoFields(note->layer_two_dropped,note->layer_two_max_px);
+        if(note->difference_px)line<<" seam_difference_px="<<*note->difference_px;
+        line<<" quality_accepted=0";
+        return line.str();
+    }
+    // Measures the distance between P before the shot and the JPEG's mapping on the plan in use, once a registered plan exists.
+    void MeasureCaptureLocked(){
+        if(!machine_.CaptureDifferencePending() || !base_ || !base_->live)return;
+        try{
+            const double pixels=LiveSeamMappingDifferenceOutputPx(*base_,machine_.Capture()->before,machine_.Placement(),kLiveSeamDifferenceRows);
+            machine_.SetCaptureDifference(pixels);
+        }catch(const std::exception&){}   // not measured: the sentence leaves the number out
+    }
 
-    void PublishStatusLocked(double now){
+    void PublishStatusLocked(){
         LiveStatus next;
-        next.live_enabled=tracker_.has_value();
-        if(tracker_)next.view=tracker_->View(now);
-        if(tracker_ && next.view.state!=LiveRegistrationState::fixed){
-            if(orientation_serial_!=next.view.serial){
-                orientation_b_=CameraOrientationOfBFromPose(profile_,next.view.mapping.pose);
-                orientation_serial_=next.view.serial;
+        next.live_enabled=config_.live_enabled;
+        next.placement=machine_.View();
+        const auto& view=next.placement;
+        // B's direction is shown for a position that was measured or set by a shot; for the condition's position it is not measured.
+        if(view.source!=LivePlacementSource::fixed_condition){
+            if(orientation_serial_!=view.serial){
+                orientation_b_=CameraOrientationOfBFromPose(profile_,view.mapping.pose);
+                orientation_serial_=view.serial;
             }
         }else{orientation_b_.reset();orientation_serial_.reset();}
         next.bake_failed=bake_failed_;
-        next.state_text=LiveRegistrationStateText(next.view,next.live_enabled,bake_failed_);
+        next.state_text=LivePlacementStateText(view,bake_failed_);
         next.orientation=LiveOrientationTextsOf(orientation_a_,orientation_b_);
         next.orientation_line=LiveOrientationRowText(next.orientation);
         next.rebakes=rebakes_;next.rebake_failures=rebake_failures_;
@@ -633,20 +673,16 @@ private:
     mutable std::mutex mutex_;
     Config config_;
     a0::m2::render::DocumentRenderParameters profile_;
-    std::optional<LiveRegistrationTracker> tracker_;
+    LivePlacementMachine machine_;
     std::shared_ptr<const Plan> base_,current_;
     std::uint64_t base_serial_{};
-    bool published_once_{false};
     bool bake_failed_{false};
-    std::optional<std::uint64_t> failed_view_serial_;
+    std::optional<std::uint64_t> failed_wanted_serial_;
+    std::optional<std::uint64_t> logged_serial_;
     std::optional<CameraOrientation> orientation_a_,orientation_b_;
     std::optional<std::uint64_t> orientation_serial_;
     LiveStatus status_;
     std::uint64_t rebakes_{},rebake_failures_{};
-    std::string last_logged_;
-    double last_summary_{-std::numeric_limits<double>::infinity()};
-    double window_largest_change_px_{0};
-    static constexpr double kSummaryIntervalSeconds=30.0;
     std::atomic<int> workers_running_{0};
 };
 }

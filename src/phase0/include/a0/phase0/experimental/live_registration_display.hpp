@@ -5,10 +5,14 @@
 #include "a0/m2/experimental/registration_mapping.hpp"
 #include "a0/m2/experimental/registration_pose.hpp"
 #include "a0/phase0/experimental/fixed_composite_registration_text.hpp"
+#include "a0/phase0/experimental/live_placement.hpp"
 #include "a0/phase0/experimental/live_registration_tracker.hpp"
 #include <algorithm>
 #include <cmath>
+#include <iomanip>
+#include <locale>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -155,6 +159,96 @@ inline constexpr std::string_view kLiveEstimatorUnavailableReason = "live-estima
     if (view.fixed_reason == "hold-expired") return "推定を保てる時間を過ぎたため、Cは固定の写像で描いています";
     if (view.fixed_reason == "estimate-failed") return "映像から推定できないため、Cは固定の写像で描いています";
     return "推定の完了を待っています（それまでCは固定の写像で描きます）";
+}
+
+// ---- The state row of the live C under the position that is confirmed once (#437 stage 1) -------------------------------------------
+// The reason of an estimate that decided no position, in a few words (the first code of the estimator's own list).
+[[nodiscard]] inline std::string LiveEstimateReasonText(const std::vector<std::string>& reasons) {
+    const std::string reason = reasons.empty() ? std::string() : reasons.front();
+    if (reason == "too-dark") return "暗すぎます";
+    if (reason == "no-overlap") return "二台の重なりが足りません";
+    if (reason == "coarse-no-unique-blocks" || reason == "unique-blocks" || reason == "too-few-points") return "模様が足りません";
+    if (reason == "repeating-only" || reason == "coarse-ambiguous") return "模様が繰り返していて、位置が一つに決まりません";
+    if (reason == "coarse-inconsistent") return "大まかな位置が一致しませんでした";
+    if (reason == "out-of-envelope") return "許容の範囲の外の値でした";
+    if (reason == kLiveEstimatorUnavailableReason) return "映像からの推定は未接続です";
+    if (reason == "bake-failed") return "推定した位置ではCを描けませんでした";
+    if (reason == "estimate-refused" || reason == "estimator-exception") return "推定の処理が途中で失敗しました";
+    return "推定が確かではありません";
+}
+[[nodiscard]] inline std::string LivePlacementSourceText(LivePlacementSource source) {
+    switch (source) {
+    case LivePlacementSource::fixed_condition: return "条件の位置";
+    case LivePlacementSource::auto_start: return "開始時の自動";
+    case LivePlacementSource::auto_button: return "ボタンの自動";
+    case LivePlacementSource::after_capture: return "撮影の後の位置";
+    }
+    return {};
+}
+// How far the live C moved at the shot: the distance between the position it was drawn with before the shot and the one it is drawn with
+// now, along the seam (the largest of the lattice's samples, in pixels of the JPEG's raster). It is not a difference between the live C and
+// the JPEG: after the shot the live C is drawn with the JPEG's own position. Empty difference: nothing is said.
+[[nodiscard]] inline std::string LivePlacementMovedText(const std::optional<double>& difference_px) {
+    if (!difference_px || !std::isfinite(*difference_px)) return {};
+    if (*difference_px < 0.05) return "撮影の前のライブの位置から動いていません";
+    std::ostringstream s;
+    s.imbue(std::locale::classic());
+    s << "撮影の前のライブの位置から継ぎ目で最大 " << std::fixed << std::setprecision(1) << *difference_px << " px（JPEGの画素）動かしました";
+    return s.str();
+}
+// The layer 2 that the JPEG has and the live C does not draw: its largest shift when the record gave one (output px, the JPEG's pixels).
+[[nodiscard]] inline std::string LivePlacementLayerTwoText(const LivePlacementCaptureNote& note) {
+    if (!note.layer_two_dropped) return {};
+    if (!note.layer_two_max_px || !std::isfinite(*note.layer_two_max_px)) return "局所の補正はライブのCには出ません";
+    std::ostringstream s;
+    s.imbue(std::locale::classic());
+    s << "JPEGの局所の補正（最大 " << std::fixed << std::setprecision(1) << *note.layer_two_max_px << " px）はライブのCには出ません";
+    return s.str();
+}
+// What the shot did to the position (after_capture): the JPEG's own estimate decided it (G1, G2), or it did not and the JPEG was made with a
+// position that the condition or the coarse stage gave (G3, G4). Either way the live C is drawn with the JPEG's position from now on, so it
+// is at the same place as the JPEG; what the sentence says moved is the live C, and what stays different is layer 2.
+[[nodiscard]] inline std::string LivePlacementCaptureText(const LivePlacementCaptureNote& note) {
+    const auto moved = LivePlacementMovedText(note.difference_px);
+    const auto layer_two = LivePlacementLayerTwoText(note);
+    std::string text;
+    if (note.level == "G1" || note.level == "G2") {
+        text = "撮影の後の自動調整で位置を確定しました（" + note.level + "）";
+        if (!moved.empty()) text += "。" + moved;
+        text += "。今のライブのCはJPEGと同じ位置です";
+    } else {
+        text = std::string("撮影の後の自動調整では確かな位置が出ませんでした。JPEGは") + (note.level == "G3" ? "目安の位置（G3）" : "条件の位置") + "で作りました。ライブのCもその位置へ移しました";
+        if (!moved.empty()) text += "（" + moved + "）";
+    }
+    if (!layer_two.empty()) text += "。" + layer_two;
+    return text;
+}
+
+// One sentence about what the live C is drawn with, and what the last estimate came to. The picture is a guide: no sentence calls it within a
+// criterion, and none says that a composite cannot be saved. `bake_failed`: the position in force could not be drawn (the table of B could not
+// be made for it), so C keeps the last mapping that could.
+[[nodiscard]] inline std::string LivePlacementStateText(const LivePlacementView& view, bool bake_failed = false) {
+    // The button is refused when the condition has no registration.live, so it is named only when it works.
+    const std::string hint = view.live_enabled ? "。紙を替えた時は「自動位置合わせ」を押してください" : std::string();
+    if (view.activity != LivePlacementActivity::idle) return "自動合成中です…";
+    if (bake_failed) return view.source == LivePlacementSource::after_capture ? "撮影JPEGの位置ではCを描けませんでした。直前に描けた位置のまま表示しています"
+                                                                              : "推定した位置ではCを描けませんでした。直前に描けた位置のまま表示しています";
+    if (view.outcome == LivePlacementOutcomeKind::not_decided)
+        return "位置を決められませんでした（理由: " + LiveEstimateReasonText(view.last_failure) + "）。前の位置のままです（出どころ: " + LivePlacementSourceText(view.source) +
+            "）。模様のある所で「自動位置合わせ」を押してください";
+    if (view.source == LivePlacementSource::after_capture && view.capture) return LivePlacementCaptureText(*view.capture) + hint;
+    if (!view.live_enabled && view.source == LivePlacementSource::fixed_condition) return "Cは固定の写像で描いています（映像からの合わせ込みは条件で無効です）";
+    if (view.outcome == LivePlacementOutcomeKind::placed) {
+        const bool button = view.outcome_ask && *view.outcome_ask == LiveEstimateAsk::button;
+        std::string text = std::string("位置を確定しました（自動・") + (button ? "ボタン" : "開始時");
+        if (view.beyond_envelope) {
+            const std::string components = LiveExceededComponentsText(view.exceeded_components);
+            text += "。許容の範囲の外の値で描いています" + (components.empty() ? std::string() : "。範囲を超えた量: " + components);
+        }
+        return text + "）" + hint;
+    }
+    if (view.source == LivePlacementSource::after_capture) return "Cは撮影の後の位置で描いています" + hint;
+    return "Cは条件の位置で描いています" + hint;
 }
 
 // The state row when the registration of the live C could not be set up for the session (C is the condition's fixed mapping).

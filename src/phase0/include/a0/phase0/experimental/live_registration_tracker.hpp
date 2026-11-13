@@ -68,7 +68,7 @@ enum class LiveJobKind {full,follow};
 [[nodiscard]] inline std::string_view LiveJobKindCode(LiveJobKind kind){return kind==LiveJobKind::full?"full":"follow";}
 
 // Why a full estimate is wanted.
-enum class LiveFullReason {session_start,after_capture,condition_reloaded,change_detected,hold_expired};
+enum class LiveFullReason {session_start,after_capture,condition_reloaded,change_detected,hold_expired,button};
 [[nodiscard]] inline std::string_view LiveFullReasonCode(LiveFullReason reason){
     switch(reason){
     case LiveFullReason::session_start:return "session-start";
@@ -76,6 +76,7 @@ enum class LiveFullReason {session_start,after_capture,condition_reloaded,change
     case LiveFullReason::condition_reloaded:return "condition-reloaded";
     case LiveFullReason::change_detected:return "change-detected";
     case LiveFullReason::hold_expired:return "hold-expired";
+    case LiveFullReason::button:return "button";
     }
     return {};
 }

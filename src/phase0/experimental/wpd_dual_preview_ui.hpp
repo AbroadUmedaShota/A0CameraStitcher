@@ -109,8 +109,9 @@ void ApplyCalibrationTexts(){
 std::shared_ptr<LiveRegistrationRuntime> live_runtime;
 LiveEstimator live_estimator_override;
 std::optional<LiveTrackerDesign> live_design_override;
-std::string live_condition_sha;
-unsigned live_captures_seen{};
+// The position that the live C is drawn with (#437), carried from one session to the next: the runtime of a session starts from it and the
+// next session takes it back (PrepareLiveRuntime). Only the UI thread, while no merge worker exists, touches it.
+LivePlacementMachine live_placement_carry;
 // Read again at every preview session start, so a condition made between sessions is used.
 void LoadFixedSource(){
     try{
@@ -139,11 +140,13 @@ void LoadFixedSource(){
     Log(line.str());
     ApplyCalibrationTexts(); // every session start reads the condition again; so does the caption
 }
-// The live registration of C (#417 LC): a runtime for a condition v3, made at every preview session start (the condition is read
-// again there). A session that follows a capture asks for its first full estimate with the reason after-capture, and a session whose
-// condition file differs from the one before with condition-reloaded; the first one is session-start. Without a v3 condition there
-// is no runtime, and C is drawn as before. A setup failure leaves no runtime: C is drawn with the fixed mapping and says so.
+// The live registration of C (#417 LC, #437): a runtime for a condition v3, made at every preview session start (the condition is read
+// again there). The position that C is drawn with is carried over from the session before. The first session of the window asks for one
+// estimate, and so does a session whose condition file differs from the one before; every other session (a restart of Live by hand, the
+// one after a shot) asks for nothing and draws with the position it was left with. Without a v3 condition there is no runtime, and C is
+// drawn as before. A setup failure leaves no runtime: C is drawn with the fixed mapping and says so.
 void PrepareLiveRuntime(){
+    if(live_runtime)live_placement_carry=live_runtime->PlacementMachine();
     live_runtime.reset();
     if(!fixed_source.loaded_v3)return;
     const auto& loaded=*fixed_source.loaded_v3;
@@ -153,29 +156,45 @@ void PrepareLiveRuntime(){
         config.base_pose=loaded.condition.base_pose;
         config.live_enabled=loaded.condition.registration.live.has_value();
         config.mount=mount_orientation;
-        const auto origin=Clock::now();
-        config.clock=[origin]{return std::chrono::duration<double>(Clock::now()-origin).count();};
+        config.condition_sha256=loaded.file_sha256;
+        config.placement=live_placement_carry;
         config.log=[](const std::string& line){Log(line);};
+        const char* reason=!live_placement_carry.Configured()?"start":live_placement_carry.ConditionSha256()!=loaded.file_sha256?"condition-changed":"resumed";
         auto runtime=std::make_shared<LiveRegistrationRuntime>(config,loaded.profile.parameters);
-        const bool captured=captures_saved!=live_captures_seen;
-        const bool reread=!live_condition_sha.empty() && live_condition_sha!=loaded.file_sha256;
-        const auto reason=captured?LiveFullReason::after_capture:reread?LiveFullReason::condition_reloaded:LiveFullReason::session_start;
-        if(reason!=LiveFullReason::session_start)runtime->Restart(reason);
-        live_captures_seen=captures_saved;live_condition_sha=loaded.file_sha256;
+        live_placement_carry=runtime->PlacementMachine();
         live_runtime=std::move(runtime);
-        const auto& t=config.design.tracker;
+        const auto view=live_placement_carry.View();
         std::ostringstream line;line.imbue(std::locale::classic());
-        line<<"C live_registration_session reason="<<LiveFullReasonCode(reason)<<" live_enabled="<<(config.live_enabled?1:0)
-            <<" design=draft follow_interval_s="<<t.follow_interval_seconds<<" hold_s="<<t.hold_seconds<<" full_retry_s="<<t.full_retry_seconds
-            <<" follow_change_limit_px="<<t.follow_change_limit_px<<" inlier_fraction_floor="<<t.inlier_fraction_floor
-            <<" brightness_change_limit="<<t.brightness_change_limit<<" tau_bake_px="<<t.bake_threshold_px
-            <<" adopt_threshold_px="<<t.adopt_threshold_px<<" adopt_sigma_factor="<<t.adopt_sigma_factor
-            <<" difference_samples_per_axis="<<config.design.difference_samples_per_axis<<" quality_accepted=0";
+        line<<"C live_registration_session reason="<<reason<<" live_enabled="<<(config.live_enabled?1:0)<<" estimate_asked="<<(view.activity==LivePlacementActivity::idle?0:1)
+            <<" placement_serial="<<view.serial<<" placement_source="<<LivePlacementSourceCode(view.source)<<" follow_up=0 quality_accepted=0";
         Log(line.str());
     }catch(const std::exception& error){
         live_runtime.reset();
         Log(std::string("C live_registration_session setup_failed=1 detail=")+error.what());
     }
+}
+// The button "自動位置合わせ" with a condition v3 (#437): one estimate is asked for, and the state row says so. False when there is no live
+// estimate to ask for (no runtime, or the condition has no registration.live): the request is ignored like any other position request.
+// A request while an estimate is asked for or running is taken as given: the state row already says "合成中".
+bool AskLiveEstimate(){
+    if(!live_runtime || !live_runtime->Enabled())return false;
+    const auto result=live_runtime->RequestEstimate(LiveEstimateAsk::button);
+    Log(std::string("C ui_live_estimate_requested=1 result=")+(result==LiveAskResult::accepted?"accepted":"busy")+" quality_accepted=0");
+    return true;
+}
+// A shot that ended with a JPEG made with the registered composite (#437 stage 1): the live C is drawn from now on with the mapping that the
+// JPEG was made with (its level's mapping, layer 2 left out), so what C shows after the shot is what the JPEG has. The JPEG itself is not
+// touched; its position is the one the shot estimated. The capture's log line writes that mapping, and layer 2 that the live C does not draw
+// (its largest shift from the record's parallax summary), with the same functions as the live log.
+void ApplyCaptureToLivePlacement(const a0::m2::experimental::StillReviewResult& review){
+    if(!review.fixed_composite_registration)return;
+    const auto& record=*review.fixed_composite_registration;
+    const auto& level=record.registration.level;
+    const std::string code(a0::m2::experimental::GeometryLevelCode(level.level));
+    const auto layer_two_max=LivePlacementLayerTwoMaxPx(level.mapping,record.registration.parallax.summary.max_shift_px);
+    const bool applied=live_runtime && live_runtime->ApplyCapture(level.mapping,code,record.condition_sha256,layer_two_max);
+    Log("pair_review_placement source=after-capture level="+code+" "+LivePlacementFields(level.mapping)+" condition_sha256="+record.condition_sha256+" "+
+        LivePlacementLayerTwoFields(LivePlacementHasLayerTwo(level.mapping),layer_two_max)+" applied_to_live="+(applied?"1":"0")+" quality_accepted=0");
 }
 void LogPreviewChoice(const FixedPreviewChoice& choice){
     std::ostringstream line;line.imbue(std::locale::classic());
@@ -1073,8 +1092,8 @@ void AdvanceCapture(HWND hwnd){
                 }
                 review_visible=true;review_calibrated=ReviewIsCalibrated(*result.review);
             }
-            // #417 LC: the live registration is asked for a full pass after a shot here, with the originals of this shot gone from
-            // the live view: tracker.RequestFull(now, after_capture). J8w does not call it; the tracker is LC's.
+            // #437: the live C is drawn from now on with the position that this JPEG was made with; no estimate is asked for.
+            if(result.review)ApplyCaptureToLivePlacement(*result.review);
             if(!closing)StartPreview();
         }else{
             capture_restart_blocked=true;
@@ -1172,6 +1191,73 @@ int RunPairV3UiSmoke(const std::filesystem::path& fixtures){
         check(log_after_first.find("quality_accepted=0")!=std::string::npos && log_after_first.find(work.string())==std::string::npos &&
             log_after_first.find("synthetic-a")==std::string::npos && log_after_first.find("CAM-A")==std::string::npos,"v3: the log has no path and no camera identifier");
 
+        // 1b. The live C after a shot (#437 stage 1): a real review of the shot handed to the window's function, with the condition read as the window
+        //     reads it. The position that C is baked with is the JPEG's own, and B's table is the one that the JPEG's maker gives
+        //     (RegisteredDocumentOutputToCamera, the function that makes B's side of the JPEG, times the view's scale), at the samples of C's grid.
+        //     The flat frames give G4, whose mapping is the condition's own and is zero here; so the same review is also handed over with a mapping
+        //     that moves B (pose, paper plane and a layer 2 that C does not draw), which is the case that tells a table made from the nine numbers
+        //     from one made from the calibration.
+        const auto live_after_shot=[&](const m2e::StillReviewResult& review,const std::string& what,bool moved_mapping){
+            const auto say=[&](bool ok,const char* text){check(ok,(what+": "+text).c_str());};
+            const auto& record=*review.fixed_composite_registration;
+            fixed_source={};fixed_source.loaded_v3=v3.loaded;
+            mount_orientation=m2e::MountOrientation::normal;
+            live_placement_carry={};live_runtime.reset();
+            PrepareLiveRuntime();
+            say(live_runtime!=nullptr && record.condition_sha256==v3.loaded.file_sha256,"a runtime for the condition of the shot");
+            if(live_runtime){
+                const auto plan=PlanFixedPreviewV3(v3.loaded,mount_orientation,400,267);
+                say(!plan.skip && plan.live,"a registered plan for the real profile");
+                live_runtime->PublishBase(plan);
+                ApplyCaptureToLivePlacement(review);
+                const auto status=live_runtime->Status();
+                const auto& jpeg_mapping=record.registration.level.mapping;
+                say(status.placement.source==LivePlacementSource::after_capture && LivePlacementSameMapping(status.placement.mapping,jpeg_mapping) &&
+                    !status.placement.mapping.parallax,"P is the nine numbers of the JPEG's mapping (the real condition sha matched)");
+                say(status.state_text.find("ライブのCもその位置へ移しました")!=std::string::npos || status.state_text.find("今のライブのCはJPEGと同じ位置です")!=std::string::npos,"the sentence says the live C is at the JPEG's position");
+                say((status.state_text.find("局所の補正")!=std::string::npos)==moved_mapping,"layer 2 is in the sentence exactly when the mapping has it");
+                const LiveFrameSource no_frames{[]{return false;},nullptr};
+                const LiveEstimator never=[&](const LiveJob&,const a0::m2::render::BgrImage&,const a0::m2::render::BgrImage&){check(false,"no estimate is asked for after a shot");return LiveEstimateOutcome{};};
+                (void)live_runtime->RunPass(no_frames,never);
+                const auto drawn=live_runtime->CurrentPlan()?live_runtime->CurrentPlan():live_runtime->BasePlan();
+                say(drawn && drawn->live && LivePlacementSameMapping(drawn->live->baked,jpeg_mapping),"C is baked with the JPEG's mapping");
+                if(drawn && drawn->mapped){
+                    const auto& rig=v3.loaded.profile.parameters;
+                    const a0::m2::experimental::content_registration::PoseModel model(rig.camera_b);
+                    auto mapping=jpeg_mapping;mapping.parallax.reset();
+                    const auto jpeg=m2e::RegisteredDocumentOutputToCamera(rig.raster,rig.camera_a,rig.camera_b,model,mapping,v3.loaded.condition.seam.column);
+                    const double pitch=25.4/rig.raster.dpi,left=rig.raster.region_um.left/1000.0,top=rig.raster.region_um.top/1000.0;
+                    const double sx=400.0/ps::kWidth,sy=267.0/ps::kHeight;
+                    double worst=0,from_calibration=0;size_t samples=0,disagree=0;
+                    for(std::uint32_t y=0;y<drawn->grid.height;y+=2)for(std::uint32_t x=0;x<drawn->grid.width;x+=2){
+                        a0::m2::render::Point in_c{};
+                        const bool c_has=drawn->mapped->camera_b({double(x),double(y)},in_c);
+                        const double dx=drawn->grid.left_mm+(x+.5)*drawn->grid.pitch_mm,dy=drawn->grid.top_mm+(y+.5)*drawn->grid.pitch_mm;
+                        a0::m2::render::Point raw{};bool j_has=false;
+                        try{j_has=jpeg({(dx-left)/pitch-0.5,(dy-top)/pitch-0.5},raw);}catch(const std::exception&){}
+                        if(c_has!=j_has){++disagree;continue;}
+                        if(!c_has)continue;
+                        ++samples;worst=std::max(worst,std::hypot(in_c.x-raw.x*sx,in_c.y-raw.y*sy));
+                        a0::m2::render::Point base_b{};
+                        if(plan.mapped && plan.mapped->camera_b({double(x),double(y)},base_b))from_calibration=std::max(from_calibration,std::hypot(in_c.x-base_b.x,in_c.y-base_b.y));
+                    }
+                    say(samples>300 && disagree==0 && worst<1e-6,"B's table of C is the JPEG maker's table (the scale of the view only)");
+                    if(moved_mapping)say(from_calibration>0.5,"the table moved from the condition's own table (the control)");
+                }
+            }
+            live_placement_carry={};live_runtime.reset();fixed_source={};
+        };
+        if(first.review && first.review->fixed_composite_registration){
+            live_after_shot(*first.review,"live after the real shot (G4)",false);
+            auto moved=*first.review;
+            auto& level=moved.fixed_composite_registration->registration.level;
+            level.level=m2e::GeometryLevel::g1;
+            level.mapping=m2e::RegisteredMapping{m2e::content_registration::PoseParameters{0.2,0.05,0.4,3.0,0.5,0.0},m2e::SurfacePlane{2.0,0.001,-0.001},std::nullopt};
+            m2e::ParallaxProfile layer_two;layer_two.q_px={0.0,0.4,0.0};layer_two.row_spacing_px=100;layer_two.a_px=8;layer_two.l_px=16;layer_two.seam_column=1000;
+            level.mapping.parallax=layer_two;
+            moved.fixed_composite_registration->registration.parallax.summary.max_shift_px=0.4;
+            live_after_shot(moved,"live after the real review with a mapping that moves B (G1)",true);
+        }
         // 2. A revision chain with a gap is a damaged condition: no composite, the originals are kept, the reason is on the row.
         {
             const auto gap=ps::MakeSettings(work/"settings-gap",profile,m2e::MountOrientation::normal,raster);
@@ -1453,6 +1539,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM w,LPARAM l){
             review_visible=false;
             // A fixed composite condition decides C's position (#401): no request moves it, and nothing is estimated.
             if(FixedConditionPresent()){
+                if(id==304 && AskLiveEstimate()){merged.position_refusal.clear();Log("C ui_auto_alignment=1 live_registered=1");return 0;} // #437: one estimate for the registered C
                 merged.position_refusal=FixedPreviewPositionRefusal();
                 Log("C ui_position_request_ignored=1 id="+std::to_string(id)+" fixed_composite_condition=1");return 0;
             }
@@ -2290,8 +2377,9 @@ int RunFixedCUiSmoke(){
 // Camera-free contract of the registered live C (condition v3, #417 LC), on synthetic frames. The real merge worker with its helper
 // thread (the worker of the live registration), Paint with its two rows, the position buttons and the pair-capture admission run;
 // the condition comes from memory (two pinhole cameras built here), the estimator is a scripted function (live_estimator_override,
-// as preview_restart_override is for the settings smoke), and the design constants are shortened so that holding ends within the
-// run. No settings file is read or written, and no Discover/Open/Run or hardware lease exists.
+// as preview_restart_override is for the settings smoke), and the design constants ask for a follow-up every 0.15 s and a holding time of
+// 0.8 s (#437: the runtime reads none of them, so a run that sees the estimator asked once for the start and once for each press shows that
+// nothing follows). No settings file is read or written, and no Discover/Open/Run or hardware lease exists.
 int RunLiveCUiSmoke(){
     Log("live_c_ui_synthetic=1 camera_operations=0");
     namespace m2=a0::m2::experimental;
@@ -2364,9 +2452,8 @@ int RunLiveCUiSmoke(){
             return outcome;
         };
     };
-    // Shortened lines so that holding ends within the run; the other values are the draft design's. The significance line is off here:
-    // the scripted estimator moves between two poses with the change of a small step, and the run checks the plumbing (threads, frames,
-    // what the window shows), not the policy of when an estimate replaces the one in force.
+    // The old lines of the follow-up, of holding and of the retry, shortened so that they would act within the run if anything still read them
+    // (#437 stage 1: nothing does); the other values are the draft design's.
     LiveTrackerDesign shortened=kLiveTrackerDesignDraft;
     shortened.tracker.follow_interval_seconds=0.15;shortened.tracker.hold_seconds=0.8;shortened.tracker.full_retry_seconds=0.3;
     shortened.tracker.adopt_threshold_px=0;shortened.tracker.adopt_sigma_factor=0;
@@ -2418,8 +2505,11 @@ int RunLiveCUiSmoke(){
     const auto pink=[&](const PixelRect& rect){unsigned count{};
         for(int y=rect.top;y<rect.top+rect.height;++y)for(int x=rect.left;x<rect.left+rect.width;++x)if(GetPixel(dc,x,y)==kSeamLineColor)++count;return count;};
     const auto lit=[&](int top,int bottom){unsigned count{};for(int y=top;y<bottom;++y)for(int x=12;x<900;++x)if(GetPixel(dc,x,y)!=RGB(0,0,0))++count;return count;};
-    const auto start=[&](bool live,bool scripted){
-        fixed_source={};fixed_source.loaded_v3=condition(live,std::string(64,'1'));
+    // fresh: a window that was just opened (nothing is carried from a session before); otherwise the runtime of the session before is
+    // still there, as it is when StartPreview begins the next session.
+    const auto start=[&](bool live,bool scripted,bool fresh=true,const std::string& sha=std::string(64,'1')){
+        fixed_source={};fixed_source.loaded_v3=condition(live,sha);
+        if(fresh){live_placement_carry={};live_runtime.reset();}
         live_design_override=shortened;
         if(scripted)install_estimator();else live_estimator_override=nullptr;
         script->mode=0;script->calls=0;script->wrong_frames=0;{std::lock_guard lock(script->mutex);script->threads.clear();script->kinds.clear();}
@@ -2430,25 +2520,27 @@ int RunLiveCUiSmoke(){
         merge_worker.request_stop();merge_worker.join();rearm();ClearMerge();
     };
     const auto state_text=[&]{return live_runtime?live_runtime->Status().state_text:std::string();};
-    const auto contains=[](const std::string& text,const char* part){return text.find(part)!=std::string::npos;};
+    const auto contains=[](const std::string& text,const std::string& part){return text.find(part)!=std::string::npos;};
 
     // 1. The connected estimate (the real connection, with the condition's ranges) on frames that are plain grey: there is nothing
-    //    to estimate from, and it says so. C is drawn with the condition's fixed mapping, the rows say that nothing could be
-    //    estimated (not that C is registered, and not that the estimate is unconnected), A's direction is shown and B's is not
-    //    measured; the position requests change nothing and the pair capture stays admitted.
+    //    to estimate from, and it says so. C is drawn with the condition's position, the rows say that no position could be decided (not
+    //    that C is registered, and not that the estimate is unconnected), A's direction is shown and B's is not measured; nothing is
+    //    estimated again by itself, the position buttons change nothing, the automatic button asks for one more estimate, and the pair
+    //    capture stays admitted.
     check(captures_saved==0);
     start(true,false);
     check(live_runtime!=nullptr && live_runtime->Enabled());
     check(wait_for(picture_ready));
-    check(wait_for([&]{return contains(state_text(),"推定できない");}));
+    check(wait_for([&]{return contains(state_text(),"位置を決められませんでした");}));
     {
         const auto plan=drawn_plan();
         check(plan.live!=nullptr && plan.live->baked.pose.IsZero() && plan.lens_aware);
         const auto status=live_runtime->Status();
-        check(status.view.state==LiveRegistrationState::fixed && status.view.counters.full_jobs>=1 && status.rebakes==0);
-        check(contains(status.state_text,"固定の写像") && !contains(status.state_text,"未接続") && !contains(status.state_text,"目安"));
-        check(status.view.fixed_reason=="estimate-failed" && !status.view.last_failure.empty() &&
-            std::find(status.view.last_failure.begin(),status.view.last_failure.end(),std::string(kLiveEstimatorUnavailableReason))==status.view.last_failure.end());
+        check(status.placement.source==LivePlacementSource::fixed_condition && status.placement.outcome==LivePlacementOutcomeKind::not_decided &&
+            status.placement.counters.jobs==1 && status.rebakes==0);
+        check(contains(status.state_text,"条件の位置") && !contains(status.state_text,"未接続") && !contains(status.state_text,"位置を確定しました"));
+        check(!status.placement.last_failure.empty() &&
+            std::find(status.placement.last_failure.begin(),status.placement.last_failure.end(),std::string(kLiveEstimatorUnavailableReason))==status.placement.last_failure.end());
         check(contains(status.orientation_line,"B: 向きを測れていません") && contains(status.orientation_line,"A（校正時）: ") && !contains(status.orientation.a_short,"測れていません"));
     }
     paint();
@@ -2461,18 +2553,34 @@ int RunLiveCUiSmoke(){
         check(lit(client.bottom/2+140+PreviewLowerShift(client.right),client.bottom/2+161+PreviewLowerShift(client.right))>100 && lit(client.bottom/2+163+PreviewLowerShift(client.right),client.bottom/2+184+PreviewLowerShift(client.right))>100); // both rows have text
     }
     {
+        // Nothing is estimated again by itself: the one estimate of the start was the only job.
+        wait_for([&]{return false;},800);
+        check(live_runtime->Status().placement.counters.jobs==1);
         std::uint64_t revision{};{std::lock_guard lock(merged.mutex);revision=merged.revision;}
-        for(int id=300;id<=304;++id)press(id);
-        std::lock_guard lock(merged.mutex);
-        check(merged.revision==revision && !merged.auto_requested && !merged.position_refusal.empty());
+        for(int id=300;id<=303;++id)press(id);
+        {
+            std::lock_guard lock(merged.mutex);
+            check(merged.revision==revision && !merged.auto_requested && !merged.position_refusal.empty());   // the position buttons are refused as before
+        }
+        press(304);
+        {
+            std::lock_guard lock(merged.mutex);
+            check(merged.revision==revision && !merged.auto_requested && merged.position_refusal.empty());    // the automatic button is taken: one estimate
+        }
+        check(wait_for([&]{const auto status=live_runtime->Status();return status.placement.counters.jobs==2 && status.placement.activity==LivePlacementActivity::idle;}));
+        check(live_runtime->Status().placement.counters.asked==1 && contains(state_text(),"位置を決められませんでした"));
+        wait_for([&]{return false;},500);
+        check(live_runtime->Status().placement.counters.jobs==2);
     }
     check(capture_admitted_soon());
     finish();
     check(live_runtime->WorkersRunning()==0);
     live_runtime.reset();
 
-    // 2. A scripted estimate: the worker (not the loop of C, not this thread) estimates and bakes, the loop draws with the new plan,
-    //    the picture goes on, and the rows follow.
+    // 2. A scripted estimate: the worker (not the loop of C, not this thread) estimates once at the start and bakes, the loop draws with the
+    //    new plan, the picture goes on, and nothing follows it; each press of the automatic button is one more estimate; a position that
+    //    cannot be drawn and an estimate that decides nothing leave the position as it was, with no retry and no fall back; a shot sets the
+    //    position that the live C is drawn with, and nothing is estimated after it.
     start(true,true);
     check(wait_for(picture_ready));
     check(wait_for([&]{const auto plan=drawn_plan();return plan.live && plan.live->baked.pose.tx_mm==pose_a.tx_mm;}));
@@ -2480,7 +2588,9 @@ int RunLiveCUiSmoke(){
         const auto plan=drawn_plan();
         check(plan.live && plan.live->baked.pose.rx_deg==pose_a.rx_deg && plan.live->baked.surface.IsZero());
         const auto status=live_runtime->Status();
-        check(status.view.state==LiveRegistrationState::tracking && contains(status.state_text,"目安") && status.rebakes>=1 && !status.bake_failed);
+        check(status.placement.source==LivePlacementSource::auto_start && status.placement.outcome==LivePlacementOutcomeKind::placed &&
+            contains(status.state_text,"位置を確定しました（自動・開始時）") && status.rebakes>=1 && !status.bake_failed);
+        check(LivePlacementSameMapping(plan.live->baked,status.placement.mapping));   // what C draws is P
         check(!contains(status.orientation.b_short,"測れていません") && contains(status.orientation.b_short,"B: "));
         check(plan.output_width>0 && plan.output_width==plan.mapped->width);
         std::lock_guard lock(script->mutex);
@@ -2491,10 +2601,11 @@ int RunLiveCUiSmoke(){
         check(script->kinds.front()==LiveJobKind::full);
     }
     {
-        // The loop of C keeps drawing while the worker follows: the number of drawn frames grows and follow-ups arrive.
-        const auto before=drawn_frames();const int calls=script->calls;
-        check(wait_for([&]{return drawn_frames()>before+2 && script->calls>calls+1;}));
-        check(script->wrong_frames==0);
+        // The loop of C keeps drawing, and no follow-up runs: the number of drawn frames grows and the estimator is not asked again.
+        const auto before=drawn_frames();
+        check(wait_for([&]{return drawn_frames()>before+2;}));
+        wait_for([&]{return false;},800);
+        check(script->calls==1 && script->wrong_frames==0);
     }
     paint();
     {
@@ -2504,16 +2615,20 @@ int RunLiveCUiSmoke(){
         std::lock_guard lock(merged.mutex);
         check(merged.error.empty() && merged.pixels.width==merged.fixed_plan.output_width && merged.pixels.height==merged.fixed_plan.output_height);
     }
-    // The pose moves a long way: a follow-up (a change under the line) is taken and the plan is baked again.
+    // The button asks for one more estimate; the position moves a long way and is baked (whatever the size of the move).
     script->mode=3;
+    press(304);
     check(wait_for([&]{const auto plan=drawn_plan();return plan.live && plan.live->baked.pose.tx_mm==pose_b.tx_mm;}));
-    check(live_runtime->Status().rebakes>=2 && live_runtime->Status().view.state==LiveRegistrationState::tracking);
-    // A pose that cannot be drawn: the sentence says so, the plan in force is kept, and the picture goes on.
+    check(script->calls==2 && live_runtime->Status().rebakes>=2 && live_runtime->Status().placement.source==LivePlacementSource::auto_button);
+    check(contains(state_text(),"位置を確定しました（自動・ボタン）") && script->kinds.back()==LiveJobKind::full);
+    // A position that cannot be drawn: the sentence says so, the position and the plan in force are kept, and the picture goes on.
     script->mode=2;
-    check(wait_for([&]{return live_runtime->Status().bake_failed;}));
+    press(304);
+    check(wait_for([&]{return live_runtime->Status().rebake_failures>=1 && live_runtime->Status().placement.activity==LivePlacementActivity::idle;}));
     {
         const auto status=live_runtime->Status();
-        check(contains(status.state_text,"描けませんでした") && status.rebake_failures>=1);
+        check(contains(status.state_text,"位置を決められませんでした") && contains(status.state_text,"描けませんでした") && contains(status.state_text,"前の位置のまま"));
+        check(status.placement.mapping.pose.tx_mm==pose_b.tx_mm && status.placement.source==LivePlacementSource::auto_button);
         const auto plan=drawn_plan();
         check(plan.live && plan.live->baked.pose.tx_mm==pose_b.tx_mm);
         const auto before=drawn_frames();
@@ -2521,20 +2636,93 @@ int RunLiveCUiSmoke(){
         paint();
         check(pink(picture_rect())>0);
     }
-    // A pose that can be drawn again clears the sentence.
+    // A position that can be drawn again clears the sentence.
     script->mode=0;
-    check(wait_for([&]{const auto plan=drawn_plan();return !live_runtime->Status().bake_failed && plan.live && plan.live->baked.pose.tx_mm==pose_a.tx_mm;}));
-    // No estimate can be made: the last one is held, then C goes back to the fixed mapping and B's direction is not measured.
+    press(304);
+    check(wait_for([&]{const auto plan=drawn_plan();return plan.live && plan.live->baked.pose.tx_mm==pose_a.tx_mm && contains(state_text(),"位置を確定しました（自動・ボタン）");}));
+    // No estimate can be made: the position stays (there is no holding time and no fall back to the condition's position), the sentence says
+    // why, B's direction is still the one of the position, and nothing is asked for again.
     script->mode=1;
-    check(wait_for([&]{return live_runtime->Status().view.state==LiveRegistrationState::holding;}));
-    check(contains(live_runtime->Status().state_text,"直前の推定"));
-    check(wait_for([&]{return live_runtime->Status().view.state==LiveRegistrationState::fixed;}));
-    check(wait_for([&]{const auto plan=drawn_plan();return plan.live && plan.live->baked.pose.IsZero();}));
-    check(contains(live_runtime->Status().orientation.b_short,"B: 向きを測れていません"));
-    // The estimate comes back.
-    script->mode=0;
-    check(wait_for([&]{return live_runtime->Status().view.state==LiveRegistrationState::tracking;}));
+    press(304);
+    check(wait_for([&]{return contains(state_text(),"位置を決められませんでした");}));
+    check(contains(state_text(),"前の位置のままです（出どころ: ボタンの自動）"));
+    {
+        const int calls=script->calls;
+        wait_for([&]{return false;},1500);   // longer than the holding time that the shortened design used to have
+        check(script->calls==calls);
+        const auto plan=drawn_plan();
+        check(plan.live && plan.live->baked.pose.tx_mm==pose_a.tx_mm && live_runtime->Status().placement.source==LivePlacementSource::auto_button);
+        check(!contains(live_runtime->Status().orientation.b_short,"測れていません"));
+    }
     check(capture_admitted_soon());
+
+    // A shot that ended with a JPEG (what AdvanceCapture does, without a camera): the loop is stopped, then the live C is set to the mapping
+    // that the JPEG was made with, with layer 2 left out.
+    const m2::RegisteredMapping jpeg_mapping{cr::PoseParameters{0.2,0.05,0.4,3.0,0.5,0.0},m2::SurfacePlane{2.0,0.001,-0.001},std::nullopt};
+    const auto shot=[&](m2::RegisteredMapping mapping,m2::GeometryLevel level,const std::string& sha,bool layer_two){
+        if(layer_two){m2::ParallaxProfile profile;profile.q_px={0.0,0.4,0.0};profile.row_spacing_px=100;profile.a_px=8;profile.l_px=16;profile.seam_column=1000;mapping.parallax=profile;}
+        m2::StillReviewResult review;
+        m2::SavedFixedCompositeRegistration record;
+        record.condition_sha256=sha;record.registration.level.level=level;record.registration.level.mapping=std::move(mapping);
+        if(layer_two)record.registration.parallax.summary.max_shift_px=0.4;   // the largest shift of that layer 2 (the q samples' largest)
+        review.fixed_composite_registration=std::move(record);
+        return review;
+    };
+    finish();
+    {
+        const auto status=live_runtime->Status();
+        const auto serial=status.placement.serial;
+        // A shot of another condition's position is refused, and the live C is as it was.
+        ApplyCaptureToLivePlacement(shot(jpeg_mapping,m2::GeometryLevel::g1,std::string(64,'9'),true));
+        check(live_runtime->Status().placement.serial==serial && live_runtime->Status().placement.source==LivePlacementSource::auto_button);
+        // The shot of this condition. The two lines that it writes carry the nine numbers in the one form.
+        std::ostringstream captured;
+        auto* const original_buffer=std::cout.rdbuf(captured.rdbuf());
+        ApplyCaptureToLivePlacement(shot(jpeg_mapping,m2::GeometryLevel::g1,std::string(64,'1'),true));
+        std::cout.rdbuf(original_buffer);
+        const auto text=captured.str();
+        const std::string layer_two_fields=LivePlacementLayerTwoFields(true,0.4);   // "layer_two_dropped=1 layer_two_max_px=0.40000000000000002"
+        check(contains(text,"pair_review_placement source=after-capture level=G1 "+LivePlacementFields(jpeg_mapping)+" condition_sha256="+std::string(64,'1')+" "+layer_two_fields+" applied_to_live=1"));
+        check(contains(text,"C live_placement_after_capture serial="+std::to_string(serial+1)+" level=G1 before_source=auto-button ") && contains(text,layer_two_fields+" seam_difference_px="));
+        const auto after=live_runtime->Status();
+        check(after.placement.source==LivePlacementSource::after_capture && after.placement.serial==serial+1 && LivePlacementSameMapping(after.placement.mapping,jpeg_mapping) &&
+            !after.placement.mapping.parallax);
+        check(after.placement.capture && after.placement.capture->difference_px && contains(after.state_text,"撮影の後の自動調整で位置を確定しました（G1）") &&
+            contains(after.state_text,"JPEGの局所の補正（最大 0.4 px）はライブのCには出ません") && contains(after.state_text,"JPEGの画素）動かしました。今のライブのCはJPEGと同じ位置です"));
+    }
+    // The session that follows the shot (what StartPreview does): the position is carried, drawn into the new plan, and no estimate is asked
+    // for; the pair stays admitted and the picture goes on.
+    start(true,true,false);
+    check(live_runtime->Status().placement.source==LivePlacementSource::after_capture && live_runtime->Status().placement.activity==LivePlacementActivity::idle);
+    check(wait_for(picture_ready));
+    check(wait_for([&]{const auto plan=drawn_plan();return plan.live && LivePlacementSameMapping(plan.live->baked,jpeg_mapping);}));
+    wait_for([&]{return false;},800);
+    const auto jobs_after_shot=live_runtime->Status().placement.counters.jobs;   // the counters are carried with the machine: they only grow when a job begins
+    check(script->calls==0 && contains(state_text(),"撮影の後の自動調整で位置を確定しました（G1）"));
+    paint();
+    check(pink(picture_rect())>0);
+    // The button after a shot is one estimate, and it replaces the position of the shot.
+    script->mode=3;
+    press(304);
+    check(wait_for([&]{const auto plan=drawn_plan();return plan.live && plan.live->baked.pose.tx_mm==pose_b.tx_mm;}));
+    check(script->calls==1 && live_runtime->Status().placement.source==LivePlacementSource::auto_button && !live_runtime->Status().placement.capture &&
+        live_runtime->Status().placement.counters.jobs==jobs_after_shot+1);
+    check(capture_admitted_soon());   // (it stops the loop: finish() below brings it back)
+    // Live restarted by hand (the same condition, no shot): the position stays, and nothing is estimated.
+    finish();
+    start(true,true,false);
+    check(live_runtime->Status().placement.source==LivePlacementSource::auto_button && live_runtime->Status().placement.activity==LivePlacementActivity::idle);
+    check(wait_for(picture_ready));
+    check(wait_for([&]{const auto plan=drawn_plan();return plan.live && plan.live->baked.pose.tx_mm==pose_b.tx_mm;}));
+    wait_for([&]{return false;},800);
+    check(script->calls==0);
+    // A condition that is not the one before: the condition's position, and one estimate.
+    finish();
+    start(true,true,false,std::string(64,'2'));
+    check(live_runtime->Status().placement.source==LivePlacementSource::fixed_condition && live_runtime->Status().placement.activity==LivePlacementActivity::requested);
+    check(wait_for(picture_ready));
+    check(wait_for([&]{const auto plan=drawn_plan();return plan.live && plan.live->baked.pose.tx_mm==pose_a.tx_mm;}));
+    check(script->calls==1 && script->kinds.front()==LiveJobKind::full && live_runtime->Status().placement.source==LivePlacementSource::auto_start);
     finish();
     check(live_runtime->WorkersRunning()==0);
     {
@@ -2545,26 +2733,29 @@ int RunLiveCUiSmoke(){
     }
     live_runtime.reset();
 
-    // 3. The reasons of the first full estimate of a session: a start, a session after a capture, a condition read again.
+    // 3. The estimate of a session: the first session asks for one, a session after it with nothing run asks for the same one, a condition that
+    //    was read again asks for another, and a condition without registration.live asks for none.
+    live_placement_carry={};
     fixed_source={};fixed_source.loaded_v3=condition(true,std::string(64,'1'));
     // The caption of a condition v3 names its revision (#432); the smoke's revision is 1.
     check(PreviewWindowTitle(fixed_source)==PreviewTitleFrame(L"校正あり・改訂 1") && PreviewTitleMarksMatch(PreviewWindowTitle(fixed_source)) && std::wstring(PairButtonLabel(fixed_source))==L"両台撮影 → 合成を保存");
-    live_captures_seen=captures_saved;live_condition_sha.clear();
+    const auto asked=[&]{return live_runtime?live_runtime->PlacementMachine().View().ask:std::optional<LiveEstimateAsk>{};};
     PrepareLiveRuntime();
-    check(live_runtime && live_runtime->Status().view.full_reason==LiveFullReason::session_start);
+    check(live_runtime && asked()==LiveEstimateAsk::start);
     PrepareLiveRuntime();
-    check(live_runtime && live_runtime->Status().view.full_reason==LiveFullReason::session_start);
-    ++captures_saved;
-    PrepareLiveRuntime();
-    check(live_runtime && live_runtime->Status().view.full_reason==LiveFullReason::after_capture);
+    check(live_runtime && asked()==LiveEstimateAsk::start);
     fixed_source.loaded_v3=condition(true,std::string(64,'2'));
     PrepareLiveRuntime();
-    check(live_runtime && live_runtime->Status().view.full_reason==LiveFullReason::condition_reloaded);
+    check(live_runtime && asked()==LiveEstimateAsk::condition_changed);
     PrepareLiveRuntime();
-    check(live_runtime && live_runtime->Status().view.full_reason==LiveFullReason::session_start);
-    captures_saved=0;live_captures_seen=0;live_condition_sha.clear();live_runtime.reset();
+    check(live_runtime && asked()==LiveEstimateAsk::condition_changed);
+    fixed_source.loaded_v3=condition(false,std::string(64,'3'));
+    PrepareLiveRuntime();
+    check(live_runtime && !asked() && live_runtime->PlacementMachine().View().activity==LivePlacementActivity::idle);
+    live_placement_carry={};live_runtime.reset();
 
-    // 4. A condition without registration.live: nothing is estimated, the rows say so, the pair capture stays admitted.
+    // 4. A condition without registration.live: nothing is estimated, the rows say so, the button is refused like every position request, the
+    //    pair capture stays admitted; a shot still sets the position that C is drawn with.
     start(false,true);
     check(live_runtime!=nullptr && !live_runtime->Enabled());
     check(wait_for(picture_ready));
@@ -2572,11 +2763,20 @@ int RunLiveCUiSmoke(){
     paint();
     {
         const auto status=live_runtime->Status();
-        check(!status.live_enabled && contains(status.state_text,"無効") && contains(status.orientation.b_short,"測れていません"));
+        check(!status.live_enabled && contains(status.state_text,"無効") && contains(status.orientation.b_short,"測れていません") && contains(status.orientation.a_short,"A（校正時）: "));
         check(script->calls==0 && live_runtime->CurrentPlan()==nullptr);
         check(lit(client.bottom/2+140+PreviewLowerShift(client.right),client.bottom/2+161+PreviewLowerShift(client.right))>100 && lit(client.bottom/2+163+PreviewLowerShift(client.right),client.bottom/2+184+PreviewLowerShift(client.right))>100);
         check(pink(picture_rect())>0);
     }
+    {
+        std::uint64_t revision{};{std::lock_guard lock(merged.mutex);revision=merged.revision;}
+        press(304);
+        {std::lock_guard lock(merged.mutex);check(merged.revision==revision && !merged.auto_requested && !merged.position_refusal.empty());}
+        check(live_runtime->Status().placement.counters.jobs==0 && script->calls==0);
+    }
+    ApplyCaptureToLivePlacement(shot(jpeg_mapping,m2::GeometryLevel::g2,std::string(64,'1'),false));
+    check(wait_for([&]{const auto plan=drawn_plan();return plan.live && LivePlacementSameMapping(plan.live->baked,jpeg_mapping);}));
+    check(script->calls==0 && contains(state_text(),"撮影の後の自動調整で位置を確定しました（G2）") && !contains(state_text(),"局所の補正"));
     check(capture_admitted_soon());
     finish();
     live_runtime.reset();
