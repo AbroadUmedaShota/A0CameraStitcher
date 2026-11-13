@@ -558,13 +558,22 @@ void FillNew(Display& display,const Plan& plan){
             width=std::max(0.0,right_edge-left_edge);
         }
         if(width<narrowest){narrowest=width;display.narrowest_overlap_row=y;}
-        Point raw_a{},raw_b{};
+        Point raw_a{},raw_b{},next_a{},next_b{};
         const Point seam{static_cast<double>(plan.seam_column),row};
+        // The stored pixel order is the profile's, so which side of a photograph faces the drawing's right depends on the mounting: one
+        // output pixel further along the row says which way the stored x runs (a half-turn mounting runs it backwards). A's edge that
+        // matters is the one on the drawing's right, B's the one on the drawing's left.
+        const double step=seam.x+1.0<=right_limit?1.0:-1.0;
+        const Point probe{seam.x+step,row};
         bool ok=false;
-        try{ok=map_a(seam,raw_a) && map_b(seam,raw_b);}catch(const std::invalid_argument&){}
+        try{ok=map_a(seam,raw_a) && map_b(seam,raw_b) && map_a(probe,next_a) && map_b(probe,next_b);}catch(const std::invalid_argument&){}
         if(ok && Covered(map_a,seam.x,seam.y) && Covered(map_b,seam.x,seam.y)){
-            distance_a=std::min(distance_a,static_cast<double>(kD810SensorWidthPixels)-1.0-raw_a.x);
-            distance_b=std::min(distance_b,raw_b.x);
+            const double run_a_x=(next_a.x-raw_a.x)*step,run_b_x=(next_b.x-raw_b.x)*step;
+            const double last=static_cast<double>(kD810SensorWidthPixels)-1.0;
+            if(run_a_x!=0 && run_b_x!=0){
+                distance_a=std::min(distance_a,run_a_x>0?last-raw_a.x:raw_a.x);
+                distance_b=std::min(distance_b,run_b_x>0?raw_b.x:last-raw_b.x);
+            }
         }
     }
     if(std::isfinite(narrowest)){display.narrowest_overlap_mm=narrowest*pitch;display.has_overlap=true;}

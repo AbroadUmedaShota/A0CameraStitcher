@@ -528,6 +528,25 @@ void GeometryFromPose(){
         CHECK(!cand.check.details.empty());
     }
 
+    // A rig mounted a half turn stores the photographs the other way round: the same physical move gives the same distances of the seam to
+    // the photographs' edges on the drawing's right (A) and left (B) as for the normal mounting (the stored x runs backwards).
+    {
+        const auto turned_profile=RigText(true);
+        const auto turned_parameters=RigProfileV2::Parse(turned_profile).ValidateCalibrationForEvaluation(raster,render::Resampling::bilinear);
+        auto turned=MakeActive("geometry-turned",turned_profile,MountOrientation::rotated_180,raster,TestRanges);
+        for(const double shift:{5.0,30.0,60.0}){
+            const auto pose=PoseForShift(turned_parameters.camera_b,shift,true);
+            const auto proposal=rc::ProposeFromPose(MakeInputs(turned,nullptr,nullptr),pose,fit,record);
+            CHECK(proposal.refusals.empty() && proposal.candidate);
+            const auto& d=proposal.display;
+            CHECK(d.has_edge_distance);
+            CheckNear(d.edge_distance_a_px,7359-(10*(646.0+shift/2)+100),3.0,"half turn: the seam's distance to the drawing-right edge of A");
+            CheckNear(d.edge_distance_b_px,10*(646.0+shift/2)-5660-10*shift,3.0,"half turn: the seam's distance to the drawing-left edge of B");
+            CheckNear(d.motion.camera_motion_mm.x,shift,0.2,"half turn: B moved to the right of the drawing");
+        }
+        std::error_code ignored_turned;fs::remove_all(turned.settings,ignored_turned);
+    }
+
     // Where the seam goes and how big the raster is are two choices, each way.
     {
         const auto pose=PoseForShift(parameters.camera_b,30.0,false);
