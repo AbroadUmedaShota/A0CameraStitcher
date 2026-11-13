@@ -163,6 +163,7 @@ struct Harness {
     Clock::time_point deadline=Clock::now()+std::chrono::seconds(60);
     std::function<void()> after_prepare_b;
     std::function<void(int)> close_hook;
+    WpdStillCompletionWait wait=kWait;
     Harness(){
         lane[0].fake.jpeg={0xff,0xd8,1,1,1,1,0xff,0xd9};
         lane[1].fake.jpeg={0xff,0xd8,2,2,2,2,2,2,0xff,0xd9};
@@ -179,7 +180,7 @@ struct Harness {
         steps.preflight=[&](int i,Clock::time_point){events.push_back(std::string("preflight:")+Name(i));return VerifiedStillPreflight{true,true,{}};};
         steps.prepare=[&](int i,Clock::time_point){
             events.push_back(std::string("open:")+Name(i));auto& l=lane[i];
-            l.run.emplace(l.fake,[&l]{return l.fake.admission();},[&l](std::span<const unsigned char> bytes){l.partial.insert(l.partial.end(),bytes.begin(),bytes.end());},&l.observation,kWait);
+            l.run.emplace(l.fake,[&l]{return l.fake.admission();},[&l](std::span<const unsigned char> bytes){l.partial.insert(l.partial.end(),bytes.begin(),bytes.end());},&l.observation,wait);
             const auto prepared=PrepareWpdStillRun(*l.run);
             if(i==1 && after_prepare_b)after_prepare_b();
             return prepared;
@@ -387,6 +388,21 @@ int main(){
             const auto r=h.Run();CheckSent(h);CheckClosedBoth(h);
             Check(!r.complete && Contains(r.error,"ambiguous SDRAM object") && h.lane[0].persisted && r.originals[0].success);
             Check(!h.lane[1].persisted && h.lane[1].partial==h.lane[1].fake.jpeg);}
+        // Classification of what a preflight threw, and the log line for a read.
+        {Fake f;f.preflight_event=0x4fff;StillPreflightKind kind{};std::optional<std::uint16_t> code;
+            try{ReadWpdStillPreflight(f,[]{return true;});}catch(const std::exception& error){const auto r=ClassifyWpdStillRefusal(error);kind=r.kind;code=r.event_code;}
+            Check(kind==StillPreflightKind::Event && code==0x4fff);}
+        {const auto refusal=ClassifyWpdStillRefusal(std::runtime_error("still data transfer failed: 3"));Check(refusal.kind==StillPreflightKind::Transport && !refusal.event_code);
+            Check(ClassifyWpdStillRefusal(std::runtime_error("still transaction deadline/stop")).kind==StillPreflightKind::Transport);
+            Check(ClassifyWpdStillRefusal(WpdStillOutOfFocus{}).kind==StillPreflightKind::OutOfFocus);
+            Check(ClassifyWpdStillRefusal(WpdStillStateRefused(WpdStillStateRefusal::Size,"x")).kind==StillPreflightKind::Size);}
+        {WpdStillPreflightRecord ready;ready.polls=2;
+            Check(DescribeWpdStillPreflightEvents("check",ready,nullptr)=="preflight_events stage=check polls=2 codes=none refresh=0 result=ready refused_code=none kind=none");
+            WpdStillPreflightRecord refused;refused.polls=1;refused.refresh=true;const std::vector<WpdStillEvent> events{{0xc102,0x7b},{0x4006,1}};refused.codes.Add(events);
+            const WpdStillRefusal why{StillPreflightKind::Event,0xc102};
+            const auto line=DescribeWpdStillPreflightEvents("recheck",refused,&why);
+            Check(line=="preflight_events stage=recheck polls=1 codes=0x4006:1,0xc102:1 refresh=1 result=refused refused_code=0xc102 kind=event");
+            Check(line.find("7b")==std::string::npos);}
         try{PersistContracts();}catch(const std::exception& error){Check(false);std::cerr<<"persist contracts: "<<error.what()<<"\n";}
     }
     CoUninitialize();std::cout<<checks<<" checks, "<<failures<<" failures\n";return failures?1:0;

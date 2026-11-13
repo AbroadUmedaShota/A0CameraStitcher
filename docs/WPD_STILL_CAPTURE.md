@@ -56,3 +56,13 @@ AのOutOfFocusは、撮影前の確認で気付けなかった場合にだけ、
 - 待ちの間に届いた他のイベントは従来の規則で扱う。二つ目の完了イベント、記憶領域・メタデータの変化、未知のイベントは、撮影後なので終端で、取得済みのpartialを残す
 - 既存の観測ログ `<alias> capture_completion shutter_attempted=<0|1> complete_event=<0|1> complete_event_code=<0xNNNN|none>` と、失敗時の `code=0x%04x phase=before_shutter|after_shutter` は変えない。待ちの結果は別の行 `<alias> completion_wait result=<already_seen|seen|timeout|aborted> waited_ms=<n> max_ms=<n>` に出す。`timeout` が、完了イベントを見届けられなかった撮影
 - 続けて二台を切っても、完了イベント、SDRAMの画像、観測はカメラ（セッション）ごとに持つ。各カメラは自分のセッションのキューだけを読むので、別のカメラのイベントを数えない。二台のobject handleが同じ値でも、取り込みはそのセッションが認めたhandleだけに結び付く。万一、同じカメラの別の完了イベントや画像イベントが混ざれば、重複・曖昧として終端になる
+
+## 撮影前の点検が読んだ通知の記録 (#430)
+
+撮影前の点検がカメラに残っていた通知で止まり、アプリの起動し直しが何度も要る問題への対応の一部。AGENTS.md の規則は変えない。判定は変えず、点検が読んだ通知を記録する。新しい命令の種類は足さない（通知の読み取り `0x90C7` は従来から使っている）。通知の番号の出典は[公開資料](../third_party/PTP_PROTOCOL_REFERENCES.md)。
+
+**点検が読んだ通知の記録（C1）**: 点検は通知を `0x90C7` で2回読み、撮影前に来てはいけない通知が一つでもあれば止める。止めるかどうかの判定は従来のまま、最初に引っかかった通知で止まる。判定の前に、その回の全ての通知を番号ごとの数で数え、止まった時も含めて次の行に残す。通知の引数（object handle、storage ID）と機体の識別子は数えず、書かない。成功した点検にも同じ行が出る。
+
+`<alias> preflight_events stage=<check|recheck> polls=<n> codes=<0xNNNN:n,...|none> refresh=<0|1> result=<ready|refused> refused_code=<0xNNNN|none> kind=<none|event|live_view_on|quality|size|not_settled|not_ready|out_of_focus|identity|transport|deadline_stop>`
+
+`check` は露光の前の非撮影の点検、`recheck` は露光の直前の確かめ直し。`polls` は `0x90C7` を読んだ回数（読み直しを含む）、`refresh` は撮影条件の読み直しが一度要求されたか。

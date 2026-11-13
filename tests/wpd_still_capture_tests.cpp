@@ -178,6 +178,47 @@ int main(){
         {Fake f;f.reject_shutter=true;size_t partial=0;Reject([&]{AcquireWpdStillPayload(f,[]{return true;},[&](auto c){partial+=c.size();});});Check(f.shutters==1 && !f.CaptureConfirmed() && f.object_reads==1 && partial==f.jpeg.size());}
         {Fake f;f.admitted=false;Reject([&]{AcquireWpdStillPayload(f,[]{return true;},[](auto){});});Check(f.shutters==0);}
         {Fake f;f.owned=false;Reject([&]{f.ShutterOnce();});Check(f.shutters==0);}
+
+        // #430 C1: every notice of every preflight read is counted by code, whether or not the
+        // preflight passes, and before the ledger judges the batch. The judgement is unchanged:
+        // it stops at the first rejected notice. Parameters (object handles) are never counted.
+        {Fake f;WpdStillPreflightRecord record;ReadWpdStillPreflight(f,[]{return true;},&record);
+            Check(record.polls==2 && record.codes.Empty() && record.codes.Describe()=="none" && !record.refresh);}
+        {std::vector<WpdStillEvent> queue{{0xc102,0},{0xc101,0x7b},{0x4006,5}};
+            Fake f;f.camera_queue=&queue;WpdStillPreflightRecord record;
+            const auto what=RejectedEvent([&]{ReadWpdStillPreflight(f,[]{return true;},&record);},0xc102,false);
+            Check(what=="pending capture completion code=0xc102 phase=before_shutter"); // The reason is still the first rejected notice.
+            Check(record.polls==1 && record.codes.Describe()=="0x4006:1,0xc101:1,0xc102:1" && !record.refresh);
+            Check(!Contains(record.codes.Describe(),"7b") && !Contains(record.codes.Describe(),"123") && queue.empty());
+            Check(f.shutters==0 && f.object_reads==0);}
+        {std::vector<WpdStillEvent> queue{{0x4005,0},{0x4004,9}};
+            Fake f;f.camera_queue=&queue;WpdStillPreflightRecord record;
+            RejectedEvent([&]{ReadWpdStillPreflight(f,[]{return true;},&record);},0x4005,false);
+            Check(record.polls==1 && record.codes.Describe()=="0x4004:1,0x4005:1");
+            // The leftover was read, so the next preflight passes.
+            WpdStillPreflightRecord again;ReadWpdStillPreflight(f,[]{return true;},&again);Check(again.polls==2 && again.codes.Empty());}
+        // A refresh is recorded, and the counts add up across the reads before and after it.
+        {Fake f;f.preflight_event=0x4004;WpdStillPreflightRecord record;ReadWpdStillPreflight(f,[]{return true;},&record);
+            Check(record.polls==4 && record.refresh && record.codes.Describe()=="0x4004:1" && f.profile_reads==2);}
+        {Fake f;f.preflight_event=0x4004;f.repeat_preflight_event=true;WpdStillPreflightRecord record;bool typed=false;
+            try{ReadWpdStillPreflight(f,[]{return true;},&record);}
+            catch(const WpdStillStateRefused& e){typed=e.Reason()==WpdStillStateRefusal::NotSettled;Check(std::string(e.what())=="camera state did not settle after capture profile refresh");}
+            Check(typed && record.refresh && record.polls==4 && record.codes.Describe()=="0x4004:4");}
+        // The camera-state refusals are typed, with the text they always had.
+        {Fake f;f.live_on=true;WpdStillPreflightRecord record;bool typed=false;
+            try{ReadWpdStillPreflight(f,[]{return true;},&record);}catch(const WpdStillStateRefused& e){typed=e.Reason()==WpdStillStateRefusal::LiveViewOn && std::string(e.what())=="capture requires Live View off";}
+            Check(typed && record.polls==0);}
+        {Fake f;f.bad_quality=true;bool typed=false;
+            try{ReadWpdStillPreflight(f,[]{return true;});}catch(const WpdStillStateRefused& e){typed=e.Reason()==WpdStillStateRefusal::Quality && std::string(e.what())=="capture requires JPEG Fine only; camera settings unchanged";}
+            Check(typed);}
+        {Fake f;f.wrong_size=true;bool typed=false;
+            try{ReadWpdStillPreflight(f,[]{return true;});}catch(const WpdStillStateRefused& e){typed=e.Reason()==WpdStillStateRefusal::Size && std::string(e.what())=="capture requires FX JPEG L; camera settings unchanged";}
+            Check(typed);}
+        // A deadline or stop is not a camera-state refusal.
+        {Fake f;bool state=false,other=false;
+            try{ReadWpdStillPreflight(f,[]{return false;});}catch(const WpdStillStateRefused&){state=true;}catch(const std::exception&){other=true;}
+            Check(!state && other);}
+
     }
     CoUninitialize();std::cout<<checks<<" checks, "<<failures<<" failures\n";return failures?1:0;
 }

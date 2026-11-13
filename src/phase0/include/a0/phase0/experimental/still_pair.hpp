@@ -16,6 +16,35 @@ struct VerifiedStillOriginal {
     std::string sha256,error;
     bool out_of_focus{};
 };
+// Why a body's read-only preflight stopped (#430). The first seven kinds are the camera's own
+// state (a notice it still held, a capture setting, readiness, focus): the camera answered and
+// the session closed. The last four are not: identity, transport, Close and the deadline or a
+// stop request say nothing certain about the body.
+enum class StillPreflightKind {None,Event,LiveViewOn,Quality,Size,NotSettled,NotReady,OutOfFocus,Identity,Transport,Close,DeadlineStop};
+inline bool StillPreflightIsBodyState(StillPreflightKind kind){
+    switch(kind){
+    case StillPreflightKind::Event:case StillPreflightKind::LiveViewOn:case StillPreflightKind::Quality:case StillPreflightKind::Size:
+    case StillPreflightKind::NotSettled:case StillPreflightKind::NotReady:case StillPreflightKind::OutOfFocus:return true;
+    default:return false;
+    }
+}
+inline const char* StillPreflightKindText(StillPreflightKind kind){
+    switch(kind){
+    case StillPreflightKind::Event:return "event";
+    case StillPreflightKind::LiveViewOn:return "live_view_on";
+    case StillPreflightKind::Quality:return "quality";
+    case StillPreflightKind::Size:return "size";
+    case StillPreflightKind::NotSettled:return "not_settled";
+    case StillPreflightKind::NotReady:return "not_ready";
+    case StillPreflightKind::OutOfFocus:return "out_of_focus";
+    case StillPreflightKind::Identity:return "identity";
+    case StillPreflightKind::Transport:return "transport";
+    case StillPreflightKind::Close:return "close";
+    case StillPreflightKind::DeadlineStop:return "deadline_stop";
+    default:return "none";
+    }
+}
+struct VerifiedStillPreflight {bool ready{},closed{};std::string error;bool out_of_focus{};};
 struct VerifiedStillPair {
     std::array<VerifiedStillOriginal,2> originals;bool complete{};std::string error;bool out_of_focus{},preflight_complete{};
     // Whether each body's shutter command was handed to the transport. Both false
@@ -25,7 +54,6 @@ struct VerifiedStillPair {
     // shutters were dispatched (#389).
     std::optional<long long> shutter_gap_ms;
 };
-struct VerifiedStillPreflight {bool ready{},closed{};std::string error;bool out_of_focus{};};
 // A body opened for exposure whose capture state was rechecked. `ready` false
 // means no shutter may be sent to either body.
 struct StillPairPrepared {bool ready{};std::string error;bool out_of_focus{};};

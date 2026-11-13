@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -93,6 +94,38 @@ public:
     bool AfterShutter()const{return after_shutter_;}
 private:
     std::uint16_t code_{};bool after_shutter_{};
+};
+// How many notices of each code one session has read (#430). Only the code is kept: the
+// parameter (an object handle or storage ID) is never counted, stored or logged.
+class WpdStillEventCounts final {
+public:
+    void Add(std::span<const WpdStillEvent> events){for(const auto& event:events)++counts_[event.code];}
+    bool Empty()const{return counts_.empty();}
+    // "0x4006:1,0xc102:1" in ascending code order, or "none".
+    std::string Describe()const{
+        if(counts_.empty())return "none";
+        std::string text;
+        for(const auto& [code,count]:counts_)text+=std::string(text.empty()?"":",")+WpdStillEventCodeText(code)+":"+std::to_string(count);
+        return text;
+    }
+private:
+    std::map<std::uint16_t,unsigned> counts_;
+};
+// What a preflight read from the camera, filled as it goes so that a preflight that stops on its
+// first rejected notice still shows every notice of that read and of the reads before it.
+struct WpdStillPreflightRecord {
+    unsigned polls{};WpdStillEventCounts codes;bool refresh{};
+};
+enum class WpdStillStateRefusal {LiveViewOn,Quality,Size,NotSettled,NotReady};
+// A preflight refusal that is the camera's own answer (capture setting, readiness, an unsettled
+// state), as opposed to a transport failure or an expired deadline. The text is the one the
+// untyped exception carried before.
+class WpdStillStateRefused final:public std::runtime_error {
+public:
+    WpdStillStateRefused(WpdStillStateRefusal reason,const char* text):std::runtime_error(text),reason_(reason){}
+    WpdStillStateRefusal Reason()const{return reason_;}
+private:
+    WpdStillStateRefusal reason_;
 };
 class WpdStillEventLedger final {
 public:
@@ -252,33 +285,46 @@ inline void WaitWpdStillReady(WpdStillCaptureChannel& channel,const std::functio
         auto until=std::chrono::steady_clock::now()+std::chrono::seconds(10);
         for(;;){if(!may_continue())throw std::runtime_error("still transaction deadline/stop");const auto r=channel.Ready();if(r.Ok())return;
             if(r.error==WpdLiveViewResultError::MtpRejected && r.mtp_response==0xa002)throw WpdStillOutOfFocus();
-            if(r.error!=WpdLiveViewResultError::MtpRejected || r.mtp_response!=0x2019 || std::chrono::steady_clock::now()>=until)throw std::runtime_error("still camera not ready");
+            const bool busy=r.error==WpdLiveViewResultError::MtpRejected && r.mtp_response==0x2019;
+            if(busy && std::chrono::steady_clock::now()>=until)throw WpdStillStateRefused(WpdStillStateRefusal::NotReady,"still camera not ready");
+            if(!busy)throw std::runtime_error("still camera not ready");
             std::this_thread::sleep_for(std::chrono::milliseconds(50));}
 }
-inline WpdStillEventLedger ReadWpdStillPreflight(WpdStillCaptureChannel& channel,const std::function<bool()>& may_continue){
+// `record` (#430), when given, is filled as the reads happen: every notice code of every batch is
+// counted before the ledger judges that batch, so a batch that stops the preflight is still shown
+// whole. The judgement itself is unchanged and stops at the first rejected notice as before.
+inline WpdStillEventLedger ReadWpdStillPreflight(WpdStillCaptureChannel& channel,const std::function<bool()>& may_continue,WpdStillPreflightRecord* record=nullptr){
     if(!may_continue)throw std::invalid_argument("missing still preflight admission");
     auto active=[&]{if(!may_continue())throw std::runtime_error("still transaction deadline/stop");};
     auto ready=[&]{WaitWpdStillReady(channel,may_continue);};
     auto validate_profile=[&]{
     auto live=channel.Read(WpdStillOperation::LiveStatus,16);
-    if(live.size()!=1 || live[0]!=0)throw std::runtime_error("capture requires Live View off");
+    if(live.size()!=1)throw std::runtime_error("capture requires Live View off");
+    if(live[0]!=0)throw WpdStillStateRefused(WpdStillStateRefusal::LiveViewOn,"capture requires Live View off");
     auto quality=channel.Read(WpdStillOperation::ImageQuality,16);
-    if((quality.size()!=1 && quality.size()!=2) || StillLittleEndian(quality,0,quality.size())!=2)throw std::runtime_error("capture requires JPEG Fine only; camera settings unchanged");
-    if(ParseWpdStillString(channel.Read(WpdStillOperation::ImageSize,128))!=L"7360x4912")throw std::runtime_error("capture requires FX JPEG L; camera settings unchanged");
+    if(quality.size()!=1 && quality.size()!=2)throw std::runtime_error("capture requires JPEG Fine only; camera settings unchanged");
+    if(StillLittleEndian(quality,0,quality.size())!=2)throw WpdStillStateRefused(WpdStillStateRefusal::Quality,"capture requires JPEG Fine only; camera settings unchanged");
+    if(ParseWpdStillString(channel.Read(WpdStillOperation::ImageSize,128))!=L"7360x4912")throw WpdStillStateRefused(WpdStillStateRefusal::Size,"capture requires FX JPEG L; camera settings unchanged");
     };
     active();ready();validate_profile();
+    auto poll=[&](WpdStillEventLedger& baseline){
+        const auto events=ParseWpdStillEvents(channel.Read(WpdStillOperation::Events,8192));
+        if(record){++record->polls;record->codes.Add(events);}
+        baseline.Observe(events,false);
+    };
     auto drain_preflight=[&](WpdStillEventLedger& baseline){
-        active();baseline.Observe(ParseWpdStillEvents(channel.Read(WpdStillOperation::Events,8192)),false);
+        active();poll(baseline);
         std::this_thread::sleep_for(std::chrono::milliseconds(100));active();
-        baseline.Observe(ParseWpdStillEvents(channel.Read(WpdStillOperation::Events,8192)),false);
+        poll(baseline);
     };
     WpdStillEventLedger ledger;drain_preflight(ledger);
     if(ledger.ProfileRefreshRequired()){
+        if(record)record->refresh=true;
         active();ready();validate_profile();
         // One read-only refresh, then a new bounded baseline. Never loop until
         // a changing camera looks stable or carry an old object into capture.
         WpdStillEventLedger settled;drain_preflight(settled);
-        if(settled.ProfileRefreshRequired())throw std::runtime_error("camera state did not settle after capture profile refresh");
+        if(settled.ProfileRefreshRequired())throw WpdStillStateRefused(WpdStillStateRefusal::NotSettled,"camera state did not settle after capture profile refresh");
     }
     active();return ledger;
 }
@@ -299,7 +345,7 @@ public:
     WpdStillCaptureRun(const WpdStillCaptureRun&)=delete;
     WpdStillCaptureRun& operator=(const WpdStillCaptureRun&)=delete;
     // Profile and event baseline. No exposure happens before this passes.
-    void Preflight(){ledger_=ReadWpdStillPreflight(channel_,may_continue_);preflighted_=true;Publish();}
+    void Preflight(WpdStillPreflightRecord* record=nullptr){ledger_=ReadWpdStillPreflight(channel_,may_continue_,record);preflighted_=true;Publish();}
     // Hands the single shutter to the transport. Throws if it was refused or
     // its acknowledgement is unconfirmed; the caller must never resend it.
     void Shutter(){

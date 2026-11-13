@@ -140,10 +140,11 @@ public:
     StillLane& operator=(const StillLane&)=delete;
     ~StillLane(){try{Finish();}catch(...){}}
     bool OpenSession(){
+        bool identity_mismatch=false;
         try{
             device_=Open(id_,GENERIC_READ|GENERIC_WRITE);opened_=true;
             auto map_path=DefaultIdentityMapPath();map_path.replace_filename("camera-map-wpd.json");IdentityMap map(map_path);
-            if(map.FindAlias(Identity(device_.Get()))!=std::optional<std::string>(alias_))throw std::runtime_error("still camera alias mismatch");
+            if(map.FindAlias(Identity(device_.Get()))!=std::optional<std::string>(alias_)){identity_mismatch=true;throw std::runtime_error("still camera alias mismatch");}
             if(!preflight_only_){
                 partial_=CreateFileW(partial_path_.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL|FILE_FLAG_OPEN_REPARSE_POINT|FILE_FLAG_WRITE_THROUGH,nullptr);
                 if(partial_==INVALID_HANDLE_VALUE)throw std::runtime_error("cannot create private capture partial");
@@ -162,14 +163,24 @@ public:
             channel_=std::make_unique<Channel>(*this);
             evidence_->RecordState(preflight_only_?"preflight":"capture","BothLiveViewsClosed",alias_);
             return true;
-        }catch(const std::exception& error){Fail(error.what(),dynamic_cast<const WpdStillOutOfFocus*>(&error)!=nullptr);return false;}
+        }catch(const std::exception& error){
+            refusal_.kind=identity_mismatch?StillPreflightKind::Identity:StillPreflightKind::Transport;
+            Fail(error.what(),dynamic_cast<const WpdStillOutOfFocus*>(&error)!=nullptr);return false;
+        }
     }
-    // Non-exposing check: Ready, capture profile and a clean event baseline.
+    // Non-exposing check: Ready, capture profile and a clean event baseline. Every notice the
+    // reads returned is logged by code and count, whether or not the check passed (#430).
     void RunPreflightOnly(){
         try{
             Log(alias_+" preflight_only=1 shutter_commands=0 setting_writes=0");
-            ReadWpdStillPreflight(*channel_,[this]{return Admitted();});outcome_.success=true;
-        }catch(const std::exception& error){Fail(error.what(),dynamic_cast<const WpdStillOutOfFocus*>(&error)!=nullptr);}
+            ReadWpdStillPreflight(*channel_,[this]{return Admitted();},&preflight_record_);outcome_.success=true;
+            Log(alias_+" "+DescribeWpdStillPreflightEvents("check",preflight_record_,nullptr));
+        }catch(const std::exception& error){
+            refusal_=ClassifyWpdStillRefusal(error);
+            if(refusal_.kind==StillPreflightKind::Transport && !Admitted())refusal_.kind=StillPreflightKind::DeadlineStop;
+            Log(alias_+" "+DescribeWpdStillPreflightEvents("check",preflight_record_,&refusal_));
+            Fail(error.what(),dynamic_cast<const WpdStillOutOfFocus*>(&error)!=nullptr);
+        }
     }
     // Recheck the capture state of this open body. No exposure.
     StillPairPrepared PrepareForExposure(){
@@ -179,7 +190,9 @@ public:
             run_.emplace(*channel_,[this]{return Admitted();},[this](std::span<const unsigned char> bytes){
                 DWORD written{};if(!WriteFile(partial_,bytes.data(),static_cast<DWORD>(bytes.size()),&written,nullptr) || written!=bytes.size())throw std::runtime_error("capture partial write failed");
             },&observed_);
-            prepared=PrepareWpdStillRun(*run_);
+            WpdStillRefusal refusal;
+            prepared=PrepareWpdStillRun(*run_,&preflight_record_,&refusal);
+            Log(alias_+" "+DescribeWpdStillPreflightEvents("recheck",preflight_record_,prepared.ready?nullptr:&refusal));
         }catch(const std::exception& error){prepared.error=error.what();}
         if(!prepared.ready)Fail(prepared.error,prepared.out_of_focus);
         return prepared;
@@ -279,6 +292,8 @@ private:
     bool opened_{},shutter_dispatched_{},acquisition_entered_{},finished_{};
     std::atomic<bool> cancelled_{},busy_{};std::atomic<ULONGLONG> busy_tick_{};
     WpdStillCaptureObservation observed_;
+    WpdStillPreflightRecord preflight_record_;
+    WpdStillRefusal refusal_{StillPreflightKind::None,std::nullopt};
     StillCaptureOutcome outcome_;
     std::unique_ptr<Channel> channel_;
     std::optional<WpdStillCaptureRun> run_;
