@@ -448,7 +448,7 @@ inline WpdLiveProbeOutcome RunLiveCaptureProbe(WpdLiveCaptureProbeChannel& chann
         return out;
     }
     bool imported = false;
-    bool skipped_completion = false, skipped_import_ready = false;
+    bool skipped_import_ready = false;
 
     // ---- After the shutter: ready state, events, the one object, completion.
     WpdLiveProbeEventLedger ledger;
@@ -482,7 +482,7 @@ inline WpdLiveProbeOutcome RunLiveCaptureProbe(WpdLiveCaptureProbeChannel& chann
         out.object_reason = "object_event_timeout";
         for (;;) {
             if (!channel.Admitted()) { out.object_reason = "deadline_or_stop"; break; }
-            try { ledger.Observe(read_events(), true); } catch (const std::exception&) { out.object_reason = "event_read_failed"; break; }
+            try { ledger.Observe(read_events(), true); } catch (const std::exception&) { out.object_reason = channel.Admitted() ? "event_read_failed" : "deadline_or_stop"; break; }
             if (ledger.Ambiguous()) { out.object_reason = "ambiguous_object_events"; break; }
             if (ledger.CardImageEvent()) { out.object_reason = "card_image_event"; break; }
             if (ledger.Handle()) { out.object_reason = "attributed"; break; }
@@ -534,33 +534,34 @@ inline WpdLiveProbeOutcome RunLiveCaptureProbe(WpdLiveCaptureProbeChannel& chann
             } catch (const std::exception&) { if (out.object_reason == "attributed") out.object_reason = "import_failed"; flag(out.object_reason); }
         }
         // Events that arrive around the import and the completion event, observed inside the existing bound. Skipped
-        // once an anomaly is flagged, and left at once when an unexpected event shows up during it.
-        if (confirmed && ledger.ObjectEvents() > 0) {
-            if (anomaly) {
-                skipped_completion = true;
-            } else {
-                for (int i = 0; i < 2 && channel.Admitted(); ++i) {
-                    if (i) sleep(options.event_poll);
-                    try { ledger.Observe(read_events(), true); } catch (const std::exception&) { break; }
-                    if (ledger.Unexpected() > 0) break;
+        // once an anomaly is flagged. It ends at once, without another event read, when a read fails (a refusal or an
+        // unparsable answer), when an unexpected event shows up, or when the deadline or a stop arrives.
+        if (confirmed && ledger.ObjectEvents() > 0 && !anomaly) {
+            const auto read_failed = [&] { flag(channel.Admitted() ? "event_read_failed" : "deadline_or_stop"); };
+            int reads = 0;
+            for (int i = 0; i < 2 && channel.Admitted(); ++i) {
+                if (i) sleep(options.event_poll);
+                try { ledger.Observe(read_events(), true); ++reads; } catch (const std::exception&) { read_failed(); break; }
+                if (ledger.Unexpected() > 0) break;
+            }
+            out.completion.completion_wait = WpdStillCompletionWaitResult::Aborted;
+            if (anomaly) {}                                   // a failed read
+            else if (ledger.Unexpected() > 0) flag("unexpected_event");
+            else if (reads < 2) flag("deadline_or_stop");
+            else if (ledger.Completed()) out.completion.completion_wait = WpdStillCompletionWaitResult::AlreadySeen;
+            else {
+                const auto start = now();
+                for (;;) {
+                    const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(now() - start);
+                    if (!channel.Admitted()) { flag("deadline_or_stop"); break; }
+                    if (waited >= options.completion.max) { out.completion.completion_wait = WpdStillCompletionWaitResult::TimedOut; break; }
+                    sleep(std::min(options.completion.poll, options.completion.max - waited));
+                    if (!channel.Admitted()) { flag("deadline_or_stop"); break; }
+                    try { ledger.Observe(read_events(), true); } catch (const std::exception&) { read_failed(); break; }
+                    if (ledger.Unexpected() > 0) { flag("unexpected_event"); break; }
+                    if (ledger.Completed()) { out.completion.completion_wait = WpdStillCompletionWaitResult::Seen; break; }
                 }
-                out.completion.completion_wait = WpdStillCompletionWaitResult::Aborted;
-                if (ledger.Unexpected() > 0) { flag("unexpected_event"); }
-                else if (ledger.Completed()) { out.completion.completion_wait = WpdStillCompletionWaitResult::AlreadySeen; }
-                else {
-                    const auto start = now();
-                    for (;;) {
-                        const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(now() - start);
-                        if (!channel.Admitted()) break;
-                        if (waited >= options.completion.max) { out.completion.completion_wait = WpdStillCompletionWaitResult::TimedOut; break; }
-                        sleep(std::min(options.completion.poll, options.completion.max - waited));
-                        if (!channel.Admitted()) break;
-                        try { ledger.Observe(read_events(), true); } catch (const std::exception&) { break; }
-                        if (ledger.Unexpected() > 0) { flag("unexpected_event"); break; }
-                        if (ledger.Completed()) { out.completion.completion_wait = WpdStillCompletionWaitResult::Seen; break; }
-                    }
-                    out.completion.completion_wait_ms = elapsed_ms(start);
-                }
+                out.completion.completion_wait_ms = elapsed_ms(start);
             }
         }
         out.completion.complete_event = ledger.Completed();
@@ -605,7 +606,10 @@ inline WpdLiveProbeOutcome RunLiveCaptureProbe(WpdLiveCaptureProbeChannel& chann
         log("live_capture_probe_live_after value=" + (out.live_after ? Hex(*out.live_after, 2) : std::string("unreadable")));
     } else {
         log("live_capture_probe_live_after value=not_read reason=" + out.anomaly);
-        log("live_capture_probe_anomaly reason=" + out.anomaly + " not_sent=" + std::string(skipped_completion ? "completion_wait," : "") +
+        // The wait for the completion event is listed whenever it did not run to a result, whatever the reason.
+        const bool completion_not_run = out.completion.completion_wait == WpdStillCompletionWaitResult::NotReached ||
+            out.completion.completion_wait == WpdStillCompletionWaitResult::Aborted;
+        log("live_capture_probe_anomaly reason=" + out.anomaly + " not_sent=" + std::string(completion_not_run ? "completion_wait," : "") +
             (skipped_import_ready ? "import_ready," : "") + "live_state_read,frame_read");
     }
     out.sequence_clean = confirmed && !anomaly;

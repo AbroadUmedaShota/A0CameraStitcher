@@ -6,6 +6,7 @@
 #include "a0/phase0/experimental/wpd_live_capture_probe.hpp"
 #include <algorithm>
 #include <iostream>
+#include <map>
 #include <string>
 #include <vector>
 using namespace a0::phase0::experimental;
@@ -55,6 +56,8 @@ public:
     static constexpr DWORD kThrow = 0xffffffff;
     std::vector<DWORD> import_ready_script;
     int ready_calls_after{};
+    // 1-based number of the event read after the shutter -> how it fails: 1 the body refuses it, 2 the answer cannot be parsed, 3 the transport fails.
+    std::map<int, int> fail_event_read_at;
     std::vector<std::vector<WpdStillEvent>> pre, post{std::vector<WpdStillEvent>{{0xc101, 0x0badf00d}, {0xc102, 0}}}; // batches for successive reads before / after the shutter (default: one object and its completion)
     DWORD handle = 0x0badf00d;
     std::vector<unsigned char> jpeg{0xff, 0xd8, 7, 8, 9, 10, 0xff, 0xd9};
@@ -62,7 +65,7 @@ public:
     std::function<void(size_t)> on_post_events; // after the n-th events read that follows the shutter
     std::function<void(int)> on_ready_call;     // after the n-th DeviceReady that follows the shutter has been answered
     // What reached the body.
-    int shutters{}, object_reads{}, info_reads{}, ends{}, profile_reads{}, post_event_reads{};
+    int shutters{}, object_reads{}, info_reads{}, ends{}, profile_reads{}, post_event_reads{}, post_event_ends{};
     std::vector<std::string> trace;
     std::vector<std::string> after_trace; // the operations that reached the body after the shutter (the shutter itself is not in it)
 protected:
@@ -130,6 +133,14 @@ protected:
                 ++index;
                 if (shutters) ++post_event_reads;
                 if (shutters && on_post_events) on_post_events(post_index_);
+                if (shutters) {
+                    const auto failing = fail_event_read_at.find(post_event_reads);
+                    if (failing != fail_event_read_at.end()) {
+                        if (failing->second == 1) { auto refusal = Reply(true); refusal->SetUnsignedIntegerValue(WPD_PROPERTY_MTP_EXT_RESPONSE_CODE, 0xa004); return {S_OK, refusal}; }
+                        if (failing->second == 2) data_ = {0x01, 0x00}; // one event announced, none present
+                        else throw std::runtime_error("synthetic transport failure");
+                    }
+                }
             } else if (code == 0x1008) {
                 Require(parameter == handle);
                 ++info_reads;
@@ -157,6 +168,7 @@ protected:
         }
         Require(id == WPD_COMMAND_MTP_EXT_END_DATA_TRANSFER.pid);
         ++ends;
+        if (shutters && current_operation_ == 0x90c7) ++post_event_ends; // an event read after the shutter has ended
         return {S_OK, Reply(true)};
     }
 private:
@@ -549,6 +561,7 @@ int main() {
             run = Go(h, false, false, {}, Short());
             Check(h.info_reads == 0 && run.out.object_reason == "object_event_timeout" && run.out.published == "none" && run.out.sdram_may_remain && run.out.result == WpdLiveProbeResult::StoppedAfterShutter, "no object event within the bound: nothing is imported");
             Check(Count(h, "90c0") == 1, "no resend when the image never arrives");
+            Check(run.IndexOf("live_capture_probe_anomaly reason=object_event_timeout not_sent=completion_wait,live_state_read,frame_read") >= 0, "no object: the anomaly line names the completion wait as not sent");
             Check(!run.out.sequence_clean && h.profile_reads == 1, "no object event within the bound: an anomaly, the Live state is not read");
         }
         {   // The object arrives after a few empty reads.
@@ -577,6 +590,36 @@ int main() {
             const auto waiting = Go(g);
             Check(waiting.out.completion.completion_wait == WpdStillCompletionWaitResult::Aborted && !waiting.out.completion.complete_event && g.post_event_reads == 4 && waiting.out.published == "partial_only" && !waiting.out.sequence_clean, "an odd event during the completion wait ends the wait");
         }
+        // An event read that fails inside the completion observation (a refusal, an answer that cannot be parsed, a transport
+        // failure) ends the observation: no second read is sent after it, and no 0xD1A2 read follows. Read 1 is the object
+        // search, 2 and 3 the two reads after the import, 4 the first read of the wait.
+        for (const int mode : {1, 2, 3}) {
+            for (const int failing : {2, 3, 4}) {
+                ProbeFake f; f.fail_event_read_at[failing] = mode;
+                if (failing == 4) f.post = {{{0xc101, 0x0badf00d}}}; // no completion yet, so the observation goes on to wait
+                const auto run = Go(f);
+                const auto& o = run.out;
+                Check(!o.sequence_clean && o.anomaly == "event_read_failed" && o.result == WpdLiveProbeResult::StoppedAfterShutter, "an event read that fails in the completion observation is an anomaly");
+                Check(f.post_event_reads == failing && CountAfter(f, "90c7") == failing, "no event read is sent after the one that failed");
+                Check(CountAfter(f, "1015") == 0 && f.profile_reads == 1 && !o.live_after && o.live_after_state == "not_read", "a failed event read: 0xD1A2 is not read");
+                Check(o.published == "partial_only" && run.saved == 0 && o.completion.completion_wait == WpdStillCompletionWaitResult::Aborted && o.object_reason == "event_read_failed", "a failed event read: the image already imported stays a partial only and the wait did not run");
+                Check(run.IndexOf("live_capture_probe_anomaly reason=event_read_failed not_sent=completion_wait,live_state_read,frame_read") >= 0, "a failed event read: the anomaly line names what was not sent");
+            }
+        }
+        {   // The deadline or a stop ends the completion observation: it is an anomaly of its own, nothing is sent after it.
+            ProbeFake f; f.admission = [&] { return f.post_event_ends < 2; }; // after the first read that follows the import
+            const auto run = Go(f);
+            Check(!run.out.sequence_clean && run.out.anomaly == "deadline_or_stop" && f.post_event_reads == 2 && CountAfter(f, "1015") == 0 && !run.out.live_after && run.out.completion.completion_wait == WpdStillCompletionWaitResult::Aborted && run.out.published == "partial_only",
+                "the deadline between the two reads after the import is an anomaly");
+            ProbeFake g; g.post = {{{0xc101, 0x0badf00d}}}; g.admission = [&] { return g.post_event_ends < 3; }; // after the second read, before the wait
+            const auto waiting = Go(g);
+            Check(!waiting.out.sequence_clean && waiting.out.anomaly == "deadline_or_stop" && g.post_event_reads == 3 && CountAfter(g, "1015") == 0 && waiting.out.completion.completion_wait == WpdStillCompletionWaitResult::Aborted,
+                "the deadline at the start of the completion wait is an anomaly");
+            ProbeFake h; bool over = false; h.on_post_events = [&](size_t read) { if (read == 2) over = true; }; h.admission = [&] { return !over; }; // while the first read after the import is under way
+            const auto cut = Go(h);
+            Check(!cut.out.sequence_clean && cut.out.anomaly == "deadline_or_stop" && CountAfter(h, "1015") == 0 && h.post_event_reads == 2 && cut.out.completion.completion_wait == WpdStillCompletionWaitResult::Aborted,
+                "the deadline in the middle of an event read is an anomaly, not a read failure");
+        }
         {   // No completion arrives: observation times out, the image is still original.
             ProbeFake f; f.post = {{{0xc101, 0x0badf00d}}};
             const auto run = Go(f, false, false, {}, Short());
@@ -604,9 +647,11 @@ int main() {
             const auto run = Go(f);
             Check(run.out.live_after == 0u && run.out.published == "original" && run.out.result == WpdLiveProbeResult::Observed && run.IndexOf("live_after value=0x00") >= 0, "Live off after the shot is recorded");
             ProbeFake g; g.post = {kClean};
-            bool over = false; g.on_post_events = [&](size_t read) { if (read >= 3) over = true; }; g.admission = [&] { return !over; }; // the deadline runs out right after the import
-            const auto expired = Go(g);
-            Check(!expired.out.live_after && expired.IndexOf("live_after value=unreadable") >= 0 && expired.out.result == WpdLiveProbeResult::StoppedAfterShutter, "Live state not readable after the deadline is recorded as such");
+            bool over = false; g.admission = [&] { return !over; };
+            // The deadline runs out after the completion observation, before the Live state is read.
+            const auto expired = Go(g, false, false, [&](const std::string& line) { if (Contains(line, "completion_wait result=")) over = true; });
+            Check(!expired.out.live_after && expired.IndexOf("live_after value=unreadable") >= 0 && expired.out.result == WpdLiveProbeResult::StoppedAfterShutter && expired.out.live_after_state == "unreadable" && CountAfter(g, "1015") == 0,
+                "Live state not readable after the deadline is recorded as such");
         }
     }
     // ---- An exception that leaves RunLiveCaptureProbe after the shutter does not turn into "no shutter was sent".
