@@ -117,6 +117,7 @@ struct RecalibrationSentence {std::string reason,remedy;};
     // Lane-level codes (before or after the computation).
     if(c=="no-v3-condition")return {"校正の元になる条件（v3）がありません","技術担当の作業が要ります"};
     if(c=="staging-exists")return {"校正用のフォルダが既にあります","新しいフォルダを指定してください（何も書いていません）"};
+    if(c=="staging-in-settings")return {"校正用のフォルダが、設定のフォルダの中にあります","設定のフォルダの外に新しいフォルダを指定してください（何も書いていません）"};
     if(c=="live-not-stopped")return {"ライブが止まっていません","ライブを止めてからやり直してください"};
     if(c=="decode-failed")return {"撮影した画像を読めませんでした","撮り直してください"};
     if(c=="hash-mismatch")return {"画像が撮影の記録と一致しません","撮り直してください"};
@@ -211,14 +212,14 @@ inline std::string MotionLine(const a0::m2::experimental::recalibration::Display
     return text;
 }
 inline std::string SeamLine(const a0::m2::experimental::recalibration::Display& d){
-    if(d.width_new_px==0)return {};   // the new raster was not made: there is no new seam to speak of
+    if(!d.has_new)return {};   // the new side is not whole (a refusal before the plan was made): there is no new seam to speak of
     const double delta=d.seam_x_new_mm-d.seam_x_previous_mm;
     if(!std::isfinite(delta))return {};
     if(!Present(delta))return "継ぎ目の位置は変わりません";
     return "継ぎ目の位置が変わります: 図面の上で"+std::string(delta>0?"右":"左")+"へ"+Approx(delta,Unit::mm)+"（検品の時に見る場所が変わります）";
 }
 inline std::string RasterLine(const a0::m2::experimental::recalibration::Display& d){
-    if(d.width_new_px==0)return {};
+    if(!d.has_new)return {};
     const double grown=d.right_new_mm-d.right_previous_mm;
     std::string text="合成の画像の大きさ: 幅 "+std::to_string(d.width_previous_px)+" → "+std::to_string(d.width_new_px)+" 画素";
     if(Present(grown))text+="（右の端が"+Approx(grown,Unit::mm)+(grown>0?" 広がります":" 狭まります")+"）";
@@ -271,7 +272,8 @@ inline std::string GateLine(const RecalibrationGateFacts& g){
     switch(verdict){
     case RecalibrationVerdict::usable: return "この校正は使えます";
     case RecalibrationVerdict::usable_unverified:
-        return "未確認の校正です。継ぎ目のずれを確かめられませんでした。数と見本を見て、使うかどうかを決めてください";
+        // What could not be checked is told by the lines of reasons below; this line must not name it (the gate may have passed).
+        return "未確認の校正です。数と見本を見て、使うかどうかを決めてください";
     case RecalibrationVerdict::unusable: return "この校正は使えません";
     }
     return {};
@@ -302,7 +304,6 @@ inline std::string GateLine(const RecalibrationGateFacts& g){
     if(reason=="condition-changed")return "条件が変わっています。撮り直してください（前の校正のままです）";
     if(reason=="not-usable")return "この校正は使えない結果です。前の校正のままです";
     if(reason=="not-acknowledged")return "確かめられていない校正です。警告を見たうえで使うと決めた時だけ更新できます。前の校正のままです";
-    if(reason=="already-confirmed")return "この結果は既に使っています";
     if(reason=="readback-failed")return "書いた後の確認で、新しい校正が有効になっていませんでした。技術担当へ知らせてください";
     return "書けませんでした。前の校正のまま使います";
 }

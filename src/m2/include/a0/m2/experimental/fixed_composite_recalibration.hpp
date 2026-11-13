@@ -186,6 +186,9 @@ struct Display {
     std::uint32_t seam_column_previous{},seam_column_new{};
     double seam_x_previous_mm{},seam_x_new_mm{};
     // The raster, before and after: width and height in pixels, and the region's left and right edge in mm.
+    // `has_new` is true when the whole "after" side (seam, raster) is filled. A refusal can leave it half filled (the width and the right
+    // edge are known before the sheet check); the "after" values must not be shown then.
+    bool has_new{};
     std::uint32_t width_previous_px{},height_previous_px{},width_new_px{},height_new_px{};
     double right_previous_mm{},right_new_mm{};
     // How near the seam is to the edges of the photographs (the nearest over the rows), in camera pixels and as a share of the

@@ -547,6 +547,7 @@ void FillNew(Display& display,const Plan& plan){
     display.seam_x_new_mm=left+(static_cast<double>(plan.seam_column)+0.5)*pitch;
     display.width_new_px=r.width_pixels;display.height_new_px=r.height_pixels;
     display.right_new_mm=static_cast<double>(r.region_um.right)/1000.0;
+    display.has_new=true;
     // Overlap and the seam's distance to the photographs' edges, row by row, with the new mapping and the same coverage rule as the check.
     const auto map_a=render::DocumentOutputToCamera(r,plan.parameters.camera_a);
     const auto map_b=render::DocumentOutputToCamera(r,plan.parameters.camera_b);

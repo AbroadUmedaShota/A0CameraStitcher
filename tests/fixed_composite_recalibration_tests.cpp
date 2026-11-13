@@ -516,6 +516,7 @@ void GeometryFromPose(){
         CheckNear(d.motion.camera_motion_mm.y,0.0,0.2,"B did not move up or down");
         CheckNear(d.pose.position_mm,shift,0.2,"the size of the move");
         CHECK(d.width_new_px==c.raster.width_pixels && d.width_previous_px==raster.width_pixels && d.right_new_mm>d.right_previous_mm);
+        CHECK(d.has_new && d.height_new_px==c.raster.height_pixels);
         CheckNear(d.edge_distance_a_px,7359-(10*(646.0+shift/2)+100),3.0,"the seam's distance to the right edge of A");
         CheckNear(d.edge_distance_b_px,10*(646.0+shift/2)-5660-10*shift,3.0,"the seam's distance to the left edge of B");
         CheckNear(d.edge_share_a,d.edge_distance_a_px/7360,1e-9,"the share of the width");
@@ -865,6 +866,7 @@ void RefusalsFromPose(){
     {
         const auto proposal=rc::ProposeFromPose(MakeInputs(active,nullptr,nullptr),PoseForShift(parameters.camera_b,500.0,false),fit,"{}");
         CHECK(!proposal.candidate && has(proposal,rc::Refusal::raster_outside_sheet));
+        CHECK(!proposal.display.has_new);   // the width is known, the seam and the height are not: the screen must not show the "after" side
         const auto huge=rc::ProposeFromPose(MakeInputs(active,nullptr,nullptr),PoseForShift(parameters.camera_b,3500.0,false),fit,"{}");
         CHECK(!huge.candidate && (has(huge,rc::Refusal::raster_too_large) || has(huge,rc::Refusal::raster_outside_sheet)));
     }

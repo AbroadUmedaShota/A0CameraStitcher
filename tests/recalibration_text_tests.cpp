@@ -50,6 +50,7 @@ rc::Display SampleDisplay() {
     d.height_previous_px = d.height_new_px = 1600;
     d.right_previous_mm = 740.0;
     d.right_new_mm = 782.0;
+    d.has_new = true;
     d.has_edge_distance = true;
     d.edge_share_a = 0.12;
     d.edge_share_b = 0.09;
@@ -107,7 +108,7 @@ void Sentences() {
         distinct.insert(RecalibrationFindingSentence({FindingClass::rejected, std::string(rc::RefusalCode(r)), {}}).reason);
     }
     CHECK(distinct.size() == 12);   // twelve codes, twelve different sentences (the unchecked variant of reestimate-not-verified is a thirteenth)
-    const char* lane[] = {"no-v3-condition", "staging-exists", "live-not-stopped", "decode-failed", "hash-mismatch", "size-mismatch", "profile-unreadable", "out-of-memory", "job-failed",
+    const char* lane[] = {"no-v3-condition", "staging-exists", "staging-in-settings", "live-not-stopped", "decode-failed", "hash-mismatch", "size-mismatch", "profile-unreadable", "out-of-memory", "job-failed",
         "gate-undetermined", "gate-unmeasurable", "gate-not-run", "gate-fail", "sample-estimate-undetermined", "sample-estimate-out-of-envelope", "sample-skipped", "sample-failed"};
     for (const auto* code : lane) {
         const auto s = RecalibrationFindingSentence({FindingClass::rejected, code, {}});
@@ -198,6 +199,20 @@ void ResultLines() {
         const auto l2 = RecalibrationResultLines(f);
         CHECK(HasLine(l2, "狭まります") && HasLine(l2, "高さ 1600 → 1700 画素"));
     }
+    // A refusal before the plan was whole (the raster went outside the sheet) leaves the "after" side half filled: the width and the right
+    // edge are known, the seam and the height are zero. No line may speak of the new seam or of a height that became 0.
+    {
+        auto f = facts;
+        f.display.has_new = false;
+        f.display.seam_x_new_mm = 0.0;
+        f.display.height_new_px = 0;
+        const auto l = RecalibrationResultLines(f);
+        CHECK(l.size() == lines.size() - 2);
+        CHECK(!HasLine(l, "継ぎ目の位置") && !HasLine(l, "合成の画像の大きさ") && !HasLine(l, "画素") && !HasLine(l, "650"));
+        CHECK(HasLine(l, "A に対する B の位置の変化") && HasLine(l, "継ぎ目のずれ: 基準内"));   // what is known is still shown
+        const auto screen = RecalibrationScreenLines(RecalibrationVerdict::unusable, {{FindingClass::rejected, "raster-outside-sheet", {}}}, f);
+        CHECK(HasLine(screen, "用紙の外に出ます") && !HasLine(screen, "継ぎ目の位置") && !HasLine(screen, "合成の画像の大きさ"));
+    }
     // The gate in each of its states: what it measured is always beside the verdict.
     {
         auto f = facts;
@@ -228,7 +243,7 @@ void ResultLines() {
 void Verdicts() {
     CHECK(RecalibrationVerdictLine(RecalibrationVerdict::usable) == "この校正は使えます");
     CHECK(Has(RecalibrationVerdictLine(RecalibrationVerdict::usable_unverified), "未確認の校正"));
-    CHECK(Has(RecalibrationVerdictLine(RecalibrationVerdict::usable_unverified), "確かめられませんでした"));
+    CHECK(!Has(RecalibrationVerdictLine(RecalibrationVerdict::usable_unverified), "確かめられませんでした"));   // what was not checked is for the reason lines
     CHECK(RecalibrationVerdictLine(RecalibrationVerdict::unusable) == "この校正は使えません");
     CHECK(RecalibrationVerdictCode(RecalibrationVerdict::usable_unverified) == "usable-unverified");
     // The screen: the verdict first, then why, then the numbers.
@@ -241,6 +256,24 @@ void Verdicts() {
     CHECK(lines.size() >= 4 && Has(lines.front(), "未確認の校正"));
     CHECK(Has(lines[1], "継ぎ目のずれを確かめられませんでした。"));
     CHECK(Has(lines[2], "A に対する B の位置の変化"));
+    // The check of the estimate on the new profile was not trusted but the gate passed: the screen must not say "the seam was not checked" and
+    // "the seam is within the line" together. The verdict line says only that the calibration is unchecked; the reasons say what.
+    {
+        RecalibrationResultFacts passed;
+        passed.display = SampleDisplay();
+        passed.gate = Gate(gate::GateState::pass);
+        passed.creation_checked = true;
+        const std::vector<RecalibrationFinding> estimate_only{{FindingClass::unverified, "reestimate-not-verified", "too-few-points"}};
+        const auto both = RecalibrationScreenLines(RecalibrationVerdict::usable_unverified, estimate_only, passed);
+        CHECK(Has(both.front(), "未確認の校正") && HasLine(both, "新しい校正での確かめが、確かな値になりませんでした") && HasLine(both, "継ぎ目のずれ: 基準内"));
+        CHECK(!HasLine(both, "継ぎ目のずれを確かめられませんでした"));
+        for (const auto& l : both) CHECK(!(Has(l, "確かめられませんでした") && Has(l, "基準内")));
+        // When the gate itself could not decide, the reason line (not the verdict line) says so.
+        passed.gate = Gate(gate::GateState::undetermined);
+        const std::vector<RecalibrationFinding> gate_only{{FindingClass::unverified, "gate-undetermined", {}}};
+        const auto gate_lines = RecalibrationScreenLines(RecalibrationVerdict::usable_unverified, gate_only, passed);
+        CHECK(!Has(gate_lines.front(), "確かめられませんでした") && Has(gate_lines[1], "継ぎ目のずれを確かめられませんでした"));
+    }
     // A calibration that cannot be used says why in a way the person can act on.
     const auto refused = RecalibrationScreenLines(RecalibrationVerdict::unusable, {{FindingClass::rejected, "tilt-exceeded", {}}}, RecalibrationResultFacts{});
     CHECK(refused.front() == "この校正は使えません" && HasLine(refused, "チャートでの校正が要ります"));
@@ -251,7 +284,7 @@ void Verdicts() {
 void AfterTheDecision() {
     CHECK(Has(RecalibrationConfirmedText(3, false), "校正を更新しました（改訂 3）") && !Has(RecalibrationConfirmedText(3, false), "未確認"));
     CHECK(Has(RecalibrationConfirmedText(3, true), "未確認の校正として更新しました（改訂 3）"));
-    for (const char* reason : {"condition-changed", "not-usable", "not-acknowledged", "already-confirmed", "write-failed", "readback-failed"}) {
+    for (const char* reason : {"condition-changed", "not-usable", "not-acknowledged", "write-failed", "readback-failed"}) {
         const auto text = RecalibrationNotConfirmedText(reason);
         CHECK(!text.empty() && Plain(text));
     }

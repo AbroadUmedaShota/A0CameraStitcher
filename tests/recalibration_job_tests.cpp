@@ -75,6 +75,13 @@ std::map<std::string, std::string> Snapshot(const fs::path& folder) {
         if (entry.is_regular_file()) files[fs::relative(entry.path(), folder).generic_string()] = ReadAll(entry.path());
     return files;
 }
+// Every entry of a folder, folders included (Snapshot holds only the files): two listings are equal when nothing was added or removed.
+std::vector<std::string> Listing(const fs::path& folder) {
+    std::vector<std::string> names;
+    for (const auto& entry : fs::recursive_directory_iterator(folder)) names.push_back(fs::relative(entry.path(), folder).generic_string());
+    std::sort(names.begin(), names.end());
+    return names;
+}
 fs::path root;
 fs::path NewFolder(const std::string& name) {
     const auto path = root / name;
@@ -139,7 +146,7 @@ cr::PoseParameters PoseForShift(const render::CameraProjection& camera_b, double
 }
 
 // ---- The stand-in for the computation ----
-enum class Fake { ready, check_not_trusted, check_out_of_range, displacement, no_overlap, tilt, throws, throws_memory };
+enum class Fake { ready, check_not_trusted, check_out_of_range, displacement, no_overlap, tilt, throws, throws_memory, outside_sheet };
 constexpr const char* kRecord = "{\"schema\":\"test-record\"}";
 RecalibrationComputation FakeComputation(Fake mode, std::vector<std::string>* stages = nullptr) {
     RecalibrationComputation c;
@@ -150,7 +157,8 @@ RecalibrationComputation FakeComputation(Fake mode, std::vector<std::string>* st
         if (mode == Fake::throws) throw std::runtime_error("a failure inside the computation (C:\\secret\\path\\x.jpg)");
         if (mode == Fake::throws_memory) throw std::bad_alloc();
         const auto parent = RigProfileV2::Parse(in.profile_bytes).ValidateCalibrationForEvaluation(in.active.raster, render::Resampling::bilinear);
-        const auto pose = PoseForShift(parent.camera_b, 30.0);
+        // outside_sheet: B far enough along the sheet that the new raster leaves the profile's sheet (the real pieces refuse it).
+        const auto pose = PoseForShift(parent.camera_b, mode == Fake::outside_sheet ? 500.0 : 30.0);
         const rc::ProfileFit fit{0.1, 0.3, 50};
         rc::Proposal p;
         if (mode == Fake::no_overlap) {
@@ -356,6 +364,30 @@ void JobRefusals(const Pair& pair) {
         const auto o = RunRecalibrationJob(r);
         CHECK(!o.ready && HasCode(o, "staging-exists") && ReadAll(r.staging_folder / "keep.txt") == "kept" && Snapshot(r.staging_folder).size() == 1);
     }
+    {   // A staging folder inside the settings folder (a record folder among the revisions would make the reader refuse the whole row of
+        // revisions) is refused before anything is made; the bytes and the listing of the settings folder stay as they were.
+        const auto revisions = settings / std::string(m2e::kFixedCompositeRevisionFolderName);
+        const auto listing = Listing(settings);
+        const struct {const char* name; fs::path staging;} inside[] = {
+            {"directly in the settings folder", settings / "staging-inside"},
+            {"in the folder of the revisions", revisions / "staging-inside"},
+            {"in the revisions, by a path with a parent step", revisions / ".." / std::string(m2e::kFixedCompositeRevisionFolderName) / "staging-inside"},
+        };
+        for (const auto& c : inside) {
+            auto r = Request(settings, pair, "unused", FakeComputation(Fake::ready));
+            r.staging_folder = c.staging;
+            const auto o = RunRecalibrationJob(r);
+            if (!(!o.ready && !o.candidate && HasCode(o, "staging-in-settings"))) std::cerr << "not refused: " << c.name << std::endl;
+            CHECK(!o.ready && !o.candidate && HasCode(o, "staging-in-settings") && OnlyClass(o, FindingClass::no_candidate));
+            CHECK(!fs::exists(settings / "staging-inside") && !fs::exists(revisions / "staging-inside") && HasLine(o.screen_lines, "設定のフォルダの中にあります"));
+            CHECK(Snapshot(settings) == before && Listing(settings) == listing && Active(settings).has_value());
+        }
+        // A sibling whose name only starts the same way is not inside.
+        auto sibling = Request(settings, pair, "staging-sibling", FakeComputation(Fake::no_overlap));
+        sibling.staging_folder = settings.parent_path() / (settings.filename().string() + "-record");
+        const auto s = RunRecalibrationJob(sibling);
+        CHECK(!HasCode(s, "staging-in-settings") && HasCode(s, "no-overlap") && fs::exists(sibling.staging_folder / "recalibration-report.json"));
+    }
     {   // No condition v3 in the settings: refused before the staging folder is made.
         const auto empty = NewFolder("settings-empty");
         auto r = Request(empty, pair, "staging-nov3", FakeComputation(Fake::ready));
@@ -391,6 +423,12 @@ void JobRefusals(const Pair& pair) {
         auto r3 = Request(settings, pair, "staging-missing", FakeComputation(Fake::ready));
         r3.original_a = dir / "nothing.jpg";
         CHECK(HasCode(RunRecalibrationJob(r3), "decode-failed"));
+    }
+    {   // A staging folder whose parent is not there cannot be made: an outcome (job-failed), not an exception, and no path on the screen.
+        auto r = Request(settings, pair, "unused", FakeComputation(Fake::ready));
+        r.staging_folder = root / "no-such-parent" / "staging-orphan";
+        const auto o = RunRecalibrationJob(r);
+        CHECK(!o.ready && !o.candidate && HasCode(o, "job-failed") && AllPlain(o.screen_lines) && AllPlain(o.log_lines) && !fs::exists(root / "no-such-parent"));
     }
     {   // A stop asked for before the computation: nothing is computed.
         std::vector<std::string> ran;
@@ -445,6 +483,72 @@ void JobRefusals(const Pair& pair) {
         CHECK(!fs::exists(r.staging_folder));
     }
     // None of the above wrote into the settings folder.
+    CHECK(Snapshot(settings) == before);
+}
+
+// A stop asked for after the computation is honoured at the next step: the outcome is "stopped", nothing is offered, and nothing that a
+// confirmation would use is written (the settings folder is untouched, the staging folder holds no candidate and no sample).
+void StopAfterTheComputation(const Pair& pair) {
+    const auto settings = MakeSettings("settings-stop-late");
+    const auto before = Snapshot(settings);
+    {   // The stop comes when the computation returns: the proposal is dropped before the rebuild, the record and the sample.
+        std::stop_source source;
+        auto computation = FakeComputation(Fake::ready);
+        const auto inner = computation.propose;
+        computation.propose = [inner, &source](const rc::Inputs& in) { auto proposal = inner(in); source.request_stop(); return proposal; };
+        auto r = Request(settings, pair, "staging-stop-late", computation);
+        r.stop = source.get_token();
+        std::vector<std::string> stages;
+        r.on_stage = [&](RecalibrationStage s, double) { stages.emplace_back(RecalibrationStageCode(s)); };
+        const auto o = RunRecalibrationJob(r);
+        CHECK(o.verdict == RecalibrationVerdict::unusable && !o.ready && !o.candidate && o.findings.size() == 1 && HasCode(o, "stopped"));
+        // The numbers of the dropped proposal are not shown (the lines that remain are the "not found" lines of an empty result).
+        CHECK(o.screen_lines.front() == "この校正は使えません" && HasLine(o.screen_lines, "中止しました") && !HasLine(o.screen_lines, "の位置の変化") && !HasLine(o.screen_lines, "画素"));
+        CHECK(!o.facts.display.has_motion && !o.facts.display.has_new && !o.facts.gate.known && !o.facts.creation_checked);
+        CHECK(std::find(stages.begin(), stages.end(), "sample") == stages.end() && std::find(stages.begin(), stages.end(), "crops") == stages.end());
+        CHECK(Snapshot(settings) == before);
+        const auto staged = Snapshot(r.staging_folder);
+        CHECK(staged.size() == 1 && staged.count("recalibration-report.json") == 1);   // only the record of the run itself
+        CHECK(!fs::exists(r.staging_folder / "review") && !fs::exists(r.staging_folder / "sample-originals"));
+        const auto confirmed = ConfirmRecalibration(o, settings, kHash, {true});
+        CHECK(!confirmed.written && confirmed.reason == "not-usable" && Snapshot(settings) == before);
+    }
+    {   // The stop comes while the sample is composed: the crops are not made and nothing is offered.
+        std::stop_source source;
+        auto r = Request(settings, pair, "staging-stop-sample", FakeComputation(Fake::ready));
+        r.stop = source.get_token();
+        std::vector<std::string> stages;
+        r.on_stage = [&](RecalibrationStage s, double) { stages.emplace_back(RecalibrationStageCode(s)); if (s == RecalibrationStage::sample) source.request_stop(); };
+        const auto o = RunRecalibrationJob(r);
+        CHECK(o.verdict == RecalibrationVerdict::unusable && !o.ready && !o.candidate && HasCode(o, "stopped") && o.findings.size() == 1);
+        CHECK(std::find(stages.begin(), stages.end(), "crops") == stages.end() && !fs::exists(r.staging_folder / "seam-crops.png") && !o.seam_crops);
+        CHECK(Snapshot(settings) == before);
+        CHECK(!ConfirmRecalibration(o, settings, kHash, {true}).written);
+    }
+}
+
+// A refusal that comes before the new plan is whole (the new raster leaves the sheet) must not put the "after" side on the screen, in the
+// report or on the command line: the width is known, the seam and the height are not.
+void RefusedBeforeThePlan(const Pair& pair) {
+    const auto settings = MakeSettings("settings-outside");
+    const auto before = Snapshot(settings);
+    auto r = Request(settings, pair, "staging-outside", FakeComputation(Fake::outside_sheet));
+    const auto o = RunRecalibrationJob(r);
+    CHECK(!o.ready && !o.candidate && HasCode(o, "raster-outside-sheet") && o.verdict == RecalibrationVerdict::unusable);
+    CHECK(!o.facts.display.has_new && o.facts.display.has_motion);
+    CHECK(!HasLine(o.screen_lines, "継ぎ目の位置") && !HasLine(o.screen_lines, "合成の画像の大きさ") && !HasLine(o.screen_lines, "画素") && HasLine(o.screen_lines, "A に対する B の位置の変化"));
+    const auto report = Tree(ReadAll(r.staging_folder / "recalibration-report.json"));
+    const auto& display = At(report, "display");
+    CHECK(!At(display, "hasNew").boolean && At(display, "seamXNewMm").kind == json::JsonKind::null_value && At(display, "widthNewPx").kind == json::JsonKind::null_value &&
+        At(display, "rightNewMm").kind == json::JsonKind::null_value && At(display, "seamXPreviousMm").kind == json::JsonKind::number);
+    CHECK(Snapshot(settings) == before);
+    // The command line prints the same facts: no line for the new seam and the new raster.
+    const auto wide = [](const fs::path& p) { return p.wstring(); };
+    const std::vector<std::wstring> args{L"--camera-a", wide(pair.frames.a), L"--camera-b", wide(pair.frames.b), L"--settings-folder", wide(settings), L"--staging", wide(root / "staging-outside-cli")};
+    std::ostringstream out;
+    CHECK(RunRecalibrationCommand(args, out, kHash, kNow, FakeComputation(Fake::outside_sheet)) == 1);
+    const auto text = out.str();
+    CHECK(Has(text, "code=raster-outside-sheet") && Has(text, "motion right_mm=") && !Has(text, "seam previous_mm=") && !Has(text, "raster_width_px") && !Has(text, "screen 合成の画像の大きさ"));
     CHECK(Snapshot(settings) == before);
 }
 
@@ -699,6 +803,9 @@ void CommandLine(const Pair& pair, const std::string& exe, bool on) {
             {L"--camera-a", L"a", L"--camera-b", L"b", L"--settings-folder", L"c", L"--staging", L"d", L"--pair-id", L"not a pair"},
             {L"--camera-a", L"a", L"--camera-b", L"b", L"--settings-folder", L"c", L"--staging", L"d", L"--measured-at", L"tomorrow"},
             {L"--camera-a", L"", L"--camera-b", L"b", L"--settings-folder", L"c", L"--staging", L"d"},
+            // A value that is the next flag (a forgotten value) is refused, not taken as a path.
+            {L"--camera-a", L"--camera-b", L"b", L"--settings-folder", L"c", L"--staging", L"d"},
+            {L"--camera-a", L"a", L"--camera-b", L"b", L"--settings-folder", L"c", L"--staging", L"--seam", L"keep"},
         };
         for (const auto& args : bad) {
             const auto refused = ParseRecalibrationArguments(args);
@@ -815,11 +922,10 @@ void BothMoved(double a_mm, double b_mm) {
     // The place of B against A is what changed: b - a, to the right.
     CHECK(o.facts.display.has_motion && std::abs(o.facts.display.motion.camera_motion_mm.x - (b_mm - a_mm)) < 1.0 && std::abs(o.facts.display.motion.camera_motion_mm.y) < 1.0);
     CHECK(HasLine(o.screen_lines, "図面の右へ約"));
-    if (o.verdict == RecalibrationVerdict::usable) {
-        CHECK(o.facts.gate.known && o.facts.gate.state == gate::GateState::pass && o.findings.empty());
-        const auto r = ConfirmRecalibration(o, settings, kHash, {});
-        CHECK(r.written && !r.unverified && Active(settings)->condition.revision.sequence == 2);
-    }
+    CHECK(o.verdict == RecalibrationVerdict::usable);
+    CHECK(o.facts.gate.known && o.facts.gate.state == gate::GateState::pass && o.findings.empty());
+    const auto r = ConfirmRecalibration(o, settings, kHash, {});
+    CHECK(r.written && !r.unverified && Active(settings)->condition.revision.sequence == 2);
 }
 }
 
@@ -846,6 +952,8 @@ int main(int argc, char** argv) {
         const auto pair = MakePair("pair");
         lap("frames");
         JobRefusals(pair); lap("refusals");
+        StopAfterTheComputation(pair); lap("stop after the computation");
+        RefusedBeforeThePlan(pair); lap("refused before the plan");
         WholeJob(pair); lap("whole job and confirmation");
         RefusePolicy(pair); lap("refuse policy");
         UncheckedProfile(pair); lap("unchecked profile");

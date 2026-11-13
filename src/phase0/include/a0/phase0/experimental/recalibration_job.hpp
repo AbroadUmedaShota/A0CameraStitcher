@@ -344,11 +344,25 @@ inline std::string ReportJson(const ReportInput& in){
     s<<",\"display\":{\"hasMotion\":"<<Bool(d.has_motion)<<",\"motionRightMm\":"<<Num(d.motion.camera_motion_mm.x)<<",\"motionDownMm\":"<<Num(d.motion.camera_motion_mm.y)
      <<",\"rotationClockwiseDeg\":"<<Num(d.motion.rotation_clockwise_deg)<<",\"tiltDeg\":"<<Num(d.pose.tilt_deg)<<",\"heightPercent\":"<<Num(d.pose.height_percent)
      <<",\"hasOverlap\":"<<Bool(d.has_overlap)<<",\"narrowestOverlapMm\":"<<Num(d.narrowest_overlap_mm)
-     <<",\"seamXPreviousMm\":"<<Num(d.seam_x_previous_mm)<<",\"seamXNewMm\":"<<Num(d.seam_x_new_mm)
-     <<",\"widthPreviousPx\":"<<d.width_previous_px<<",\"widthNewPx\":"<<d.width_new_px<<",\"rightPreviousMm\":"<<Num(d.right_previous_mm)<<",\"rightNewMm\":"<<Num(d.right_new_mm)
+     <<",\"hasNew\":"<<Bool(d.has_new)<<",\"seamXPreviousMm\":"<<Num(d.seam_x_previous_mm)<<",\"seamXNewMm\":"<<(d.has_new?Num(d.seam_x_new_mm):std::string("null"))
+     <<",\"widthPreviousPx\":"<<d.width_previous_px<<",\"widthNewPx\":"<<(d.has_new?std::to_string(d.width_new_px):std::string("null"))
+     <<",\"rightPreviousMm\":"<<Num(d.right_previous_mm)<<",\"rightNewMm\":"<<(d.has_new?Num(d.right_new_mm):std::string("null"))
      <<",\"hasEdgeDistance\":"<<Bool(d.has_edge_distance)<<",\"edgeShareA\":"<<Num(d.edge_share_a)<<",\"edgeShareB\":"<<Num(d.edge_share_b)<<"}";
     s<<"}";
     return s.str();
+}
+
+// True when `path` is `folder` or lies below it, compared on the real places (".." and links resolved as far as the paths exist) and by
+// whole path elements, so a sibling whose name starts the same way does not count.
+inline bool IsInsideFolder(const fs::path& path,const fs::path& folder){
+    std::error_code ec;
+    auto inner=fs::weakly_canonical(path,ec);
+    if(ec)inner=fs::absolute(path,ec).lexically_normal();
+    auto outer=fs::weakly_canonical(folder,ec);
+    if(ec)outer=fs::absolute(folder,ec).lexically_normal();
+    if(inner.empty() || outer.empty())return false;
+    const auto relative=inner.lexically_relative(outer);
+    return !relative.empty() && *relative.begin()!=fs::path("..");
 }
 
 inline bool IsCanonicalOriginal(const fs::path& file,const wchar_t* alias){
@@ -381,6 +395,13 @@ inline bool IsCanonicalOriginal(const fs::path& file,const wchar_t* alias){
         out.log_lines.push_back("recalibration_stage name="+std::string(RecalibrationStageCode(s))+" at_s="+Num(at));
     };
     const auto find=[&](FindingClass klass,const char* code,std::string reason={}){out.findings.push_back({klass,code,std::move(reason)});};
+    // A stop asked for is honoured at every step that follows a long one: whatever was found so far is dropped and the outcome says "stopped".
+    const auto stop_asked=[&]{
+        if(!request.stop.stop_requested())return false;
+        out.findings.clear();out.candidate.reset();out.facts=RecalibrationResultFacts{};out.thumbnail=render::BgrImage{};out.seam_crops.reset();
+        find(FindingClass::no_candidate,"stopped");
+        return true;
+    };
 
     bool staging_created=false;
     ReportInput report;
@@ -408,6 +429,9 @@ inline bool IsCanonicalOriginal(const fs::path& file,const wchar_t* alias){
     };
 
     if(!request.live_view_stopped){find(FindingClass::no_candidate,"live-not-stopped");return finish();}
+    // The staging folder is never inside the settings folder: a record folder made among the revisions would make the reader refuse the
+    // whole row of revisions. Nothing is made.
+    if(IsInsideFolder(request.staging_folder,request.settings_folder)){find(FindingClass::no_candidate,"staging-in-settings");return finish();}
     {
         std::error_code ec;
         // A path that is not there is reported by some libraries as "not found" with an error code set: the type decides, not the code.
@@ -430,7 +454,11 @@ inline bool IsCanonicalOriginal(const fs::path& file,const wchar_t* alias){
         if(!profile_bytes || Sha(request.hash,*profile_bytes)!=active->condition.source.profile_file_sha256){find(FindingClass::no_candidate,"profile-unreadable");return finish();}
 
         // The staging folder is made now: from here on there is a record, whatever happens.
-        fs::create_directory(request.staging_folder);
+        // A folder that appeared since the check above is not ours: it is refused and not written into. Any other failure ends as job-failed.
+        std::error_code made_ec;
+        const bool made=fs::create_directory(request.staging_folder,made_ec);
+        if(made_ec)throw fs::filesystem_error("the staging folder could not be made",request.staging_folder,made_ec);
+        if(!made){find(FindingClass::no_candidate,"staging-exists");return finish();}
         staging_created=true;
 
         // 2. The two originals: read, hashed, decoded in the stored pixel order (the registered composite does not rotate them).
@@ -466,6 +494,7 @@ inline bool IsCanonicalOriginal(const fs::path& file,const wchar_t* alias){
         in.progress=[&](rc::Stage s){stage(RecalibrationStageOf(s));};
         auto proposal=request.computation.propose(in);
         images[0]=render::BgrImage{};images[1]=render::BgrImage{};in.camera_a=nullptr;in.camera_b=nullptr;
+        if(stop_asked())return finish();   // the computation is done; the rebuild, the sample and the crops are not started
 
         out.facts.display=proposal.display;
         report.estimate_state=std::string(cr::RegistrationStateCode(proposal.estimate.state));report.estimate_reasons=proposal.estimate.reasons;
@@ -482,6 +511,7 @@ inline bool IsCanonicalOriginal(const fs::path& file,const wchar_t* alias){
             else for(auto& f:ClassifyProposal(rebuilt))out.findings.push_back(std::move(f));
         }
         if(!proposal.ready && !only_unverified)candidate.reset();
+        if(stop_asked())return finish();   // before the record and the sample
         if(!candidate){
             if(out.findings.empty())find(FindingClass::rejected,"profile-invalid");   // a proposal that is not ready and says nothing is not offered
             return finish();
@@ -533,6 +563,7 @@ inline bool IsCanonicalOriginal(const fs::path& file,const wchar_t* alias){
         for(auto& f:ClassifySample(sample))out.findings.push_back(std::move(f));
 
         // 6. The seam at native size, for the screen (a failure here loses the crops, not the result).
+        if(stop_asked())return finish();   // before the crops (the sample is in the staging folder, nothing of it is offered)
         if(composed.review){
             stage(RecalibrationStage::crops);
             try{out.seam_crops=ExportSeamCrops(request.staging_folder/"review",request.staging_folder/"seam-crops.png");}
