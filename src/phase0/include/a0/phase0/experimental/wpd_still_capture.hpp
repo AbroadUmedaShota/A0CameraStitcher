@@ -502,7 +502,6 @@ private:
         }
     }
     void ObserveFailureCompletion(){
-        const bool had_handle=ledger_.Handle().has_value();
         const auto start=std::chrono::steady_clock::now();
         const auto finish=[&](WpdStillFailureObservationResult result){
             failure_.result=result;
@@ -519,13 +518,12 @@ private:
             catch(...){return finish(may_continue_()?WpdStillFailureObservationResult::ReadFailed:WpdStillFailureObservationResult::Aborted);}
             // Counted before the ledger judges the batch, as in the preflight.
             failure_.codes.Add(events);
+            if(std::any_of(events.begin(),events.end(),[](const WpdStillEvent& e){return e.code==0xc101;}))failure_.late_object_event=true;
             try{ledger_.Observe(events,true);}
             catch(const WpdStillEventRejected& rejected){
                 failure_.rejected_code=rejected.Code();
-                if(rejected.Code()==0xc101)failure_.late_object_event=true;
                 return finish(WpdStillFailureObservationResult::Rejected);
             }
-            if(!had_handle && ledger_.Handle())failure_.late_object_event=true;
             if(failure_.late_object_event && !ledger_.Completed())return finish(WpdStillFailureObservationResult::ObjectEvent);
             if(ledger_.Completed())return finish(WpdStillFailureObservationResult::Seen);
         }

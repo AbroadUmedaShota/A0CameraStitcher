@@ -270,6 +270,16 @@ int main(){
             WpdStillCaptureObservation observed;auto run=failed_run(f,observed);run->ObserveCompletionBeforeClose();
             Check(observed.failure.result==WpdStillFailureObservationResult::Rejected && observed.failure.rejected_code==0x4005 && !observed.complete_event && !observed.failure.late_object_event);
             Check(Contains(DescribeWpdStillFailureObservation(observed.failure),"rejected_code=0x4005 codes=0x4005:1,0xc102:1") && f.object_reads==0);}
+        // An image notice in one batch with a notice the ledger refuses is still recorded, whichever comes first.
+        for(const auto& batch:std::vector<std::vector<WpdStillEvent>>{{{0xc101,123},{0x4005,0}},{{0x4005,0},{0xc101,123}}}){
+            Fake f;f.out_of_focus_after_shutter=true;f.use_script=true;f.post_script={batch};std::vector<std::string> trace;f.trace=&trace;
+            WpdStillCaptureObservation observed;auto run=failed_run(f,observed);run->ObserveCompletionBeforeClose();
+            Check(observed.failure.result==WpdStillFailureObservationResult::Rejected && observed.failure.late_object_event && !observed.complete_event);
+            Check(Contains(DescribeWpdStillFailureObservation(observed.failure),"late_object_event=1") && f.object_reads==0 && !object_operations(trace));}
+        // An image notice followed by a duplicate completion in one batch: rejected on the duplicate, still flagged.
+        {Fake f;f.out_of_focus_after_shutter=true;f.use_script=true;f.post_script={{{0xc101,123},{0xc102,0},{0xc102,0}}};std::vector<std::string> trace;f.trace=&trace;
+            WpdStillCaptureObservation observed;auto run=failed_run(f,observed);run->ObserveCompletionBeforeClose();
+            Check(observed.failure.result==WpdStillFailureObservationResult::Rejected && observed.failure.rejected_code==0xc102 && observed.failure.late_object_event && f.object_reads==0 && !object_operations(trace));}
         // A second image notice after an image was already retrieved is ambiguous: rejected, flagged.
         {Fake f;f.use_script=true;f.jpeg.clear();f.post_script={{{0xc101,123}},{{0xc101,200}}};WpdStillCaptureObservation observed;
             WpdStillCaptureRun run(f,[]{return true;},[](auto){},&observed,kShortWait);run.Preflight();run.Shutter();
