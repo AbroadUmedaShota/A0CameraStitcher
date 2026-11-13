@@ -16,7 +16,7 @@ list(LENGTH hits count)
 # UTF-16LE of the button text prefix (63A2 308A 003A 0020) and of the window title word (63A2 308A "build").
 file(READ "${BINARY}" hex HEX)
 set(button_hex "a2638a303a002000")
-set(title_hex "a2638a3062007500690069006c006400")
+set(title_hex "a2638a306200750069006c006400")
 string(FIND "${hex}" "${button_hex}" button_at)
 string(FIND "${hex}" "${title_hex}" title_at)
 set(japanese 0)

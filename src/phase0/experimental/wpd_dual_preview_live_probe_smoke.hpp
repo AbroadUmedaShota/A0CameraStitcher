@@ -150,6 +150,43 @@ int RunLiveCaptureProbeUiSmoke(){
     check(wait_for([&]{return live_probe_phase!=LiveProbePhase::Running;}) && live_probe_phase==LiveProbePhase::Stopping,"after the thread ends the window stops");
     check(cameras[target]->probe_frame_state==0 && owner_is(0,PreviewSessionState::Live) && owner_is(1,PreviewSessionState::Live),"no frame is asked for and the sessions are released");
 
+    // 7. A worker that was asked to hold sends nothing and waits for the release, even while the window is closing; the
+    // Live path refuses to send while the session is held or lent; no focus request is accepted meanwhile.
+    {
+        ComScope com; // the request below is a WPD object
+        reset();
+        Camera& camera=*cameras[0];
+        camera.owner.RequestHold();
+        std::atomic<bool> finished{};
+        std::thread worker([&]{camera.HoldAtFrameBoundary();finished=true;});
+        const auto until=Clock::now()+std::chrono::seconds(5);
+        while(camera.owner.State()!=PreviewSessionState::Held && Clock::now()<until)std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        check(camera.owner.State()==PreviewSessionState::Held,"the worker answers a hold request");
+        const auto refused=[&](const char* what){
+            auto request=BuildPreviewDeviceReadyRequest();
+            bool thrown=false;
+            try{camera.Dispatch(request.Get());}catch(const std::runtime_error&){thrown=true;}
+            check(thrown,what);
+        };
+        refused("the Live path refuses to send while the session is held");
+        stopping=true;capture_stop_requested=true; // the window is closing
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        check(!finished,"a closing window does not release a held worker");
+        check(!camera.focus_mailbox.TryQueue(PreviewFocusAction::AutoFocus,CanFocus(camera)) && !camera.focus_mailbox.TryQueueAfPoint(PreviewAfPointRequest{10,10,100,100},CanFocus(camera)),"no focus or AF frame request is accepted while held");
+        const auto token=camera.owner.Lend();
+        check(token.has_value(),"the held session can be lent");
+        refused("the Live path refuses to send while the session is lent");
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        check(!finished,"a lent session keeps the worker waiting");
+        camera.owner.Return(*token);
+        refused("the Live path still refuses after the session is returned but not released");
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        check(!finished,"a returned session keeps the worker waiting until it is released");
+        camera.owner.Release();
+        worker.join();
+        check(finished && camera.held_dispatch_refused>=3,"the release lets the worker go, and the refusals were counted");
+    }
+
     live_probe_backend=RunLiveProbeOnCamera;
     live_probe_future=std::future<LiveProbeThreadOutcome>();
     DestroyWindow(window);live_probe_button=nullptr;
