@@ -301,7 +301,6 @@ inline std::string GateLine(const RecalibrationGateFacts& g){
     if(reason=="condition-changed")return "条件が変わっています。撮り直してください（前の校正のままです）";
     if(reason=="not-usable")return "この校正は使えない結果です。前の校正のままです";
     if(reason=="not-acknowledged")return "確かめられていない校正です。警告を見たうえで使うと決めた時だけ更新できます。前の校正のままです";
-    if(reason=="already-confirmed")return "この結果は既に使っています";
     if(reason=="readback-failed")return "書いた後の確認で、新しい校正が有効になっていませんでした。技術担当へ知らせてください";
     return "書けませんでした。前の校正のまま使います";
 }

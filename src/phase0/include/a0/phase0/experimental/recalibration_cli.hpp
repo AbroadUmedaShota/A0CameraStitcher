@@ -49,6 +49,7 @@ struct RecalibrationCliParse {
         const std::wstring_view flag(args[i]);
         if(i+1>=args.size())return refuse("a flag has no value");
         const std::wstring& value=args[++i];
+        if(value.starts_with(L"--"))return refuse("a flag has no value");   // the next flag, not a value
         const auto once=[&](bool& seen){if(seen)return false;seen=true;return true;};
         if(value.empty())return refuse("a value is empty");
         if(flag==L"--camera-a"){if(!once(have_a))return refuse("--camera-a is given twice");request.original_a=std::filesystem::path(value);}

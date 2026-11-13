@@ -1428,6 +1428,9 @@ if(BUILD_TESTING)
         add_test(NAME still_review_condition_v3_contracts COMMAND a0_still_review_condition_v3_tests "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2"
             $<TARGET_FILE:A0CameraStitcher.StillReview> "${CMAKE_SOURCE_DIR}/docs/examples/wpd-registration-policy.example.json")
         set_tests_properties(still_review_condition_v3_contracts PROPERTIES TIMEOUT 1200)
+        # Recalibration of camera B from one pair (#434): the development command line of StillReview (--recalibrate-from-pair) and, in the
+        # preview, the button. OFF by default: with it OFF neither has an entrance (the sources are not compiled in and the library is not linked).
+        option(A0_BUILD_WPD_RECALIBRATION "Build the recalibration of camera B from one pair into StillReview and the development preview (#434)" OFF)
         # The recalibration of camera B from one pair (#434 lane B): the words (sentences for every reason, the numbers of the result screen, the
         # directions of the drawing), and the job and its confirmation with a stand-in for the computation (settings folder untouched by the job,
         # what a confirmation writes and in what order, the unchecked calibration and its acknowledgement, the command line). Camera and window free.
@@ -1465,9 +1468,6 @@ if(BUILD_TESTING)
         target_include_directories(a0_review_alignment_tests PRIVATE src/m2/include)
         target_link_libraries(a0_review_alignment_tests PRIVATE a0_m2_render)
         add_test(NAME review_alignment_contracts COMMAND a0_review_alignment_tests)
-        # Recalibration of camera B from one pair (#434): the development command line of StillReview (--recalibrate-from-pair) and, in the
-        # preview, the button. OFF by default: with it OFF neither has an entrance (the sources are not compiled in and the library is not linked).
-        option(A0_BUILD_WPD_RECALIBRATION "Build the recalibration of camera B from one pair into StillReview and the development preview (#434)" OFF)
         add_executable(A0CameraStitcher.StillReview src/phase0/experimental/still_review_main.cpp)
         target_include_directories(A0CameraStitcher.StillReview PRIVATE src/phase0/include)
         target_link_libraries(A0CameraStitcher.StillReview PRIVATE a0_m2_offline_stitcher a0_m2_fixed_composite a0_m2_fixed_composite_v2 user32 gdi32 windowscodecs ole32 comdlg32)

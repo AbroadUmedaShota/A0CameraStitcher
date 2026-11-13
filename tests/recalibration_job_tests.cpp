@@ -424,6 +424,12 @@ void JobRefusals(const Pair& pair) {
         r3.original_a = dir / "nothing.jpg";
         CHECK(HasCode(RunRecalibrationJob(r3), "decode-failed"));
     }
+    {   // A staging folder whose parent is not there cannot be made: an outcome (job-failed), not an exception, and no path on the screen.
+        auto r = Request(settings, pair, "unused", FakeComputation(Fake::ready));
+        r.staging_folder = root / "no-such-parent" / "staging-orphan";
+        const auto o = RunRecalibrationJob(r);
+        CHECK(!o.ready && !o.candidate && HasCode(o, "job-failed") && AllPlain(o.screen_lines) && AllPlain(o.log_lines) && !fs::exists(root / "no-such-parent"));
+    }
     {   // A stop asked for before the computation: nothing is computed.
         std::vector<std::string> ran;
         auto r = Request(settings, pair, "staging-stop", FakeComputation(Fake::ready, &ran));
@@ -797,6 +803,9 @@ void CommandLine(const Pair& pair, const std::string& exe, bool on) {
             {L"--camera-a", L"a", L"--camera-b", L"b", L"--settings-folder", L"c", L"--staging", L"d", L"--pair-id", L"not a pair"},
             {L"--camera-a", L"a", L"--camera-b", L"b", L"--settings-folder", L"c", L"--staging", L"d", L"--measured-at", L"tomorrow"},
             {L"--camera-a", L"", L"--camera-b", L"b", L"--settings-folder", L"c", L"--staging", L"d"},
+            // A value that is the next flag (a forgotten value) is refused, not taken as a path.
+            {L"--camera-a", L"--camera-b", L"b", L"--settings-folder", L"c", L"--staging", L"d"},
+            {L"--camera-a", L"a", L"--camera-b", L"b", L"--settings-folder", L"c", L"--staging", L"--seam", L"keep"},
         };
         for (const auto& args : bad) {
             const auto refused = ParseRecalibrationArguments(args);
@@ -913,11 +922,10 @@ void BothMoved(double a_mm, double b_mm) {
     // The place of B against A is what changed: b - a, to the right.
     CHECK(o.facts.display.has_motion && std::abs(o.facts.display.motion.camera_motion_mm.x - (b_mm - a_mm)) < 1.0 && std::abs(o.facts.display.motion.camera_motion_mm.y) < 1.0);
     CHECK(HasLine(o.screen_lines, "図面の右へ約"));
-    if (o.verdict == RecalibrationVerdict::usable) {
-        CHECK(o.facts.gate.known && o.facts.gate.state == gate::GateState::pass && o.findings.empty());
-        const auto r = ConfirmRecalibration(o, settings, kHash, {});
-        CHECK(r.written && !r.unverified && Active(settings)->condition.revision.sequence == 2);
-    }
+    CHECK(o.verdict == RecalibrationVerdict::usable);
+    CHECK(o.facts.gate.known && o.facts.gate.state == gate::GateState::pass && o.findings.empty());
+    const auto r = ConfirmRecalibration(o, settings, kHash, {});
+    CHECK(r.written && !r.unverified && Active(settings)->condition.revision.sequence == 2);
 }
 }
 

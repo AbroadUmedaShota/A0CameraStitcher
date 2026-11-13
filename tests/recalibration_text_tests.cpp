@@ -282,7 +282,7 @@ void Verdicts() {
 void AfterTheDecision() {
     CHECK(Has(RecalibrationConfirmedText(3, false), "校正を更新しました（改訂 3）") && !Has(RecalibrationConfirmedText(3, false), "未確認"));
     CHECK(Has(RecalibrationConfirmedText(3, true), "未確認の校正として更新しました（改訂 3）"));
-    for (const char* reason : {"condition-changed", "not-usable", "not-acknowledged", "already-confirmed", "write-failed", "readback-failed"}) {
+    for (const char* reason : {"condition-changed", "not-usable", "not-acknowledged", "write-failed", "readback-failed"}) {
         const auto text = RecalibrationNotConfirmedText(reason);
         CHECK(!text.empty() && Plain(text));
     }

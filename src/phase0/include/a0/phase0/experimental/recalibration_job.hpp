@@ -454,7 +454,11 @@ inline bool IsCanonicalOriginal(const fs::path& file,const wchar_t* alias){
         if(!profile_bytes || Sha(request.hash,*profile_bytes)!=active->condition.source.profile_file_sha256){find(FindingClass::no_candidate,"profile-unreadable");return finish();}
 
         // The staging folder is made now: from here on there is a record, whatever happens.
-        fs::create_directory(request.staging_folder);
+        // A folder that appeared since the check above is not ours: it is refused and not written into. Any other failure ends as job-failed.
+        std::error_code made_ec;
+        const bool made=fs::create_directory(request.staging_folder,made_ec);
+        if(made_ec)throw fs::filesystem_error("the staging folder could not be made",request.staging_folder,made_ec);
+        if(!made){find(FindingClass::no_candidate,"staging-exists");return finish();}
         staging_created=true;
 
         // 2. The two originals: read, hashed, decoded in the stored pixel order (the registered composite does not rotate them).
