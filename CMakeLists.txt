@@ -1612,6 +1612,12 @@ if(BUILD_TESTING)
         # the button, its screens and a camera-free smoke of them (the job's computation replaced by a stand-in that returns at once); with it
         # OFF the preview carries none of that, and the binary check below looks for it in the file.
         if(A0_BUILD_WPD_RECALIBRATION)
+            # The settings write screen sets a minimum window width that the calibration screen's checks at a narrower width cannot meet
+            # (the calibration smoke fails at its first width check), so the two are not built together until that is settled.
+            if(A0_BUILD_WPD_SETTINGS_WRITE)
+                message(FATAL_ERROR "A0_BUILD_WPD_RECALIBRATION and A0_BUILD_WPD_SETTINGS_WRITE must not both be ON: the settings write screen "
+                    "keeps the window wider than the width the calibration screen is checked at.")
+            endif()
             target_link_libraries(A0CameraStitcher.WpdDualPreview PRIVATE a0_m2_fixed_composite_recalibration a0_m2_capture_registration a0_m2_rig_profile_v2)
             target_compile_definitions(A0CameraStitcher.WpdDualPreview PRIVATE A0_ENABLE_WPD_RECALIBRATION=1)
             add_test(NAME preview_recalibration_ui_contracts COMMAND A0CameraStitcher.WpdDualPreview --recalibration-ui-smoke "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2")
