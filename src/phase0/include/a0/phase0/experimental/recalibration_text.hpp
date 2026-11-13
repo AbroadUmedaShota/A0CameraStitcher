@@ -94,10 +94,13 @@ enum class RecalibrationVerdict {usable,usable_unverified,unusable};
 }
 
 // ---- The guide before the shot ----
-// The four conditions of the paper, and what not to touch. The line before them says when to use the button.
+// When to use the button, how to move the cameras, what not to touch, and the four conditions of the paper. The cameras may have been
+// moved one at a time or both together, so the words speak of the interval between them.
 [[nodiscard]] inline std::vector<std::string> RecalibrationGuideLines(){
     return {
-        "カメラの間隔を変えた時に、この校正をやり直します。レンズの高さ、ピントリング、ズームは触らないでください",
+        "この校正は、カメラの間隔を変えた時だけ行います。撮影のたびには要りません",
+        "カメラを動かす時は、机と平行に動かしてください。レンズの高さ、ピントリング、ズームは触らないでください",
+        "校正の時は、線や模様の多い紙を 1 枚、机に置きます。次の 4 点を守ってください",
         "1. 机に直に、平らに置いた紙を使います。冊子・厚紙・板に貼った物は使えません（紙の高さが B の位置として焼き込まれます）",
         "2. 左右のカメラの両方に写る帯（継ぎ目のあたり）に、上から下まで文字・線・図形がある紙にします",
         "3. 罫線や格子だけの紙は使えません（繰り返す模様は位置が一つに決まりません）",
