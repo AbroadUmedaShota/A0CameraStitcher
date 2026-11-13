@@ -1559,8 +1559,11 @@ if(BUILD_TESTING)
                     "stops and restarts Live View, which would mix another cause into the probe's observation (ADR-0044).")
             endif()
             # The probe never goes into the reference build folder (the AGENTS.md item for ADR-0044).
+            # Compared in lower case (the file system ignores case) and as a path component, so build/Reference and
+            # build/reference/<sub> are stopped as well, while build-probe-on and build/reference-x are not.
             file(TO_CMAKE_PATH "${CMAKE_BINARY_DIR}" a0_probe_binary_dir)
-            if(a0_probe_binary_dir MATCHES "(^|/)build/reference/*$")
+            string(TOLOWER "${a0_probe_binary_dir}" a0_probe_binary_dir)
+            if(a0_probe_binary_dir MATCHES "(^|/)build/reference(/|$)")
                 message(FATAL_ERROR "A0_BUILD_WPD_LIVE_CAPTURE_PROBE=ON must not be used in a build folder named build/reference "
                     "(${CMAKE_BINARY_DIR}). Configure the probe in its own folder, for example build-probe-on (ADR-0044).")
             endif()
