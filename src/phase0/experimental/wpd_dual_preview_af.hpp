@@ -10,7 +10,11 @@ void Camera::UpdateAfFrame(std::span<const unsigned char> payload,unsigned width
     D810AfReject reason{};
     const auto frame=D810PreviewAfFrame(payload,width,height,&reason);
     const auto now=Clock::now();
-    {std::lock_guard lock(mutex);af.frame=frame;af.frame_at=now;af.reject=reason;}
+    {std::lock_guard lock(mutex);af.frame=frame;af.frame_at=now;af.reject=reason;
+#if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
+        af_words_last=words;af_reject_last=reason; // for the line before and after the probe shot
+#endif
+    }
     if(af.log.ShouldLog(words,reason,now))Log(alias+" "+DescribeD810AfWords(words,reason));
 }
 
@@ -22,6 +26,9 @@ WpdLiveViewExchange Camera::DispatchAfPoint(IPortableDeviceValues* request){
     {std::lock_guard lock(mutex);bounds=PreviewAfBoundsFrom(af.frame,af.frame_at);}
     std::lock_guard io_lock(wpd_io_mutex);
     const auto now=Clock::now();
+#if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
+    if(!owner.MayLiveSend()){++held_dispatch_refused;throw std::runtime_error("session is held or lent; the AF frame path does not send");}
+#endif
     if(!AdmitPreviewAfPointDispatch(request,bounds,now,opened && !closed,stopping,now>=send_deadline)){
         if(stopping)admission_cancelled=true;
         throw std::runtime_error("AF point request not admitted");

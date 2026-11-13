@@ -100,3 +100,7 @@ A・Bの映像の上で左クリックすると、そのカメラのAF枠を、�
 ### 試験
 
 `preview_af_point_contracts`（headerの語の読み方、不明にする条件、表示の位置の換算、ログの間引き、専用の許可リストの範囲・型・個数・他の命令・古いbounds、クリックの換算と寄せ、偽の本体が0x2001・0xA00B・0xA004・transport失敗を返す場合に再送しない・自動でAFしないこと、MFで送らないこと）、`preview_focus_mailbox_contracts`（枠の移動がAF・微調整と1件の枠を分け合うこと、連打が1件、停止後は受けないこと）、`preview_af_point_ui_contracts`（`--af-point-ui-smoke`。偽のカメラにクリックを送り、mailboxに1件入ること、赤と緑の線が描かれること、受けない条件、活性化のクリックを食うこと、クリックの換算の矩形が実際に描く矩形と一致すること、`UpdateAfFrame`と`DispatchAfPoint`の配線、映像の矩形が窓の中央より下の物と重ならないこと、緑と赤の線が映像の外に出ないこと）、`preview_af_point_panel_contracts`（設定の書き込みありの構成の試験用の実行ファイルだけが持つ入口`--af-point-panel-smoke`。設定の画面が開いている間は映像を選べず、活性化のクリックを食わず、枠も描かないこと。閉じると元に戻ること）。カメラは開かない。
+
+## 探りのbuildでの通信の持ち主（ADR-0044 段P）
+
+`A0_BUILD_WPD_LIVE_CAPTURE_PROBE`を付けたbuildだけ、冒頭の「通信はカメラごとのworkerだけが行う」は「そのsessionに送るのは、その時の持ち主1人だけ」に読み替える。持ち主は、ライブの間はそのカメラのworker、探りが借りている間は探りのthread。workerはフレームの転送をENDまで終えた境目で止まってから貸し、返されるまでStopもCloseも送らない。貸している間・止めている間は、AF・微調整・AF枠の移動の受付（`PreviewFocusMailbox`）も何も受けない。状態は`preview_session_owner.hpp`の`PreviewSessionOwner`（Live・HoldRequested・Held・Lent・Retired）で、遷移は1つのatomicへのcompare-and-swapだけ。探りが無いbuildでは、この読み替えは起きない。手順は`WPD_STILL_CAPTURE.md`の「ライブを開いたまま撮る探り」。
