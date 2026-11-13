@@ -762,9 +762,10 @@ int RunSettingsWriteUiSmoke(){
     const auto wait_idle=[&]{for(int i=0;i<400;++i){tick();if(!SettingsWriteBusy())return true;std::this_thread::sleep_for(std::chrono::milliseconds(5));}return false;};
     const auto drawn_in=[&](int top,int bottom){return SettingsWriteSmokeFrame(1400,960).Lit(top,bottom);};
     // The ON build's mark is in the caption that follows a Live start or a condition read again, together with the state of the calibration.
+    wchar_t caption[256]{};
     {
         preview_window=window;fixed_source={};ApplyCalibrationTexts();
-        wchar_t caption[256]{};GetWindowTextW(window,caption,256);
+        GetWindowTextW(window,caption,256);
         check(std::wstring(caption).find(L"設定の書き込みあり")!=std::wstring::npos && std::wstring(caption).find(L"校正")!=std::wstring::npos && PreviewTitleMarksMatch(caption));
         preview_window=nullptr;
     }
