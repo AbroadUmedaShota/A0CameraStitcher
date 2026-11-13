@@ -50,8 +50,6 @@ struct RecalibrationUi {
     RecalPhase phase{RecalPhase::idle};
     RecalAction action{RecalAction::none};
     std::shared_ptr<RecalibrationCaptureRecord> capture;
-    std::future<a0::phase0::experimental::RecalibrationJobOutcome> job;
-    std::stop_source stop;
     bool abort_requested{};
     std::mutex stage_mutex;
     std::optional<a0::phase0::experimental::RecalibrationStage> stage;
@@ -69,6 +67,9 @@ struct RecalibrationUi {
     a0::phase0::experimental::RecalibrationComputation computation;
     std::function<a0::phase0::experimental::RecalibrationJobOutcome(const a0::phase0::experimental::RecalibrationJobRequest&)> runner;
     unsigned jobs_started{},confirmations_written{};
+    // Last, so that it is destroyed first: a job that is still running never outlives the members it reads.
+    std::stop_source stop;
+    std::future<a0::phase0::experimental::RecalibrationJobOutcome> job;
 };
 RecalibrationUi recal_ui;
 HWND recal_enter_button{};
@@ -321,7 +322,7 @@ void PrepareRecalibrationPictures(){
     if(!outcome.thumbnail.bgr.empty()){
         r.thumbnail=ToPixels(outcome.thumbnail);
         const auto& d=outcome.facts.display;
-        if(d.width_new_px>0 && outcome.candidate){
+        if(d.has_new && d.width_new_px>0 && outcome.candidate){
             const double to_thumbnail=static_cast<double>(r.thumbnail.width)/static_cast<double>(d.width_new_px);
             const double pitch_mm=25.4/static_cast<double>(outcome.candidate->condition.raster.dpi);
             const double left_mm=d.right_new_mm-static_cast<double>(d.width_new_px)*pitch_mm;
@@ -487,16 +488,6 @@ a0::phase0::experimental::RecalibrationJobOutcome RecalibrationFailedOutcome(con
     outcome.screen_lines=RecalibrationScreenLines(outcome.verdict,outcome.findings,outcome.facts);
     return outcome;
 }
-// `child` is `parent` or lies under it (the paths are compared as they resolve).
-bool RecalibrationPathInside(const std::filesystem::path& child,const std::filesystem::path& parent){
-    std::error_code ec;
-    const auto a=std::filesystem::weakly_canonical(child,ec);
-    if(ec)return true;                       // cannot tell: treat as inside, which refuses
-    const auto b=std::filesystem::weakly_canonical(parent,ec);
-    if(ec)return true;
-    const auto relative=a.lexically_relative(b);
-    return !relative.empty() && *relative.begin()!=std::filesystem::path("..");
-}
 a0::phase0::experimental::RecalibrationJobRequest MakeRecalibrationRequest(const RecalibrationCaptureRecord& record){
     a0::phase0::experimental::RecalibrationJobRequest request;
     request.original_a=record.originals[0];request.original_b=record.originals[1];
@@ -552,7 +543,7 @@ bool RecalibrationTakeCapture(const CaptureUiOutcome& result){
     }
     if(closing){r.phase=RecalPhase::idle;return false;}
     review_visible=false;
-    if(RecalibrationPathInside(record->run_root,RecalibrationSettingsFolder())){
+    if(a0::phase0::experimental::IsInsideFolder(record->run_root,RecalibrationSettingsFolder())){
         // The record of a run must not stand among the settings (a reader of the revisions would refuse the whole chain). Nothing is run.
         r.outcome=RecalibrationFailedOutcome("job-failed");r.thumbnail={};r.crops={};r.note.clear();r.action=RecalAction::none;
         r.phase=RecalPhase::result;
@@ -586,7 +577,7 @@ void RecalibrationStartCapture(){
     if(!fixed_source.loaded_v3){r.note=L"校正の元になる条件（v3）がありません。";return;}
     if(!(CanFocus(*cameras[0]) && CanFocus(*cameras[1]))){r.note=L"いまは撮影できません。両方のライブの映像が出てから、もう一度押してください。";return;}
     r.note.clear();
-    capture_pending.reset();
+    if(capture_pending){r.note=L"いまは撮影できません（ほかの撮影が終わってから、もう一度押してください）。";Log("recalibration_ui capture_refused=1");return;}
     RequestCapture(2);
     if(!capture_pending){r.note=L"いまは撮影できません（Cの映像が新しくなるまで待って、もう一度押してください）。";Log("recalibration_ui capture_refused=1");return;}
     r.capture=std::make_shared<RecalibrationCaptureRecord>();
