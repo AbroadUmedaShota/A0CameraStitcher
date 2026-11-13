@@ -5,6 +5,7 @@
 // measurement of a real rig.
 #include "a0/m2/experimental/fixed_composite_condition_v2.hpp"
 #include "a0/m2/experimental/fixed_composite_condition_v3.hpp"
+#include "a0/m2/experimental/fixed_composite_maps.hpp"
 #include "a0/m2/document_render.hpp"
 #include "a0/m2/rig_profile_v2.hpp"
 #ifndef NOMINMAX

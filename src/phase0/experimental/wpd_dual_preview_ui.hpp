@@ -1191,6 +1191,73 @@ int RunPairV3UiSmoke(const std::filesystem::path& fixtures){
         check(log_after_first.find("quality_accepted=0")!=std::string::npos && log_after_first.find(work.string())==std::string::npos &&
             log_after_first.find("synthetic-a")==std::string::npos && log_after_first.find("CAM-A")==std::string::npos,"v3: the log has no path and no camera identifier");
 
+        // 1b. The live C after a shot (#437 stage 1): a real review of the shot handed to the window's function, with the condition read as the window
+        //     reads it. The position that C is baked with is the JPEG's own, and B's table is the one that the JPEG's maker gives
+        //     (RegisteredDocumentOutputToCamera, the function that makes B's side of the JPEG, times the view's scale), at the samples of C's grid.
+        //     The flat frames give G4, whose mapping is the condition's own and is zero here; so the same review is also handed over with a mapping
+        //     that moves B (pose, paper plane and a layer 2 that C does not draw), which is the case that tells a table made from the nine numbers
+        //     from one made from the calibration.
+        const auto live_after_shot=[&](const m2e::StillReviewResult& review,const std::string& what,bool moved_mapping){
+            const auto say=[&](bool ok,const char* text){check(ok,(what+": "+text).c_str());};
+            const auto& record=*review.fixed_composite_registration;
+            fixed_source={};fixed_source.loaded_v3=v3.loaded;
+            mount_orientation=m2e::MountOrientation::normal;
+            live_placement_carry={};live_runtime.reset();
+            PrepareLiveRuntime();
+            say(live_runtime!=nullptr && record.condition_sha256==v3.loaded.file_sha256,"a runtime for the condition of the shot");
+            if(live_runtime){
+                const auto plan=PlanFixedPreviewV3(v3.loaded,mount_orientation,400,267);
+                say(!plan.skip && plan.live,"a registered plan for the real profile");
+                live_runtime->PublishBase(plan);
+                ApplyCaptureToLivePlacement(review);
+                const auto status=live_runtime->Status();
+                const auto& jpeg_mapping=record.registration.level.mapping;
+                say(status.placement.source==LivePlacementSource::after_capture && LivePlacementSameMapping(status.placement.mapping,jpeg_mapping) &&
+                    !status.placement.mapping.parallax,"P is the nine numbers of the JPEG's mapping (the real condition sha matched)");
+                say(status.state_text.find("ライブのCもその位置へ移しました")!=std::string::npos || status.state_text.find("今のライブのCはJPEGと同じ位置です")!=std::string::npos,"the sentence says the live C is at the JPEG's position");
+                say((status.state_text.find("局所の補正")!=std::string::npos)==moved_mapping,"layer 2 is in the sentence exactly when the mapping has it");
+                const LiveFrameSource no_frames{[]{return false;},nullptr};
+                const LiveEstimator never=[&](const LiveJob&,const a0::m2::render::BgrImage&,const a0::m2::render::BgrImage&){check(false,"no estimate is asked for after a shot");return LiveEstimateOutcome{};};
+                (void)live_runtime->RunPass(no_frames,never);
+                const auto drawn=live_runtime->CurrentPlan()?live_runtime->CurrentPlan():live_runtime->BasePlan();
+                say(drawn && drawn->live && LivePlacementSameMapping(drawn->live->baked,jpeg_mapping),"C is baked with the JPEG's mapping");
+                if(drawn && drawn->mapped){
+                    const auto& rig=v3.loaded.profile.parameters;
+                    const a0::m2::experimental::content_registration::PoseModel model(rig.camera_b);
+                    auto mapping=jpeg_mapping;mapping.parallax.reset();
+                    const auto jpeg=m2e::RegisteredDocumentOutputToCamera(rig.raster,rig.camera_a,rig.camera_b,model,mapping,v3.loaded.condition.seam.column);
+                    const double pitch=25.4/rig.raster.dpi,left=rig.raster.region_um.left/1000.0,top=rig.raster.region_um.top/1000.0;
+                    const double sx=400.0/ps::kWidth,sy=267.0/ps::kHeight;
+                    double worst=0,from_calibration=0;size_t samples=0,disagree=0;
+                    for(std::uint32_t y=0;y<drawn->grid.height;y+=2)for(std::uint32_t x=0;x<drawn->grid.width;x+=2){
+                        a0::m2::render::Point in_c{};
+                        const bool c_has=drawn->mapped->camera_b({double(x),double(y)},in_c);
+                        const double dx=drawn->grid.left_mm+(x+.5)*drawn->grid.pitch_mm,dy=drawn->grid.top_mm+(y+.5)*drawn->grid.pitch_mm;
+                        a0::m2::render::Point raw{};bool j_has=false;
+                        try{j_has=jpeg({(dx-left)/pitch-0.5,(dy-top)/pitch-0.5},raw);}catch(const std::exception&){}
+                        if(c_has!=j_has){++disagree;continue;}
+                        if(!c_has)continue;
+                        ++samples;worst=std::max(worst,std::hypot(in_c.x-raw.x*sx,in_c.y-raw.y*sy));
+                        a0::m2::render::Point base_b{};
+                        if(plan.mapped && plan.mapped->camera_b({double(x),double(y)},base_b))from_calibration=std::max(from_calibration,std::hypot(in_c.x-base_b.x,in_c.y-base_b.y));
+                    }
+                    say(samples>300 && disagree==0 && worst<1e-6,"B's table of C is the JPEG maker's table (the scale of the view only)");
+                    if(moved_mapping)say(from_calibration>0.5,"the table moved from the condition's own table (the control)");
+                }
+            }
+            live_placement_carry={};live_runtime.reset();fixed_source={};
+        };
+        if(first.review && first.review->fixed_composite_registration){
+            live_after_shot(*first.review,"live after the real shot (G4)",false);
+            auto moved=*first.review;
+            auto& level=moved.fixed_composite_registration->registration.level;
+            level.level=m2e::GeometryLevel::g1;
+            level.mapping=m2e::RegisteredMapping{m2e::content_registration::PoseParameters{0.2,0.05,0.4,3.0,0.5,0.0},m2e::SurfacePlane{2.0,0.001,-0.001},std::nullopt};
+            m2e::ParallaxProfile layer_two;layer_two.q_px={0.0,0.4,0.0};layer_two.row_spacing_px=100;layer_two.a_px=8;layer_two.l_px=16;layer_two.seam_column=1000;
+            level.mapping.parallax=layer_two;
+            moved.fixed_composite_registration->registration.parallax.summary.max_shift_px=0.4;
+            live_after_shot(moved,"live after the real review with a mapping that moves B (G1)",true);
+        }
         // 2. A revision chain with a gap is a damaged condition: no composite, the originals are kept, the reason is on the row.
         {
             const auto gap=ps::MakeSettings(work/"settings-gap",profile,m2e::MountOrientation::normal,raster);
