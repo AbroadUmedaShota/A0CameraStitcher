@@ -519,6 +519,7 @@ bool DrawLevel(HDC dc,int left,int width,const Camera& c){
     drawn=(LineTo(dc,x+dx,y+dy)!=FALSE) && drawn;
     RestoreDC(dc,saved);return drawn && text_drawn;
 }
+#include "wpd_dual_preview_af_ui.hpp"
 // Camera-free rendering contract. Inspect only our own memory bitmap; never
 // read the desktop or attach to a camera. Real-frame presentation is separate.
 int RunLevelUiSmoke(){
@@ -720,6 +721,7 @@ std::array<std::uint64_t,6> Paint(HDC dc,RECT client){
         if(!panel_over_live && DrawLevel(dc,left,pane-24,c))drawn[4+i]=c.frames;
         if(!panel_over_live && !c.pixels.bytes.empty() && Clock::now()-c.last<std::chrono::seconds(2) && !stopping &&
             DrawPixels(dc,c.pixels,left,top,pane-24,client.bottom/2-top-8))drawn[i]=c.frames;
+        if(!panel_over_live && drawn[i]==c.frames && !c.pixels.bytes.empty())DrawAfOverlay(dc,c,client,i); // #426: the body's AF frame over the picture
     }
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
     if(panel_over_live)DrawSettingsPanel(dc,client); // the settings panel takes the place of both Live areas
@@ -1303,6 +1305,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM w,LPARAM l){
             merged.alignment_status=L"手動調整（要目視確認）";++merged.revision;merged.pixels={};
             Log("C ui_manual_adjustment="+std::to_string(id-300)+" overlap_px="+std::to_string(merged.overlap_pixels)+" vertical_px="+std::to_string(merged.vertical_pixels));return 0;
         }break;}
+    case WM_MOUSEACTIVATE:if(const auto eaten=AfMouseActivateOf(hwnd,l))return eaten;break; // #426: the click that raises the window is not a click on a picture
+    case WM_LBUTTONDOWN:HandleAfPointClick(hwnd,static_cast<short>(LOWORD(l)),static_cast<short>(HIWORD(l)));return 0; // #426
     case WM_PAINT:{
         PAINTSTRUCT ps{};auto dc=BeginPaint(hwnd,&ps);RECT r;GetClientRect(hwnd,&r);PreviewBackBuffer frame(dc,r.right,r.bottom);
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
@@ -1437,6 +1441,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM w,LPARAM l){
     case WM_DESTROY:PostQuitMessage(0);return 0;
     }return DefWindowProcW(hwnd,message,w,l);
 }
+#include "wpd_dual_preview_af_smoke.hpp"
 int RunLifecycleUiSmoke(){
     // Synthetic failed workers only. No Discover/Open/Run or hardware lease.
     Log("lifecycle_ui_synthetic=1 camera_operations=0");
