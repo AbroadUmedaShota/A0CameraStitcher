@@ -150,6 +150,10 @@ inline std::wstring D810WriteReasonText(std::string_view token) {
         if (token.substr(0, entry.prefix.size()) == entry.prefix) return std::wstring(entry.text) + L"（" + D810WidenAscii(token) + L"）";
     return L"理由の符号: " + D810WidenAscii(token);
 }
+// The notice of a plan of picked values that has a white balance step: only the kind is written (the fine adjustment, the type of Automatic and
+// the type of Fluorescent are other properties), so the colour need not match whatever the kinds are. It is added to the line that names the columns,
+// not to the item line (the item line of the widest values already fills the window, and the line count of a confirmation is at its limit).
+inline const wchar_t* D810ChosenWhiteBalanceNote() { return L"（WB は種類だけを書きます。色まで揃うとは限りません）"; }
 // One step of a plan or a result: the item, the value now on CAM-B and the value to write.
 inline std::wstring D810WriteStepLine(const D810WriteStep& step) {
     std::wstring line = std::wstring(D810WriteItemLabel(step.item)) + L": CAM-B の今の値 " + D810WriteValueText(step.code, step.before) + L" → 書く値 " +
@@ -340,7 +344,8 @@ inline D810WriteScreenView BuildD810ChosenConfirmation(const D810WritePlan& plan
     view.lines.push_back(L"自動では元に戻りません。書く前の値に戻す時は、本体で操作してください。");
     view.lines.push_back(L"書き込みは項目ごとに 1 回だけです。失敗しても再送しません。結果を確かめられない時は撮影を止めます。");
     view.lines.push_back(L"書く順: CAM-B の項目を先に、CAM-A の項目を最後に書きます。どれかが失敗したら、残りは送りません。");
-    view.lines.push_back(L"項目: CAM-B の今の値 → 書く値 ／ CAM-A の今の値 → 書く値");
+    const bool has_white_balance = std::any_of(plan.steps.begin(), plan.steps.end(), [](const D810WriteStep& step) { return step.item == D810WriteItem::WhiteBalance; });
+    view.lines.push_back(std::wstring(L"項目: CAM-B の今の値 → 書く値 ／ CAM-A の今の値 → 書く値") + (has_white_balance ? D810ChosenWhiteBalanceNote() : L""));
     const auto order = D810ItemsInStepOrder(plan.steps, [](const D810WriteStep& step) { return step.item; });
     bool a_written = false, changed = false;
     for (const auto item : order) {
@@ -715,8 +720,8 @@ public:
     }
     // "N 件を書き込む…" may be pressed: the panel's values are current, there is at least one change, nothing runs
     // and no confirmation is up, the preview is ready, and the table lets a plan be made and run (a block that is a
-    // known mismatch lets one through, as for a copy). With the product table no cell can be picked, so there is never
-    // a change and this is false.
+    // known mismatch lets one through, as for a copy). A cell the product table keeps closed cannot be picked, so a
+    // change exists only where the table opens a row.
     bool ChosenOffered(bool screen_ready) const {
         return screen_ready && !Busy() && !close_failed_ && PanelEditable() && status_.write_allowed && PanelDirty() > 0;
     }

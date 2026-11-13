@@ -1,5 +1,5 @@
 #pragma once
-// Values chosen per camera for the camera settings panel (#416, ADR-0041 draft).
+// Values chosen per camera for the camera settings panel (#416, ADR-0041).
 //
 // Pure data and pure functions only: no Windows headers, no device access, no file I/O, and nothing here can
 // send a command. It builds on the item table and the write refusals of d810_settings_write.hpp but carries no

@@ -4,7 +4,7 @@
 // D810SettingsWriteScreen; this file opens the cameras, draws and hooks the buttons and the capture admission.
 //
 // The controller comes from the product entry point only: this build has no constructor that takes a
-// table, and the fixed product table decides every row (CAM-B rows only; the count is checked below).
+// table, and the fixed product table decides every row (the rows of its stage; the sets are checked by the static_asserts after the table).
 #if defined(A0_SETTINGS_WRITE_TEST_TABLES)
 // The confirmation test build (CMake: a0_preview_settings_write_confirm_tests): the one executable that has the
 // table-taking constructor. Its main runs the camera-free confirmation smoke and nothing else.
@@ -193,7 +193,7 @@ void InstallSettingsWriteHost(std::unique_ptr<SettingsWriteHost> host,D810Settin
     D810SettingsWriteScreen::Options options;options.log=[](const std::string& line){Log(line);};
     host->screen=std::make_unique<D810SettingsWriteScreen>(*host->controller,std::move(access),std::move(options));
     const auto& status=host->screen->Status();
-    Log("settings_write_screen=1 enabled_rows="+std::to_string(status.enabled_rows)+" capture_block="+D810CaptureBlockToken(status.block)+
+    Log("settings_write_screen=1 enabled_rows="+std::to_string(status.enabled_rows)+" "+D810StageMark(host->controller->Table())+" capture_block="+D810CaptureBlockToken(status.block)+
         " capture_allowed="+std::to_string(status.capture_allowed)+" setting_writes=0");
     // A block left by an earlier run (not confirmed, mismatch, unknown) holds capture from the start.
     if(!status.capture_allowed)capture_status=D810CaptureBlockText(status.block,status.chosen_history,status.history_damaged);
@@ -745,16 +745,27 @@ int RunSettingsWriteUiSmoke(){
     wchar_t caption[256]{};GetWindowTextW(window,caption,256);
     check(std::wstring(caption).find(L"設定の書き込みあり")!=std::wstring::npos); // the ON build's mark
 
-    // 1. The product table and an empty record folder: five rows are enabled (ISO, shutter speed, aperture, white balance and metering on CAM-B), capture is free, and copying
+    // 1. The product table and an empty record folder: the table's rows are enabled (the static_asserts after the table fix which), capture is free, and copying
     //    is offered once both Live sessions are joined. The smoke opens no camera (the access counts every Open).
     InitSettingsWrite(std::make_unique<D810SettingsFileJournal>(folder),factory);
     auto* screen=settings_write->screen.get();
-    check(screen->Status().enabled_rows==5 && screen->Status().write_allowed && screen->Status().capture_allowed);
+    check(screen->Status().enabled_rows==D810EnabledRowCount(kD810ProductWriteTable) && screen->Status().write_allowed && screen->Status().capture_allowed);
     tick();
     check(!SettingsWriteButtonShown(settings_copy_button) && !IsWindowEnabled(settings_copy_button)); // Live runs: not shown
     stop_live();tick();
     check(CanReadSettings() && SettingsWriteButtonShown(settings_copy_button) && IsWindowEnabled(settings_copy_button)!=FALSE); // rows enabled: copying is offered
     check(IsWindowEnabled(settings_reread_button)!=FALSE && !SettingsWriteButtonShown(settings_confirm_button) && !SettingsWriteButtonShown(settings_discard_button));
+    {   // The settings table keeps clear of the shown row of buttons: its last row ends above the buttons' top edge (client bottom - kD810ButtonRowGap), at every height.
+        check(SettingsButtonRowReserve()==kD810ButtonRowGap);
+        bool clear=true;
+        for(int bottom=600;bottom<=1400;++bottom)clear=clear && SettingsTableBottom(16,bottom,SettingsButtonRowReserve())<=bottom-kD810ButtonRowGap;
+        check(clear);
+        for(const int bottom:{960,1000,1040}){   // heights at which the last rows used to lie under the buttons
+            check(SettingsTableBottom(16,bottom,SettingsButtonRowReserve())<=bottom-kD810ButtonRowGap);
+            Log("settings_table_clear_of_buttons client_bottom="+std::to_string(bottom)+" last_row_bottom="+std::to_string(SettingsTableBottom(16,bottom,SettingsButtonRowReserve()))+" without_reserve="+std::to_string(SettingsTableBottom(16,bottom,0))+" buttons_top="+std::to_string(bottom-kD810ButtonRowGap));
+        }
+        check(SettingsTableBottom(16,1000,0)>1000-kD810ButtonRowGap);   // without the reserve the table would lie under the buttons
+    }
     const auto offer=screen->OfferText(true);
     // The "no row" text belongs to a table with no enabled row; the product table does not reach it.
     check(offer.find(L"書ける項目がありません")==std::wstring::npos && offer.find(L"番号（code）")==std::wstring::npos && offer.find(L"確定の前に表示します")!=std::wstring::npos);
@@ -1080,6 +1091,7 @@ D810WriteTable SmokeConfirmTable(){
         if(row.item==D810WriteItem::ShutterSpeed)row.code=0x500d;
         row.enabled=row.camera==D810Camera::B && D810WriteItemOf(row.item).scope!=D810ItemScope::Adr41;
     }
+    table.chosen_values=false;table.verified_firmware_a=nullptr; // the copy table of the confirmation smoke: picked values and CAM-A stay off whatever the product table opens
     return table;
 }
 // How many buttons (and drop-downs) that are shown overlap the window rectangle of `target`, other than `target` itself. A
@@ -1389,6 +1401,7 @@ int WidestPossibleChosenLine(HDC dc,std::wstring& which){
     int widest=0;
     const auto width_of=[&](const std::wstring& text){RECT r{0,0,0,0};DrawTextW(dc,text.c_str(),-1,&r,DT_CALCRECT|DT_LEFT|DT_SINGLELINE|DT_NOPREFIX);return static_cast<int>(r.right);};
     const auto note=[&](const std::wstring& text){const int w=width_of(text);if(w>widest){widest=w;which=text;}};
+    note(std::wstring(L"項目: CAM-B の今の値 → 書く値 ／ CAM-A の今の値 → 書く値")+D810ChosenWhiteBalanceNote()); // the column line of a plan with a white balance step
     // The widest of a set of texts: only the ones with the most characters are measured (two characters fewer is never wider here).
     const auto widest_text=[&](const std::vector<std::wstring>& texts){
         std::size_t longest=0;
@@ -1471,7 +1484,8 @@ int RunSettingsWriteChosenSmoke(){
     D810SettingsWriteScreen* screen=nullptr;
     unsigned restarts{};const auto saved_override=preview_restart_override;preview_restart_override=[&]{++restarts;}; // a Live restart is a counter here
 
-    // 1. The product table: the panel opens on a read, shows both cameras, and no drop-down can be used.
+    // 1. The product table: the panel opens on a read and shows both cameras. CAM-A's body is read as not verified, so none of CAM-A's
+    //    drop-downs can be used (the table's row or the body check locks them); CAM-B's follow the table's rows.
     InitSettingsWrite(std::make_unique<D810SettingsFileJournal>(folder),factory);
     screen=settings_write->screen.get();
     tick();
@@ -1481,25 +1495,27 @@ int RunSettingsWriteChosenSmoke(){
     for(int i=0;i<400 && SettingsWriteBusy();++i){tick();std::this_thread::sleep_for(std::chrono::milliseconds(5));}
     check(!SettingsPanelOpen() && opens->load()>=1 && screen->View() && screen->View()->title.find(L"設定の画面は開きません")!=std::wstring::npos);
     check(!shown(combo_ok(0,kIso)) && !shown(settings_panel_close_button) && enabled(settings_panel_open_button));
-    screen->TakePanelReadForTest(read_of(true,false)); // the product table's flags: CAM-A's body is not verified
+    screen->TakePanelReadForTest(read_of(true,false)); // CAM-A's body is not verified
     tick();
     check(SettingsPanelOpen() && screen->Panel() && PanelHoldsLive());
     check(!CanRestartPreview() && !shown(settings_panel_open_button) && enabled(settings_panel_close_button) && shown(settings_panel_write_button) && !enabled(settings_panel_write_button));
     {
-        bool all_locked=true,all_shown=true;
+        bool all_shown=true,a_locked=true,b_follows_table=true;
         for(int camera=0;camera<2;++camera)for(int item=0;item<static_cast<int>(kD810ChoiceItemCount);++item){
-            all_shown=all_shown && shown(combo_ok(camera,item));all_locked=all_locked && !enabled(combo_ok(camera,item));
+            const bool b_row_on=D810RowRefusal(kD810ProductWriteTable,D810ChoiceWriteItem(static_cast<D810ChoiceItem>(item)),D810Camera::B,D810PlanSource::Chosen)==nullptr;
+            all_shown=all_shown && shown(combo_ok(camera,item));
+            if(camera==0)a_locked=a_locked && !enabled(combo_ok(camera,item));
+            else b_follows_table=b_follows_table && enabled(combo_ok(camera,item))==b_row_on;
         }
-        check(all_shown && all_locked);
-        for(int item=0;item<static_cast<int>(kD810ChoiceItemCount);++item)check(shown(settings_panel_same_buttons[item]) && !enabled(settings_panel_same_buttons[item]));
+        check(all_shown && a_locked && b_follows_table);
+        // Same-as-A makes a pick on CAM-B: it is offered only where CAM-B's cell can be picked.
+        for(int item=0;item<static_cast<int>(kD810ChoiceItemCount);++item)check(shown(settings_panel_same_buttons[item]) && (!enabled(settings_panel_same_buttons[item]) || enabled(combo_ok(1,item))));
     }
     check(selected(0,kIso)==L"200" && selected(1,kIso)==L"100" && selected(0,kShutter).find(L"1/40")!=std::wstring::npos);
     // A notification of a locked drop-down (a stand-in for a key or the wheel): nothing is picked and the value comes back.
     {
         const auto picks=settings_panel_picks;
-        check(choose(1,kIso,L"200") && settings_panel_picks==picks && screen->PanelDirty()==0 && selected(1,kIso)==L"100");
-        click(kPanelSameBaseId+kIso,settings_panel_same_buttons[kIso]);
-        check(settings_panel_picks==picks && screen->PanelEntryCount()==0);
+        check(choose(0,kIso,L"400") && settings_panel_picks==picks && screen->PanelDirty()==0 && selected(0,kIso)==L"200");
         click(kPanelWriteButtonId,settings_panel_write_button);
         check(!SettingsWriteBusy() && screen->Step()==D810WriteScreenStep::Idle && opens->load()<=2);
     }
@@ -1519,6 +1535,64 @@ int RunSettingsWriteChosenSmoke(){
     check(!SettingsPanelOpen() && !screen->Panel() && !shown(combo_ok(0,kIso)) && !shown(settings_panel_close_button) && enabled(settings_panel_open_button) && CanRestartPreview());
     check(restarts==0 && manual_preview_restarts==0 && settings_panel_auto_restarts==0 && capture_status.find(L"この画面を開く前から止まっていたため、自動では再開しません")!=std::wstring::npos); // Live was stopped by hand: closing does not start it
     check(capture_status.find(L"設定の画面を閉じました")!=std::wstring::npos);
+
+    // 1b. CAM-A read as verified (the body matches the table): a cell can be picked exactly where the table enables its row, on both
+    //     cameras, and a pick in a cell the table closes does nothing. Part 1 reads CAM-A as not verified, so it never shows a usable CAM-A
+    //     cell; this part does, with the product table and with a table that closes every CAM-A row but the ISO.
+    const auto cells_follow_table=[&](const D810WriteTable& table){
+        std::size_t open=0;bool follows=true;
+        for(int camera=0;camera<2;++camera)for(int item=0;item<static_cast<int>(kD810ChoiceItemCount);++item){
+            const auto write_item=D810ChoiceWriteItem(static_cast<D810ChoiceItem>(item));
+            const bool row_on=D810RowRefusal(table,write_item,camera==0?D810Camera::A:D810Camera::B,D810PlanSource::Chosen)==nullptr;
+            HWND combo=combo_ok(camera,item);
+            const auto before=selected(camera,item);
+            const auto dirty=screen->PanelDirty();
+            follows=follows && shown(combo) && enabled(combo)==row_on;
+            if(row_on){
+                // An open cell: pick another entry of its drop-down, as the operator does; it becomes a draft.
+                std::wstring other;
+                const int count=static_cast<int>(SendMessageW(combo,CB_GETCOUNT,0,0));
+                for(int i=0;i<count && other.empty();++i)if(SmokeComboText(combo,i)!=before)other=SmokeComboText(combo,i);
+                ++open;
+                follows=follows && !other.empty() && choose(camera,item,other) && screen->PanelDirty()==dirty+1 && selected(camera,item)==other;
+            }else{
+                // A closed cell: no value of any kind is taken as a pick, and the cell shows what it showed.
+                for(const std::int64_t value:{1,2,3,4,5,6,7,100,125,200,250,400,500,560,800,1000,1100})
+                    follows=follows && !screen->PanelPick(SettingsPanelCamera(camera),static_cast<D810ChoiceItem>(item),value);
+                follows=follows && screen->PanelDirty()==dirty && selected(camera,item)==before;
+            }
+        }
+        return follows && open>0 && screen->PanelDirty()==open;
+    };
+    // A panel put up again by a new window object keeps the drop-downs of the one before (they are rebuilt when the panel's serial changes, and a
+    // new object counts from the same number again): rebuild them and show the values read, as an opened panel does.
+    const auto fresh_cells=[&]{RebuildSettingsPanelCombos();SyncSettingsPanelSelection(true);};
+    const auto close_panel=[&]{screen->PanelCancelAll();SyncSettingsPanelSelection(true);click(kPanelCloseButtonId,settings_panel_close_button);tick();return !SettingsPanelOpen();};
+    settings_write.reset();std::filesystem::remove_all(folder,ignored);capture_status.clear();
+    InitSettingsWrite(std::make_unique<D810SettingsFileJournal>(folder),factory);
+    screen=settings_write->screen.get();
+    tick();
+    screen->TakePanelReadForTest(read_of(true,true)); // CAM-A's body matches the table
+    tick();
+    fresh_cells();
+    check(SettingsPanelOpen() && screen->Panel() && screen->PanelEditable());
+    check(cells_follow_table(kD810ProductWriteTable));
+    check(close_panel());
+    {
+        auto iso_only_a=SmokeChosenTable();
+        for(auto& row:iso_only_a.rows)if(row.camera==D810Camera::A && row.item!=D810WriteItem::Iso)row.enabled=false;
+        settings_write.reset();std::filesystem::remove_all(folder,ignored);capture_status.clear();
+        InitSettingsWriteWithTable(iso_only_a,std::make_unique<D810SettingsFileJournal>(folder),factory);
+        screen=settings_write->screen.get();
+        tick();
+        screen->TakePanelReadForTest(read_of(true,true));
+        tick();
+        fresh_cells();
+        check(SettingsPanelOpen() && screen->Panel() && screen->PanelEditable());
+        check(enabled(combo_ok(0,kIso)) && !enabled(combo_ok(0,kShutter)) && !enabled(combo_ok(0,kWb)) && enabled(combo_ok(1,kShutter)));
+        check(cells_follow_table(iso_only_a));
+        check(close_panel());
+    }
 
     // 2. A table of the test's own: the drop-downs work, a pick is a draft and sends nothing.
     settings_write.reset();std::filesystem::remove_all(folder,ignored);capture_status.clear();

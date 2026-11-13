@@ -382,6 +382,9 @@ struct SettingsReadOutcome {
     std::array<SettingsCameraResult,2> cameras;
     bool CleanClose()const{return cameras[0].clean_close && cameras[1].clean_close;}
     bool Complete()const{return cameras[0].read.Complete() && cameras[1].read.Complete();}
+    // "Everything matches" is a claim about the whole read: both reads ran to the end, both bodies were
+    // closed cleanly, and no compared row is different or unreadable.
+    bool EverythingMatches(const D810ComparisonSummary& summary)const{return Complete() && CleanClose() && summary.AllSame();}
 };
 using SettingsBackend=std::function<SettingsCameraResult(int index,const std::wstring& id,Clock::time_point deadline,const std::atomic<bool>& stop)>;
 SettingsCameraResult RealSettingsBackend(int index,const std::wstring& id,Clock::time_point deadline,const std::atomic<bool>& stop){
@@ -401,7 +404,9 @@ void LogSettingsOutcome(const SettingsReadOutcome& outcome){
     }
     const auto rows=CompareD810Settings(outcome.cameras[0].read.readings,outcome.cameras[1].read.readings);
     for(const auto& row:rows)Log("settings_compare name="+row.name+" A=\""+row.a_text+"\" B=\""+row.b_text+"\" difference="+D810DifferenceToken(row.difference));
-    Log("settings_compare differences="+std::to_string(CountD810Differences(rows))+" setting_writes=0");
+    const auto summary=SummarizeD810Comparison(rows);
+    Log("settings_compare same="+std::to_string(summary.same)+" different="+std::to_string(summary.different)+" unreadable="+std::to_string(summary.unknown)+
+        " all_match="+(outcome.EverythingMatches(summary)?"1":"0")+" setting_writes=0");
 }
 // Explicit read-only entry (#416): prints what each body answers for every table
 // code and the two diagnostic codes, so a person can compare against the camera.
@@ -902,7 +907,7 @@ int main(int argc,char** argv){
     try{
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
         // A build that contains the settings write path says so first (#416 stage B). The smoke opens no camera.
-        Log("settings_write_build=1 development_only=1 enabled_rows="+std::to_string(D810EnabledRowCount(kD810ProductWriteTable)));
+        Log("settings_write_build=1 development_only=1 enabled_rows="+std::to_string(D810EnabledRowCount(kD810ProductWriteTable))+" "+D810StageMark(kD810ProductWriteTable));
 #if defined(A0_SETTINGS_WRITE_TEST_TABLES)
         // The confirmation test build (the only one with a table-taking controller): its one camera-free smoke, and
         // nothing else. No other argument reaches a camera, a lease or the window.
