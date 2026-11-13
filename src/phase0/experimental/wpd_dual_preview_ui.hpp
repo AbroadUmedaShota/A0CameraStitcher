@@ -76,11 +76,28 @@ struct MergeView {
 // thread while no merge worker exists; the merge worker and the UI only read it.
 FixedPreviewSource fixed_source;
 bool FixedConditionPresent(){return fixed_source.Present();}
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+// The recalibration button (#434, wpd_recalibration_ui.hpp, included below). Only --recalibration-ui-smoke replaces the settings folder
+// (a temporary one); every other run reads the folder beside the identity map.
+std::optional<std::filesystem::path> recalibration_settings_override;
+inline constexpr const wchar_t* kRecalUncheckedMark=L"未確認の校正"; // what the screen calls a calibration that was used without its seam checked
+bool RecalibrationHoldsLive();                 // a calibration holds the place of Live: CanFocus, CanRestartPreview, CanReadSettings
+void RecalibrationRefreshUncheckedMark();        // looked up where the condition is read
+std::wstring RecalibrationTitleNote();
+bool RecalibrationUncheckedInForce();
+bool DrawRecalibrationScreen(HDC dc,const RECT& client);
+void LayoutRecalibrationButtons(const RECT& rect);
+#endif
 // The caption of the window and the label of the pair button say what the Live view read (#432), not what the first build of the window
 // knew. preview_window is set by the window that shows them; the camera-free smokes have none (or a window of their own).
 HWND preview_window{};
 void ApplyCalibrationTexts(){
-    if(preview_window && !closing)SetWindowTextW(preview_window,PreviewWindowTitle(fixed_source).c_str());
+    std::wstring note;
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+    RecalibrationRefreshUncheckedMark();
+    note=RecalibrationTitleNote();
+#endif
+    if(preview_window && !closing)SetWindowTextW(preview_window,PreviewWindowTitle(fixed_source,note).c_str());
     if(pair_button)SetWindowTextW(pair_button,PairButtonLabel(fixed_source));
 }
 // The live registration of C for a condition v3 (#417 LC). live_runtime is replaced only by PrepareLiveRuntime (or the smoke), on the
@@ -95,6 +112,9 @@ unsigned live_captures_seen{};
 void LoadFixedSource(){
     try{
         auto file=DefaultIdentityMapPath();file.replace_filename(a0::m2::experimental::kFixedCompositeConditionName);
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+        if(recalibration_settings_override)file=*recalibration_settings_override/a0::m2::experimental::kFixedCompositeConditionName;
+#endif
         fixed_source=LoadFixedPreviewSource(file,[](const std::vector<unsigned char>& bytes){return a0::phase0::Sha256Hex(bytes);});
     }catch(const std::exception& error){
         fixed_source={};fixed_source.reason=a0::m2::experimental::FixedCompositeSkip::condition_invalid;fixed_source.detail=error.what();
@@ -176,6 +196,9 @@ int SettingsTableBottom(std::size_t count,int client_bottom,int reserved_bottom)
 #endif
 bool CanFocus(Camera& camera){
     std::lock_guard lock(camera.mutex);
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+    if(RecalibrationHoldsLive())return false; // a calibration holds the place of Live (the shot, the computation, the result): no AF, no capture
+#endif
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
     if(SettingsWriteBusy() || SettingsPanelOpen())return false; // a settings write or reread holds the cameras, and the panel takes the place of the Live area: no AF, no capture
 #endif
@@ -200,9 +223,19 @@ bool PanelHoldsLive(){return SettingsPanelOpen();}
 bool SettingsReadBusy(){return settings_future.valid();}
 bool PanelHoldsLive(){return false;}
 #endif
-bool CanRestartPreview(){return !SettingsReadBusy() && !settings_close_failed && !PanelHoldsLive() && LiveStoppedAndClosed();}
+bool CanRestartPreview(){
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+    if(RecalibrationHoldsLive())return false; // the calibration restarts Live itself, after the person has decided
+#endif
+    return !SettingsReadBusy() && !settings_close_failed && !PanelHoldsLive() && LiveStoppedAndClosed();
+}
 // Re-checked inside the handler, not only through the button state.
-bool CanReadSettings(){return !SettingsReadBusy() && !settings_close_failed && LiveStoppedAndClosed() && settings_backend;}
+bool CanReadSettings(){
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+    if(RecalibrationHoldsLive())return false;
+#endif
+    return !SettingsReadBusy() && !settings_close_failed && LiveStoppedAndClosed() && settings_backend;
+}
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
 void DiscardSettingsWriteView();
 void DiscardSettingsView(){settings_view.reset();DiscardSettingsWriteView();}
@@ -454,6 +487,9 @@ void LayoutButtons(HWND hwnd){
     if(seam_button)MoveWindow(seam_button,1245,rect.bottom/2+52,140,28,TRUE);
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
     LayoutSettingsWriteButtons(rect);
+#endif
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+    LayoutRecalibrationButtons(rect);
 #endif
 }
 void OpenSavedInspector(){
@@ -739,6 +775,9 @@ std::array<std::uint64_t,6> Paint(HDC dc,RECT client){
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
     if(preview_joined && settings_write && settings_write->screen->View() && DrawSettingsWrite(dc,client))return drawn; // a confirmation or a result is never under the review
 #endif
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+    if(DrawRecalibrationScreen(dc,client))return drawn; // the guide, the progress or the result of the calibration takes the place of C (#434)
+#endif
     if(review_visible && !review_pixels.bytes.empty()){
         const wchar_t* title=L"撮影JPEGの合成結果（静止画／未校正・確認用）";
         TextOutW(dc,12,client.bottom/2+88,title,lstrlenW(title));
@@ -760,6 +799,10 @@ std::array<std::uint64_t,6> Paint(HDC dc,RECT client){
     if(merged.decided && merged.mode==PreviewCMode::fixed_composite){
         title=FixedPreviewTitle(mount_orientation,merged.fixed_plan);
         status=merged.position_refusal.empty()?FixedPreviewNote(merged.fixed_plan):merged.position_refusal;
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+        // A calibration that was used although its seam could not be checked says so for as long as it is in force (#434).
+        if(RecalibrationUncheckedInForce())status=std::wstring(kRecalUncheckedMark)+L"。継ぎ目のずれを確かめられないまま使っています / "+status;
+#endif
         live_rows=merged.fixed_plan.live!=nullptr;
     }else if(FixedConditionPresent()){
         title=FixedPreviewUnavailableTitle(fixed_source);
@@ -907,6 +950,9 @@ std::wstring SavedCaptureStatus(const CaptureUiOutcome& result){
     if(result.review && result.review->automatic)status+=L" / "+StillAlignmentLine(*result.review->automatic);
     return status;
 }
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+#include "wpd_recalibration_ui.hpp" // #434: the calibration button (after SavePairReview, whose seams it uses)
+#endif
 void AdvanceCapture(HWND hwnd){
     if(settings_future.valid() && settings_future.wait_for(std::chrono::seconds(0))==std::future_status::ready){
         auto outcome=settings_future.get();settings_stop.reset();ApplySettingsOutcome(outcome);
@@ -922,8 +968,19 @@ void AdvanceCapture(HWND hwnd){
             const int index=*capture_pending;capture_pending.reset();
             if(safe){
                 capture_status=index==2?L"AとBのシャッターを続けて1回ずつ切り、原画像と確認用Merge JPEGを保存しています…":index==0?L"Aを1回撮影してPCへ保存しています…":L"Bを1回撮影してPCへ保存しています…";
-                capture_future=std::async(std::launch::async,[ids=registered_ids,index,geometry=pending_geometry,deadline=capture_deadline]{
-                    try{ComScope com;if(index==2)return SavePairReview(ids,geometry,deadline);return CaptureUiOutcome{SaveStillOnce(ids[index],index==0?"CAM-A":"CAM-B",true,deadline),{}};}
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+                const auto calibration_record=RecalibrationCaptureFor(index); // non-null: this pair is a calibration's (the originals only)
+#endif
+                capture_future=std::async(std::launch::async,[ids=registered_ids,index,geometry=pending_geometry,deadline=capture_deadline
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+                    ,calibration_record
+#endif
+                    ]{
+                    try{ComScope com;
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+                        if(calibration_record)return SaveRecalibrationPair(ids,deadline,calibration_record);
+#endif
+                        if(index==2)return SavePairReview(ids,geometry,deadline);return CaptureUiOutcome{SaveStillOnce(ids[index],index==0?"CAM-A":"CAM-B",true,deadline),{}};}
                     catch(const std::exception& error){CaptureUiOutcome result;result.capture.error=ErrorSummary(error);return result;}
                 });
             }else capture_status=L"Liveの安全な終了を確認できません。撮影せず停止しました。";
@@ -940,8 +997,15 @@ void AdvanceCapture(HWND hwnd){
     }
     if(capture_future.valid() && capture_future.wait_for(std::chrono::seconds(0))==std::future_status::ready){
         auto result=capture_future.get();
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+        if(RecalibrationTakeCapture(result)){} // the pair of a calibration: Live stays stopped and the job runs; a failed capture falls through to the failure below
+        else
+#endif
         if(result.capture.success && result.capture.closed){
             captures_saved+=(result.review || result.composite_skip || result.composite_failure)?2:1;capture_status=SavedCaptureStatus(result);
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+            capture_status+=RecalibrationNudgeLine(result); // the cameras seem to have moved a lot: say which button to press (#434)
+#endif
             if(result.review){
                 ++pair_reviews;review_path=result.review->jpeg;const auto& thumbnail=result.review->thumbnail;
                 if(pair_cycle_smoke){pair_cycle_reports.push_back(result.review->report);std::wcout<<L"pair_cycle_report="<<result.review->report.wstring()<<std::endl;}
@@ -972,6 +1036,9 @@ void AdvanceCapture(HWND hwnd){
     }
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
     if(closing && SettingsWriteHoldsWindow(hwnd))return; // a write or reread is waited for the same way
+#endif
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+    if(closing && RecalibrationHoldsWindow())return; // a calibration's job in progress is asked to stop and waited for the same way
 #endif
     // A settings read in progress is waited for: its Close must finish before the window (and the lease) goes.
     if(closing && preview_joined && !capture_future.valid() && !settings_future.valid())DestroyWindow(hwnd);
@@ -1263,6 +1330,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM w,LPARAM l){
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
         if(HandleSettingsWriteCommand(id,HIWORD(w),reinterpret_cast<HWND>(l)))return 0;
 #endif
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+        if(HandleRecalibrationCommand(id,HIWORD(w),reinterpret_cast<HWND>(l)))return 0;
+#endif
         if(id==405 && HIWORD(w)==BN_CLICKED && reinterpret_cast<HWND>(l)==settings_button){RequestSettingsRead();return 0;}
         if(id==403 && HIWORD(w)==BN_CLICKED && reinterpret_cast<HWND>(l)==session_button){
             if(SettingsReadBusy()){Log("ui_live_restart_refused=1 settings_read_in_progress=1");return 0;}
@@ -1336,6 +1406,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM w,LPARAM l){
     case WM_KEYDOWN:if(w==VK_ESCAPE)SendMessageW(hwnd,WM_CLOSE,0,0);return 0;
     case WM_CLOSE:closing=true;stopping=true;capture_stop_requested=true;capture_pending.reset();
         if(settings_stop)settings_stop->store(true); // Only set. The read ends, closes its body, then the window goes.
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+        RecalibrationOnClose(); // a job in progress is asked to stop; the window goes when it has ended
+#endif
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
         if(SettingsWriteBusy())return 0; // the wait notice (SettingsWriteHoldsWindow) owns the title; a repeated request must not bring the first wording back
 #endif
@@ -1353,6 +1426,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM w,LPARAM l){
         if(review_button){EnableWindow(review_button,!review_pixels.bytes.empty());SetWindowTextW(review_button,review_visible?L"ライブCに戻す":L"撮影結果を見る");}
         if(inspect_button)EnableWindow(inspect_button,!review_path.empty());
         if(settings_button)EnableWindow(settings_button,CanReadSettings() && !PanelHoldsLive());
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+        UpdateRecalibrationControls(hwnd);
+#endif
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
         SettingsWriteTimer();
 #endif
@@ -1427,7 +1503,12 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM w,LPARAM l){
         // Interactive failures stay visible after Stop/Close. Finite test
         // runs still terminate and retain a failing result; no auto restart.
         if(run_seconds>0 && !camera_end_restart_smoke && (cameras[0]->failed || cameras[1]->failed))closing=true;
-        try{AdvanceCapture(hwnd);}
+        try{
+            AdvanceCapture(hwnd);
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+            AdvanceRecalibration(); // the end of the job, the person's decision, the start of Live again
+#endif
+        }
         catch(const std::exception& error){
             all_sessions_passed=false;closing=true;stopping=true;capture_pending.reset();
             Log(std::string("preview host failure: ")+error.what());
@@ -1450,6 +1531,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM w,LPARAM l){
     }return DefWindowProcW(hwnd,message,w,l);
 }
 #include "wpd_dual_preview_af_smoke.hpp"
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+#include "wpd_recalibration_smoke.hpp" // #434: --recalibration-ui-smoke
+#endif
 int RunLifecycleUiSmoke(){
     // Synthetic failed workers only. No Discover/Open/Run or hardware lease.
     Log("lifecycle_ui_synthetic=1 camera_operations=0");
@@ -2280,6 +2364,9 @@ int RunPreviewWindow(const std::array<std::wstring,2>& ids){
     SendMessageW(seam_button,BM_SETCHECK,BST_CHECKED,0);EnableWindow(seam_button,FALSE);
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
     CreateSettingsWriteControls(window,instance);InitProductSettingsWrite(); // before any session: a block left by an earlier run holds capture
+#endif
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+    CreateRecalibrationControls(window,instance);
 #endif
     LayoutButtons(window);run_start=Clock::now();StartPreview();SetTimer(window,1,50,nullptr);
     // A hidden console launch can supply STARTF_USESHOWWINDOW/SW_HIDE. This

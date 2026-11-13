@@ -1576,6 +1576,22 @@ if(BUILD_TESTING)
             COMMAND "${CMAKE_COMMAND}" "-DBINARY=$<TARGET_FILE:A0CameraStitcher.WpdDualPreview>" "-DEXPECT=${a0_settings_write_binary_expect}"
                 -P "${CMAKE_SOURCE_DIR}/tests/settings_write_binary_tests.cmake")
         set_tests_properties(preview_settings_write_binary_contracts PROPERTIES TIMEOUT 30)
+        # The calibration button (#434): the option A0_BUILD_WPD_RECALIBRATION is declared above, beside StillReview. With it ON the preview carries
+        # the button, its screens and a camera-free smoke of them (the job's computation replaced by a stand-in that returns at once); with it
+        # OFF the preview carries none of that, and the binary check below looks for it in the file.
+        if(A0_BUILD_WPD_RECALIBRATION)
+            target_link_libraries(A0CameraStitcher.WpdDualPreview PRIVATE a0_m2_fixed_composite_recalibration a0_m2_capture_registration a0_m2_rig_profile_v2)
+            target_compile_definitions(A0CameraStitcher.WpdDualPreview PRIVATE A0_ENABLE_WPD_RECALIBRATION=1)
+            add_test(NAME preview_recalibration_ui_contracts COMMAND A0CameraStitcher.WpdDualPreview --recalibration-ui-smoke "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2")
+            set_tests_properties(preview_recalibration_ui_contracts PROPERTIES TIMEOUT 600)
+            set(a0_recalibration_binary_expect present)
+        else()
+            set(a0_recalibration_binary_expect absent)
+        endif()
+        add_test(NAME preview_recalibration_binary_contracts
+            COMMAND "${CMAKE_COMMAND}" "-DBINARY=$<TARGET_FILE:A0CameraStitcher.WpdDualPreview>" "-DEXPECT=${a0_recalibration_binary_expect}"
+                -P "${CMAKE_SOURCE_DIR}/tests/recalibration_binary_tests.cmake")
+        set_tests_properties(preview_recalibration_binary_contracts PROPERTIES TIMEOUT 60)
         if(MSVC)
             target_compile_options(A0CameraStitcher.WpdDualPreview PRIVATE /W4 /permissive- /EHsc /utf-8)
         endif()
