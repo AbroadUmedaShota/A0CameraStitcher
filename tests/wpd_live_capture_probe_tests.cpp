@@ -155,7 +155,18 @@ private:
 };
 int Count(const ProbeFake& f, const char* op) { return static_cast<int>(std::count(f.trace.begin(), f.trace.end(), op)); }
 int CountAfter(const ProbeFake& f, const char* op) { return static_cast<int>(std::count(f.after_trace.begin(), f.after_trace.end(), op)); }
-WpdLiveProbeOptions Fast() {
+// A run that is expected to get there in the end: the bounds are far above any real pause a loaded machine can add,
+// so a slow scheduler cannot turn a pass into a timeout. Nothing waits for them unless the run fails.
+WpdLiveProbeOptions Patient() {
+    WpdLiveProbeOptions o;
+    o.ready_wait = std::chrono::seconds(5); o.ready_poll = std::chrono::milliseconds(1);
+    o.preflight_gap = std::chrono::milliseconds(1);
+    o.event_wait = std::chrono::seconds(5); o.event_poll = std::chrono::milliseconds(1);
+    o.completion = WpdStillCompletionWait{std::chrono::seconds(5), std::chrono::milliseconds(1)};
+    return o;
+}
+// Short bounds, for the runs whose point is that a bound runs out.
+WpdLiveProbeOptions Short() {
     WpdLiveProbeOptions o;
     o.ready_wait = std::chrono::milliseconds(100); o.ready_poll = std::chrono::milliseconds(1);
     o.preflight_gap = std::chrono::milliseconds(1);
@@ -171,7 +182,8 @@ struct Run {
     std::string All() const { std::string text; for (const auto& line : logs) text += line + "\n"; return text; }
     int IndexOf(std::string_view part) const { for (size_t i = 0; i < logs.size(); ++i) if (Contains(logs[i], part)) return static_cast<int>(i); return -1; }
 };
-Run Go(ProbeFake& f, bool save_throws = false, bool save_false = false, const std::function<void(const std::string&)>& tap = {}) {
+Run Go(ProbeFake& f, bool save_throws = false, bool save_false = false, const std::function<void(const std::string&)>& tap = {},
+    const WpdLiveProbeOptions& options = Patient()) {
     Run run;
     WpdLiveProbeHooks hooks;
     hooks.partial_sink = [&](std::span<const unsigned char> bytes) { run.partial.insert(run.partial.end(), bytes.begin(), bytes.end()); };
@@ -181,7 +193,7 @@ Run Go(ProbeFake& f, bool save_throws = false, bool save_false = false, const st
         return !save_false && !payload.jpeg.empty();
     };
     hooks.log = [&](const std::string& line) { run.logs.push_back(line); if (tap) tap(line); };
-    run.out = RunLiveCaptureProbe(f, "CAM-B", hooks, Fast());
+    run.out = RunLiveCaptureProbe(f, "CAM-B", hooks, options);
     return run;
 }
 const std::vector<WpdStillEvent> kClean{{0xc101, 0x0badf00d}, {0xc102, 0}};
@@ -367,8 +379,8 @@ int main() {
 
     // ---- 8. The state before the shutter.
     {
-        const auto refuse = [](ProbeFake& f, const char* reason, const char* what) {
-            const auto run = Go(f);
+        const auto refuse = [](ProbeFake& f, const char* reason, const char* what, const WpdLiveProbeOptions& options = Patient()) {
+            const auto run = Go(f, false, false, {}, options);
             Check(run.out.result == WpdLiveProbeResult::StoppedBeforeShutter && f.shutters == 0 && !run.out.shutter_sent && run.out.stop_reason == reason && run.saved == 0, what);
             Check(run.IndexOf("result=refused reason=" + std::string(reason)) >= 0, "the preflight line names the reason");
             Check(run.IndexOf("shutter_no_af_once") < 0, "no shutter line when the shutter was not sent");
@@ -379,7 +391,7 @@ int main() {
         { ProbeFake f; f.quality = 4; refuse(f, "quality_not_jpeg_fine", "not JPEG Fine stops"); }
         { ProbeFake f; f.size = L"5520x3680"; refuse(f, "size_not_fx_l", "not FX L stops"); }
         { ProbeFake f; f.busy_before = 5; const auto run = Go(f); Check(run.out.result == WpdLiveProbeResult::Observed && f.shutters == 1, "a few busy answers are waited out"); }
-        { ProbeFake f; f.busy_before = 100000; refuse(f, "ready_timeout", "a camera that stays busy stops"); }
+        { ProbeFake f; f.busy_before = 100000; refuse(f, "ready_timeout", "a camera that stays busy stops", Short()); }
         { ProbeFake f; f.ready_before = 0xa002; refuse(f, "out_of_focus_before_shutter", "OutOfFocus before the shutter stops"); }
         { ProbeFake f; f.ready_before = 0xa004; refuse(f, "ready_rejected", "another refusal of DeviceReady stops"); }
         // Events waiting before the shutter.
@@ -437,7 +449,7 @@ int main() {
         }
         {   // A transport failure with no image to find.
             ProbeFake f; f.shutter_throws = true; f.post.clear();
-            const auto run = Go(f);
+            const auto run = Go(f, false, false, {}, Short());
             Check(f.shutters == 1 && run.out.published == "none" && run.saved == 0 && run.out.sdram_may_remain && f.object_reads == 0, "an uncertain shutter with no event imports nothing");
         }
         {   // A second ShutterOnce on a used channel is refused whatever the first did.
@@ -478,7 +490,7 @@ int main() {
             const auto run = Go(f);
             Check(run.out.busy_polls == 3 && run.out.after_ready == 0x2001 && run.saved == 1, "busy answers after the shutter are counted");
             ProbeFake g; g.busy_after = 100000;
-            const auto timed_out = Go(g);
+            const auto timed_out = Go(g, false, false, {}, Short());
             Check(timed_out.out.after_ready == 0x2019 && timed_out.out.busy_polls > 0 && timed_out.out.published == "partial_only" && timed_out.saved == 0, "a camera that stays busy leaves a partial only");
             Check(!timed_out.out.sequence_clean && g.profile_reads == 1, "a camera that stays busy: the Live state is not read");
         }
@@ -492,7 +504,7 @@ int main() {
             Check(g.info_reads == 0 && g.object_reads == 0 && run.out.object_reason == "card_image_event" && run.saved == 0, "a card image event: nothing is imported");
             Check(!run.out.sequence_clean && g.profile_reads == 1, "a card image event: an anomaly, the Live state is not read");
             ProbeFake h; h.post.clear();
-            run = Go(h);
+            run = Go(h, false, false, {}, Short());
             Check(h.info_reads == 0 && run.out.object_reason == "object_event_timeout" && run.out.published == "none" && run.out.sdram_may_remain && run.out.result == WpdLiveProbeResult::StoppedAfterShutter, "no object event within the bound: nothing is imported");
             Check(Count(h, "90c0") == 1, "no resend when the image never arrives");
             Check(!run.out.sequence_clean && h.profile_reads == 1, "no object event within the bound: an anomaly, the Live state is not read");
@@ -525,7 +537,7 @@ int main() {
         }
         {   // No completion arrives: observation times out, the image is still original.
             ProbeFake f; f.post = {{{0xc101, 0x0badf00d}}};
-            const auto run = Go(f);
+            const auto run = Go(f, false, false, {}, Short());
             Check(run.out.published == "original" && !run.out.completion.complete_event && run.out.completion.completion_wait == WpdStillCompletionWaitResult::TimedOut && run.saved == 1, "a missing completion is recorded and does not fail the capture");
             Check(run.IndexOf("capture_completion shutter_attempted=1 complete_event=0 complete_event_code=none") >= 0 && run.IndexOf("completion_wait result=timeout") >= 0, "the completion lines use the existing form");
         }
