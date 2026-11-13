@@ -448,6 +448,50 @@ void JobRefusals(const Pair& pair) {
     CHECK(Snapshot(settings) == before);
 }
 
+// A stop asked for after the computation is honoured at the next step: the outcome is "stopped", nothing is offered, and nothing that a
+// confirmation would use is written (the settings folder is untouched, the staging folder holds no candidate and no sample).
+void StopAfterTheComputation(const Pair& pair) {
+    const auto settings = MakeSettings("settings-stop-late");
+    const auto before = Snapshot(settings);
+    {   // The stop comes when the computation returns: the proposal is dropped before the rebuild, the record and the sample.
+        std::stop_source source;
+        auto computation = FakeComputation(Fake::ready);
+        const auto inner = computation.propose;
+        computation.propose = [inner, &source](const rc::Inputs& in) { auto proposal = inner(in); source.request_stop(); return proposal; };
+        auto r = Request(settings, pair, "staging-stop-late", computation);
+        r.stop = source.get_token();
+        std::vector<std::string> stages;
+        r.on_stage = [&](RecalibrationStage s, double) { stages.emplace_back(RecalibrationStageCode(s)); };
+        const auto o = RunRecalibrationJob(r);
+        CHECK(o.verdict == RecalibrationVerdict::unusable && !o.ready && !o.candidate && o.findings.size() == 1 && HasCode(o, "stopped"));
+        // The numbers of the dropped proposal are not shown (the lines that remain are the "not found" lines of an empty result).
+        CHECK(o.screen_lines.front() == "この校正は使えません" && HasLine(o.screen_lines, "中止しました") && !HasLine(o.screen_lines, "の位置の変化") && !HasLine(o.screen_lines, "画素"));
+        CHECK(!o.facts.display.has_motion && !o.facts.display.has_new && !o.facts.gate.known && !o.facts.creation_checked);
+        CHECK(std::find(stages.begin(), stages.end(), "sample") == stages.end() && std::find(stages.begin(), stages.end(), "crops") == stages.end());
+        CHECK(Snapshot(settings) == before);
+        const auto staged = Snapshot(r.staging_folder);
+        CHECK(staged.size() == 1 && staged.count("recalibration-report.json") == 1);   // only the record of the run itself
+        CHECK(!fs::exists(r.staging_folder / "review") && !fs::exists(r.staging_folder / "sample-originals"));
+        const auto confirmed = ConfirmRecalibration(o, settings, kHash, {true});
+        CHECK(!confirmed.written && confirmed.reason == "not-usable" && Snapshot(settings) == before);
+    }
+    {   // The stop comes while the sample is composed: the crops are not made and nothing is offered.
+        std::stop_source source;
+        auto r = Request(settings, pair, "staging-stop-sample", FakeComputation(Fake::ready));
+        r.stop = source.get_token();
+        std::vector<std::string> stages;
+        r.on_stage = [&](RecalibrationStage s, double) { stages.emplace_back(RecalibrationStageCode(s)); if (s == RecalibrationStage::sample) source.request_stop(); };
+        const auto o = RunRecalibrationJob(r);
+        CHECK(o.verdict == RecalibrationVerdict::unusable && !o.ready && !o.candidate && HasCode(o, "stopped") && o.findings.size() == 1);
+        CHECK(std::find(stages.begin(), stages.end(), "crops") == stages.end() && !fs::exists(r.staging_folder / "seam-crops.png") && !o.seam_crops);
+        CHECK(Snapshot(settings) == before);
+        CHECK(!ConfirmRecalibration(o, settings, kHash, {true}).written);
+    }
+}
+
+    CHECK(Snapshot(settings) == before);
+}
+
 // ---- 3. A whole job with a sample, and the confirmation ----
 void Reports(const RecalibrationJobOutcome& o, const fs::path& staging, const std::string& verdict, const std::string& policy) {
     const auto report = Tree(ReadAll(staging / "recalibration-report.json"));
@@ -846,6 +890,7 @@ int main(int argc, char** argv) {
         const auto pair = MakePair("pair");
         lap("frames");
         JobRefusals(pair); lap("refusals");
+        StopAfterTheComputation(pair); lap("stop after the computation");
         WholeJob(pair); lap("whole job and confirmation");
         RefusePolicy(pair); lap("refuse policy");
         UncheckedProfile(pair); lap("unchecked profile");

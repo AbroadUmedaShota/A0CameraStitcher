@@ -381,6 +381,13 @@ inline bool IsCanonicalOriginal(const fs::path& file,const wchar_t* alias){
         out.log_lines.push_back("recalibration_stage name="+std::string(RecalibrationStageCode(s))+" at_s="+Num(at));
     };
     const auto find=[&](FindingClass klass,const char* code,std::string reason={}){out.findings.push_back({klass,code,std::move(reason)});};
+    // A stop asked for is honoured at every step that follows a long one: whatever was found so far is dropped and the outcome says "stopped".
+    const auto stop_asked=[&]{
+        if(!request.stop.stop_requested())return false;
+        out.findings.clear();out.candidate.reset();out.facts=RecalibrationResultFacts{};out.thumbnail=render::BgrImage{};out.seam_crops.reset();
+        find(FindingClass::no_candidate,"stopped");
+        return true;
+    };
 
     bool staging_created=false;
     ReportInput report;
@@ -466,6 +473,7 @@ inline bool IsCanonicalOriginal(const fs::path& file,const wchar_t* alias){
         in.progress=[&](rc::Stage s){stage(RecalibrationStageOf(s));};
         auto proposal=request.computation.propose(in);
         images[0]=render::BgrImage{};images[1]=render::BgrImage{};in.camera_a=nullptr;in.camera_b=nullptr;
+        if(stop_asked())return finish();   // the computation is done; the rebuild, the sample and the crops are not started
 
         out.facts.display=proposal.display;
         report.estimate_state=std::string(cr::RegistrationStateCode(proposal.estimate.state));report.estimate_reasons=proposal.estimate.reasons;
@@ -482,6 +490,7 @@ inline bool IsCanonicalOriginal(const fs::path& file,const wchar_t* alias){
             else for(auto& f:ClassifyProposal(rebuilt))out.findings.push_back(std::move(f));
         }
         if(!proposal.ready && !only_unverified)candidate.reset();
+        if(stop_asked())return finish();   // before the record and the sample
         if(!candidate){
             if(out.findings.empty())find(FindingClass::rejected,"profile-invalid");   // a proposal that is not ready and says nothing is not offered
             return finish();
@@ -533,6 +542,7 @@ inline bool IsCanonicalOriginal(const fs::path& file,const wchar_t* alias){
         for(auto& f:ClassifySample(sample))out.findings.push_back(std::move(f));
 
         // 6. The seam at native size, for the screen (a failure here loses the crops, not the result).
+        if(stop_asked())return finish();   // before the crops (the sample is in the staging folder, nothing of it is offered)
         if(composed.review){
             stage(RecalibrationStage::crops);
             try{out.seam_crops=ExportSeamCrops(request.staging_folder/"review",request.staging_folder/"seam-crops.png");}
