@@ -119,8 +119,8 @@ struct LiveEstimatorInputs {
 };
 using LiveEstimatorEntrance=std::function<LiveEstimateOutcome(const LiveEstimatorInputs&)>;
 
-// An estimate that cannot be used because the estimate is not connected (the window words it "not connected"). The live C is then
-// drawn with the condition's fixed mapping.
+// An estimate that cannot be used because the estimate is not connected (the window words it "not connected"). The machine then keeps
+// the position it has (the condition's position until another one is decided) and records the reason.
 [[nodiscard]] inline LiveEstimateOutcome LiveEstimatorNotConnected(const LiveEstimatorInputs&){
     LiveEstimateOutcome outcome;
     outcome.usable=false;
@@ -193,9 +193,9 @@ inline constexpr std::string_view kLiveEstimateRefusedReason="estimate-refused";
 }
 
 // One job on the inputs. Never throws for what the frames show: an estimate that cannot be trusted is an outcome that is not
-// usable, with the estimator's reasons, and the tracker then holds the last estimate or goes back to the fixed mapping. A full
-// estimate is usable when it is verified, or trusted but outside a range that the condition applies anyway
-// (applyBeyondEnvelope); a follow-up when V1 and V3 pass.
+// usable, with the estimator's reasons; the machine then keeps the position it has and records them. A full estimate is usable when it is
+// verified, or trusted but outside a range that the condition applies anyway (applyBeyondEnvelope); a follow-up when V1 and V3 pass (the
+// runtime asks for full estimates only; the follow-up stays for the estimator's own tests).
 [[nodiscard]] inline LiveEstimateOutcome EstimateLiveRegistration(const LiveEstimatorInputs& in,const LiveEstimatorDesign& design){
     namespace cr=a0::m2::experimental::content_registration;
     LiveEstimateOutcome outcome;
@@ -269,7 +269,7 @@ inline constexpr std::string_view kLiveEstimateRefusedReason="estimate-refused";
 }
 
 using LivePlanSource=std::function<std::shared_ptr<const FixedPreviewPlan>()>;
-// The estimator that the tracker runs: it prepares the inputs from the plan in force and calls the entrance. A plan without a
+// The estimator that runs a job of the machine: it prepares the inputs from the plan in force and calls the entrance. A plan without a
 // registered context gives an estimate that cannot be used (reason "no-registered-plan"). `ranges` is what the condition says
 // about the registration (LiveRegistrationRangesOf); without it the connected entrance answers "not connected".
 [[nodiscard]] inline LiveEstimator MakeLiveEstimator(LivePlanSource plan_source,const LiveTrackerDesign& design,LiveEstimatorEntrance entrance,
