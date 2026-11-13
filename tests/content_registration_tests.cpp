@@ -1117,6 +1117,72 @@ void BasePose() {
     try { cr::ValidateRegistrationSettings(bad); } catch (const std::invalid_argument&) { refused = true; }
     Check(refused, "an unset surface envelope is refused");
 }
+
+// ---- Evidence shortage (#434): "too few marks" is told from "does not fit" by every reason, in one function -------------
+// The limits are this test's (alpha 8, beta 0.3: V1 passes only above 11.43 inliers when no point is an outlier).
+void Evidence() {
+    cr::RegistrationLimits limits;
+    limits.brown_lowe_alpha = 8.0;
+    limits.brown_lowe_beta = 0.3;
+    const auto assess = [&](std::vector<std::string> reasons, std::uint32_t inliers = 0, std::uint32_t points = 0) {
+        return cr::AssessEvidenceShortage(reasons, inliers, points, limits);
+    };
+    // Every reason of the "too few marks" family alone, and together.
+    for (const char* code : {"coarse-no-unique-blocks", "unique-blocks", "repeating-only", "too-few-points", "prediction-uncertain", "too-dark"}) {
+        const auto v = assess({code});
+        Check(v.shortage_only && v.doubt.empty(), std::string("shortage: ") + code);
+    }
+    Check(assess({"unique-blocks", "too-few-points", "prediction-uncertain"}).shortage_only, "shortage: several reasons of the family");
+    // One reason outside the family decides, wherever it stands in the list, and is the one named.
+    for (const char* code : {"coarse-ambiguous", "coarse-inconsistent", "fit-failed", "not-converged", "residual-shape", "starts-disagree", "no-overlap",
+             "estimate-failed", "displacement-failed", "time-budget"}) {
+        const auto v = assess({code});
+        Check(!v.shortage_only && v.doubt == code, std::string("doubt: ") + code);
+        const auto first = assess({"unique-blocks", code});
+        const auto last = assess({code, "unique-blocks"});
+        Check(!first.shortage_only && first.doubt == code && !last.shortage_only && last.doubt == code, std::string("doubt beside a shortage: ") + code);
+    }
+    {
+        const auto v = assess({"unique-blocks", "residual-shape"});
+        Check(!v.shortage_only && v.doubt == "residual-shape", "unique-blocks with residual-shape is a doubt");
+    }
+    // What this does not know is a doubt; so is a reason list with nothing in it.
+    Check(!assess({"a-code-nobody-knows"}).shortage_only && assess({"a-code-nobody-knows"}).doubt == "a-code-nobody-knows", "an unknown code is a doubt");
+    Check(!assess({"unique-blocks", "a-code-nobody-knows"}).shortage_only, "an unknown code beside a shortage is a doubt");
+    Check(!assess({}).shortage_only && assess({}).doubt.empty(), "no reason is not a shortage");
+    // brown-lowe: alpha / (1 - beta) = 11.43. At or below it no outlier is needed to fail, so it is the number of points; above it, outliers.
+    Check(assess({"brown-lowe"}, 11, 11).shortage_only, "brown-lowe: 11 inliers of 11 points is a shortage");
+    Check(assess({"brown-lowe"}, 11, 40).shortage_only, "brown-lowe: 11 inliers among many outliers is still few inliers");
+    Check(assess({"brown-lowe"}, 0, 0).shortage_only, "brown-lowe: nothing counted is a shortage");
+    {
+        const auto v = assess({"brown-lowe"}, 12, 12);
+        Check(!v.shortage_only && v.doubt == "brown-lowe", "brown-lowe: 12 inliers of 12 points would pass V1 with no outlier, so the outliers are the cause");
+    }
+    Check(!assess({"brown-lowe"}, 12, 60).shortage_only, "brown-lowe: 12 inliers among many outliers is a doubt");
+    Check(!assess({"brown-lowe"}, 40, 100).shortage_only, "brown-lowe: many inliers, more outliers: a doubt");
+    Check(assess({"brown-lowe", "too-few-points"}, 5, 9).shortage_only, "brown-lowe with few inliers beside another shortage");
+    Check(!assess({"brown-lowe", "residual-shape"}, 5, 9).shortage_only, "brown-lowe with few inliers beside a doubt");
+    Check(!assess({"brown-lowe"}, 11, 5).shortage_only, "brown-lowe: more inliers than points cannot be told, so it is a doubt");
+    // The limits are the caller's: unset (NaN) or beta not below 1 make brown-lowe a doubt.
+    {
+        const cr::RegistrationLimits unset;
+        Check(!cr::AssessEvidenceShortage({"brown-lowe"}, 1, 1, unset).shortage_only, "brown-lowe: unset limits are a doubt");
+        auto flat = limits;
+        flat.brown_lowe_beta = 1.0;
+        Check(!cr::AssessEvidenceShortage({"brown-lowe"}, 1, 1, flat).shortage_only, "brown-lowe: beta 1 is a doubt");
+        Check(cr::AssessEvidenceShortage({"unique-blocks"}, 0, 0, unset).shortage_only, "the other reasons do not need the limits");
+    }
+    // The result form gives the same answer as the three numbers.
+    {
+        cr::RegistrationResult r;
+        r.reasons = {"brown-lowe"};
+        r.diagnostics.inliers = 11;
+        r.diagnostics.points = 20;
+        Check(cr::AssessEvidenceShortage(r, limits).shortage_only, "the result form: few inliers");
+        r.diagnostics.inliers = 12;
+        Check(!cr::AssessEvidenceShortage(r, limits).shortage_only, "the result form: more inliers");
+    }
+}
 }
 
 // With no argument every section runs (ctest). A section name runs that section only (development).
@@ -1132,6 +1198,7 @@ int main(int argc, char** argv) {
     if (wanted("repeating")) Repeating();
     if (wanted("window")) Window();
     if (wanted("ruled")) Ruled();
+    if (wanted("evidence")) Evidence();
     std::cout << checks-failures << '/' << checks << " checks passed\n";
     return failures ? 1 : 0;
 }
