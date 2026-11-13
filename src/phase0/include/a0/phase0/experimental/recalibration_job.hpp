@@ -344,8 +344,9 @@ inline std::string ReportJson(const ReportInput& in){
     s<<",\"display\":{\"hasMotion\":"<<Bool(d.has_motion)<<",\"motionRightMm\":"<<Num(d.motion.camera_motion_mm.x)<<",\"motionDownMm\":"<<Num(d.motion.camera_motion_mm.y)
      <<",\"rotationClockwiseDeg\":"<<Num(d.motion.rotation_clockwise_deg)<<",\"tiltDeg\":"<<Num(d.pose.tilt_deg)<<",\"heightPercent\":"<<Num(d.pose.height_percent)
      <<",\"hasOverlap\":"<<Bool(d.has_overlap)<<",\"narrowestOverlapMm\":"<<Num(d.narrowest_overlap_mm)
-     <<",\"seamXPreviousMm\":"<<Num(d.seam_x_previous_mm)<<",\"seamXNewMm\":"<<Num(d.seam_x_new_mm)
-     <<",\"widthPreviousPx\":"<<d.width_previous_px<<",\"widthNewPx\":"<<d.width_new_px<<",\"rightPreviousMm\":"<<Num(d.right_previous_mm)<<",\"rightNewMm\":"<<Num(d.right_new_mm)
+     <<",\"hasNew\":"<<Bool(d.has_new)<<",\"seamXPreviousMm\":"<<Num(d.seam_x_previous_mm)<<",\"seamXNewMm\":"<<(d.has_new?Num(d.seam_x_new_mm):std::string("null"))
+     <<",\"widthPreviousPx\":"<<d.width_previous_px<<",\"widthNewPx\":"<<(d.has_new?std::to_string(d.width_new_px):std::string("null"))
+     <<",\"rightPreviousMm\":"<<Num(d.right_previous_mm)<<",\"rightNewMm\":"<<(d.has_new?Num(d.right_new_mm):std::string("null"))
      <<",\"hasEdgeDistance\":"<<Bool(d.has_edge_distance)<<",\"edgeShareA\":"<<Num(d.edge_share_a)<<",\"edgeShareB\":"<<Num(d.edge_share_b)<<"}";
     s<<"}";
     return s.str();

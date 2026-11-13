@@ -208,14 +208,14 @@ inline std::string MotionLine(const a0::m2::experimental::recalibration::Display
     return text;
 }
 inline std::string SeamLine(const a0::m2::experimental::recalibration::Display& d){
-    if(d.width_new_px==0)return {};   // the new raster was not made: there is no new seam to speak of
+    if(!d.has_new)return {};   // the new side is not whole (a refusal before the plan was made): there is no new seam to speak of
     const double delta=d.seam_x_new_mm-d.seam_x_previous_mm;
     if(!std::isfinite(delta))return {};
     if(!Present(delta))return "継ぎ目の位置は変わりません";
     return "継ぎ目の位置が変わります: 図面の上で"+std::string(delta>0?"右":"左")+"へ"+Approx(delta,Unit::mm)+"（検品の時に見る場所が変わります）";
 }
 inline std::string RasterLine(const a0::m2::experimental::recalibration::Display& d){
-    if(d.width_new_px==0)return {};
+    if(!d.has_new)return {};
     const double grown=d.right_new_mm-d.right_previous_mm;
     std::string text="合成の画像の大きさ: 幅 "+std::to_string(d.width_previous_px)+" → "+std::to_string(d.width_new_px)+" 画素";
     if(Present(grown))text+="（右の端が"+Approx(grown,Unit::mm)+(grown>0?" 広がります":" 狭まります")+"）";

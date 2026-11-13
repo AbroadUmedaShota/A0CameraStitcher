@@ -139,7 +139,7 @@ cr::PoseParameters PoseForShift(const render::CameraProjection& camera_b, double
 }
 
 // ---- The stand-in for the computation ----
-enum class Fake { ready, check_not_trusted, check_out_of_range, displacement, no_overlap, tilt, throws, throws_memory };
+enum class Fake { ready, check_not_trusted, check_out_of_range, displacement, no_overlap, tilt, throws, throws_memory, outside_sheet };
 constexpr const char* kRecord = "{\"schema\":\"test-record\"}";
 RecalibrationComputation FakeComputation(Fake mode, std::vector<std::string>* stages = nullptr) {
     RecalibrationComputation c;
@@ -150,7 +150,8 @@ RecalibrationComputation FakeComputation(Fake mode, std::vector<std::string>* st
         if (mode == Fake::throws) throw std::runtime_error("a failure inside the computation (C:\\secret\\path\\x.jpg)");
         if (mode == Fake::throws_memory) throw std::bad_alloc();
         const auto parent = RigProfileV2::Parse(in.profile_bytes).ValidateCalibrationForEvaluation(in.active.raster, render::Resampling::bilinear);
-        const auto pose = PoseForShift(parent.camera_b, 30.0);
+        // outside_sheet: B far enough along the sheet that the new raster leaves the profile's sheet (the real pieces refuse it).
+        const auto pose = PoseForShift(parent.camera_b, mode == Fake::outside_sheet ? 500.0 : 30.0);
         const rc::ProfileFit fit{0.1, 0.3, 50};
         rc::Proposal p;
         if (mode == Fake::no_overlap) {
@@ -489,6 +490,28 @@ void StopAfterTheComputation(const Pair& pair) {
     }
 }
 
+// A refusal that comes before the new plan is whole (the new raster leaves the sheet) must not put the "after" side on the screen, in the
+// report or on the command line: the width is known, the seam and the height are not.
+void RefusedBeforeThePlan(const Pair& pair) {
+    const auto settings = MakeSettings("settings-outside");
+    const auto before = Snapshot(settings);
+    auto r = Request(settings, pair, "staging-outside", FakeComputation(Fake::outside_sheet));
+    const auto o = RunRecalibrationJob(r);
+    CHECK(!o.ready && !o.candidate && HasCode(o, "raster-outside-sheet") && o.verdict == RecalibrationVerdict::unusable);
+    CHECK(!o.facts.display.has_new && o.facts.display.has_motion);
+    CHECK(!HasLine(o.screen_lines, "継ぎ目の位置") && !HasLine(o.screen_lines, "合成の画像の大きさ") && !HasLine(o.screen_lines, "画素") && HasLine(o.screen_lines, "A に対する B の位置の変化"));
+    const auto report = Tree(ReadAll(r.staging_folder / "recalibration-report.json"));
+    const auto& display = At(report, "display");
+    CHECK(!At(display, "hasNew").boolean && At(display, "seamXNewMm").kind == json::JsonKind::null_value && At(display, "widthNewPx").kind == json::JsonKind::null_value &&
+        At(display, "rightNewMm").kind == json::JsonKind::null_value && At(display, "seamXPreviousMm").kind == json::JsonKind::number);
+    CHECK(Snapshot(settings) == before);
+    // The command line prints the same facts: no line for the new seam and the new raster.
+    const auto wide = [](const fs::path& p) { return p.wstring(); };
+    const std::vector<std::wstring> args{L"--camera-a", wide(pair.frames.a), L"--camera-b", wide(pair.frames.b), L"--settings-folder", wide(settings), L"--staging", wide(root / "staging-outside-cli")};
+    std::ostringstream out;
+    CHECK(RunRecalibrationCommand(args, out, kHash, kNow, FakeComputation(Fake::outside_sheet)) == 1);
+    const auto text = out.str();
+    CHECK(Has(text, "code=raster-outside-sheet") && Has(text, "motion right_mm=") && !Has(text, "seam previous_mm=") && !Has(text, "raster_width_px") && !Has(text, "screen 合成の画像の大きさ"));
     CHECK(Snapshot(settings) == before);
 }
 
@@ -891,6 +914,7 @@ int main(int argc, char** argv) {
         lap("frames");
         JobRefusals(pair); lap("refusals");
         StopAfterTheComputation(pair); lap("stop after the computation");
+        RefusedBeforeThePlan(pair); lap("refused before the plan");
         WholeJob(pair); lap("whole job and confirmation");
         RefusePolicy(pair); lap("refuse policy");
         UncheckedProfile(pair); lap("unchecked profile");

@@ -50,6 +50,7 @@ rc::Display SampleDisplay() {
     d.height_previous_px = d.height_new_px = 1600;
     d.right_previous_mm = 740.0;
     d.right_new_mm = 782.0;
+    d.has_new = true;
     d.has_edge_distance = true;
     d.edge_share_a = 0.12;
     d.edge_share_b = 0.09;
@@ -195,6 +196,20 @@ void ResultLines() {
         f.display.height_new_px = 1700;
         const auto l2 = RecalibrationResultLines(f);
         CHECK(HasLine(l2, "狭まります") && HasLine(l2, "高さ 1600 → 1700 画素"));
+    }
+    // A refusal before the plan was whole (the raster went outside the sheet) leaves the "after" side half filled: the width and the right
+    // edge are known, the seam and the height are zero. No line may speak of the new seam or of a height that became 0.
+    {
+        auto f = facts;
+        f.display.has_new = false;
+        f.display.seam_x_new_mm = 0.0;
+        f.display.height_new_px = 0;
+        const auto l = RecalibrationResultLines(f);
+        CHECK(l.size() == lines.size() - 2);
+        CHECK(!HasLine(l, "継ぎ目の位置") && !HasLine(l, "合成の画像の大きさ") && !HasLine(l, "画素") && !HasLine(l, "650"));
+        CHECK(HasLine(l, "A に対する B の位置の変化") && HasLine(l, "継ぎ目のずれ: 基準内"));   // what is known is still shown
+        const auto screen = RecalibrationScreenLines(RecalibrationVerdict::unusable, {{FindingClass::rejected, "raster-outside-sheet", {}}}, f);
+        CHECK(HasLine(screen, "用紙の外に出ます") && !HasLine(screen, "継ぎ目の位置") && !HasLine(screen, "合成の画像の大きさ"));
     }
     // The gate in each of its states: what it measured is always beside the verdict.
     {

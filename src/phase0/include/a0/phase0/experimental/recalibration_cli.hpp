@@ -120,7 +120,7 @@ inline std::string Number(double value){return recalibration_job_detail::Num(val
         out<<"motion right_mm="<<Number(d.motion.camera_motion_mm.x)<<" down_mm="<<Number(d.motion.camera_motion_mm.y)<<" rotation_clockwise_deg="<<Number(d.motion.rotation_clockwise_deg)
            <<" tilt_deg="<<Number(d.pose.tilt_deg)<<" height_percent="<<Number(d.pose.height_percent)<<'\n';
     if(d.has_overlap)out<<"overlap narrowest_mm="<<Number(d.narrowest_overlap_mm)<<'\n';
-    if(d.width_new_px)
+    if(d.has_new)
         out<<"seam previous_mm="<<Number(d.seam_x_previous_mm)<<" new_mm="<<Number(d.seam_x_new_mm)<<" raster_width_px="<<d.width_previous_px<<"->"<<d.width_new_px
            <<" raster_height_px="<<d.height_previous_px<<"->"<<d.height_new_px<<'\n';
     if(d.has_edge_distance)out<<"edge_share a="<<Number(d.edge_share_a)<<" b="<<Number(d.edge_share_b)<<'\n';
