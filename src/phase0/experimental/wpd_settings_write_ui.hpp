@@ -797,7 +797,7 @@ int RunSettingsWriteUiSmoke(){
         bool view_clear=true,panel_clear=true,write_row_clear=true;
         for(const int width:{kD810WriteMinClientWidth,1300,1400,1500,1920}){
             const int bottom=SettingsWriteMinClientHeight(),middle=bottom/2;
-            const auto plan=PlanPreviewButtons(width,kPreviewWithRecalibration);
+            const auto plan=PlanPreviewButtons(width);
             const auto overlap=[](const RECT& a,int x,int y,int w,int h){return a.left<x+w && x<a.right && a.top<y+h && y<a.bottom;};
             const RECT view=SettingsWriteViewLinesRect(width,bottom,D810WriteViewMaxLines()),title=SettingsWriteViewTitleRect(width,bottom);
             check(D810WriteViewVisibleLines(bottom,PreviewLowerShift(width))>=D810WriteViewMaxLines() || width>kD810WriteMinClientWidth);

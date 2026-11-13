@@ -286,6 +286,7 @@ int RunRecalibrationUiSmoke(const std::filesystem::path& fixtures,const std::fil
         geometry_ok("rest: the entrance is in the client area");
         report_old_controls("rest-1000");
         shot("1-rest-1000",true);
+        set_client_size(1400,960);geometry_ok("rest at 1400: the entrance is in the client area");shot("1-rest-1400",true);set_client_size(1000,960);
         {   // The entrance goes while a pair capture is asked for, while a settings read is open, and when the frames are old.
             capture_pending=2;tick();check(!IsWindowEnabled(recal_enter_button),"rest: not while a capture is pending");
             click(kRecalEnterId,recal_enter_button);check(phase()==RecalPhase::idle,"rest: a click while a capture is pending does nothing");capture_pending.reset();
@@ -376,6 +377,7 @@ int RunRecalibrationUiSmoke(const std::filesystem::path& fixtures,const std::fil
             check(lit_pixels(12,mid()+160,988,940)>1500,"result: the lines are drawn in the lower half");
             report_old_controls("result-1000");
             shot("4-result-unchecked-1000",true);
+            set_client_size(1400,960);geometry_ok("result at 1400: the buttons are in the client area");shot("4-result-unchecked-1400",true);
             set_client_size(500,960);
             check(recal_ui.button_rows==2,"result at 500: the buttons go to a second row");
             geometry_ok("result at 500: the buttons are in the client area");

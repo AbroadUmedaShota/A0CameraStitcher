@@ -83,9 +83,7 @@ enum PreviewLowerButton {
     kLowerMerge0=0,kLowerMerge1,kLowerMerge2,kLowerMerge3,kLowerMerge4,
     kLowerPair,kLowerReview,kLowerSeam,kLowerInspect,kLowerSession,kLowerSettings,kLowerButtonCount
 };
-// The button of an option that is built in (the calibration entrance, #434) stands after the ones above, in the left-aligned flow.
-inline constexpr int kLowerRecal=kLowerButtonCount;
-inline std::vector<LayoutButton> LowerButtonItems(bool with_recalibration=false){
+inline std::vector<LayoutButton> LowerButtonItems(){
     std::vector<LayoutButton> items{{135},{135},{135},{135},{135}};
     items.push_back({235,28});                // pair shot
     items.push_back({225,15});                // saved result
@@ -93,7 +91,6 @@ inline std::vector<LayoutButton> LowerButtonItems(bool with_recalibration=false)
     items.push_back({200,15,true});           // inspect (rightmost)
     items.push_back({200,15,true});           // session
     items.push_back({200,15,true});           // settings
-    if(with_recalibration)items.push_back({200,15});   // calibration entrance
     return items;
 }
 
@@ -103,7 +100,7 @@ struct PreviewButtonPlan {
     int pane_rows{1},top_shift{0};
     int lower_rows{2},lower_shift{0};
 };
-inline PreviewButtonPlan PlanPreviewButtons(int client_width,bool with_recalibration=false){
+inline PreviewButtonPlan PlanPreviewButtons(int client_width){
     PreviewButtonPlan plan;
     const int pane_width=client_width/2;
     for(int i=0;i<2;++i){
@@ -111,7 +108,7 @@ inline PreviewButtonPlan PlanPreviewButtons(int client_width,bool with_recalibra
         plan.pane[static_cast<std::size_t>(i)]=flow.boxes;plan.pane_rows=std::max(plan.pane_rows,flow.rows);
     }
     plan.top_shift=(plan.pane_rows-1)*kPaneRowPitch;
-    const auto lower=FlowButtons(LowerButtonItems(with_recalibration),kLayoutMargin,client_width-kLayoutRightMargin,kLowerButtonsTop,kLowerRowPitch);
+    const auto lower=FlowButtons(LowerButtonItems(),kLayoutMargin,client_width-kLayoutRightMargin,kLowerButtonsTop,kLowerRowPitch);
     plan.lower=lower.boxes;plan.lower_rows=lower.rows;
     const bool shares_last_row=lower.rows==2 && lower.right_rows==1 && lower.right_left_edge>=kLowerTitleReserve;
     const int title_row=shares_last_row?kLowerSharedTitleRow:kLowerButtonsTop+kLowerRowPitch*lower.rows;

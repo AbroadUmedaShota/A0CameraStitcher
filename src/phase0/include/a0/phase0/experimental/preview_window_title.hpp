@@ -30,34 +30,41 @@ namespace a0::phase0::experimental {
     return state;
 }
 
+// The texts of a mark exist only in a build that has the feature: a build without it carries none of the feature's strings
+// (the binary checks of the probe and of the settings write look for them in the executable).
 #if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
-inline constexpr bool kPreviewProbeBuild=true;
-#else
-inline constexpr bool kPreviewProbeBuild=false;
+inline constexpr const wchar_t* kPreviewProbeMark=L"[探りbuild: ライブを開いたまま1回撮る] ";
 #endif
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
-inline constexpr bool kPreviewSettingsWriteBuild=true;
-#else
-inline constexpr bool kPreviewSettingsWriteBuild=false;
-#endif
-inline constexpr const wchar_t* kPreviewProbeMark=L"[探りbuild: ライブを開いたまま1回撮る] ";
 inline constexpr const wchar_t* kPreviewSettingsWriteMark=L" ／ 設定の書き込みあり（開発用・#416 段B）";
+#endif
 
 // The whole caption for a state text (the part inside the parentheses).
 [[nodiscard]] inline std::wstring PreviewTitleFrame(std::wstring_view state){
     std::wstring title=L"A0 ";
-    if(kPreviewProbeBuild)title+=kPreviewProbeMark;
+#if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
+    title+=kPreviewProbeMark;
+#endif
     title+=L"A/B Live + C（";title.append(state);title+=L"） / 撮影・PC保存";
-    if(kPreviewSettingsWriteBuild)title+=kPreviewSettingsWriteMark;
+#if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
+    title+=kPreviewSettingsWriteMark;
+#endif
     return title;
 }
 [[nodiscard]] inline std::wstring PreviewWindowTitle(const FixedPreviewSource& source,std::wstring_view note={}){
     return PreviewTitleFrame(PreviewCalibrationState(source,note));
 }
-// True when the caption carries exactly the marks that this build has (and none that it does not have).
+// True when the caption carries the marks that this build has. (A mark that this build does not have has no text here to look for.)
 [[nodiscard]] inline bool PreviewTitleMarksMatch(std::wstring_view title){
-    const auto has=[&](const wchar_t* part){return title.find(part)!=std::wstring_view::npos;};
-    return has(kPreviewProbeMark)==kPreviewProbeBuild && has(kPreviewSettingsWriteMark)==kPreviewSettingsWriteBuild;
+    [[maybe_unused]] const auto has=[&](const wchar_t* part){return title.find(part)!=std::wstring_view::npos;};
+    bool ok=true;
+#if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
+    ok=ok && has(kPreviewProbeMark);
+#endif
+#if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
+    ok=ok && has(kPreviewSettingsWriteMark);
+#endif
+    return ok;
 }
 
 // A composite that is made with a calibration is not a "provisional" one.

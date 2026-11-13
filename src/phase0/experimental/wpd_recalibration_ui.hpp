@@ -72,7 +72,6 @@ struct RecalibrationUi {
     std::future<a0::phase0::experimental::RecalibrationJobOutcome> job;
 };
 RecalibrationUi recal_ui;
-HWND recal_enter_button{};
 std::array<HWND,kRecalFlowCount> recal_flow_buttons{};
 
 // ---- Where things are ----
@@ -227,10 +226,14 @@ std::vector<RecalibrationFlowButton> RecalibrationFlowButtons(){
     }
     return shown;
 }
-// The entrance is one of the lower buttons (preview_button_layout.hpp, kLowerRecal; placed by LayoutButtons). The flow buttons stand in
-// the area that the lower half keeps for C (under the rows of buttons, PreviewLowerShift), in one row, and go to the next row when the
-// window is narrow.
+// The entrance stands at the right end of the status band of the lower half (the same place as the probe's button, placed by the same
+// part, FlowButtons), so that it takes no row from the buttons of the lower half. The flow buttons stand in the area that the lower half
+// keeps for C (under the rows of buttons, PreviewLowerShift), in one row, and go to the next row when the window is narrow.
 void LayoutRecalibrationButtons(const RECT& rect){
+    if(recal_enter_button){
+        const auto place=FlowButtons({{kRecalEnterWidth,kLayoutGap,true}},kLayoutMargin,rect.right-kLayoutMargin,kLowerStatusTop,kLowerRowPitch).boxes[0];
+        MoveWindow(recal_enter_button,place.x,rect.bottom/2+place.y,place.width,place.height,TRUE);
+    }
     const int top=rect.bottom/2+kRecalRowTop+PreviewLowerShift(rect.right);
     int x=12,row=0;
     for(const auto& flow:RecalibrationFlowButtons()){
@@ -543,7 +546,7 @@ bool RecalibrationTakeCapture(const CaptureUiOutcome& result){
     }
     if(closing){r.phase=RecalPhase::idle;return false;}
     review_visible=false;
-    if(a0::phase0::experimental::IsInsideFolder(record->run_root,RecalibrationSettingsFolder())){
+    if(a0::phase0::experimental::recalibration_job_detail::IsInsideFolder(record->run_root,RecalibrationSettingsFolder())){
         // The record of a run must not stand among the settings (a reader of the revisions would refuse the whole chain). Nothing is run.
         r.outcome=RecalibrationFailedOutcome("job-failed");r.thumbnail={};r.crops={};r.note.clear();r.action=RecalAction::none;
         r.phase=RecalPhase::result;

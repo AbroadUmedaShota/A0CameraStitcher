@@ -22,17 +22,6 @@ int main(){
     // The lists and their enums stay in step: a button added to one and not the other would index out of range.
     Check(LowerButtonItems().size()==static_cast<std::size_t>(kLowerButtonCount),"lower list matches the enum");
     Check(PaneButtonItems().size()==static_cast<std::size_t>(kPaneButtonCount),"pane list matches its count");
-    Check(LowerButtonItems(true).size()==static_cast<std::size_t>(kLowerRecal)+1,"the calibration entrance is one more item after the others");
-    // With the calibration entrance, every width keeps every button inside the window and clear of the others.
-    for(const int width:{1000,1024,1056,1400,1920}){
-        const auto plan=PlanPreviewButtons(width,true);
-        const std::string tag=" with the calibration entrance, width="+std::to_string(width);
-        Check(plan.lower.size()==static_cast<std::size_t>(kLowerRecal)+1,"every button has a place"+tag);
-        for(std::size_t a=0;a<plan.lower.size();++a){
-            Check(plan.lower[a].x>=12 && plan.lower[a].x+plan.lower[a].width<=width-15,"inside the lower half"+tag);
-            for(std::size_t b=a+1;b<plan.lower.size();++b)Check(!Overlap(plan.lower[a],plan.lower[b]),"no overlap"+tag);
-        }
-    }
     // A wide window gives the places of the fixed numbers this layout replaced.
     for(const int width:{1400,1920,3000}){
         const auto plan=PlanPreviewButtons(width);

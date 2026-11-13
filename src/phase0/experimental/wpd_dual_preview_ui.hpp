@@ -200,9 +200,8 @@ int PreviewLowerShift(int client_width); // how far the rows of buttons push the
 int PreviewTopShift(int client_width); // the same for the two Live panes (defined below)
 #endif
 #if defined(A0_ENABLE_WPD_RECALIBRATION)
-inline constexpr bool kPreviewWithRecalibration=true;   // the calibration entrance (#434) takes a place among the lower buttons
-#else
-inline constexpr bool kPreviewWithRecalibration=false;
+HWND recal_enter_button{};   // the calibration entrance (#434): wpd_recalibration_ui.hpp makes it, LayoutRecalibrationButtons places it
+inline constexpr int kRecalEnterWidth=200,kRecalEntranceRoom=kRecalEnterWidth+kLayoutGap+kLayoutMargin;   // the entrance and the room the status text leaves for it
 #endif
 void CheckButtonLayouts(const std::function<void(bool)>& check); // the button layout checks of the window smokes (defined before them)
 #if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
@@ -493,11 +492,11 @@ bool FinishPreview(){
     all_sessions_passed=all_sessions_passed && passed;return passed;
 }
 // How far the wrapped rows of buttons push the content under them (preview_button_layout.hpp): the Live panes, and the lower half.
-int PreviewTopShift(int client_width){return PlanPreviewButtons(client_width,kPreviewWithRecalibration).top_shift;}
-int PreviewLowerShift(int client_width){return PlanPreviewButtons(client_width,kPreviewWithRecalibration).lower_shift;}
+int PreviewTopShift(int client_width){return PlanPreviewButtons(client_width).top_shift;}
+int PreviewLowerShift(int client_width){return PlanPreviewButtons(client_width).lower_shift;}
 void MoveBox(HWND button,const LayoutBox& box,int y_offset=0){if(button)MoveWindow(button,box.x,box.y+y_offset,box.width,box.height,TRUE);}
 void LayoutButtons(HWND hwnd){
-    RECT rect{};GetClientRect(hwnd,&rect);const auto plan=PlanPreviewButtons(rect.right,kPreviewWithRecalibration);const int middle=rect.bottom/2;
+    RECT rect{};GetClientRect(hwnd,&rect);const auto plan=PlanPreviewButtons(rect.right);const int middle=rect.bottom/2;
     for(int i=0;i<2;++i){
         const auto& boxes=plan.pane[static_cast<std::size_t>(i)];
         for(int j=0;j<3;++j)MoveBox(focus_buttons[i][j],boxes[static_cast<std::size_t>(j)]);
@@ -517,7 +516,6 @@ void LayoutButtons(HWND hwnd){
     LayoutSettingsWriteButtons(rect);
 #endif
 #if defined(A0_ENABLE_WPD_RECALIBRATION)
-    MoveBox(recal_enter_button,plan.lower[kLowerRecal],middle);
     LayoutRecalibrationButtons(rect);
 #endif
 }
@@ -780,6 +778,9 @@ RECT PreviewStatusRect(const RECT& client){
     RECT rect{12,client.bottom/2+kLowerStatusTop,client.right-12,client.bottom/2+kLowerStatusBottom};
 #if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
     rect.right=std::max<LONG>(rect.left+100,rect.right-300); // leave room for the probe button
+#endif
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+    rect.right=std::max<LONG>(rect.left+100,rect.right-kRecalEntranceRoom); // leave room for the calibration entrance (#434)
 #endif
     return rect;
 }
