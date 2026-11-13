@@ -106,7 +106,7 @@ void Sentences() {
         distinct.insert(RecalibrationFindingSentence({FindingClass::rejected, std::string(rc::RefusalCode(r)), {}}).reason);
     }
     CHECK(distinct.size() == 12);   // twelve codes, twelve different sentences (the unchecked variant of reestimate-not-verified is a thirteenth)
-    const char* lane[] = {"no-v3-condition", "staging-exists", "live-not-stopped", "decode-failed", "hash-mismatch", "size-mismatch", "profile-unreadable", "out-of-memory", "job-failed",
+    const char* lane[] = {"no-v3-condition", "staging-exists", "staging-in-settings", "live-not-stopped", "decode-failed", "hash-mismatch", "size-mismatch", "profile-unreadable", "out-of-memory", "job-failed",
         "gate-undetermined", "gate-unmeasurable", "gate-not-run", "gate-fail", "sample-estimate-undetermined", "sample-estimate-out-of-envelope", "sample-skipped", "sample-failed"};
     for (const auto* code : lane) {
         const auto s = RecalibrationFindingSentence({FindingClass::rejected, code, {}});

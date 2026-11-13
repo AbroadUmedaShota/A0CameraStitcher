@@ -75,6 +75,13 @@ std::map<std::string, std::string> Snapshot(const fs::path& folder) {
         if (entry.is_regular_file()) files[fs::relative(entry.path(), folder).generic_string()] = ReadAll(entry.path());
     return files;
 }
+// Every entry of a folder, folders included (Snapshot holds only the files): two listings are equal when nothing was added or removed.
+std::vector<std::string> Listing(const fs::path& folder) {
+    std::vector<std::string> names;
+    for (const auto& entry : fs::recursive_directory_iterator(folder)) names.push_back(fs::relative(entry.path(), folder).generic_string());
+    std::sort(names.begin(), names.end());
+    return names;
+}
 fs::path root;
 fs::path NewFolder(const std::string& name) {
     const auto path = root / name;
@@ -356,6 +363,30 @@ void JobRefusals(const Pair& pair) {
         { std::ofstream(r.staging_folder / "keep.txt") << "kept"; }
         const auto o = RunRecalibrationJob(r);
         CHECK(!o.ready && HasCode(o, "staging-exists") && ReadAll(r.staging_folder / "keep.txt") == "kept" && Snapshot(r.staging_folder).size() == 1);
+    }
+    {   // A staging folder inside the settings folder (a record folder among the revisions would make the reader refuse the whole row of
+        // revisions) is refused before anything is made; the bytes and the listing of the settings folder stay as they were.
+        const auto revisions = settings / std::string(m2e::kFixedCompositeRevisionFolderName);
+        const auto listing = Listing(settings);
+        const struct {const char* name; fs::path staging;} inside[] = {
+            {"directly in the settings folder", settings / "staging-inside"},
+            {"in the folder of the revisions", revisions / "staging-inside"},
+            {"in the revisions, by a path with a parent step", revisions / ".." / std::string(m2e::kFixedCompositeRevisionFolderName) / "staging-inside"},
+        };
+        for (const auto& c : inside) {
+            auto r = Request(settings, pair, "unused", FakeComputation(Fake::ready));
+            r.staging_folder = c.staging;
+            const auto o = RunRecalibrationJob(r);
+            if (!(!o.ready && !o.candidate && HasCode(o, "staging-in-settings"))) std::cerr << "not refused: " << c.name << std::endl;
+            CHECK(!o.ready && !o.candidate && HasCode(o, "staging-in-settings") && OnlyClass(o, FindingClass::no_candidate));
+            CHECK(!fs::exists(settings / "staging-inside") && !fs::exists(revisions / "staging-inside") && HasLine(o.screen_lines, "設定のフォルダの中にあります"));
+            CHECK(Snapshot(settings) == before && Listing(settings) == listing && Active(settings).has_value());
+        }
+        // A sibling whose name only starts the same way is not inside.
+        auto sibling = Request(settings, pair, "staging-sibling", FakeComputation(Fake::no_overlap));
+        sibling.staging_folder = settings.parent_path() / (settings.filename().string() + "-record");
+        const auto s = RunRecalibrationJob(sibling);
+        CHECK(!HasCode(s, "staging-in-settings") && HasCode(s, "no-overlap") && fs::exists(sibling.staging_folder / "recalibration-report.json"));
     }
     {   // No condition v3 in the settings: refused before the staging folder is made.
         const auto empty = NewFolder("settings-empty");

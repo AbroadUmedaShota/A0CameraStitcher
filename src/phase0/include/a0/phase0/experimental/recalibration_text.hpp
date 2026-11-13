@@ -114,6 +114,7 @@ struct RecalibrationSentence {std::string reason,remedy;};
     // Lane-level codes (before or after the computation).
     if(c=="no-v3-condition")return {"校正の元になる条件（v3）がありません","技術担当の作業が要ります"};
     if(c=="staging-exists")return {"校正用のフォルダが既にあります","新しいフォルダを指定してください（何も書いていません）"};
+    if(c=="staging-in-settings")return {"校正用のフォルダが、設定のフォルダの中にあります","設定のフォルダの外に新しいフォルダを指定してください（何も書いていません）"};
     if(c=="live-not-stopped")return {"ライブが止まっていません","ライブを止めてからやり直してください"};
     if(c=="decode-failed")return {"撮影した画像を読めませんでした","撮り直してください"};
     if(c=="hash-mismatch")return {"画像が撮影の記録と一致しません","撮り直してください"};

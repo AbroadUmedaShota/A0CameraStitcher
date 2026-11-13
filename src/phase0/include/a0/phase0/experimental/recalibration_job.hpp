@@ -352,6 +352,19 @@ inline std::string ReportJson(const ReportInput& in){
     return s.str();
 }
 
+// True when `path` is `folder` or lies below it, compared on the real places (".." and links resolved as far as the paths exist) and by
+// whole path elements, so a sibling whose name starts the same way does not count.
+inline bool IsInsideFolder(const fs::path& path,const fs::path& folder){
+    std::error_code ec;
+    auto inner=fs::weakly_canonical(path,ec);
+    if(ec)inner=fs::absolute(path,ec).lexically_normal();
+    auto outer=fs::weakly_canonical(folder,ec);
+    if(ec)outer=fs::absolute(folder,ec).lexically_normal();
+    if(inner.empty() || outer.empty())return false;
+    const auto relative=inner.lexically_relative(outer);
+    return !relative.empty() && *relative.begin()!=fs::path("..");
+}
+
 inline bool IsCanonicalOriginal(const fs::path& file,const wchar_t* alias){
     return file.filename()==L"original.jpg" && file.parent_path().filename()==alias;
 }
@@ -416,6 +429,9 @@ inline bool IsCanonicalOriginal(const fs::path& file,const wchar_t* alias){
     };
 
     if(!request.live_view_stopped){find(FindingClass::no_candidate,"live-not-stopped");return finish();}
+    // The staging folder is never inside the settings folder: a record folder made among the revisions would make the reader refuse the
+    // whole row of revisions. Nothing is made.
+    if(IsInsideFolder(request.staging_folder,request.settings_folder)){find(FindingClass::no_candidate,"staging-in-settings");return finish();}
     {
         std::error_code ec;
         // A path that is not there is reported by some libraries as "not found" with an error code set: the type decides, not the code.
