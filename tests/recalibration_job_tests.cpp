@@ -1,0 +1,855 @@
+// The job and the confirmation of the recalibration of camera B from one pair (#434 lane B; recalibration_job.hpp, recalibration_cli.hpp).
+//
+// The computation (the wide search, the six-degree estimate and the check on the new profile; about a minute on a real pair) is replaced by a
+// stand-in that returns at once, so the rest runs in seconds: reading the condition, decoding the originals, the sample composite with the
+// candidate as the selection, the classification of what was found (checked / not checked / found not to fit), the record in the staging
+// folder, and the confirmation that writes into the settings folder. The frames are flat JPEGs of the full sensor size: a flat sheet cannot be
+// measured, so the sample comes back "not checked" and the unchecked path (a warning, an acknowledgement) is the one that runs here.
+//
+// Argument 1 is the shared rig profile v2 fixture folder, 2 the StillReview executable, 3 `on` when StillReview was built with
+// A0_BUILD_WPD_RECALIBRATION and `off` otherwise. Argument 4 `full` (not run by ctest) adds a whole run with the real computation on a rendered
+// pair in which both cameras were moved (A and B by different amounts). The settings folders are temporary copies.
+// Every range, line and tolerance below is a value of this test; the rig and the paper are synthetic.
+#include "a0/common/protocol_json.hpp"
+#include "a0/m2/experimental/fixed_composite_condition_v2.hpp"
+#include "a0/m2/experimental/fixed_composite_condition_v3.hpp"
+#include "a0/m2/experimental/fixed_composite_selection.hpp"
+#include "a0/m2/rig_profile_v2.hpp"
+#include "a0/phase0/experimental/fixed_composite_tool_v3.hpp"
+#include "a0/phase0/experimental/pair_review_synthetic.hpp"
+#include "a0/phase0/experimental/recalibration_cli.hpp"
+#include "a0/phase0/experimental/recalibration_job.hpp"
+
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cmath>
+#include <cstdlib>
+#include <fstream>
+#include <iostream>
+#include <iterator>
+#include <map>
+#include <numbers>
+#include <sstream>
+#include <string>
+#include <thread>
+#include <vector>
+
+using namespace a0::phase0::experimental;
+namespace m2e = a0::m2::experimental;
+namespace rc = a0::m2::experimental::recalibration;
+namespace cr = a0::m2::experimental::content_registration;
+namespace gate = a0::m2::experimental::registration_gate;
+namespace render = a0::m2::render;
+namespace ps = a0::phase0::experimental::pair_synthetic;
+namespace fs = std::filesystem;
+namespace json = a0::common::protocol_json;
+using a0::m2::RigProfileV2;
+
+namespace {
+int checks = 0, failures = 0;
+void Check(bool value, const char* what, int line) {
+    ++checks;
+    if (!value) { ++failures; std::cerr << "FAILED (line " << line << "): " << what << '\n'; }
+}
+#define CHECK(expr) Check((expr), #expr, __LINE__)
+bool Has(const std::string& text, const std::string& part) { return text.find(part) != std::string::npos; }
+bool HasLine(const std::vector<std::string>& lines, const std::string& part) {
+    for (const auto& l : lines) if (Has(l, part)) return true;
+    return false;
+}
+double Since(std::chrono::steady_clock::time_point t) { return std::chrono::duration<double>(std::chrono::steady_clock::now() - t).count(); }
+
+const auto kNow = std::chrono::system_clock::time_point{std::chrono::sys_days{std::chrono::year{2000} / 1 / 1} + std::chrono::hours(12)};
+const m2e::FixedCompositeSha256 kHash = ps::Hash();
+constexpr const char* kMeasuredAt = "2000-01-01T00:00:00Z";
+
+std::string ReadAll(const fs::path& path) { std::ifstream in(path, std::ios::binary); return {std::istreambuf_iterator<char>(in), {}}; }
+std::string HashOf(const std::string& text) { return kHash(std::vector<unsigned char>(text.begin(), text.end())); }
+
+// Every file of a folder, by relative name, with its bytes: two snapshots are equal when nothing was added, removed or changed.
+std::map<std::string, std::string> Snapshot(const fs::path& folder) {
+    std::map<std::string, std::string> files;
+    if (!fs::exists(folder)) return files;
+    for (const auto& entry : fs::recursive_directory_iterator(folder))
+        if (entry.is_regular_file()) files[fs::relative(entry.path(), folder).generic_string()] = ReadAll(entry.path());
+    return files;
+}
+fs::path root;
+fs::path NewFolder(const std::string& name) {
+    const auto path = root / name;
+    fs::create_directories(path);
+    return path;
+}
+void CopyFolder(const fs::path& from, const fs::path& to) { fs::copy(from, to, fs::copy_options::recursive); }
+
+struct JsonFailure { [[noreturn]] static void Fail(std::string_view code, std::string_view) { throw std::invalid_argument("test json " + std::string(code)); } };
+json::JsonValue Tree(const std::string& text) { return json::BasicJsonParser<JsonFailure>(text).Parse(); }
+const json::JsonValue& At(const json::JsonValue& v, const char* key) { return v.object.at(key); }
+
+// ---- The rig and the settings (the shared fixture, as in the recalibration test of the computation) ----
+std::string fixture;
+std::string RigText() {
+    using ps::detail::WithMatrix;
+    return WithMatrix(WithMatrix(fixture, 0, {10, 0, 100, 0, 10, 100}), 1, {10, 0, -5660, 0, 10, 100});
+}
+// 180 mm x 160 mm at 254 DPI: 1800 x 1600 pixels, the synthetic rig's seam column 900 (X = 650 mm).
+render::OutputRaster Raster() { return ps::Raster(560000, 100000, 740000, 260000, 254); }
+void TestRanges(m2e::FixedCompositeConditionV3& c) {
+    c.registration.envelope = {5, 1, 0.5, 2};
+    c.registration.surface_envelope = m2e::SurfaceEnvelope{10, 2};
+    c.registration.limits.convergence_px = 0.05;
+    c.registration.limits.minimum_unique_blocks = 2;
+}
+// A settings folder with the profile and revision r000001 (this test's ranges).
+fs::path MakeSettings(const std::string& name) {
+    const auto folder = NewFolder(name);
+    auto c = ps::SampleCondition(folder, RigText(), m2e::MountOrientation::normal, Raster());
+    TestRanges(c);
+    m2e::ValidateFixedCompositeConditionV3(c);
+    const auto revisions = folder / std::string(m2e::kFixedCompositeRevisionFolderName);
+    fs::create_directories(revisions);
+    m2e::WriteFixedCompositeConditionV3(revisions, c);
+    return folder;
+}
+std::optional<m2e::LoadedFixedCompositeConditionV3> Active(const fs::path& settings) {
+    return m2e::LoadActiveFixedCompositeRevisionV3(settings / std::string(m2e::kFixedCompositeRevisionFolderName), kHash);
+}
+
+render::Matrix3 MatrixOf(const render::CameraProjection& c) { return c.document_to_image; }
+render::Point Project(const render::Matrix3& h, render::Point x) {
+    render::Point p{};
+    if (!render::TryTransform(h, x, p)) throw std::runtime_error("projection failed");
+    return p;
+}
+// The pose of B for a camera moved by `shift_mm` along the sheet's x, found on the model.
+cr::PoseParameters PoseForShift(const render::CameraProjection& camera_b, double shift_mm) {
+    const cr::PoseModel model(camera_b);
+    const render::Point x0{934, 236};
+    const auto target = Project(MatrixOf(camera_b), {x0.x - shift_mm, x0.y});
+    const auto at = [&](double tx) { return Project(model.CameraHomography(cr::PoseParameters{0, 0, 0, tx, 0, 0}), x0).x - target.x; };
+    double a = 0, b = 1;
+    for (int i = 0; i < 6; ++i) {
+        const double fa = at(a), fb = at(b);
+        if (fa == fb) break;
+        const double c = b - fb * (b - a) / (fb - fa);
+        a = b; b = c;
+    }
+    return cr::PoseParameters{0, 0, 0, b, 0, 0};
+}
+
+// ---- The stand-in for the computation ----
+enum class Fake { ready, check_not_trusted, check_out_of_range, displacement, no_overlap, tilt, throws, throws_memory };
+constexpr const char* kRecord = "{\"schema\":\"test-record\"}";
+RecalibrationComputation FakeComputation(Fake mode, std::vector<std::string>* stages = nullptr) {
+    RecalibrationComputation c;
+    c.propose = [mode, stages](const rc::Inputs& in) {
+        // The stand-in announces the stages the real computation announces; ProposeFromPose announces bake and check itself.
+        if (in.progress) for (const auto s : {rc::Stage::wide_search, rc::Stage::fine_fit}) in.progress(s);
+        if (stages) stages->push_back("propose");
+        if (mode == Fake::throws) throw std::runtime_error("a failure inside the computation (C:\\secret\\path\\x.jpg)");
+        if (mode == Fake::throws_memory) throw std::bad_alloc();
+        const auto parent = RigProfileV2::Parse(in.profile_bytes).ValidateCalibrationForEvaluation(in.active.raster, render::Resampling::bilinear);
+        const auto pose = PoseForShift(parent.camera_b, 30.0);
+        const rc::ProfileFit fit{0.1, 0.3, 50};
+        rc::Proposal p;
+        if (mode == Fake::no_overlap) {
+            p.refusals = {rc::Refusal::no_overlap};
+            p.detail = "wide search: insufficient-tiles";
+            return p;
+        }
+        p = rc::ProposeFromPose(in, pose, fit, kRecord);   // the real pieces after the estimate: the candidate and the creation check
+        if (in.progress) in.progress(rc::Stage::verify);
+        p.estimate.state = cr::RegistrationState::verified;
+        p.estimate.has_estimate = true;
+        p.verification.performed = true;
+        p.verification.limit_px = in.active.registration.limits.convergence_px;
+        p.verification.state = cr::RegistrationState::verified;
+        p.verification.passed = true;
+        switch (mode) {
+        case Fake::ready: p.ready = p.candidate.has_value() && p.refusals.empty(); break;
+        case Fake::check_not_trusted:
+            // What the computation does when the estimator on the new profile cannot be trusted: no candidate, one refusal.
+            p.candidate.reset(); p.ready = false; p.refusals = {rc::Refusal::reestimate_not_verified};
+            p.verification.state = cr::RegistrationState::undetermined; p.verification.passed = false; p.verification.reasons = {"too-few-points"};
+            break;
+        case Fake::check_out_of_range:
+            p.candidate.reset(); p.ready = false; p.refusals = {rc::Refusal::reestimate_not_verified};
+            p.verification.state = cr::RegistrationState::out_of_envelope; p.verification.passed = false;
+            break;
+        case Fake::displacement:
+            p.candidate.reset(); p.ready = false; p.refusals = {rc::Refusal::reestimate_displacement};
+            p.verification.passed = false; p.verification.seam_displacement_px = 3.0;
+            break;
+        case Fake::tilt:
+            p.candidate.reset(); p.ready = false; p.refusals = {rc::Refusal::estimate_not_verified, rc::Refusal::tilt_exceeded};
+            p.estimate.state = cr::RegistrationState::out_of_envelope; p.estimate.reasons = {"residual-shape"};
+            break;
+        default: break;
+        }
+        return p;
+    };
+    return c;
+}
+
+// ---- The pair ----
+struct Pair {ps::Frames frames; fs::path plain_a, plain_b;};
+Pair MakePair(const std::string& name) {
+    const auto dir = NewFolder(name);
+    Pair pair;
+    pair.frames = ps::WriteFrames(dir, ps::Flat(128), ps::Flat(131));
+    pair.plain_a = dir / "first.jpg"; pair.plain_b = dir / "second.jpg";
+    fs::copy_file(pair.frames.a, pair.plain_a); fs::copy_file(pair.frames.b, pair.plain_b);
+    return pair;
+}
+RecalibrationJobRequest Request(const fs::path& settings, const Pair& pair, const std::string& staging, RecalibrationComputation computation, bool plain_names = false) {
+    RecalibrationJobRequest r;
+    r.original_a = plain_names ? pair.plain_a : pair.frames.a;
+    r.original_b = plain_names ? pair.plain_b : pair.frames.b;
+    r.pair_id = "pair-0042"; r.measured_at_utc = kMeasuredAt;
+    r.settings_folder = settings; r.staging_folder = root / staging;
+    r.hash = kHash; r.live_view_stopped = true; r.thread_count = 2; r.now = kNow;
+    r.computation = std::move(computation);
+    return r;
+}
+bool Plain(const std::string& text) {
+    for (const std::string bad : {root.string(), root.generic_string(), std::string(":\\"), std::string("/Users"), std::string("CAM-A"), std::string("CAM-B"), std::string("original.jpg")})
+        if (!bad.empty() && Has(text, bad)) return false;
+    return true;
+}
+bool AllPlain(const std::vector<std::string>& lines) {
+    for (const auto& l : lines) if (!Plain(l)) return false;
+    return true;
+}
+bool OnlyClass(const RecalibrationJobOutcome& o, FindingClass k) {
+    return !o.findings.empty() && std::all_of(o.findings.begin(), o.findings.end(), [&](const RecalibrationFinding& f) { return f.klass == k; });
+}
+bool HasCode(const RecalibrationJobOutcome& o, const std::string& code) {
+    return std::any_of(o.findings.begin(), o.findings.end(), [&](const RecalibrationFinding& f) { return f.code == code; });
+}
+
+// ---- 1. The decisions, without files ----
+void Decisions() {
+    // Every refusal of the computation, and how it counts.
+    struct Row {rc::Refusal refusal; cr::RegistrationState check; FindingClass klass;};
+    const Row rows[] = {
+        {rc::Refusal::no_overlap, cr::RegistrationState::verified, FindingClass::no_candidate},
+        {rc::Refusal::estimate_failed, cr::RegistrationState::verified, FindingClass::no_candidate},
+        {rc::Refusal::estimate_not_verified, cr::RegistrationState::verified, FindingClass::no_candidate},
+        {rc::Refusal::stopped, cr::RegistrationState::verified, FindingClass::no_candidate},
+        {rc::Refusal::tilt_exceeded, cr::RegistrationState::verified, FindingClass::rejected},
+        {rc::Refusal::height_exceeded, cr::RegistrationState::verified, FindingClass::rejected},
+        {rc::Refusal::profile_invalid, cr::RegistrationState::verified, FindingClass::rejected},
+        {rc::Refusal::raster_too_large, cr::RegistrationState::verified, FindingClass::rejected},
+        {rc::Refusal::raster_outside_sheet, cr::RegistrationState::verified, FindingClass::rejected},
+        {rc::Refusal::creation_check_failed, cr::RegistrationState::verified, FindingClass::rejected},
+        {rc::Refusal::reestimate_displacement, cr::RegistrationState::verified, FindingClass::rejected},
+        {rc::Refusal::reestimate_not_verified, cr::RegistrationState::out_of_envelope, FindingClass::rejected},
+        {rc::Refusal::reestimate_not_verified, cr::RegistrationState::undetermined, FindingClass::unverified},
+    };
+    for (const auto& row : rows) {
+        rc::Proposal p;
+        p.refusals = {row.refusal};
+        p.verification.performed = true;
+        p.verification.state = row.check;
+        const auto f = ClassifyProposal(p);
+        CHECK(f.size() == 1 && f[0].klass == row.klass && f[0].code == std::string(rc::RefusalCode(row.refusal)));
+    }
+    {   // The estimator's first reason sharpens the finding.
+        rc::Proposal p;
+        p.refusals = {rc::Refusal::estimate_not_verified};
+        p.estimate.reasons = {"unique-blocks", "too-few-points"};
+        CHECK(ClassifyProposal(p).front().reason == "unique-blocks");
+        rc::Proposal q;
+        q.refusals = {rc::Refusal::reestimate_not_verified};
+        q.verification.state = cr::RegistrationState::undetermined;
+        q.verification.reasons = {"too-few-points"};
+        CHECK(ClassifyProposal(q).front().reason == "too-few-points");
+    }
+    // Only a check that could not be made, with a pose to rebuild from, is rebuilt and offered as unchecked.
+    {
+        rc::Proposal p;
+        p.refusals = {rc::Refusal::reestimate_not_verified};
+        p.verification.performed = true; p.verification.state = cr::RegistrationState::undetermined;
+        p.has_pose = true; p.estimate_record_text = kRecord;
+        CHECK(OnlyUnverifiedCheck(p));
+        auto no_pose = p; no_pose.has_pose = false;
+        auto no_record = p; no_record.estimate_record_text.clear();
+        auto wrong = p; wrong.verification.state = cr::RegistrationState::out_of_envelope;
+        auto more = p; more.refusals.push_back(rc::Refusal::tilt_exceeded);
+        auto ready = p; ready.ready = true;
+        CHECK(!OnlyUnverifiedCheck(no_pose) && !OnlyUnverifiedCheck(no_record) && !OnlyUnverifiedCheck(wrong) && !OnlyUnverifiedCheck(more) && !OnlyUnverifiedCheck(ready));
+    }
+    // The sample: the gate and the estimate.
+    {
+        RecalibrationSampleFacts s;
+        s.composed = true; s.estimate = cr::RegistrationState::verified; s.gate = gate::GateState::pass;
+        CHECK(ClassifySample(s).empty());
+        auto one = [&](auto edit) { auto t = s; edit(t); return ClassifySample(t); };
+        auto f = one([](auto& t) { t.gate = gate::GateState::undetermined; });
+        CHECK(f.size() == 1 && f[0].klass == FindingClass::unverified && f[0].code == "gate-undetermined");
+        f = one([](auto& t) { t.gate = gate::GateState::not_run; });
+        CHECK(f.size() == 1 && f[0].klass == FindingClass::unverified && f[0].code == "gate-not-run");
+        f = one([](auto& t) { t.gate = gate::GateState::fail; t.gate_cause = gate::GateCause::displacement; });
+        CHECK(f.size() == 1 && f[0].klass == FindingClass::rejected && f[0].code == "gate-fail");
+        for (const auto cause : {gate::GateCause::lift, gate::GateCause::pose, gate::GateCause::displacement, gate::GateCause::none}) {
+            f = one([&](auto& t) { t.gate = gate::GateState::fail; t.gate_cause = cause; });
+            CHECK(f.size() == 1 && f[0].klass == FindingClass::rejected && f[0].code == "gate-fail");
+        }
+        // A failure because the seam could not be measured is "not checked" (a paper with few marks), not "over the line".
+        f = one([](auto& t) { t.gate = gate::GateState::fail; t.gate_cause = gate::GateCause::unmeasurable; });
+        CHECK(f.size() == 1 && f[0].klass == FindingClass::unverified && f[0].code == "gate-unmeasurable");
+        f = one([](auto& t) { t.estimate = cr::RegistrationState::undetermined; });
+        CHECK(f.size() == 1 && f[0].klass == FindingClass::unverified && f[0].code == "sample-estimate-undetermined");
+        f = one([](auto& t) { t.estimate = cr::RegistrationState::out_of_envelope; });
+        CHECK(f.size() == 1 && f[0].klass == FindingClass::rejected && f[0].code == "sample-estimate-out-of-envelope");
+        f = one([](auto& t) { t.estimate = cr::RegistrationState::undetermined; t.gate = gate::GateState::fail; });   // a failure beside a doubt stays a failure
+        CHECK(f.size() == 2);
+        f = one([](auto& t) { t.composed = false; t.threw = true; });
+        CHECK(f.size() == 1 && f[0].code == "sample-failed" && f[0].klass == FindingClass::rejected);
+        f = one([](auto& t) { t.composed = false; t.skip = m2e::FixedCompositeSkip::seam_outside_overlap; });
+        CHECK(f.size() == 1 && f[0].code == "sample-skipped" && f[0].klass == FindingClass::rejected);
+        f = one([](auto& t) { t.composed = false; t.out_of_memory = true; });
+        CHECK(f.size() == 1 && f[0].code == "out-of-memory");
+        f = one([](auto& t) { t.composed = false; });
+        CHECK(f.size() == 1 && f[0].code == "sample-failed");
+    }
+    // The verdict, for each policy. Nothing without a candidate is usable; anything found wrong is not; only a doubt follows the policy.
+    {
+        const RecalibrationFinding doubt{FindingClass::unverified, "gate-undetermined", {}}, wrong{FindingClass::rejected, "gate-fail", {}}, none{FindingClass::no_candidate, "no-overlap", {}};
+        for (const auto policy : {UnverifiedPolicy::confirm_with_warning, UnverifiedPolicy::refuse_to_confirm}) {
+            CHECK(DecideVerdict({}, policy, true) == RecalibrationVerdict::usable);
+            CHECK(DecideVerdict({}, policy, false) == RecalibrationVerdict::unusable);
+            CHECK(DecideVerdict({doubt}, policy, false) == RecalibrationVerdict::unusable);
+            CHECK(DecideVerdict({wrong}, policy, true) == RecalibrationVerdict::unusable);
+            CHECK(DecideVerdict({none}, policy, true) == RecalibrationVerdict::unusable);
+            CHECK(DecideVerdict({doubt, wrong}, policy, true) == RecalibrationVerdict::unusable);
+        }
+        CHECK(DecideVerdict({doubt}, UnverifiedPolicy::confirm_with_warning, true) == RecalibrationVerdict::usable_unverified);
+        CHECK(DecideVerdict({doubt, doubt}, UnverifiedPolicy::confirm_with_warning, true) == RecalibrationVerdict::usable_unverified);
+        CHECK(DecideVerdict({doubt}, UnverifiedPolicy::refuse_to_confirm, true) == RecalibrationVerdict::unusable);
+    }
+    // The three decisions of the owner, in one place each.
+    CHECK(kRecalibrationSeamPlacement == rc::SeamPlacement::band_center);
+    CHECK(kRecalibrationRasterPlacement == rc::RasterPlacement::follow_camera_b);
+    CHECK(kRecalibrationUnverifiedPolicy == UnverifiedPolicy::confirm_with_warning);
+    const RecalibrationJobRequest fresh;
+    CHECK(fresh.seam == kRecalibrationSeamPlacement && fresh.raster == kRecalibrationRasterPlacement && fresh.unverified_policy == kRecalibrationUnverifiedPolicy);
+    CHECK(!fresh.live_view_stopped && fresh.sample_window == kRecalibrationSampleWindow);
+}
+
+// ---- 2. Refusals that need no sample ----
+void JobRefusals(const Pair& pair) {
+    const auto settings = MakeSettings("settings-refusals");
+    const auto before = Snapshot(settings);
+    {   // The live view must be stopped: the job does not start, and makes nothing.
+        auto r = Request(settings, pair, "staging-live", FakeComputation(Fake::ready));
+        r.live_view_stopped = false;
+        const auto o = RunRecalibrationJob(r);
+        CHECK(o.verdict == RecalibrationVerdict::unusable && !o.ready && !o.candidate && HasCode(o, "live-not-stopped") && !fs::exists(r.staging_folder));
+        CHECK(Has(o.screen_lines.front(), "使えません") && HasLine(o.screen_lines, "ライブを止めて"));
+    }
+    {   // A staging folder that exists is refused, and nothing in it is touched.
+        auto r = Request(settings, pair, "staging-taken", FakeComputation(Fake::ready));
+        fs::create_directories(r.staging_folder);
+        { std::ofstream(r.staging_folder / "keep.txt") << "kept"; }
+        const auto o = RunRecalibrationJob(r);
+        CHECK(!o.ready && HasCode(o, "staging-exists") && ReadAll(r.staging_folder / "keep.txt") == "kept" && Snapshot(r.staging_folder).size() == 1);
+    }
+    {   // No condition v3 in the settings: refused before the staging folder is made.
+        const auto empty = NewFolder("settings-empty");
+        auto r = Request(empty, pair, "staging-nov3", FakeComputation(Fake::ready));
+        const auto o = RunRecalibrationJob(r);
+        CHECK(!o.ready && HasCode(o, "no-v3-condition") && !fs::exists(r.staging_folder) && HasLine(o.screen_lines, "校正の元になる条件（v3）がありません"));
+        // A condition of the older kind (a v1/v2 file beside the revisions) is the same: there is no v3 in force.
+        const auto both = NewFolder("settings-both");
+        CopyFolder(settings, both / "x");
+        auto r2 = Request(both / "x", pair, "staging-nov3b", FakeComputation(Fake::ready));
+        { std::ofstream(both / "x" / "wpd-fixed-composite-condition.json") << "{}"; }
+        CHECK(HasCode(RunRecalibrationJob(r2), "no-v3-condition") && !fs::exists(r2.staging_folder));
+    }
+    {   // A hash that is not the file's.
+        auto r = Request(settings, pair, "staging-hash", FakeComputation(Fake::ready));
+        r.sha_a = std::string(64, 'a');
+        const auto o = RunRecalibrationJob(r);
+        CHECK(!o.ready && HasCode(o, "hash-mismatch") && fs::exists(r.staging_folder / "recalibration-report.json") && !fs::exists(r.staging_folder / "review"));
+    }
+    {   // A file that is no JPEG, and a JPEG of the wrong size.
+        const auto dir = NewFolder("bad-originals");
+        ps::Frames bad{dir / "CAM-A" / "original.jpg", dir / "CAM-B" / "original.jpg", dir};
+        fs::create_directories(dir / "CAM-A"); fs::create_directories(dir / "CAM-B");
+        { std::ofstream(bad.a, std::ios::binary) << "this is not a jpeg"; }
+        fs::copy_file(pair.frames.b, bad.b);
+        auto r = Request(settings, pair, "staging-nojpeg", FakeComputation(Fake::ready));
+        r.original_a = bad.a; r.original_b = bad.b;
+        const auto o = RunRecalibrationJob(r);
+        CHECK(!o.ready && HasCode(o, "decode-failed"));
+        ps::WriteJpeg(bad.a, render::BgrImage{64, 48, std::vector<std::uint8_t>(64 * 48 * 3, 90)});
+        auto r2 = Request(settings, pair, "staging-small", FakeComputation(Fake::ready));
+        r2.original_a = bad.a; r2.original_b = bad.b;
+        CHECK(HasCode(RunRecalibrationJob(r2), "size-mismatch"));
+        auto r3 = Request(settings, pair, "staging-missing", FakeComputation(Fake::ready));
+        r3.original_a = dir / "nothing.jpg";
+        CHECK(HasCode(RunRecalibrationJob(r3), "decode-failed"));
+    }
+    {   // A stop asked for before the computation: nothing is computed.
+        std::vector<std::string> ran;
+        auto r = Request(settings, pair, "staging-stop", FakeComputation(Fake::ready, &ran));
+        std::stop_source source; source.request_stop(); r.stop = source.get_token();
+        const auto o = RunRecalibrationJob(r);
+        CHECK(!o.ready && HasCode(o, "stopped") && ran.empty() && HasLine(o.screen_lines, "中止しました"));
+    }
+    // What the computation refuses is not offered, whatever the policy; the findings say which kind of refusal it was.
+    {
+        const struct {Fake mode; const char* name; FindingClass klass; const char* code;} cases[] = {
+            {Fake::no_overlap, "staging-noov", FindingClass::no_candidate, "no-overlap"},
+            {Fake::displacement, "staging-disp", FindingClass::rejected, "reestimate-displacement"},
+            {Fake::check_out_of_range, "staging-oor", FindingClass::rejected, "reestimate-not-verified"},
+        };
+        for (const auto& c : cases) {
+            for (const auto policy : {UnverifiedPolicy::confirm_with_warning, UnverifiedPolicy::refuse_to_confirm}) {
+                auto r = Request(settings, pair, std::string(c.name) + (policy == UnverifiedPolicy::confirm_with_warning ? "-c" : "-r"), FakeComputation(c.mode));
+                r.unverified_policy = policy;
+                const auto o = RunRecalibrationJob(r);
+                CHECK(o.verdict == RecalibrationVerdict::unusable && !o.ready && !o.candidate && HasCode(o, c.code));
+                CHECK(std::any_of(o.findings.begin(), o.findings.end(), [&](const RecalibrationFinding& f) { return f.code == c.code && f.klass == c.klass; }));
+                CHECK(!fs::exists(r.staging_folder / "review") && !fs::exists(r.staging_folder / "candidate-revision.json") && fs::exists(r.staging_folder / "recalibration-report.json"));
+                CHECK(o.screen_lines.front() == "この校正は使えません");
+                // Not usable is not confirmable, even with the acknowledgement.
+                const auto confirmed = ConfirmRecalibration(o, settings, kHash, {true});
+                CHECK(!confirmed.written && confirmed.reason == "not-usable");
+            }
+        }
+        auto r = Request(settings, pair, "staging-tilt", FakeComputation(Fake::tilt));
+        const auto o = RunRecalibrationJob(r);
+        CHECK(!o.ready && HasCode(o, "tilt-exceeded") && HasCode(o, "estimate-not-verified") && HasLine(o.screen_lines, "チャートでの校正が要ります") && HasLine(o.screen_lines, "浮いている"));
+    }
+    {   // A failure inside the computation (also memory) is an outcome, not an exception; the text of the failure does not reach the screen.
+        auto r = Request(settings, pair, "staging-throw", FakeComputation(Fake::throws));
+        const auto o = RunRecalibrationJob(r);
+        CHECK(!o.ready && HasCode(o, "job-failed") && AllPlain(o.screen_lines) && AllPlain(o.log_lines) && !HasLine(o.screen_lines, "secret") && !HasLine(o.log_lines, "secret"));
+        auto r2 = Request(settings, pair, "staging-oom", FakeComputation(Fake::throws_memory));
+        const auto m = RunRecalibrationJob(r2);
+        CHECK(!m.ready && HasCode(m, "out-of-memory") && HasLine(m.screen_lines, "メモリが足りませんでした"));
+    }
+    {   // Mistakes of the caller are exceptions.
+        auto r = Request(settings, pair, "staging-bad", FakeComputation(Fake::ready));
+        auto no_hash = r; no_hash.hash = nullptr;
+        auto bad_time = r; bad_time.measured_at_utc = "yesterday";
+        auto no_path = r; no_path.staging_folder.clear();
+        for (const auto* request : {&no_hash, &bad_time, &no_path}) {
+            bool threw = false;
+            try { (void)RunRecalibrationJob(*request); } catch (const std::invalid_argument&) { threw = true; }
+            CHECK(threw);
+        }
+        CHECK(!fs::exists(r.staging_folder));
+    }
+    // None of the above wrote into the settings folder.
+    CHECK(Snapshot(settings) == before);
+}
+
+// ---- 3. A whole job with a sample, and the confirmation ----
+void Reports(const RecalibrationJobOutcome& o, const fs::path& staging, const std::string& verdict, const std::string& policy) {
+    const auto report = Tree(ReadAll(staging / "recalibration-report.json"));
+    CHECK(At(report, "schema").string == "a0.pair-recalibration-report.v1" && At(report, "pairId").string == "pair-0042");
+    CHECK(At(report, "verdict").string == verdict && At(report, "unverifiedPolicy").string == policy);
+    CHECK(At(report, "unverified").boolean == (verdict == "usable-unverified"));
+    CHECK(At(report, "findings").array.size() == o.findings.size());
+    CHECK(At(report, "parent").object.at("revisionSha256").string == o.parent_sha256);
+    CHECK(At(At(report, "sample"), "gateKnown").boolean == o.facts.gate.known);
+    if (o.facts.gate.known) CHECK(At(At(report, "sample"), "gateState").string == std::string(gate::GateStateCode(o.facts.gate.state)));
+    if (o.candidate) CHECK(At(At(report, "candidate"), "revisionSha256").string == o.candidate->sha256);
+    // The report holds codes and numbers: no path, no machine identifier, no sentence.
+    const auto text = ReadAll(staging / "recalibration-report.json");
+    CHECK(Plain(text) && !Has(text, "使えません") && !Has(text, "未確認"));
+}
+
+void WholeJob(const Pair& pair) {
+    const auto settings = MakeSettings("settings-whole");
+    const auto before = Snapshot(settings);
+    std::vector<std::string> stages;
+    std::vector<double> stage_seconds;
+    auto request = Request(settings, pair, "staging-whole", FakeComputation(Fake::ready));
+    request.on_stage = [&](RecalibrationStage s, double seconds) { stages.emplace_back(RecalibrationStageCode(s)); stage_seconds.push_back(seconds); };
+    const auto began = std::chrono::steady_clock::now();
+    const auto o = RunRecalibrationJob(request);
+    std::cerr << "whole job: " << Since(began) << " s, verdict " << RecalibrationVerdictCode(o.verdict) << ", gate " << (o.facts.gate.known ? gate::GateStateCode(o.facts.gate.state) : "unknown")
+              << ", findings";
+    for (const auto& f : o.findings) std::cerr << ' ' << f.code << '(' << FindingClassCode(f.klass) << ')';
+    std::cerr << '\n';
+
+    // The stages arrive in order, with seconds that do not go back.
+    const std::vector<std::string> expected{"read-condition", "decode", "wide-search", "fine-fit", "bake", "check", "verify", "sample", "crops"};
+    if (stages != expected) { std::cerr << "stages:"; for (const auto& n : stages) std::cerr << ' ' << n; std::cerr << std::endl; }
+    CHECK(stages == expected);
+    CHECK(std::is_sorted(stage_seconds.begin(), stage_seconds.end()));
+    // The sample came back with something to show, and the flat sheet could not be measured: an unchecked calibration, with nothing found wrong.
+    CHECK(o.candidate.has_value() && o.facts.gate.known && o.facts.creation_checked);
+    CHECK(o.verdict == RecalibrationVerdict::usable_unverified && o.ready && o.unverified());
+    CHECK(OnlyClass(o, FindingClass::unverified));
+    CHECK(Has(o.screen_lines.front(), "未確認の校正"));
+    CHECK(HasLine(o.screen_lines, "継ぎ目のずれ: 確かめられませんでした") || HasLine(o.screen_lines, "継ぎ目のずれ: 確かめが行われませんでした") ||
+        HasLine(o.screen_lines, "継ぎ目のずれ: 測れない所があり、確かめられませんでした"));   // the gate's result is on the screen
+    CHECK(HasLine(o.screen_lines, "A に対する B の位置の変化: 図面の右へ約 ") && HasLine(o.screen_lines, "範囲の検査: 通りました"));
+    CHECK(o.facts.display.has_motion && std::abs(o.facts.display.motion.camera_motion_mm.x - 30.0) < 0.5);
+    CHECK(o.thumbnail.width > 0 && o.thumbnail.height > 0);
+    CHECK(AllPlain(o.screen_lines) && AllPlain(o.log_lines));
+    CHECK(HasLine(o.log_lines, "recalibration_verdict verdict=usable-unverified unverified=1") && HasLine(o.log_lines, "settings_written=0") && HasLine(o.log_lines, "camera_operations=0"));
+    CHECK(HasLine(o.log_lines, "recalibration_finding class=unverified"));
+    // The job read the settings and wrote nothing there.
+    CHECK(Snapshot(settings) == before);
+    // The record in the staging folder: what a confirmation would write, by its hashes; the sample; the report.
+    const auto& s = request.staging_folder;
+    CHECK(fs::exists(s / "review" / "uncalibrated-review.json") && fs::exists(s / "review" / "uncalibrated-review.jpg") && fs::exists(s / "recalibration-report.json"));
+    CHECK(!fs::exists(s / "sample-originals") && !fs::exists(s / "confirmation.json"));   // canonical originals are used where they are
+    if (o.candidate) {
+        const auto& c = *o.candidate;
+        CHECK(HashOf(ReadAll(s / "estimate-record.json")) == c.condition.revision.change.report_sha256.value_or(""));
+        CHECK(HashOf(ReadAll(s / "candidate-profile.json")) == c.condition.source.profile_file_sha256 && ReadAll(s / "candidate-profile.json") == c.profile_bytes);
+        CHECK(HashOf(ReadAll(s / "candidate-revision.json")) == c.sha256 && ReadAll(s / "candidate-revision.json") == c.text);
+        CHECK(c.condition.revision.sequence == 2 && o.sequence == 2 && c.condition.revision.change.kind == m2e::FixedCompositeRevisionKind::recalibrated);
+        CHECK(c.condition.revision.change.pair_id == std::optional<std::string>("pair-0042") && o.parent_sha256 == Active(settings)->file_sha256);
+        CHECK(c.condition.seam.origin == m2e::FixedSeamOrigin::band_center_provisional && c.condition.raster.width_pixels > Active(settings)->condition.raster.width_pixels);   // the owner's Q1 and Q2
+    }
+    // The sample is the composite of the candidate: a v8 report that names the candidate's revision.
+    {
+        const auto saved = m2e::LoadSavedStillReview(s / "review" / "uncalibrated-review.json");
+        CHECK(saved.fixed_composite_registration.has_value());
+        if (saved.fixed_composite_registration && o.candidate) {
+            CHECK(saved.fixed_composite_registration->condition_sha256 == o.candidate->sha256 && saved.fixed_composite_registration->condition_sequence == 2);
+            CHECK(saved.fixed_composite_registration->profile_file_sha256 == o.candidate->condition.source.profile_file_sha256);
+        }
+    }
+    Reports(o, s, "usable-unverified", "confirm-with-warning");
+
+    // ---- The confirmation ----
+    const auto fresh = [&](const std::string& name) { const auto copy = root / name; CopyFolder(settings, copy); return copy; };
+    {   // An unchecked calibration needs the person's acknowledgement.
+        const auto copy = fresh("confirm-noack");
+        const auto b = Snapshot(copy);
+        for (const auto& options : {RecalibrationConfirmOptions{}, RecalibrationConfirmOptions{false}}) {
+            const auto r = ConfirmRecalibration(o, copy, kHash, options);
+            CHECK(!r.written && r.reason == "not-acknowledged" && Has(r.message, "警告を見たうえで") && Snapshot(copy) == b);
+        }
+    }
+    const auto confirmed = fresh("confirm-ack");
+    {
+        const auto b = Snapshot(confirmed);
+        const auto r = ConfirmRecalibration(o, confirmed, kHash, {true});
+        CHECK(r.written && r.reason.empty() && r.unverified && r.sequence == 2 && r.revision_sha256 == o.candidate->sha256);
+        CHECK(Has(r.message, "未確認の校正として更新しました（改訂 2）") && HasLine(r.log_lines, "recalibration_confirmed=1 sequence=2 unverified=1 acknowledged=1"));
+        // Exactly a profile copy and a revision were added; nothing that was there changed.
+        const auto after = Snapshot(confirmed);
+        std::vector<std::string> added;
+        for (const auto& [name, bytes] : after) {
+            const auto it = b.find(name);
+            if (it == b.end()) added.push_back(name);
+            else CHECK(it->second == bytes);
+        }
+        CHECK(after.size() == b.size() + 2 && added.size() == 2);
+        CHECK(std::find(added.begin(), added.end(), "wpd-fixed-composite-revisions/r000002.json") != added.end());
+        CHECK(std::find(added.begin(), added.end(), o.candidate->profile_name) != added.end());
+        // The revision in force is the candidate, read the way a capture reads it (by the setup's condition name), with the new profile.
+        const auto selection = m2e::SelectFixedComposite(confirmed / m2e::kFixedCompositeConditionName, kHash);
+        const auto* v3 = selection.loaded ? std::get_if<m2e::LoadedFixedCompositeConditionV3>(&*selection.loaded) : nullptr;
+        CHECK(selection.IsV3() && v3 && v3->file_sha256 == r.revision_sha256 && v3->condition.revision.sequence == 2 && v3->profile.profile_file_sha256 == o.candidate->condition.source.profile_file_sha256);
+        // The mark of an unchecked calibration is beside the report.
+        const auto mark = Tree(ReadAll(request.staging_folder / "confirmation.json"));
+        CHECK(At(mark, "schema").string == "a0.pair-recalibration-confirmation.v1" && At(mark, "unverified").boolean && At(mark, "acknowledged").boolean &&
+            At(mark, "verdict").string == "usable-unverified" && At(mark, "revisionSha256").string == r.revision_sha256 && Plain(ReadAll(request.staging_folder / "confirmation.json")));
+        // The same outcome a second time: the revision in force is no longer its parent. Refused, nothing written.
+        const auto again_before = Snapshot(confirmed);
+        const auto again = ConfirmRecalibration(o, confirmed, kHash, {true});
+        CHECK(!again.written && again.reason == "condition-changed" && Has(again.message, "撮り直してください") && Snapshot(confirmed) == again_before);
+    }
+    {   // The condition changed after the job (another revision came in): refused, and nothing is written.
+        const auto copy = fresh("confirm-moved");
+        m2e::LayerTwoStrainDesignV3 layer{64.0, 0.5};
+        FixedConditionV3Request tool;
+        tool.settings_folder = copy; tool.kind = m2e::FixedCompositeRevisionKind::manual_adjustment; tool.layer_two = layer;
+        tool.entered = m2e::FixedCompositeRevisionChangeV3::Entered{0.5, 0.0, 0.0};
+        CHECK(MakeFixedCompositeConditionV3File(tool, kHash, kNow).made);
+        const auto b = Snapshot(copy);
+        const auto r = ConfirmRecalibration(o, copy, kHash, {true});
+        CHECK(!r.written && r.reason == "condition-changed" && Snapshot(copy) == b && Active(copy)->condition.revision.sequence == 2);
+    }
+    {   // A partial file of the next revision (a writer that died): the write is refused and the earlier revision stays in force.
+        const auto copy = fresh("confirm-partial");
+        { std::ofstream(copy / std::string(m2e::kFixedCompositeRevisionFolderName) / "r000002.json.partial") << "x"; }
+        const auto r = ConfirmRecalibration(o, copy, kHash, {true});
+        CHECK(!r.written && r.reason == "write-failed" && Has(r.message, "前の校正のまま"));
+        const auto active = Active(copy);
+        CHECK(active && active->condition.revision.sequence == 1 && active->file_sha256 == o.parent_sha256 && !fs::exists(copy / std::string(m2e::kFixedCompositeRevisionFolderName) / "r000002.json"));
+        // The profile copy may be there (named by its content, harmless); it is the candidate's own bytes.
+        if (fs::exists(copy / o.candidate->profile_name)) CHECK(ReadAll(copy / o.candidate->profile_name) == o.candidate->profile_bytes);
+    }
+    {   // A file of the profile's name with other bytes is never replaced; no revision is written.
+        const auto copy = fresh("confirm-collision");
+        { std::ofstream(copy / o.candidate->profile_name, std::ios::binary) << "other bytes"; }
+        const auto b = Snapshot(copy);
+        const auto r = ConfirmRecalibration(o, copy, kHash, {true});
+        CHECK(!r.written && r.reason == "write-failed" && Snapshot(copy) == b && Active(copy)->condition.revision.sequence == 1);
+    }
+    {   // What is written is what was checked: an outcome whose bytes were altered is not written.
+        const auto copy = fresh("confirm-altered");
+        const auto b = Snapshot(copy);
+        auto altered = o;
+        altered.candidate->profile_bytes += " ";
+        CHECK(ConfirmRecalibration(altered, copy, kHash, {true}).reason == "write-failed");
+        auto text = o;
+        text.candidate->text += " ";
+        CHECK(ConfirmRecalibration(text, copy, kHash, {true}).reason == "write-failed");
+        auto other_parent = o;
+        other_parent.parent_sha256 = std::string(64, 'f');
+        CHECK(ConfirmRecalibration(other_parent, copy, kHash, {true}).reason == "not-usable");
+        CHECK(Snapshot(copy) == b);
+    }
+    {   // An outcome that is not usable, or empty, writes nothing.
+        const auto copy = fresh("confirm-empty");
+        const auto b = Snapshot(copy);
+        CHECK(ConfirmRecalibration(RecalibrationJobOutcome{}, copy, kHash, {true}).reason == "not-usable");
+        auto unusable = o;
+        unusable.verdict = RecalibrationVerdict::unusable; unusable.ready = false;
+        CHECK(ConfirmRecalibration(unusable, copy, kHash, {true}).reason == "not-usable");
+        bool threw = false;
+        try { (void)ConfirmRecalibration(o, copy, nullptr, {true}); } catch (const std::invalid_argument&) { threw = true; }
+        CHECK(threw && Snapshot(copy) == b);
+    }
+
+    // ---- The way back ----
+    // The recalibrated revision is a revision like the others: a hand adjustment on top of it works, and a rollback within its profile works.
+    // A rollback to the revision before it is refused by the tool (the profile differs): the way back from a recalibration is to recalibrate again.
+    {
+        m2e::LayerTwoStrainDesignV3 layer{64.0, 0.5};
+        FixedConditionV3Request back;
+        back.settings_folder = confirmed; back.kind = m2e::FixedCompositeRevisionKind::rollback; back.restore_sequence = 1; back.layer_two = layer;
+        const auto b = Snapshot(confirmed);
+        const auto refused = MakeFixedCompositeConditionV3File(back, kHash, kNow);
+        CHECK(!refused.made && Has(refused.message, "別の rig") && Snapshot(confirmed) == b);
+        FixedConditionV3Request adjust;
+        adjust.settings_folder = confirmed; adjust.kind = m2e::FixedCompositeRevisionKind::manual_adjustment; adjust.layer_two = layer;
+        adjust.entered = m2e::FixedCompositeRevisionChangeV3::Entered{0.5, 0.0, 0.0};
+        CHECK(MakeFixedCompositeConditionV3File(adjust, kHash, kNow).made && Active(confirmed)->condition.revision.sequence == 3);
+        FixedConditionV3Request within;
+        within.settings_folder = confirmed; within.kind = m2e::FixedCompositeRevisionKind::rollback; within.restore_sequence = 2; within.layer_two = layer;
+        const auto made = MakeFixedCompositeConditionV3File(within, kHash, kNow);
+        const auto active = Active(confirmed);
+        CHECK(made.made && active && active->condition.revision.sequence == 4 && active->condition.revision.change.kind == m2e::FixedCompositeRevisionKind::rollback &&
+            active->condition.source.profile_file == o.candidate->condition.source.profile_file && active->condition.base_pose.IsZero());
+    }
+}
+
+// The refuse policy end to end: the same unchecked calibration is not offered, and the screen still shows what was measured.
+void RefusePolicy(const Pair& pair) {
+    const auto settings = MakeSettings("settings-refuse");
+    const auto before = Snapshot(settings);
+    auto request = Request(settings, pair, "staging-refuse", FakeComputation(Fake::ready));
+    request.unverified_policy = UnverifiedPolicy::refuse_to_confirm;
+    const auto o = RunRecalibrationJob(request);
+    CHECK(o.verdict == RecalibrationVerdict::unusable && !o.ready && o.candidate.has_value() && OnlyClass(o, FindingClass::unverified));
+    CHECK(o.screen_lines.front() == "この校正は使えません" && HasLine(o.screen_lines, "確かめられませんでした") && HasLine(o.screen_lines, "継ぎ目のずれ:"));
+    const auto r = ConfirmRecalibration(o, settings, kHash, {true});
+    CHECK(!r.written && r.reason == "not-usable" && Snapshot(settings) == before);
+    Reports(o, request.staging_folder, "unusable", "refuse-to-confirm");
+}
+
+// A check on the new profile that could not be made: the computation lets the candidate go, the job makes it again from the pose; the
+// originals have names the review writer does not take, so the job copies them beside the record.
+void UncheckedProfile(const Pair& pair) {
+    const auto settings = MakeSettings("settings-unchecked");
+    const auto before = Snapshot(settings);
+    auto request = Request(settings, pair, "staging-unchecked", FakeComputation(Fake::check_not_trusted), true);
+    const auto o = RunRecalibrationJob(request);
+    CHECK(o.candidate.has_value() && o.verdict == RecalibrationVerdict::usable_unverified && OnlyClass(o, FindingClass::unverified));
+    CHECK(HasCode(o, "reestimate-not-verified") && HasLine(o.screen_lines, "新しい校正での確かめが、確かな値になりませんでした"));
+    CHECK(fs::exists(request.staging_folder / "sample-originals" / "CAM-A" / "original.jpg") && fs::exists(request.staging_folder / "sample-originals" / "CAM-B" / "original.jpg"));
+    CHECK(Snapshot(settings) == before && AllPlain(o.screen_lines) && AllPlain(o.log_lines));
+    CHECK(o.candidate && o.candidate->condition.revision.sequence == 2 && o.facts.display.has_motion);
+    Reports(o, request.staging_folder, "usable-unverified", "confirm-with-warning");
+    // It confirms like any other unchecked calibration, with the acknowledgement.
+    const auto copy = root / "settings-unchecked-copy";
+    CopyFolder(settings, copy);
+    CHECK(ConfirmRecalibration(o, copy, kHash, {}).reason == "not-acknowledged");
+    const auto done = ConfirmRecalibration(o, copy, kHash, {true});
+    CHECK(done.written && done.unverified && Active(copy)->file_sha256 == done.revision_sha256);
+}
+
+// ---- 4. The command line ----
+void CommandLine(const Pair& pair, const std::string& exe, bool on) {
+    const auto wide = [](const fs::path& p) { return p.wstring(); };
+    const auto settings = MakeSettings("settings-cli");
+    const auto before = Snapshot(settings);
+    const std::vector<std::wstring> good{L"--camera-a", wide(pair.frames.a), L"--camera-b", wide(pair.frames.b), L"--settings-folder", wide(settings), L"--staging", wide(root / "staging-cli")};
+    // Parsing: the defaults are the owner's decisions; every mistake is refused.
+    {
+        const auto p = ParseRecalibrationArguments(good);
+        CHECK(p.request && p.error.empty() && p.request->seam == kRecalibrationSeamPlacement && p.request->raster == kRecalibrationRasterPlacement && p.request->unverified_policy == kRecalibrationUnverifiedPolicy);
+        auto more = good;
+        for (const auto* part : {L"--seam", L"keep", L"--raster", L"keep", L"--unverified", L"refuse", L"--pair-id", L"pair-7", L"--measured-at", L"2000-02-03T04:05:06Z"}) more.emplace_back(part);
+        const auto q = ParseRecalibrationArguments(more);
+        CHECK(q.request && q.request->seam == rc::SeamPlacement::keep_previous && q.request->raster == rc::RasterPlacement::keep && q.request->unverified_policy == UnverifiedPolicy::refuse_to_confirm &&
+            q.request->pair_id == "pair-7" && q.request->measured_at_utc == "2000-02-03T04:05:06Z");
+        const std::vector<std::vector<std::wstring>> bad{
+            {}, {L"--camera-a"}, {L"--camera-a", L"x"},
+            {L"--camera-a", L"a", L"--camera-a", L"b", L"--camera-b", L"c", L"--settings-folder", L"d", L"--staging", L"e"},
+            {L"--camera-a", L"a", L"--camera-b", L"b", L"--settings-folder", L"c", L"--staging", L"d", L"--unknown", L"x"},
+            {L"--camera-a", L"a", L"--camera-b", L"b", L"--settings-folder", L"c", L"--staging", L"d", L"--seam", L"middle"},
+            {L"--camera-a", L"a", L"--camera-b", L"b", L"--settings-folder", L"c", L"--staging", L"d", L"--raster", L"wide"},
+            {L"--camera-a", L"a", L"--camera-b", L"b", L"--settings-folder", L"c", L"--staging", L"d", L"--unverified", L"maybe"},
+            {L"--camera-a", L"a", L"--camera-b", L"b", L"--settings-folder", L"c", L"--staging", L"d", L"--pair-id", L"not a pair"},
+            {L"--camera-a", L"a", L"--camera-b", L"b", L"--settings-folder", L"c", L"--staging", L"d", L"--measured-at", L"tomorrow"},
+            {L"--camera-a", L"", L"--camera-b", L"b", L"--settings-folder", L"c", L"--staging", L"d"},
+        };
+        for (const auto& args : bad) {
+            const auto refused = ParseRecalibrationArguments(args);
+            CHECK(!refused.request && !refused.error.empty());
+            std::ostringstream out;
+            CHECK(RunRecalibrationCommand(args, out, kHash, kNow) == 2 && Has(out.str(), "recalibration_done=0") && Has(out.str(), "settings_written=0") && Has(out.str(), "usage: StillReview --recalibrate-from-pair"));
+        }
+    }
+    // A run: a calibration that could not be checked ends with exit code 3 (a person would confirm it after the warning), and says so.
+    {
+        std::ostringstream out;
+        const auto code = RunRecalibrationCommand(good, out, kHash, kNow, FakeComputation(Fake::ready));
+        const auto text = out.str();
+        CHECK(code == 3);
+        CHECK(Has(text, "recalibration_done=1 verdict=usable-unverified unverified=1 confirmed=0 camera_operations=0 settings_written=0"));
+        CHECK(Has(text, "finding class=unverified code=gate-") && Has(text, "gate state=") && Has(text, "motion right_mm=") && Has(text, "screen この校正は使えます") == false);
+        CHECK(Has(text, "screen 未確認の校正です"));
+        CHECK(Plain(text) && !Has(text, "staging-cli") && !Has(text, "pair-0042"));
+        CHECK(Snapshot(settings) == before && fs::exists(root / "staging-cli" / "recalibration-report.json"));
+    }
+    {   // Refused by the computation: exit code 1. A staging folder that exists: also 1, and nothing in it is touched.
+        auto args = good;
+        args[7] = wide(root / "staging-cli-2");
+        std::ostringstream out;
+        CHECK(RunRecalibrationCommand(args, out, kHash, kNow, FakeComputation(Fake::no_overlap)) == 1 && Has(out.str(), "verdict=unusable") && Has(out.str(), "finding class=no-candidate code=no-overlap"));
+        std::ostringstream again;
+        CHECK(RunRecalibrationCommand(args, again, kHash, kNow, FakeComputation(Fake::no_overlap)) == 1 && Has(again.str(), "code=staging-exists"));
+        CHECK(Snapshot(settings) == before && Plain(out.str()) && Plain(again.str()));
+    }
+    // StillReview itself: with the option on it has the entrance (wrong arguments are refused with the usage and code 2, without a window);
+    // with the option off the command is unknown to it (not run here: an unknown command ends in a message box).
+    if (on) {
+        const auto out_file = root / "exe-out.txt";
+        const std::string command = "\"\"" + exe + "\" --recalibrate-from-pair > \"" + out_file.string() + "\" 2>&1\"";
+        const int code = std::system(command.c_str());
+        const auto text = ReadAll(out_file);
+        CHECK(code == 2 && Has(text, "recalibration_done=0") && Has(text, "usage: StillReview --recalibrate-from-pair"));
+    } else {
+        std::cout << "note: StillReview was built without A0_BUILD_WPD_RECALIBRATION; its entrance is absent and was not run\n";
+    }
+}
+
+// ---- 5. (not run by ctest) the whole path with the real computation, both cameras moved ----
+struct Texture {
+    static constexpr double kLeft = -30, kTop = -30;
+    struct Octave {double spacing, amplitude; int columns, rows; std::vector<float> nodes;};
+    std::vector<Octave> octaves;
+    explicit Texture(std::uint64_t seed) {
+        const double widths[]{10.0, 4.0, 1.6};
+        const double amplitudes[]{70.0, 55.0, 45.0};
+        std::uint64_t state = seed;
+        const auto next = [&] { state += 0x9e3779b97f4a7c15ull; std::uint64_t z = state; z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ull; z = (z ^ (z >> 27)) * 0x94d049bb133111ebull; z ^= z >> 31; return z; };
+        for (int k = 0; k < 3; ++k) {
+            Octave o{widths[k], amplitudes[k], static_cast<int>(1400 / widths[k]) + 3, static_cast<int>(560 / widths[k]) + 3, {}};
+            o.nodes.resize(static_cast<std::size_t>(o.columns) * static_cast<std::size_t>(o.rows));
+            for (auto& v : o.nodes) v = static_cast<float>(static_cast<double>(next() >> 11) / 9007199254740992.0 * 2.0 - 1.0);
+            octaves.push_back(std::move(o));
+        }
+    }
+    [[nodiscard]] double operator()(double x, double y) const {
+        double value = 128;
+        for (const auto& o : octaves) {
+            const double gx = (x - kLeft) / o.spacing, gy = (y - kTop) / o.spacing;
+            const int ix = std::clamp(static_cast<int>(std::floor(gx)), 0, o.columns - 2), iy = std::clamp(static_cast<int>(std::floor(gy)), 0, o.rows - 2);
+            const double tx = std::clamp(gx - ix, 0.0, 1.0), ty = std::clamp(gy - iy, 0.0, 1.0);
+            const double sx = tx * tx * (3 - 2 * tx), sy = ty * ty * (3 - 2 * ty);
+            const auto node = [&](int cx, int cy) { return static_cast<double>(o.nodes[static_cast<std::size_t>(cy) * static_cast<std::size_t>(o.columns) + static_cast<std::size_t>(cx)]); };
+            const double top = node(ix, iy) * (1 - sx) + node(ix + 1, iy) * sx, bottom = node(ix, iy + 1) * (1 - sx) + node(ix + 1, iy + 1) * sx;
+            value += o.amplitude * (top * (1 - sy) + bottom * sy);
+        }
+        return value;
+    }
+};
+render::BgrImage RenderFrame(const render::Matrix3& h, const Texture& paper) {
+    render::BgrImage image{ps::kWidth, ps::kHeight, std::vector<std::uint8_t>(static_cast<std::size_t>(ps::kWidth) * ps::kHeight * 3)};
+    const auto inverse = render::Invert(h);
+    std::vector<std::thread> threads;
+    for (unsigned w = 0; w < 2; ++w) threads.emplace_back([&, w] {
+        for (unsigned v = w; v < ps::kHeight; v += 2)
+            for (unsigned u = 0; u < ps::kWidth; ++u) {
+                render::Point sheet{};
+                const auto value = render::TryTransform(inverse, {static_cast<double>(u), static_cast<double>(v)}, sheet) ? paper(sheet.x, sheet.y) : 128.0;
+                auto* at = &image.bgr[(static_cast<std::size_t>(v) * ps::kWidth + u) * 3];
+                at[0] = at[1] = at[2] = static_cast<std::uint8_t>(std::clamp(std::lround(value), 0L, 255L));
+            }
+    });
+    for (auto& t : threads) t.join();
+    return image;
+}
+render::Matrix3 Multiply(const render::Matrix3& a, const render::Matrix3& b) {
+    render::Matrix3 r{};
+    for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) for (int k = 0; k < 3; ++k) r[static_cast<std::size_t>(3 * i + j)] += a[static_cast<std::size_t>(3 * i + k)] * b[static_cast<std::size_t>(3 * k + j)];
+    return r;
+}
+// A moved by `a_mm` and B by `b_mm` along the sheet's x: the drawing is seen at other places by both, and A is no longer where the profile has it.
+void BothMoved(double a_mm, double b_mm) {
+    const Texture paper(7919317);
+    const render::Matrix3 a0{10, 0, 100, 0, 10, 100, 0, 0, 1}, b0{10, 0, -5660, 0, 10, 100, 0, 0, 1};
+    const auto moved = [](double mm) { return render::Matrix3{1, 0, -mm, 0, 1, 0, 0, 0, 1}; };
+    const auto began = std::chrono::steady_clock::now();
+    const auto dir = NewFolder("both-moved");
+    const auto frames = ps::WriteFrames(dir, RenderFrame(Multiply(a0, moved(a_mm)), paper), RenderFrame(Multiply(b0, moved(b_mm)), paper));
+    const auto settings = MakeSettings("settings-both-moved");
+    const auto before = Snapshot(settings);
+    Pair pair{frames, {}, {}};
+    auto request = Request(settings, pair, "staging-both-moved", RecalibrationComputation{});
+    request.thread_count = 4;
+    request.on_stage = [&](RecalibrationStage s, double seconds) { std::cerr << "  stage " << RecalibrationStageCode(s) << " at " << seconds << " s\n"; };
+    const auto o = RunRecalibrationJob(request);
+    std::cerr << "both moved (A " << a_mm << " mm, B " << b_mm << " mm): " << Since(began) << " s, verdict " << RecalibrationVerdictCode(o.verdict) << '\n';
+    for (const auto& l : o.screen_lines) std::cerr << "  " << l << '\n';
+    for (const auto& f : o.findings) std::cerr << "  finding " << FindingClassCode(f.klass) << ' ' << f.code << ' ' << f.reason << '\n';
+    CHECK(o.ready && o.candidate.has_value() && Snapshot(settings) == before);
+    // The place of B against A is what changed: b - a, to the right.
+    CHECK(o.facts.display.has_motion && std::abs(o.facts.display.motion.camera_motion_mm.x - (b_mm - a_mm)) < 1.0 && std::abs(o.facts.display.motion.camera_motion_mm.y) < 1.0);
+    CHECK(HasLine(o.screen_lines, "図面の右へ約"));
+    if (o.verdict == RecalibrationVerdict::usable) {
+        CHECK(o.facts.gate.known && o.facts.gate.state == gate::GateState::pass && o.findings.empty());
+        const auto r = ConfirmRecalibration(o, settings, kHash, {});
+        CHECK(r.written && !r.unverified && Active(settings)->condition.revision.sequence == 2);
+    }
+}
+}
+
+int main(int argc, char** argv) {
+    try {
+        if (argc < 4) throw std::invalid_argument("usage: a0_recalibration_job_tests <rig-profile-v2 fixture folder> <StillReview exe> <on|off> [full]");
+        ps::detail::Hr(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
+        fixture = ReadAll(fs::path(argv[1]) / "calibrated-draft.json");
+        if (fixture.empty()) throw std::invalid_argument("the fixture is missing");
+        fs::path parent = fs::temp_directory_path();
+        if (const char* value = std::getenv("A0_TEST_TMPDIR"); value != nullptr && *value != '\0') parent = fs::path(value);
+        root = parent / ("recalibration-job-test-" + std::to_string(GetCurrentProcessId()) + "-" + std::to_string(GetTickCount64()));
+        fs::create_directories(root);
+        const auto started = std::chrono::steady_clock::now();
+        const auto lap = [&](const char* name) { std::cerr << name << " done at " << Since(started) << " s\n"; };
+        Decisions(); lap("decisions");
+        const auto pair = MakePair("pair");
+        lap("frames");
+        JobRefusals(pair); lap("refusals");
+        WholeJob(pair); lap("whole job and confirmation");
+        RefusePolicy(pair); lap("refuse policy");
+        UncheckedProfile(pair); lap("unchecked profile");
+        CommandLine(pair, argv[2], std::string(argv[3]) == "on"); lap("command line");
+        if (argc >= 5 && std::string(argv[4]) == "full") { BothMoved(20.0, 50.0); lap("both moved"); }
+        std::error_code ignored;
+        fs::remove_all(root, ignored);
+    } catch (const std::exception& e) {
+        std::cerr << "FAILED: an exception: " << e.what() << '\n';
+        return 1;
+    }
+    std::cout << "recalibration job: " << checks << " checks, " << failures << " failures\n";
+    return failures == 0 ? 0 : 1;
+}
