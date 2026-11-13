@@ -36,6 +36,7 @@
 #include "a0/m2/experimental/overlap_estimation.hpp"
 #include "a0/phase0/experimental/still_pair.hpp"
 #include "a0/phase0/experimental/wpd_still_pair.hpp"
+#include "a0/phase0/experimental/still_pair_text.hpp"
 #include "a0/phase0/experimental/wpd_still_persist.hpp"
 #include "a0/phase0/experimental/pair_cycle_probe.hpp"
 #include "a0/phase0/experimental/preview_end_restart_probe.hpp"
@@ -229,6 +230,8 @@ public:
         Collect();
     }
     const std::string& Error()const{return outcome_.error;}
+    // Why the read-only preflight stopped, for the pair transaction (#430).
+    WpdStillRefusal Refusal()const{return refusal_;}
     // Always closes the session and the partial. `external_error` names a failure
     // decided outside this lane (e.g. its shutter was never sent) so the log and
     // the journal state agree with the pair result.
@@ -299,25 +302,40 @@ private:
     std::optional<WpdStillCaptureRun> run_;
     std::jthread watchdog_; // Last: joined first, before the state it reads goes away.
 };
+// `refusal` (preflight only, #430) receives why a refused preflight stopped.
 StillCaptureOutcome RunStillOnce(const std::wstring& id,const std::string& alias,bool both_live_sessions_closed,
-    Clock::time_point outer_deadline,bool preflight_only){
+    Clock::time_point outer_deadline,bool preflight_only,WpdStillRefusal* refusal=nullptr){
     StillCaptureOutcome outcome;
     if(!both_live_sessions_closed){outcome.error="both Live View sessions must be closed before capture";return outcome;}
     const auto deadline=std::min(outer_deadline,Clock::now()+std::chrono::seconds(180));
-    if(Clock::now()>=deadline || capture_stop_requested){outcome.error="capture deadline/stop before open";return outcome;}
+    if(Clock::now()>=deadline || capture_stop_requested){
+        outcome.error="capture deadline/stop before open";
+        if(refusal)*refusal=WpdStillRefusal{StillPreflightKind::DeadlineStop,std::nullopt};
+        return outcome;
+    }
     StillLane lane(id,alias,outer_deadline,preflight_only);
     if(lane.OpenSession()){
         if(preflight_only)lane.RunPreflightOnly();else lane.CaptureSingle();
     }
-    return lane.Finish();
+    outcome=lane.Finish();
+    if(refusal)*refusal=lane.Refusal();
+    return outcome;
 }
 StillCaptureOutcome SaveStillOnce(const std::wstring& id,const std::string& alias,bool both_live_sessions_closed,
     Clock::time_point deadline=Clock::time_point::max()){
     return RunStillOnce(id,alias,both_live_sessions_closed,deadline,false);
 }
 VerifiedStillPreflight CheckStillOnce(const std::wstring& id,const std::string& alias,Clock::time_point deadline){
-    const auto result=RunStillOnce(id,alias,true,deadline,true);
-    return {result.success,result.closed,result.error,result.out_of_focus};
+    WpdStillRefusal refusal;
+    const auto result=RunStillOnce(id,alias,true,deadline,true,&refusal);
+    VerifiedStillPreflight status{result.success,result.closed,result.error,result.out_of_focus,StillPreflightKind::None,std::nullopt};
+    if(!result.success){
+        // A Close that failed, or a deadline that passed after a clean read, is not the camera's own state.
+        status.kind=refusal.kind;status.event_code=refusal.event_code;
+        if(!result.closed && (status.kind==StillPreflightKind::None || StillPreflightIsBodyState(status.kind)))status.kind=StillPreflightKind::Close;
+        else if(status.kind==StillPreflightKind::None)status.kind=StillPreflightKind::DeadlineStop;
+    }
+    return status;
 }
 // A and B as one 180 s transaction (#389): both bodies stay open from the
 // exposure recheck until both imports are saved. Closing A or opening B between

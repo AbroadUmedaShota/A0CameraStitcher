@@ -38,7 +38,9 @@ unsigned pair_smoke_next{},pair_reviews{},review_painted{};
 unsigned captures_saved{},preview_sessions{};
 std::optional<int> capture_once_alias,capture_pending;
 // composite_skip: the originals were saved but no composite was made (#400); the text is shown on screen and in the evidence record.
+// preflight_status: when the preflight stopped the pair, what each body answered and what to do (#430). Empty keeps the screen's earlier text.
 struct CaptureUiOutcome {StillCaptureOutcome capture;std::optional<a0::m2::experimental::StillReviewResult> review;bool preflight_refused{};
+    std::wstring preflight_status;
     std::optional<a0::m2::experimental::FixedCompositeSkip> composite_skip;std::string composite_detail;std::array<std::filesystem::path,2> originals;
     // Both originals are saved and the composite step threw (the 180-second window, memory, a size mismatch, the gate). Set with
     // capture.success: the next shot is allowed exactly as after a skip. composite_cleanup is what became of a JPEG without a report.
@@ -817,7 +819,11 @@ CaptureUiOutcome SavePairReview(const std::array<std::wstring,2>& ids,ReviewGeom
         if(!selection.loaded && selection.reason!=a0::m2::experimental::FixedCompositeSkip::condition_absent)Log("pair_fixed_composite_condition_unusable reason="+std::string(a0::m2::experimental::FixedCompositeSkipCode(selection.reason))+" detail="+RedactPaths(selection.detail));
         // #389: both shutters precede either import, all under this one deadline.
         auto pair=pair_capture_backend(ids,deadline);
-        if(!pair.complete){result.capture.out_of_focus=pair.out_of_focus;result.preflight_refused=!pair.shutter_dispatched[0] && !pair.shutter_dispatched[1];throw std::runtime_error(pair.error);}
+        if(!pair.complete){
+            result.capture.out_of_focus=pair.out_of_focus;result.preflight_refused=!pair.shutter_dispatched[0] && !pair.shutter_dispatched[1];
+            result.preflight_status=DescribeStillPairPreflightRefusal(pair);
+            throw std::runtime_error(pair.error);
+        }
         const auto& a=pair.originals[0];const auto& b=pair.originals[1];
         result.capture={true,true,a.path,a.bytes,a.sha256,{}};result.originals={a.path,b.path};originals_saved=true;
         a0::m2::experimental::StillReviewRequest request{a.path,b.path,review_directory,a.sha256,b.sha256,evidence.RunId(),geometry,deadline};
@@ -959,6 +965,7 @@ void AdvanceCapture(HWND hwnd){
             if(result.capture.out_of_focus)capture_status=result.preflight_refused?
                 L"合焦を確認できず撮影前に停止しました。A/Bの撮影は0です。この画面を閉じてライブを再起動し、AFで確認してください。":
                 L"合焦できず撮影を完了できませんでした（OutOfFocus）。この画面を閉じてライブを再起動し、AFで確認してください。自動再撮影はしません。";
+            if(!result.preflight_status.empty())capture_status=result.preflight_status;
             Log("ui_capture_failed no_retry=1");
         }
     }
@@ -1211,6 +1218,24 @@ int RunPairV3UiSmoke(const std::filesystem::path& fixtures){
             const auto log=captured.str().substr(before);
             check(!r.capture.success && r.capture.error.find("private-folder")==std::string::npos && r.capture.error.find(work.string())==std::string::npos && !r.capture.error.empty(),"filesystem_error: the error text has no path");
             check(log.find("pair_review_failure: filesystem error:")!=std::string::npos && log.find("private-folder")==std::string::npos && log.find(work.string())==std::string::npos,"filesystem_error: the log has no path");
+        }
+        // 10. The pair stopped in the preflight (#430): the per-body sentences reach the outcome, nothing is claimed as saved, and the text
+        // carries the notice codes but no path and no identifier. A pair that stopped after a shutter keeps its earlier text.
+        {
+            pair_capture_backend=[](const std::array<std::wstring,2>&,Clock::time_point){
+                VerifiedStillPair pair;pair.complete=false;pair.error="CAM-A preflight: pending capture completion code=0xc102 phase=before_shutter; CAM-B preflight: pending capture completion code=0xc102 phase=before_shutter";
+                for(int i=0;i<2;++i){pair.preflight_checked[i]=true;pair.preflight[i].closed=true;pair.preflight[i].kind=StillPreflightKind::Event;pair.preflight[i].event_code=0xc102;}
+                return pair;
+            };
+            const auto r=capture(v3.folder);
+            check(!r.capture.success && r.preflight_refused && r.originals[0].empty(),"preflight stop: a failure, nothing claimed as saved");
+            check(r.preflight_status.find(L"A：前の撮影の『撮影終了』の知らせが本体に残っていました（0xC102）")!=std::wstring::npos &&
+                r.preflight_status.find(L"B：前の撮影の『撮影終了』の知らせが本体に残っていました（0xC102）")!=std::wstring::npos &&
+                r.preflight_status.find(L"どちらもシャッターは切っていません")!=std::wstring::npos && r.preflight_status.find(work.wstring())==std::wstring::npos,"preflight stop: both bodies are named with their code");
+            pair_capture_backend=[](const std::array<std::wstring,2>&,Clock::time_point){VerifiedStillPair pair;pair.complete=false;pair.error="after shutter";pair.shutter_dispatched={true,false};return pair;};
+            const auto after=capture(v3.folder);
+            pair_capture_backend=good_backend;
+            check(!after.preflight_refused && after.preflight_status.empty(),"stop after a shutter: no preflight text");
         }
     }catch(const std::exception& error){
         ++failures;captured<<"pair_v3_ui_exception: "<<error.what()<<'\n';
@@ -1472,6 +1497,10 @@ int RunLifecycleUiSmoke(){
     check(captures_saved==0 && pair_reviews==0 && !capture_future.valid());check(!CanRestartPreview());
     {std::promise<CaptureUiOutcome> pending;capture_future=pending.get_future();CaptureUiOutcome refused;refused.preflight_refused=true;refused.capture.out_of_focus=true;pending.set_value(std::move(refused));}
     SendMessageW(window,WM_TIMER,1,0);check(capture_status.find(L"A/Bの撮影は0")!=std::wstring::npos);
+    // #430: the per-body preflight text replaces the general sentence; the restart stays blocked.
+    {std::promise<CaptureUiOutcome> pending;capture_future=pending.get_future();CaptureUiOutcome refused;refused.preflight_refused=true;refused.capture.out_of_focus=true;
+        refused.preflight_status=L"per-body text";pending.set_value(std::move(refused));}
+    SendMessageW(window,WM_TIMER,1,0);check(capture_status==L"per-body text");check(capture_restart_blocked && !CanRestartPreview());
     // The same failure still ends a finite test, so it cannot hang CI.
     run_seconds=20;SendMessageW(window,WM_TIMER,1,0);check(!IsWindow(window) && closing);
     Log("lifecycle_ui_checks="+std::to_string(checks)+" failures="+std::to_string(failures)+" camera_operations=0");return failures?1:0;

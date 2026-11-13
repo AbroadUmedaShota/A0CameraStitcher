@@ -1208,6 +1208,10 @@ if(BUILD_TESTING)
     # channels only.
     add_executable(a0_wpd_still_pair_tests tests/wpd_still_pair_tests.cpp)
     target_link_libraries(a0_wpd_still_pair_tests PRIVATE a0_wpd_live_view_transfer a0_phase0_core ole32 windowscodecs PortableDeviceGuids)
+    if(MSVC)
+        # /utf-8: the operator sentences of a stopped preflight (still_pair_text.hpp, #430) are Japanese.
+        target_compile_options(a0_wpd_still_pair_tests PRIVATE /utf-8)
+    endif()
     add_test(NAME wpd_still_pair_contracts COMMAND a0_wpd_still_pair_tests)
     set_tests_properties(wpd_still_pair_contracts PROPERTIES TIMEOUT 120)
     add_executable(a0_preview_merge_tests tests/preview_merge_tests.cpp)
@@ -1334,6 +1338,10 @@ if(BUILD_TESTING)
     set_tests_properties(m2_overlap_similarity_contracts PROPERTIES TIMEOUT 900)
     add_executable(a0_still_pair_tests tests/still_pair_tests.cpp)
     target_include_directories(a0_still_pair_tests PRIVATE src/phase0/include)
+    if(MSVC)
+        # /utf-8: the operator sentences of a stopped preflight (still_pair_text.hpp, #430) are Japanese.
+        target_compile_options(a0_still_pair_tests PRIVATE /utf-8)
+    endif()
     add_test(NAME still_pair_contracts COMMAND a0_still_pair_tests)
     # Observation-policy regression belongs to the development preview slice,
     # and remains camera-free even when the interactive window is disabled.

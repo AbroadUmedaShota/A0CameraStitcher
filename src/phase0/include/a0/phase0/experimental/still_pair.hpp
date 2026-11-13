@@ -2,6 +2,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <exception>
 #include <filesystem>
 #include <functional>
@@ -44,9 +45,18 @@ inline const char* StillPreflightKindText(StillPreflightKind kind){
     default:return "none";
     }
 }
-struct VerifiedStillPreflight {bool ready{},closed{};std::string error;bool out_of_focus{};};
+struct VerifiedStillPreflight {
+    bool ready{},closed{};std::string error;bool out_of_focus{};
+    // Why it stopped, and the notice code when an event stopped it. Set only on a refusal.
+    StillPreflightKind kind{};std::optional<std::uint16_t> event_code;
+};
 struct VerifiedStillPair {
     std::array<VerifiedStillOriginal,2> originals;bool complete{};std::string error;bool out_of_focus{},preflight_complete{};
+    // What each body's preflight said (#430), for the bodies that were checked. Used only when
+    // the preflight stopped the transaction; `preflight_checked[i]` false means body i was not
+    // opened for it.
+    std::array<VerifiedStillPreflight,2> preflight;
+    std::array<bool,2> preflight_checked{};
     // Whether each body's shutter command was handed to the transport. Both false
     // means nothing was exposed.
     std::array<bool,2> shutter_dispatched{};
@@ -86,7 +96,8 @@ struct StillPairSteps {
     std::function<void(const std::string&)> log;
 };
 // One transaction under one deadline:
-//   preflight+Close A, preflight+Close B          (no exposure; a refusal stops both)
+//   preflight+Close A, preflight+Close B          (no exposure; a refusal stops both. B is still
+//                                                  checked after a camera-state refusal of A: #430)
 //   open A, open B and recheck each               (still no exposure)
 //   shutter A, shutter B                          (nothing slow between them)
 //   import+save A, import+save B, close both
@@ -103,15 +114,37 @@ inline VerifiedStillPair CaptureStillPairShutterFirstOnce(const StillPairSteps& 
     const auto name=[](int i){return i==0?"CAM-A":"CAM-B";};
     const auto may_start=[&]{return admission() && Clock::now()<deadline;};
     const auto log=[&](const std::string& line){if(steps.log)steps.log(line);};
+    // #430: when A's preflight stops for the camera's own state and A's Close is confirmed, B is
+    // checked and closed too, so one press reads what both bodies still hold. No exposure either
+    // way. Anything else about A (identity, transport, Close, deadline, stop) leaves B unopened.
+    std::string refusals;
     for(int i=0;i<2;++i){
-        if(!may_start()){result.error="pair preflight deadline/admission";return result;}
-        VerifiedStillPreflight status;
-        try{status=steps.preflight(i,deadline);}catch(const std::exception& error){result.error=error.what();return result;}
-        if(!status.ready || !status.closed){
-            result.out_of_focus=status.out_of_focus;
-            result.error=std::string(name(i))+" preflight: "+(status.error.empty()?"readiness/close unconfirmed":status.error);
-            return result;
+        if(!may_start()){
+            if(refusals.empty()){result.error="pair preflight deadline/admission";return result;}
+            break;
         }
+        VerifiedStillPreflight status;
+        try{status=steps.preflight(i,deadline);}
+        catch(const std::exception& error){
+            if(refusals.empty()){result.error=error.what();return result;}
+            status=VerifiedStillPreflight{};status.error=error.what();status.kind=StillPreflightKind::Transport;
+        }
+        result.preflight[i]=status;result.preflight_checked[i]=true;
+        if(!status.ready || !status.closed){
+            result.out_of_focus=result.out_of_focus || status.out_of_focus;
+            refusals+=std::string(refusals.empty()?"":"; ")+name(i)+" preflight: "+(status.error.empty()?"readiness/close unconfirmed":status.error);
+            if(i==0 && !(status.closed && StillPreflightIsBodyState(status.kind)))break;
+        }
+    }
+    if(!refusals.empty()){
+        const auto token=[&](int i)->std::string{return !result.preflight_checked[i]?"not_checked":(result.preflight[i].ready && result.preflight[i].closed)?"ready":"refused";};
+        const auto code=[&](int i)->std::string{
+            if(!result.preflight[i].event_code)return "none";
+            char text[8]{};std::snprintf(text,sizeof text,"0x%04x",static_cast<unsigned>(*result.preflight[i].event_code));return text;
+        };
+        log("pair_preflight_result a="+token(0)+" b="+token(1)+" a_kind="+StillPreflightKindText(result.preflight[0].kind)+" b_kind="+StillPreflightKindText(result.preflight[1].kind)+
+            " a_code="+code(0)+" b_code="+code(1)+" shutter_commands=0");
+        result.error=refusals;return result;
     }
     result.preflight_complete=true;
     std::array<bool,2> opened{};

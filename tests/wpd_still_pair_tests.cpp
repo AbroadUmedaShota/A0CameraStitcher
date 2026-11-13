@@ -4,6 +4,7 @@
 // window runs after each import (#408) is tested on a private temporary folder.
 #include "wpd_still_fake.hpp"
 #include "a0/phase0/experimental/wpd_still_pair.hpp"
+#include "a0/phase0/experimental/still_pair_text.hpp"
 #include "a0/phase0/experimental/wpd_still_persist.hpp"
 #include <wincodec.h>
 #include <array>
@@ -230,6 +231,37 @@ void CheckSent(const Harness& h){
     for(const auto& entry:h.trace)Check(!Contains(entry,"9207"));
 }
 void CheckClosedBoth(const Harness& h){Check(h.lane[0].closed && h.lane[1].closed);}
+// The pair transaction with real synthetic bodies in the preflight step only (#430): what
+// StillLane::RunPreflightOnly does, without the device. The exposure recheck refuses, so the run
+// ends right after the preflight, with no exposure possible.
+struct PreflightPair {
+    std::array<Fake,2> fake;
+    std::array<std::vector<WpdStillEvent>,2> queue;
+    std::array<WpdStillPreflightRecord,2> record;
+    std::vector<std::string> calls,log;
+    PreflightPair(){for(int i=0;i<2;++i)fake[i].camera_queue=&queue[i];}
+    VerifiedStillPair Run(){
+        StillPairSteps steps;
+        steps.preflight=[&](int i,Clock::time_point){
+            calls.push_back(std::string("preflight")+Name(i));record[i]={};
+            VerifiedStillPreflight status;status.closed=true;
+            try{ReadWpdStillPreflight(fake[i],[]{return true;},&record[i]);status.ready=true;}
+            catch(const std::exception& error){
+                const auto refusal=ClassifyWpdStillRefusal(error);
+                status.error=error.what();status.kind=refusal.kind;status.event_code=refusal.event_code;
+                status.out_of_focus=dynamic_cast<const WpdStillOutOfFocus*>(&error)!=nullptr;
+            }
+            return status;};
+        steps.prepare=[&](int i,Clock::time_point){calls.push_back(std::string("prepare")+Name(i));return StillPairPrepared{false,"stopped after the preflight",false};};
+        steps.shutter=[&](int i){calls.push_back(std::string("shutter")+Name(i));return StillShutterOutcome{};};
+        steps.collect=[&](int){return VerifiedStillOriginal{};};
+        steps.rescue=[](int){};
+        steps.close=[&](int,VerifiedStillOriginal& original){original.closed=true;};
+        steps.log=[&](const std::string& line){log.push_back(line);};
+        return CaptureStillPairShutterFirstOnce(steps,[]{return true;},Clock::now()+std::chrono::seconds(60));
+    }
+    bool Exposed()const{return fake[0].shutters+fake[1].shutters>0;}
+};
 }
 int main(){
     if(FAILED(CoInitializeEx(nullptr,COINIT_MULTITHREADED)))return 2;
@@ -388,6 +420,36 @@ int main(){
             const auto r=h.Run();CheckSent(h);CheckClosedBoth(h);
             Check(!r.complete && Contains(r.error,"ambiguous SDRAM object") && h.lane[0].persisted && r.originals[0].success);
             Check(!h.lane[1].persisted && h.lane[1].partial==h.lane[1].fake.jpeg);}
+        // #430 C2: one press reads what both bodies hold. A and B each carry a leftover completion:
+        // the first transaction stops on both and names both, the second passes.
+        {PreflightPair p;p.queue[0]={{0xc102,0}};p.queue[1]={{0xc102,0}};
+            const auto first=p.Run();
+            Check(!first.complete && !first.preflight_complete && p.calls==std::vector<std::string>{"preflightA","preflightB"} && !p.Exposed());
+            Check(first.preflight_checked[0] && first.preflight_checked[1] && first.preflight[0].kind==StillPreflightKind::Event && first.preflight[1].kind==StillPreflightKind::Event);
+            Check(first.preflight[0].event_code==0xc102 && first.preflight[1].event_code==0xc102 && !first.shutter_dispatched[0] && !first.shutter_dispatched[1]);
+            Check(first.error=="CAM-A preflight: pending capture completion code=0xc102 phase=before_shutter; CAM-B preflight: pending capture completion code=0xc102 phase=before_shutter");
+            Check(p.record[0].codes.Describe()=="0xc102:1" && p.record[1].codes.Describe()=="0xc102:1" && p.queue[0].empty() && p.queue[1].empty());
+            Check(p.log==std::vector<std::string>{"pair_preflight_result a=refused b=refused a_kind=event b_kind=event a_code=0xc102 b_code=0xc102 shutter_commands=0"});
+            p.calls.clear();p.log.clear();
+            const auto second=p.Run();
+            Check(second.preflight_complete && p.calls==std::vector<std::string>{"preflightA","preflightB","prepareA"} && p.log.empty() && !p.Exposed());
+            Check(second.preflight[0].ready && second.preflight[1].ready && p.record[0].polls==2 && p.record[1].polls==2);}
+        // Several notices in one read, then the next press passes (what an unlucky restart-and-retry cost before).
+        {PreflightPair p;p.queue[0]={{0xc102,0},{0x4005,0}};
+            const auto first=p.Run();
+            Check(!first.preflight_complete && first.preflight[0].kind==StillPreflightKind::Event && first.preflight[0].event_code==0xc102 && first.preflight[1].ready);
+            Check(p.record[0].codes.Describe()=="0x4005:1,0xc102:1" && p.record[0].polls==1);
+            Check(p.log==std::vector<std::string>{"pair_preflight_result a=refused b=ready a_kind=event b_kind=none a_code=0xc102 b_code=none shutter_commands=0"});
+            Check(p.Run().preflight_complete);}
+        // A refused for a capture setting or for focus: B is still read; no shutter.
+        {PreflightPair p;p.fake[0].out_of_focus_before_shutter=true;p.fake[1].bad_quality=true;
+            const auto r=p.Run();
+            Check(!r.preflight_complete && r.out_of_focus && r.preflight[0].kind==StillPreflightKind::OutOfFocus && r.preflight[0].out_of_focus && r.preflight[1].kind==StillPreflightKind::Quality);
+            Check(p.calls==std::vector<std::string>{"preflightA","preflightB"} && !p.Exposed());
+            const auto text=DescribeStillPairPreflightRefusal(r);
+            Check(text.find(L"A：ピントが合っていないと本体が答えました。")!=std::wstring::npos && text.find(L"B：画質が JPEG Fine になっていません。")!=std::wstring::npos);}
+        {PreflightPair p;p.fake[1].live_on=true;const auto r=p.Run();
+            Check(!r.preflight_complete && r.preflight[0].ready && r.preflight[1].kind==StillPreflightKind::LiveViewOn && r.error=="CAM-B preflight: capture requires Live View off");}
         // Classification of what a preflight threw, and the log line for a read.
         {Fake f;f.preflight_event=0x4fff;StillPreflightKind kind{};std::optional<std::uint16_t> code;
             try{ReadWpdStillPreflight(f,[]{return true;});}catch(const std::exception& error){const auto r=ClassifyWpdStillRefusal(error);kind=r.kind;code=r.event_code;}
