@@ -967,7 +967,10 @@ void AdvanceCapture(HWND hwnd){
                 L"合焦を確認できず撮影前に停止しました。A/Bの撮影は0です。この画面を閉じてライブを再起動し、AFで確認してください。":
                 L"合焦できず撮影を完了できませんでした（OutOfFocus）。この画面を閉じてライブを再起動し、AFで確認してください。自動再撮影はしません。";
             if(!result.preflight_status.empty())capture_status=result.preflight_status;
-            if(!result.late_object_status.empty())capture_status+=L"\n"+result.late_object_status;
+            // A single-camera capture reports the leftover image on its own outcome; the pair path has already described it per body.
+            if(result.late_object_status.empty() && result.capture.late_object_event)result.late_object_status=DescribeStillSingleLateObject();
+            // With a leftover image the one step is to tell the person in charge, so the focus or general sentence above is replaced, not stacked.
+            if(!result.late_object_status.empty())capture_status=result.preflight_status.empty()?result.late_object_status:capture_status+L"\n"+result.late_object_status;
             Log("ui_capture_failed no_retry=1");
         }
     }
@@ -1503,6 +1506,9 @@ int RunLifecycleUiSmoke(){
     {std::promise<CaptureUiOutcome> pending;capture_future=pending.get_future();CaptureUiOutcome refused;refused.preflight_refused=true;refused.capture.out_of_focus=true;
         refused.preflight_status=L"per-body text";refused.late_object_status=L"late image text";pending.set_value(std::move(refused));}
     SendMessageW(window,WM_TIMER,1,0);check(capture_status==L"per-body text\nlate image text");check(capture_restart_blocked && !CanRestartPreview());
+    // #430: a single-camera capture that failed with an image notice left on the body says so, and the focus sentence is replaced, not stacked.
+    {std::promise<CaptureUiOutcome> pending;capture_future=pending.get_future();CaptureUiOutcome failed;failed.capture.out_of_focus=true;failed.capture.late_object_event=true;pending.set_value(std::move(failed));}
+    SendMessageW(window,WM_TIMER,1,0);check(capture_status==DescribeStillSingleLateObject() && capture_restart_blocked && !CanRestartPreview());
     // The same failure still ends a finite test, so it cannot hang CI.
     run_seconds=20;SendMessageW(window,WM_TIMER,1,0);check(!IsWindow(window) && closing);
     Log("lifecycle_ui_checks="+std::to_string(checks)+" failures="+std::to_string(failures)+" camera_operations=0");return failures?1:0;

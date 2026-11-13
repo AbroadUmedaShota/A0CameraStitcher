@@ -97,4 +97,8 @@ inline std::wstring DescribeStillPairLateObjects(const VerifiedStillPair& pair){
     if(!text.empty())text+=L"\nこの画面を閉じて、担当者に知らせてください。";
     return text;
 }
+// The same for a single-camera capture that failed: the body is the one that was shot.
+inline std::wstring DescribeStillSingleLateObject(){
+    return L"撮影は完了できませんでしたが、本体に取り込んでいない画像が残っているかもしれません。\nこの画面を閉じて、担当者に知らせてください。";
+}
 }

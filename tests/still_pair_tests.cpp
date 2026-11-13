@@ -163,7 +163,9 @@ int main(){
         VerifiedStillPair late;late.originals[1].late_object_event=true;
         const auto late_text=DescribeStillPairLateObjects(late);
         check(contains(late_text,L"B：撮影は完了できませんでしたが、本体に取り込んでいない画像が残っているかもしれません。") && !contains(late_text,L"A：") && contains(late_text,L"担当者に知らせてください。"));
-        check(DescribeStillPairLateObjects(VerifiedStillPair{}).empty());}
+        check(DescribeStillPairLateObjects(VerifiedStillPair{}).empty());
+        const auto single_late=DescribeStillSingleLateObject();
+        check(contains(single_late,L"本体に取り込んでいない画像が残っているかもしれません。") && contains(single_late,L"担当者に知らせてください。") && !contains(single_late,L"A：") && !contains(single_late,L"B："));}
     // Exposure recheck refusal: no shutter for either body; every opened body closes.
     for(int refused:{0,1})for(int failure:{0,1,2}){
         Scripted s;if(failure==0)s.prepare_ready[refused]=false;if(failure==1)s.prepare_throws[refused]=true;
