@@ -179,9 +179,10 @@ struct RecalibrationSentence {std::string reason,remedy;};
     if(c=="gate-content-unmeasured")return {"継ぎ目の上の文字や線の多くを測れず、継ぎ目のずれを確かめきれませんでした","継ぎ目の線の上に文字や線が多い紙で撮り直すと確かめられます"};
     if(c=="gate-dx-unmeasured")return {"継ぎ目の左右のずれを測れる線（縦線）が無く、確かめきれませんでした","縦線や文字がある紙で撮り直すと確かめられます"};
     if(c=="gate-placement-unverified")return {"左右の写真の位置が合っているかを、模様では確かめきれませんでした","模様の多い紙で撮り直すと確かめられます"};
-    // The check did not work (the reason is the time budget's or the stage's): it is not offered. A time-out is cured by pressing again (the button of the result screen).
+    // The check did not work (the reason is the time budget's or the stage's): it is not offered. A time-out is cured by taking the pictures again
+    // (the "撮り直す" button of the result screen); when it keeps happening, the cause is on the machine's side.
     if(c=="gate-not-run"){
-        if(r=="time-budget")return {"継ぎ目のずれの確かめが時間内に終わりませんでした","もう一度「撮り直す」を押してください"};
+        if(r=="time-budget")return {"継ぎ目のずれの確かめが時間内に終わりませんでした","「撮り直す」を押して、もう一度撮ってください。続けて起きる時は技術担当へ知らせてください"};
         return {"継ぎ目のずれの確かめの処理が止まりました","技術担当へ知らせてください"};
     }
     if(c=="gate-fail")return {"継ぎ目のずれが基準を超えました","紙を替えて撮り直してください"};

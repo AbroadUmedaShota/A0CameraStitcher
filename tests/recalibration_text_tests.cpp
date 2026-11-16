@@ -137,7 +137,7 @@ void Sentences() {
         const auto undetermined = RecalibrationFindingSentence({FindingClass::rejected, "gate-undetermined", {}});
         CHECK(Has(undetermined.reason, "食い違い") && Has(undetermined.remedy, "技術担当") && !Has(undetermined.reason, "確かめられませんでした"));
         const auto timed_out = RecalibrationFindingSentence({FindingClass::rejected, "gate-not-run", "time-budget"});
-        CHECK(Has(timed_out.reason, "時間内に終わりませんでした") && Has(timed_out.remedy, "撮り直す"));
+        CHECK(Has(timed_out.reason, "時間内に終わりませんでした") && Has(timed_out.remedy, "撮り直す") && Has(timed_out.remedy, "技術担当"));
         for (const char* why : {"stage-failed", ""}) {
             const auto stopped = RecalibrationFindingSentence({FindingClass::rejected, "gate-not-run", why});
             CHECK(Has(stopped.reason, "処理が止まりました") && Has(stopped.remedy, "技術担当"));
