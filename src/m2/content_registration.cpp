@@ -1497,14 +1497,37 @@ std::string_view RegistrationStateCode(RegistrationState state) {
     }
     throw std::invalid_argument("unknown registration state");
 }
-EvidenceShortage AssessEvidenceShortage(const std::vector<std::string>& reasons, std::uint32_t inliers, std::uint32_t points,
+EvidenceCounts EvidenceCountsOf(const RegistrationDiagnostics& diagnostics) {
+    EvidenceCounts counts;
+    counts.inliers = diagnostics.inliers;
+    counts.points = diagnostics.points;
+    counts.unique_blocks = diagnostics.unique_blocks;
+    counts.consistent_blocks = diagnostics.consistent_blocks;
+    counts.anchor_blocks = diagnostics.anchor_blocks;
+    counts.consistent_anchor_blocks = diagnostics.consistent_anchor_blocks;
+    return counts;
+}
+EvidenceShortage AssessEvidenceShortage(const std::vector<std::string>& reasons, const EvidenceCounts& counts,
     const RegistrationLimits& limits) {
     EvidenceShortage verdict;
     if (reasons.empty()) return verdict;
+    const std::uint32_t inliers = counts.inliers, points = counts.points;
     for (const auto& reason : reasons) {
         bool shortage = false;
-        for (const char* known : {"coarse-no-unique-blocks", "unique-blocks", "repeating-only", "too-few-points", "prediction-uncertain", "too-dark"})
+        for (const char* known : {"coarse-no-unique-blocks", "repeating-only", "too-few-points", "prediction-uncertain", "too-dark"})
             if (reason == known) shortage = true;
+        if (reason == "unique-blocks") {
+            // One code, two places of the estimator: the coarse stage (too few unique blocks, nothing counted as consistent yet) and
+            // V2 at the verdict (see the comment there, which depends on these two cases). Only a lack of marks is a shortage; blocks
+            // that disagree with the fit, or an anchor that was dropped from it, are a doubt.
+            const std::uint32_t m = limits.minimum_unique_blocks;
+            const std::uint32_t u = counts.unique_blocks, c = counts.consistent_blocks;
+            const std::uint32_t a = counts.anchor_blocks, ca = counts.consistent_anchor_blocks;
+            const bool sane = m >= 1 && ca <= a && a <= u && ca <= c && c <= u;
+            const bool coarse_stopped = u >= 1 && u < m && c == 0 && ca == 0;                                        // S1
+            const bool anchors_only = u >= m && c >= m && 2ull*c >= u && a >= 1 && a < m && ca == a;               // S2
+            shortage = sane && (coarse_stopped || anchors_only);
+        }
         if (reason == "brown-lowe") {
             // V1 fails when inliers <= alpha + beta * points. It is the number of points, and not the outliers, that fails V1 only when
             // it would fail with every point an inlier: points * (1 - beta) <= alpha. The counts must also be sane (some inliers, and
@@ -1519,7 +1542,7 @@ EvidenceShortage AssessEvidenceShortage(const std::vector<std::string>& reasons,
     return verdict;
 }
 EvidenceShortage AssessEvidenceShortage(const RegistrationResult& result, const RegistrationLimits& limits) {
-    return AssessEvidenceShortage(result.reasons, result.diagnostics.inliers, result.diagnostics.points, limits);
+    return AssessEvidenceShortage(result.reasons, EvidenceCountsOf(result.diagnostics), limits);
 }
 
 std::string_view EnvelopeComponentCode(EnvelopeComponent component) {
@@ -2274,6 +2297,7 @@ RegistrationResult EstimateOn(const BgrImage& camera_a, const BgrImage& camera_b
     // V2. Surface mode: the blocks counted include the repeating blocks that follow the vote's winner, and a block that repeats
     // has a strong peak next to almost any place, so it is no evidence of the one the winner gives. The line is therefore held
     // against the anchors that agree with the fit as well: one anchor with followers is not a verified estimate.
+    // AssessEvidenceShortage (S1 and S2) tells a lack of marks from a disagreement by these same counts and depends on this expression.
     const bool too_few_blocks = diag.consistent_blocks < settings.limits.minimum_unique_blocks || 2*diag.consistent_blocks < diag.unique_blocks;
     const bool too_few_anchors = model.surface && diag.consistent_anchor_blocks < settings.limits.minimum_unique_blocks;
     if (too_few_blocks || too_few_anchors) result.reasons.push_back("unique-blocks");

@@ -185,6 +185,9 @@ RecalibrationComputation FakeComputation(Fake mode, std::vector<std::string>* st
             // Undetermined for want of marks AND for a sign that the placement does not fit: not "too few marks" alone.
             p.candidate.reset(); p.ready = false; p.refusals = {rc::Refusal::reestimate_not_verified};
             p.verification.state = cr::RegistrationState::undetermined; p.verification.passed = false; p.verification.reasons = {"unique-blocks", "residual-shape"};
+            // The blocks are those of an estimate that V2 failed on one anchor alone (a shortage), so residual-shape is the doubt that is named.
+            p.verification.evidence.unique_blocks = 6; p.verification.evidence.consistent_blocks = 6;
+            p.verification.evidence.anchor_blocks = 1; p.verification.evidence.consistent_anchor_blocks = 1;
             break;
         case Fake::check_failed:
             // What VerifyCandidate returns when the estimator refuses its settings.
@@ -246,11 +249,13 @@ bool HasCode(const RecalibrationJobOutcome& o, const std::string& code) {
     return std::any_of(o.findings.begin(), o.findings.end(), [&](const RecalibrationFinding& f) { return f.code == code; });
 }
 
-// The condition's limits of the estimator's first check (alpha 8, beta 0.3: with no outlier, V1 is passed only by 12 points or more). A value of this test.
+// The condition's limits of the estimator's first check (alpha 8, beta 0.3: with no outlier, V1 is passed only by 12 points or more) and of
+// V2 (3 blocks). Values of this test.
 cr::RegistrationLimits Limits() {
     cr::RegistrationLimits limits;
     limits.brown_lowe_alpha = 8.0;
     limits.brown_lowe_beta = 0.3;
+    limits.minimum_unique_blocks = 3;
     return limits;
 }
 const auto kLimits = Limits();
@@ -299,14 +304,20 @@ void Decisions() {
     }
     // The check on the new profile when it is undetermined: told by ALL of its reasons (the table of the ruling, one function in m2).
     {
-        struct Case {const char* name; std::vector<std::string> reasons; std::uint32_t inliers, points; FindingClass klass; const char* code; const char* reason;};
+        // u, c, a, ca: the block counts (unique, consistent, anchors, consistent anchors) that tell the two sources of unique-blocks apart.
+        struct Case {const char* name; std::vector<std::string> reasons; std::uint32_t inliers, points; FindingClass klass; const char* code; const char* reason;
+            std::uint32_t u{}, c{}, a{}, ca{};};
         const Case cases[] = {
-            {"one reason of the family", {"unique-blocks"}, 0, 0, FindingClass::unverified, "reestimate-not-verified", "unique-blocks"},
+            {"one reason of the family", {"unique-blocks"}, 0, 0, FindingClass::unverified, "reestimate-not-verified", "unique-blocks", 6, 6, 1, 1},
+            {"unique-blocks, the coarse stage stopped on the number of blocks", {"unique-blocks"}, 0, 0, FindingClass::unverified, "reestimate-not-verified", "unique-blocks", 2, 0, 1, 0},
+            {"unique-blocks, more than half of the blocks disagree", {"unique-blocks"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "unique-blocks", 8, 3, 8, 3},
+            {"unique-blocks, the only anchor was dropped", {"unique-blocks"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "unique-blocks", 6, 5, 1, 0},
+            {"unique-blocks, no counts carried", {"unique-blocks"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "unique-blocks"},
             {"every reason of the family", {"coarse-no-unique-blocks", "repeating-only", "too-few-points", "prediction-uncertain", "too-dark"}, 0, 0, FindingClass::unverified, "reestimate-not-verified", "coarse-no-unique-blocks"},
-            {"a shortage and a doubt", {"unique-blocks", "residual-shape"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "residual-shape"},
-            {"a doubt first", {"residual-shape", "unique-blocks"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "residual-shape"},
+            {"a shortage and a doubt", {"unique-blocks", "residual-shape"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "residual-shape", 6, 6, 1, 1},
+            {"a doubt first", {"residual-shape", "unique-blocks"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "residual-shape", 6, 6, 1, 1},
             {"a code nobody knows", {"a-code-nobody-knows"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "a-code-nobody-knows"},
-            {"a shortage and a code nobody knows", {"unique-blocks", "a-code-nobody-knows"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "a-code-nobody-knows"},
+            {"a shortage and a code nobody knows", {"unique-blocks", "a-code-nobody-knows"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "a-code-nobody-knows", 6, 6, 1, 1},
             {"no reason", {}, 0, 0, FindingClass::rejected, "reestimate-doubtful", ""},
             {"the estimate failed", {"estimate-failed"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "estimate-failed"},
             {"the displacement could not be found", {"displacement-failed"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "displacement-failed"},
@@ -319,7 +330,7 @@ void Decisions() {
             {"brown-lowe, nothing counted", {"brown-lowe"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "brown-lowe"},
             {"brown-lowe, no inlier", {"brown-lowe"}, 0, 5, FindingClass::rejected, "reestimate-doubtful", "brown-lowe"},
             {"brown-lowe, more inliers than points", {"brown-lowe"}, 11, 5, FindingClass::rejected, "reestimate-doubtful", "brown-lowe"},
-            {"brown-lowe beside a shortage", {"unique-blocks", "brown-lowe"}, 5, 9, FindingClass::unverified, "reestimate-not-verified", "unique-blocks"},
+            {"brown-lowe beside a shortage", {"unique-blocks", "brown-lowe"}, 5, 9, FindingClass::unverified, "reestimate-not-verified", "unique-blocks", 6, 6, 1, 1},
             {"brown-lowe beside a doubt", {"brown-lowe", "starts-disagree"}, 5, 9, FindingClass::rejected, "reestimate-doubtful", "starts-disagree"},
         };
         for (const auto& c : cases) {
@@ -327,6 +338,12 @@ void Decisions() {
             p.refusals = {rc::Refusal::reestimate_not_verified};
             p.verification.performed = true; p.verification.state = cr::RegistrationState::undetermined;
             p.verification.reasons = c.reasons; p.verification.inliers = c.inliers; p.verification.points = c.points;
+            const auto evidence = [&] {
+                cr::EvidenceCounts e;
+                e.inliers = c.inliers; e.points = c.points; e.unique_blocks = c.u; e.consistent_blocks = c.c; e.anchor_blocks = c.a; e.consistent_anchor_blocks = c.ca;
+                return e;
+            }();
+            p.verification.evidence = evidence;
             const auto f = ClassifyProposal(p, kLimits);
             if (!(f.size() == 1 && f[0].klass == c.klass && f[0].code == c.code && f[0].reason == c.reason)) std::cerr << "case: " << c.name << std::endl;
             CHECK(f.size() == 1 && f[0].klass == c.klass && f[0].code == c.code && f[0].reason == c.reason);
@@ -336,7 +353,7 @@ void Decisions() {
             // The sample's estimate is told by the same function: the same reasons give the same class.
             RecalibrationSampleFacts s;
             s.composed = true; s.estimate = cr::RegistrationState::undetermined; s.gate = gate::GateState::pass;
-            s.estimate_reasons = c.reasons; s.estimate_inliers = c.inliers; s.estimate_points = c.points;
+            s.estimate_reasons = c.reasons; s.estimate_evidence = evidence;
             const auto g = ClassifySample(s, kLimits);
             CHECK(g.size() == 1 && g[0].klass == c.klass && g[0].code == (c.klass == FindingClass::unverified ? "sample-estimate-undetermined" : "sample-estimate-doubtful"));
         }
@@ -345,6 +362,7 @@ void Decisions() {
         p.refusals = {rc::Refusal::reestimate_not_verified};
         p.verification.performed = true; p.verification.state = cr::RegistrationState::undetermined;
         p.verification.reasons = {"brown-lowe"}; p.verification.inliers = 11; p.verification.points = 11;
+        p.verification.evidence.inliers = 11; p.verification.evidence.points = 11;
         CHECK(ClassifyProposal(p, kLimits).front().klass == FindingClass::unverified);
         CHECK(ClassifyProposal(p, cr::RegistrationLimits{}).front().klass == FindingClass::rejected);
     }
@@ -400,9 +418,23 @@ void Decisions() {
         }
         f = one([](auto& t) { t.estimate = cr::RegistrationState::out_of_envelope; });
         CHECK(Is(f, FindingClass::rejected, "sample-estimate-out-of-envelope"));
-        f = one([](auto& t) { t.estimate = cr::RegistrationState::undetermined; t.estimate_reasons = {"unique-blocks"}; });
+        // The blocks of an estimate that V2 failed on one anchor alone: a shortage of marks. More than half of the blocks in disagreement,
+        // or an anchor that was dropped from the fit, is a doubt whatever the gate says.
+        const auto few_anchors = [](auto& t) {
+            t.estimate = cr::RegistrationState::undetermined; t.estimate_reasons = {"unique-blocks"};
+            t.estimate_evidence.unique_blocks = 6; t.estimate_evidence.consistent_blocks = 6;
+            t.estimate_evidence.anchor_blocks = 1; t.estimate_evidence.consistent_anchor_blocks = 1;
+        };
+        f = one(few_anchors);
         CHECK(Is(f, FindingClass::unverified, "sample-estimate-undetermined"));
-        f = one([](auto& t) { t.estimate = cr::RegistrationState::undetermined; t.estimate_reasons = {"unique-blocks"}; t.gate = gate::GateState::fail; });   // a failure beside a doubt stays a failure
+        f = one([&](auto& t) {
+            few_anchors(t);
+            t.estimate_evidence.unique_blocks = 8; t.estimate_evidence.consistent_blocks = 3; t.estimate_evidence.anchor_blocks = 8; t.estimate_evidence.consistent_anchor_blocks = 3;
+        });
+        CHECK(Is(f, FindingClass::rejected, "sample-estimate-doubtful") && f[0].reason == "unique-blocks");
+        f = one([&](auto& t) { few_anchors(t); t.estimate_evidence.consistent_anchor_blocks = 0; });
+        CHECK(Is(f, FindingClass::rejected, "sample-estimate-doubtful") && f[0].reason == "unique-blocks");
+        f = one([&](auto& t) { few_anchors(t); t.gate = gate::GateState::fail; });   // a failure beside a doubt stays a failure
         CHECK(f.size() == 2 && f[1].klass == FindingClass::rejected && f[1].code == "gate-fail");
         f = one([](auto& t) { t.composed = false; t.threw = true; });
         CHECK(f.size() == 1 && f[0].code == "sample-failed" && f[0].klass == FindingClass::rejected);

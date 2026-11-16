@@ -872,6 +872,11 @@ void Repeating() {
             Check(r.state == cr::RegistrationState::undetermined, spec.name + ": not verified on one anchor (" + Describe(r) + ")");
             // The only reason: every other check passes, so it is the count of anchors alone that keeps the estimate from being trusted.
             Check(r.reasons.size() == 1 && r.reasons.front() == "unique-blocks", spec.name + ": the one reason is unique-blocks");
+            // The estimator's own output through the classification: a lack of marks (S2), not a disagreement. If the one anchor had been
+            // dropped from the fit (consistent anchors 0), this would be a doubt and the rule would stay as it is.
+            Check(cr::AssessEvidenceShortage(r, settings.limits).shortage_only, spec.name + ": classified as a shortage of marks (counts " +
+                std::to_string(r.diagnostics.unique_blocks) + "," + std::to_string(r.diagnostics.consistent_blocks) + "," +
+                std::to_string(r.diagnostics.anchor_blocks) + "," + std::to_string(r.diagnostics.consistent_anchor_blocks) + ")");
             Check(r.has_estimate, spec.name + ": the fit still ran (the followers help the start)");
         }
     }
@@ -1119,36 +1124,50 @@ void BasePose() {
 }
 
 // ---- Evidence shortage (#434): "too few marks" is told from "does not fit" by every reason, in one function -------------
-// The limits are this test's (alpha 8, beta 0.3: with no outlier, V1 is passed only by 12 points or more).
+// The limits are this test's (alpha 8, beta 0.3: with no outlier, V1 is passed only by 12 points or more; minimum_unique_blocks 3).
 void Evidence() {
     cr::RegistrationLimits limits;
     limits.brown_lowe_alpha = 8.0;
     limits.brown_lowe_beta = 0.3;
-    const auto assess = [&](std::vector<std::string> reasons, std::uint32_t inliers = 0, std::uint32_t points = 0) {
-        return cr::AssessEvidenceShortage(reasons, inliers, points, limits);
+    limits.minimum_unique_blocks = 3;
+    const auto counts = [](std::uint32_t inliers, std::uint32_t points, std::uint32_t unique, std::uint32_t consistent, std::uint32_t anchors,
+                           std::uint32_t consistent_anchors) {
+        cr::EvidenceCounts c;
+        c.inliers = inliers; c.points = points;
+        c.unique_blocks = unique; c.consistent_blocks = consistent; c.anchor_blocks = anchors; c.consistent_anchor_blocks = consistent_anchors;
+        return c;
     };
-    // Every reason of the "too few marks" family alone, and together.
-    for (const char* code : {"coarse-no-unique-blocks", "unique-blocks", "repeating-only", "too-few-points", "prediction-uncertain", "too-dark"}) {
+    const auto assess = [&](std::vector<std::string> reasons, std::uint32_t inliers = 0, std::uint32_t points = 0) {
+        return cr::AssessEvidenceShortage(reasons, counts(inliers, points, 0, 0, 0, 0), limits);
+    };
+    // The block counts of a unique-blocks estimate that V2 failed on the number of anchors alone (6 blocks used, all consistent, 1 anchor).
+    const auto few_anchors = counts(0, 0, 6, 6, 1, 1);
+    const auto assess_blocks = [&](std::vector<std::string> reasons, const cr::EvidenceCounts& c) {
+        return cr::AssessEvidenceShortage(reasons, c, limits);
+    };
+    // Every reason of the "too few marks" family alone, and together. unique-blocks is told by the block counts (below).
+    for (const char* code : {"coarse-no-unique-blocks", "repeating-only", "too-few-points", "prediction-uncertain", "too-dark"}) {
         const auto v = assess({code});
         Check(v.shortage_only && v.doubt.empty(), std::string("shortage: ") + code);
     }
-    Check(assess({"unique-blocks", "too-few-points", "prediction-uncertain"}).shortage_only, "shortage: several reasons of the family");
+    Check(assess_blocks({"unique-blocks"}, few_anchors).shortage_only, "shortage: unique-blocks on the number of anchors");
+    Check(assess_blocks({"unique-blocks", "too-few-points", "prediction-uncertain"}, few_anchors).shortage_only, "shortage: several reasons of the family");
     // One reason outside the family decides, wherever it stands in the list, and is the one named.
     for (const char* code : {"coarse-ambiguous", "coarse-inconsistent", "fit-failed", "not-converged", "residual-shape", "starts-disagree", "no-overlap",
              "estimate-failed", "displacement-failed", "time-budget"}) {
         const auto v = assess({code});
         Check(!v.shortage_only && v.doubt == code, std::string("doubt: ") + code);
-        const auto first = assess({"unique-blocks", code});
-        const auto last = assess({code, "unique-blocks"});
+        const auto first = assess_blocks({"unique-blocks", code}, few_anchors);
+        const auto last = assess_blocks({code, "unique-blocks"}, few_anchors);
         Check(!first.shortage_only && first.doubt == code && !last.shortage_only && last.doubt == code, std::string("doubt beside a shortage: ") + code);
     }
     {
-        const auto v = assess({"unique-blocks", "residual-shape"});
+        const auto v = assess_blocks({"unique-blocks", "residual-shape"}, few_anchors);
         Check(!v.shortage_only && v.doubt == "residual-shape", "unique-blocks with residual-shape is a doubt");
     }
     // What this does not know is a doubt; so is a reason list with nothing in it.
     Check(!assess({"a-code-nobody-knows"}).shortage_only && assess({"a-code-nobody-knows"}).doubt == "a-code-nobody-knows", "an unknown code is a doubt");
-    Check(!assess({"unique-blocks", "a-code-nobody-knows"}).shortage_only, "an unknown code beside a shortage is a doubt");
+    Check(!assess_blocks({"unique-blocks", "a-code-nobody-knows"}, few_anchors).shortage_only, "an unknown code beside a shortage is a doubt");
     Check(!assess({}).shortage_only && assess({}).doubt.empty(), "no reason is not a shortage");
     // brown-lowe: V1 is passed when inliers > alpha + beta * points. It is a shortage only when even every point as an inlier cannot pass it:
     // points * (1 - beta) <= alpha (here points <= 11, as 11 * 0.7 = 7.7 <= 8 and 12 * 0.7 = 8.4 > 8), with 0 < inliers <= points.
@@ -1175,23 +1194,74 @@ void Evidence() {
         // The line follows the condition's limits: with alpha 9, 12 points * 0.7 = 8.4 <= 9 is a shortage, and 13 points are not.
         auto wider = limits;
         wider.brown_lowe_alpha = 9.0;
-        Check(cr::AssessEvidenceShortage({"brown-lowe"}, 11, 12, wider).shortage_only, "brown-lowe: the line moves with alpha (11 of 12, alpha 9)");
-        Check(!cr::AssessEvidenceShortage({"brown-lowe"}, 11, 13, wider).shortage_only, "brown-lowe: 13 points * 0.7 = 9.1 > 9 is a doubt");
+        Check(cr::AssessEvidenceShortage({"brown-lowe"}, counts(11, 12, 0, 0, 0, 0), wider).shortage_only, "brown-lowe: the line moves with alpha (11 of 12, alpha 9)");
+        Check(!cr::AssessEvidenceShortage({"brown-lowe"}, counts(11, 13, 0, 0, 0, 0), wider).shortage_only, "brown-lowe: 13 points * 0.7 = 9.1 > 9 is a doubt");
     }
     // The limits are the caller's: unset (NaN) or beta not below 1 make brown-lowe a doubt.
     {
         const cr::RegistrationLimits unset;
-        Check(!cr::AssessEvidenceShortage({"brown-lowe"}, 1, 1, unset).shortage_only, "brown-lowe: unset limits are a doubt");
+        Check(!cr::AssessEvidenceShortage({"brown-lowe"}, counts(1, 1, 0, 0, 0, 0), unset).shortage_only, "brown-lowe: unset limits are a doubt");
         auto flat = limits;
         flat.brown_lowe_beta = 1.0;
-        Check(!cr::AssessEvidenceShortage({"brown-lowe"}, 1, 1, flat).shortage_only, "brown-lowe: beta 1 is a doubt");
+        Check(!cr::AssessEvidenceShortage({"brown-lowe"}, counts(1, 1, 0, 0, 0, 0), flat).shortage_only, "brown-lowe: beta 1 is a doubt");
         auto negative = limits;
         negative.brown_lowe_alpha = -1.0;
-        Check(!cr::AssessEvidenceShortage({"brown-lowe"}, 1, 1, negative).shortage_only, "brown-lowe: a negative alpha is a doubt");
+        Check(!cr::AssessEvidenceShortage({"brown-lowe"}, counts(1, 1, 0, 0, 0, 0), negative).shortage_only, "brown-lowe: a negative alpha is a doubt");
         auto not_a_number = limits;
         not_a_number.brown_lowe_beta = std::nan("");
-        Check(!cr::AssessEvidenceShortage({"brown-lowe"}, 1, 1, not_a_number).shortage_only, "brown-lowe: a beta that is not a number is a doubt");
-        Check(cr::AssessEvidenceShortage({"unique-blocks"}, 0, 0, unset).shortage_only, "the other reasons do not need the limits");
+        Check(!cr::AssessEvidenceShortage({"brown-lowe"}, counts(1, 1, 0, 0, 0, 0), not_a_number).shortage_only, "brown-lowe: a beta that is not a number is a doubt");
+        Check(cr::AssessEvidenceShortage({"too-few-points"}, counts(0, 0, 0, 0, 0, 0), unset).shortage_only, "the other reasons do not need the limits");
+    }
+    // unique-blocks (#434): one code for two places of the estimator, told by the counts (U unique, C consistent, A anchors, CA consistent
+    // anchors; m = 3). A shortage is a lack of marks (S1: the coarse stage stopped on the number of blocks; S2: V2 failed on the anchors
+    // alone, with nothing dropped and no more than half of the blocks in disagreement). Everything else is a doubt named unique-blocks.
+    {
+        struct Row { std::uint32_t u, c, a, ca; bool shortage; const char* what; };
+        const Row rows[] = {
+            {2, 0, 1, 0, true,  "S1, surface: the coarse stage stopped on the number of blocks"},
+            {2, 0, 2, 0, true,  "S1, pose only: stopped (anchors = blocks)"},
+            {1, 0, 0, 0, true,  "S1: one block"},
+            {0, 0, 0, 0, false, "no counts carried"},
+            {2, 1, 1, 0, false, "stopped, yet a consistent block is counted"},
+            {3, 0, 3, 0, false, "as many blocks as the minimum, none consistent"},
+            {8, 3, 8, 3, false, "pose only: more than half of the blocks disagree"},
+            {7, 3, 7, 3, false, "pose only: 2C = 6 < 7"},
+            {6, 3, 6, 3, false, "pose only: anchors reach the minimum (the estimator does not give this)"},
+            {6, 6, 1, 1, true,  "S2: the form of table_one_shaded_block"},
+            {5, 5, 2, 2, true,  "S2"},
+            {6, 3, 2, 2, true,  "S2: on the half line (2C = U)"},
+            {7, 3, 2, 2, false, "below the half line (2C = 6 < 7)"},
+            {6, 5, 1, 0, false, "the only anchor was dropped"},
+            {6, 5, 2, 1, false, "an anchor was dropped"},
+            {8, 6, 4, 2, false, "anchors at the minimum or more were dropped below it"},
+            {5, 5, 0, 0, false, "no anchor (the form of a record read back)"},
+            {6, 2, 2, 2, false, "C below the minimum"},
+            {4, 5, 2, 2, false, "C above U"},
+            {6, 6, 2, 3, false, "CA above A"},
+        };
+        for (const auto& row : rows) {
+            const auto v = assess_blocks({"unique-blocks"}, counts(0, 0, row.u, row.c, row.a, row.ca));
+            const std::string name = std::string("unique-blocks (") + std::to_string(row.u) + "," + std::to_string(row.c) + "," +
+                std::to_string(row.a) + "," + std::to_string(row.ca) + "): " + row.what;
+            Check(v.shortage_only == row.shortage, name + (row.shortage ? " is a shortage" : " is a doubt"));
+            Check(row.shortage ? v.doubt.empty() : v.doubt == "unique-blocks", name + ": the doubt is " + (row.shortage ? "empty" : "unique-blocks"));
+        }
+        // The line follows the condition's minimum: unset is a doubt, and (6,6,3,3) is a shortage at 4 and a doubt at 3.
+        auto unset_minimum = limits;
+        unset_minimum.minimum_unique_blocks = 0;
+        Check(!cr::AssessEvidenceShortage({"unique-blocks"}, few_anchors, unset_minimum).shortage_only, "unique-blocks: no minimum is a doubt");
+        auto four = limits;
+        four.minimum_unique_blocks = 4;
+        Check(cr::AssessEvidenceShortage({"unique-blocks"}, counts(0, 0, 6, 6, 3, 3), four).shortage_only, "unique-blocks: the line follows the minimum (4)");
+        Check(!assess_blocks({"unique-blocks"}, counts(0, 0, 6, 6, 3, 3)).shortage_only, "unique-blocks: the same counts are a doubt at 3");
+        // Several reasons: the block counts decide unique-blocks, and the other reasons keep their own rules.
+        Check(assess_blocks({"unique-blocks", "too-few-points"}, few_anchors).shortage_only, "unique-blocks + too-few-points: a shortage on S2");
+        const auto disagree = assess_blocks({"unique-blocks", "too-few-points"}, counts(0, 0, 8, 3, 8, 3));
+        Check(!disagree.shortage_only && disagree.doubt == "unique-blocks", "unique-blocks + too-few-points: a doubt when the blocks disagree");
+        auto brown = few_anchors;
+        brown.inliers = 5; brown.points = 9;
+        Check(assess_blocks({"unique-blocks", "brown-lowe"}, brown).shortage_only, "unique-blocks + brown-lowe (5 of 9): a shortage");
+        Check(assess({"too-few-points"}).shortage_only, "too-few-points alone is a shortage whatever the block counts");
     }
     // The result form gives the same answer as the three numbers.
     {
@@ -1202,6 +1272,15 @@ void Evidence() {
         Check(cr::AssessEvidenceShortage(r, limits).shortage_only, "the result form: few points");
         r.diagnostics.points = 20;
         Check(!cr::AssessEvidenceShortage(r, limits).shortage_only, "the result form: more points");
+        // The block counts go through EvidenceCountsOf: unique-blocks on one anchor is a shortage, and a dropped anchor is a doubt.
+        r.reasons = {"unique-blocks"};
+        r.diagnostics.unique_blocks = 6; r.diagnostics.consistent_blocks = 6; r.diagnostics.anchor_blocks = 1; r.diagnostics.consistent_anchor_blocks = 1;
+        Check(cr::AssessEvidenceShortage(r, limits).shortage_only, "the result form: unique-blocks on one anchor");
+        r.diagnostics.consistent_anchor_blocks = 0;
+        Check(!cr::AssessEvidenceShortage(r, limits).shortage_only, "the result form: unique-blocks with the anchor dropped");
+        const auto copied = cr::EvidenceCountsOf(r.diagnostics);
+        Check(copied.inliers == 11 && copied.points == 20 && copied.unique_blocks == 6 && copied.consistent_blocks == 6 &&
+                copied.anchor_blocks == 1 && copied.consistent_anchor_blocks == 0, "EvidenceCountsOf copies the six counts");
     }
 }
 }

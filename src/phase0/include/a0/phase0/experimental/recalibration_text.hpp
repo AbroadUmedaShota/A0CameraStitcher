@@ -129,6 +129,14 @@ struct RecalibrationSentence {std::string reason,remedy;};
     return {"位置を確かに決められませんでした","模様の多い紙で撮り直してください"};
 }
 
+// The sentence of a reason in a "doubtful" finding (the estimate found a sign that the placement does not fit). `unique-blocks` is the one
+// code that the estimator also gives for a lack of marks; here it comes only when AssessEvidenceShortage found the blocks in disagreement
+// (a shortage never reaches a doubtful finding), so the sentence of "too few marks" would say the opposite of what was found.
+[[nodiscard]] inline RecalibrationSentence RecalibrationDoubtfulReasonSentence(const std::string& r){
+    if(r=="unique-blocks")return {"位置を決める模様どうしが、互いに合いませんでした","紙を平らに置き直すか、紙を替えて撮り直してください"};
+    return RecalibrationEstimateReasonSentence(r);
+}
+
 [[nodiscard]] inline RecalibrationSentence RecalibrationFindingSentence(const RecalibrationFinding& finding){
     const auto& c=finding.code;
     const auto& r=finding.reason;
@@ -160,7 +168,7 @@ struct RecalibrationSentence {std::string reason,remedy;};
     }
     // The check on the new profile found a sign that the placement does not fit (not only too few marks): the calibration is not offered.
     if(c=="reestimate-doubtful"){
-        const auto s=RecalibrationEstimateReasonSentence(r);
+        const auto s=RecalibrationDoubtfulReasonSentence(r);
         return {"新しい校正で確かめたところ、合っていない疑いが見つかりました（"+s.reason+"）",s.remedy};
     }
     if(c=="stopped")return {"中止しました","何も書いていません。前の校正のままです"};
@@ -171,9 +179,10 @@ struct RecalibrationSentence {std::string reason,remedy;};
     if(c=="gate-content-unmeasured")return {"継ぎ目の上の文字や線の多くを測れず、継ぎ目のずれを確かめきれませんでした","継ぎ目の線の上に文字や線が多い紙で撮り直すと確かめられます"};
     if(c=="gate-dx-unmeasured")return {"継ぎ目の左右のずれを測れる線（縦線）が無く、確かめきれませんでした","縦線や文字がある紙で撮り直すと確かめられます"};
     if(c=="gate-placement-unverified")return {"左右の写真の位置が合っているかを、模様では確かめきれませんでした","模様の多い紙で撮り直すと確かめられます"};
-    // The check did not work (the reason is the time budget's or the stage's): it is not offered. A time-out is cured by pressing again (the button of the result screen).
+    // The check did not work (the reason is the time budget's or the stage's): it is not offered. A time-out is cured by taking the pictures again
+    // (the "撮り直す" button of the result screen); when it keeps happening, the cause is on the machine's side.
     if(c=="gate-not-run"){
-        if(r=="time-budget")return {"継ぎ目のずれの確かめが時間内に終わりませんでした","もう一度「撮り直す」を押してください"};
+        if(r=="time-budget")return {"継ぎ目のずれの確かめが時間内に終わりませんでした","「撮り直す」を押して、もう一度撮ってください。続けて起きる時は技術担当へ知らせてください"};
         return {"継ぎ目のずれの確かめの処理が止まりました","技術担当へ知らせてください"};
     }
     if(c=="gate-fail")return {"継ぎ目のずれが基準を超えました","紙を替えて撮り直してください"};
@@ -183,7 +192,7 @@ struct RecalibrationSentence {std::string reason,remedy;};
     if(c=="gate-unknown")return {"継ぎ目の確かめで、想定していない結果が出ました","技術担当へ知らせてください"};
     if(c=="sample-estimate-undetermined")return {"見本の合成で、位置の推定が確かになりませんでした","紙を替えて撮り直すと確かめられます"};
     if(c=="sample-estimate-doubtful"){
-        const auto s=RecalibrationEstimateReasonSentence(r);
+        const auto s=RecalibrationDoubtfulReasonSentence(r);
         // The gate may have passed: the line of the seam says "within the line" beside this sentence, so it says that this does not save it.
         return {"見本の合成で、位置の推定に食い違いの印が見つかりました（"+s.reason+"）。継ぎ目のずれが基準内でも、この校正は使えません",s.remedy};
     }

@@ -137,7 +137,7 @@ void Sentences() {
         const auto undetermined = RecalibrationFindingSentence({FindingClass::rejected, "gate-undetermined", {}});
         CHECK(Has(undetermined.reason, "食い違い") && Has(undetermined.remedy, "技術担当") && !Has(undetermined.reason, "確かめられませんでした"));
         const auto timed_out = RecalibrationFindingSentence({FindingClass::rejected, "gate-not-run", "time-budget"});
-        CHECK(Has(timed_out.reason, "時間内に終わりませんでした") && Has(timed_out.remedy, "撮り直す"));
+        CHECK(Has(timed_out.reason, "時間内に終わりませんでした") && Has(timed_out.remedy, "撮り直す") && Has(timed_out.remedy, "技術担当"));
         for (const char* why : {"stage-failed", ""}) {
             const auto stopped = RecalibrationFindingSentence({FindingClass::rejected, "gate-not-run", why});
             CHECK(Has(stopped.reason, "処理が止まりました") && Has(stopped.remedy, "技術担当"));
@@ -175,6 +175,13 @@ void Sentences() {
         CHECK(Has(sentence("brown-lowe").reason, "外れていて") && Has(sentence("fit-failed").reason, "当てはめ"));
         CHECK(Has(sentence("").reason, head) && Has(sentence("a-code-nobody-knows").reason, head) && !Has(sentence("a-code-nobody-knows").reason, "nobody"));
         CHECK(sentence("residual-shape").reason != RecalibrationFindingSentence({FindingClass::unverified, "reestimate-not-verified", "residual-shape"}).reason);
+        // unique-blocks reaches a doubtful finding only when the blocks disagreed (a lack of marks never does): the sentence must not say
+        // that the marks are too few, and says that the patterns that fix the place did not agree with each other.
+        const auto blocks = sentence("unique-blocks");
+        CHECK(Has(blocks.reason, head) && Has(blocks.reason, "互いに合いませんでした") && !Has(blocks.reason, "模様が足りません"));
+        CHECK(Has(blocks.remedy, "置き直す") && !Has(blocks.remedy, "文字や図形が上から下まである紙"));
+        // The sentence of a lack of marks (estimate-not-verified) is the one that stays.
+        CHECK(Has(RecalibrationFindingSentence({FindingClass::no_candidate, "estimate-not-verified", "unique-blocks"}).reason, "模様が足りません"));
     }
     // The sample's estimate shows a sign of misfit while the gate may have passed: the sentence itself says that "within the line" does not save it.
     CHECK(Has(RecalibrationFindingSentence({FindingClass::rejected, "sample-estimate-doubtful", "residual-shape"}).reason, "継ぎ目のずれが基準内でも、この校正は使えません"));

@@ -702,6 +702,7 @@ Verification VerifyCandidate(const Inputs& in,const Candidate& candidate){
     }
     v.state=r.state;v.reasons=r.reasons;
     v.inliers=r.diagnostics.inliers;v.points=r.diagnostics.points;
+    v.evidence=content_registration::EvidenceCountsOf(r.diagnostics);
     if(!r.has_estimate)return v;
     v.pose=r.pose;
     if(r.surface.state==SurfaceState::estimated)v.surface=r.surface.plane;
