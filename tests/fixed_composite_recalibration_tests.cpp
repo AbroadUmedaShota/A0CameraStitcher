@@ -474,6 +474,26 @@ void GeometryFromPose(){
     }
     CHECK(rc::ProposeRaster(active.condition,parent,cr::PoseParameters{},rc::RasterPlacement::follow_camera_b).width_pixels==raster.width_pixels);
 
+    // A hand adjustment beyond the range (pose_outside_envelope, #434): the raster is counted from the profile's own placement, not from that
+    // base pose. Beyond the range by a little, and by so much that camera B covers no row of the raster at that pose (the old measure threw).
+    {
+        const auto pose=PoseForShift(parameters.camera_b,30.0,false);
+        const auto from_profile=rc::ProposeRaster(active.condition,parent,pose,rc::RasterPlacement::follow_camera_b);
+        for(const double tx:{12.0,3000.0}){
+            auto beyond=active.condition;
+            beyond.base_pose=cr::PoseParameters{0,0,0,tx,0,0};
+            CHECK(std::hypot(beyond.base_pose.tx_mm,beyond.base_pose.ty_mm)>beyond.registration.envelope.position_mm);
+            std::optional<render::OutputRaster> counted;
+            CHECK(!Throws([&]{counted=rc::ProposeRaster(beyond,parent,pose,rc::RasterPlacement::follow_camera_b);}));
+            CHECK(counted && counted->width_pixels==from_profile.width_pixels && counted->region_um.right==from_profile.region_um.right);
+            CHECK(rc::ProposeRaster(beyond,parent,pose,rc::RasterPlacement::keep).width_pixels==raster.width_pixels);
+        }
+        // Inside the range the base pose still counts: the same pose from another base pose gives another raster.
+        auto inside=active.condition;
+        inside.base_pose=cr::PoseParameters{0,0,0,3.0,0,0};
+        CHECK(rc::ProposeRaster(inside,parent,pose,rc::RasterPlacement::follow_camera_b).width_pixels!=from_profile.width_pixels);
+    }
+
     for(const double shift:{5.0,30.0,60.0}){
         const auto pose=PoseForShift(parameters.camera_b,shift,false);
         const auto proposal=rc::ProposeFromPose(MakeInputs(active,nullptr,nullptr),pose,fit,record);

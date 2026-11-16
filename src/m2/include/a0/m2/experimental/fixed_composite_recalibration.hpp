@@ -179,6 +179,9 @@ struct Display {
     OutputFrameDisplay motion;
     content_registration::PoseDisplay pose;
     // The narrowest overlap of A and B over the rows of the new raster (mm), and where.
+    // True when the active revision's hand adjustment is beyond the envelope (pose_outside_envelope): the raster and the motion above are
+    // measured from the profile's own placement (pose 0), not from that base pose.
+    bool previous_outside_envelope{};
     bool has_overlap{};
     double narrowest_overlap_mm{};
     std::uint32_t narrowest_overlap_row{};
@@ -203,6 +206,9 @@ struct Verification {
     bool performed{};
     content_registration::RegistrationState state{content_registration::RegistrationState::undetermined};
     std::vector<std::string> reasons;
+    // The counted points of the last fit and the inliers among them (the estimate's diagnostics). What
+    // content_registration::AssessEvidenceShortage needs, with the reasons, to tell "too few marks" from "does not fit". 0 when no fit ran.
+    std::uint32_t inliers{},points{};
     content_registration::PoseParameters pose;       // p-hat' (pose 0 is a perfect profile)
     content_registration::SurfacePlane surface;
     // The largest displacement over the rows of the seam column that the estimate (pose and, when estimated, the paper plane)

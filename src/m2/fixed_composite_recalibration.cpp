@@ -172,6 +172,16 @@ PoseParameters Minus(const PoseParameters& a,const PoseParameters& b){
     return {a.rx_deg-b.rx_deg,a.ry_deg-b.ry_deg,a.rz_deg-b.rz_deg,a.tx_mm-b.tx_mm,a.ty_mm-b.ty_mm,a.tz_percent-b.tz_percent};
 }
 
+// The placement that the active revision's changes are counted from: its base pose, or the profile's own (pose 0) when a hand adjustment
+// put the base pose beyond the envelope (pose_outside_envelope, the revision is intact). A raster measured at a pose that far out may leave
+// camera B no row to cover; and the revision that this makes has base pose 0 whatever the parent's was.
+bool BasePoseOutsideEnvelope(const FixedCompositeConditionV3& active){
+    try{RequireFixedCompositeBasePoseInEnvelopeV3(active);}
+    catch(const FixedCompositePoseOutsideEnvelope&){return true;}
+    return false;
+}
+PoseParameters ReferencePose(const FixedCompositeConditionV3& active){return BasePoseOutsideEnvelope(active)?PoseParameters{}:active.base_pose;}
+
 void ValidateInputs(const Inputs& in,bool images){
     using namespace fixed_composite_detail;
     if(!in.hash)Reject("no SHA-256 provider");
@@ -470,7 +480,7 @@ render::OutputRaster ProposeRaster(const FixedCompositeConditionV3& active,const
     const auto& old=active.raster;
     if(placement==RasterPlacement::keep)return old;
     const PoseModel model_b(parent.parameters.camera_b);
-    const auto map_old=PoseCorrectedDocumentOutputToCamera(old,parent.parameters.camera_b,model_b,active.base_pose);
+    const auto map_old=PoseCorrectedDocumentOutputToCamera(old,parent.parameters.camera_b,model_b,ReferencePose(active));
     const auto map_new=PoseCorrectedDocumentOutputToCamera(old,parent.parameters.camera_b,model_b,p_hat);
     // The right edge of B's cover on each row; the smallest over the rows is what the raster's right edge follows.
     double smallest_old=std::numeric_limits<double>::infinity(),smallest_new=smallest_old;
@@ -526,9 +536,11 @@ struct Plan {
 
 void FillMotion(Display& display,const Inputs& in,const FixedCompositeProfileBinding& parent,const PoseParameters& p_hat){
     const auto& active=in.active;
-    display.motion=content_registration::OutputFrameOf(parent.parameters.camera_a,parent.parameters.camera_b,active.raster,active.seam.column,active.base_pose,p_hat,
+    const auto reference=ReferencePose(active);
+    display.previous_outside_envelope=BasePoseOutsideEnvelope(active);
+    display.motion=content_registration::OutputFrameOf(parent.parameters.camera_a,parent.parameters.camera_b,active.raster,active.seam.column,reference,p_hat,
         content_registration::SurfacePlane{});
-    display.pose=content_registration::DisplayOf(Minus(p_hat,active.base_pose),PoseModel(parent.parameters.camera_b));
+    display.pose=content_registration::DisplayOf(Minus(p_hat,reference),PoseModel(parent.parameters.camera_b));
     display.pose.output_frame=display.motion;
     display.has_motion=true;
 }
@@ -689,6 +701,7 @@ Verification VerifyCandidate(const Inputs& in,const Candidate& candidate){
         return v;
     }
     v.state=r.state;v.reasons=r.reasons;
+    v.inliers=r.diagnostics.inliers;v.points=r.diagnostics.points;
     if(!r.has_estimate)return v;
     v.pose=r.pose;
     if(r.surface.state==SurfaceState::estimated)v.surface=r.surface.plane;

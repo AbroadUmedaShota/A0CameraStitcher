@@ -509,6 +509,27 @@ struct RegistrationResult {
 //   coarse-ambiguous (surface mode: the anchors do not agree on one hypothesis),
 //   time-budget (the caller's stop was asked for; the coarse stage's result is kept)
 
+// Whether an `undetermined` estimate lacks only evidence (#434), or shows a sign that the placement does not fit. The one place that
+// decides it: the check of a recalibration and its sample composite both use it, and so does every sentence that tells the two apart.
+//   shortage_only  every reason is one of "too few marks": coarse-no-unique-blocks, unique-blocks, repeating-only, too-few-points,
+//                  prediction-uncertain, too-dark, and brown-lowe only when V1 cannot be passed by that many points even if every one
+//                  of them is an inlier (points * (1 - beta) <= alpha): it is the number of points, and not the outliers, that fails it.
+//                  Nothing was found wrong; there was too little to measure.
+//   doubt          the first reason that is not of that kind (coarse-ambiguous, coarse-inconsistent, fit-failed, not-converged,
+//                  residual-shape, starts-disagree, no-overlap, estimate-failed, displacement-failed, time-budget, brown-lowe in every
+//                  other case, and any code this function does not know). One such reason is enough: the placement may be wrong.
+// No reason at all is not "shortage only" (an undetermined estimate that says nothing is not trusted). The limits are the condition's
+// (alpha and beta of V1). brown-lowe is a doubt too when alpha is not finite or is negative, when beta is not finite, is negative or is
+// not below 1, and when the counts are not sane: `points` are the counted points of the fit, and 0 < inliers <= points must hold (no
+// counts, no inliers, or more inliers than points show a fit that cannot be trusted).
+struct EvidenceShortage {
+    bool shortage_only{};
+    std::string doubt;
+};
+[[nodiscard]] EvidenceShortage AssessEvidenceShortage(const std::vector<std::string>& reasons, std::uint32_t inliers, std::uint32_t points,
+    const RegistrationLimits& limits);
+[[nodiscard]] EvidenceShortage AssessEvidenceShortage(const RegistrationResult& result, const RegistrationLimits& limits);
+
 // The caller's control (design addendum 11.25). The estimator has no clock: `stop`, when set, is asked before each call
 // of the measurer and between outer iterations; a true answer ends the fine stage and the fit, and the result is
 // undetermined with the reason time-budget (the coarse diagnostics stay). It may be called from more than one thread.
