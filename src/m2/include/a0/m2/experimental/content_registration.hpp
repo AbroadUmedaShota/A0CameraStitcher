@@ -511,22 +511,41 @@ struct RegistrationResult {
 
 // Whether an `undetermined` estimate lacks only evidence (#434), or shows a sign that the placement does not fit. The one place that
 // decides it: the check of a recalibration and its sample composite both use it, and so does every sentence that tells the two apart.
-//   shortage_only  every reason is one of "too few marks": coarse-no-unique-blocks, unique-blocks, repeating-only, too-few-points,
-//                  prediction-uncertain, too-dark, and brown-lowe only when V1 cannot be passed by that many points even if every one
-//                  of them is an inlier (points * (1 - beta) <= alpha): it is the number of points, and not the outliers, that fails it.
+//   shortage_only  every reason is one of "too few marks": coarse-no-unique-blocks, repeating-only, too-few-points,
+//                  prediction-uncertain, too-dark, brown-lowe only when V1 cannot be passed by that many points even if every one
+//                  of them is an inlier (points * (1 - beta) <= alpha): it is the number of points, and not the outliers, that fails it,
+//                  and unique-blocks only in the two cases S1 and S2 below.
 //                  Nothing was found wrong; there was too little to measure.
 //   doubt          the first reason that is not of that kind (coarse-ambiguous, coarse-inconsistent, fit-failed, not-converged,
-//                  residual-shape, starts-disagree, no-overlap, estimate-failed, displacement-failed, time-budget, brown-lowe in every
-//                  other case, and any code this function does not know). One such reason is enough: the placement may be wrong.
+//                  residual-shape, starts-disagree, no-overlap, estimate-failed, displacement-failed, time-budget, brown-lowe and
+//                  unique-blocks in every other case, and any code this function does not know). One such reason is enough: the
+//                  placement may be wrong.
 // No reason at all is not "shortage only" (an undetermined estimate that says nothing is not trusted). The limits are the condition's
-// (alpha and beta of V1). brown-lowe is a doubt too when alpha is not finite or is negative, when beta is not finite, is negative or is
-// not below 1, and when the counts are not sane: `points` are the counted points of the fit, and 0 < inliers <= points must hold (no
-// counts, no inliers, or more inliers than points show a fit that cannot be trusted).
+// (alpha and beta of V1, and minimum_unique_blocks). brown-lowe is a doubt too when alpha is not finite or is negative, when beta is not
+// finite, is negative or is not below 1, and when the counts are not sane: `points` are the counted points of the fit, and
+// 0 < inliers <= points must hold (no counts, no inliers, or more inliers than points show a fit that cannot be trusted).
+//
+// unique-blocks comes from two places of the estimator (the coarse stage, and V2 at the verdict) under one code, and is told apart by the
+// block counts (U unique, C consistent, A anchor, CA consistent anchor; m minimum_unique_blocks). It is a shortage only when m >= 1,
+// CA <= A <= U and CA <= C <= U hold and one of these is true; in every other case (including counts that were not carried) it is a doubt:
+//   S1  the coarse stage stopped on the number of blocks: 1 <= U < m, C = 0 and CA = 0.
+//   S2  V2 failed on the number of anchors alone: U >= m, C >= m, 2C >= U, 1 <= A < m and CA = A (no anchor was dropped, and the
+//       blocks that were used did not disagree by more than V2's own half line).
+// A block count that is over the half line, an anchor that was dropped from the fit, or no anchor at all shows a disagreement or an
+// estimate that cannot be trusted, not a lack of marks. V2 (EstimateOn's verdict) depends on this: change them together.
 struct EvidenceShortage {
     bool shortage_only{};
     std::string doubt;
 };
-[[nodiscard]] EvidenceShortage AssessEvidenceShortage(const std::vector<std::string>& reasons, std::uint32_t inliers, std::uint32_t points,
+// The counts AssessEvidenceShortage reads, copied from the in-memory diagnostics of an estimate. A report read back from a file does not
+// carry the anchor counts (they are 0 there), so such a record is classified as a doubt for unique-blocks.
+struct EvidenceCounts {
+    std::uint32_t inliers{}, points{};
+    std::uint32_t unique_blocks{}, consistent_blocks{};
+    std::uint32_t anchor_blocks{}, consistent_anchor_blocks{};
+};
+[[nodiscard]] EvidenceCounts EvidenceCountsOf(const RegistrationDiagnostics& diagnostics);
+[[nodiscard]] EvidenceShortage AssessEvidenceShortage(const std::vector<std::string>& reasons, const EvidenceCounts& counts,
     const RegistrationLimits& limits);
 [[nodiscard]] EvidenceShortage AssessEvidenceShortage(const RegistrationResult& result, const RegistrationLimits& limits);
 

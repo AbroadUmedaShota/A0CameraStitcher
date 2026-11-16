@@ -109,7 +109,7 @@ inline constexpr std::chrono::seconds kRecalibrationSampleWindow{900};
             const auto& check=proposal.verification;
             finding.klass=FindingClass::rejected;
             if(check.state==cr::RegistrationState::undetermined){
-                const auto assessed=cr::AssessEvidenceShortage(check.reasons,check.inliers,check.points,limits);
+                const auto assessed=cr::AssessEvidenceShortage(check.reasons,check.evidence,limits);
                 if(assessed.shortage_only){finding.klass=FindingClass::unverified;finding.reason=check.reasons.front();}
                 else{finding.code="reestimate-doubtful";finding.reason=assessed.doubt;}
             }else if(!check.reasons.empty())finding.reason=check.reasons.front();
@@ -140,9 +140,9 @@ struct RecalibrationSampleFacts {
     bool out_of_memory{};
     std::optional<a0::m2::experimental::FixedCompositeSkip> skip; // the writer refused before creating anything
     a0::m2::experimental::content_registration::RegistrationState estimate{a0::m2::experimental::content_registration::RegistrationState::undetermined};
-    // The sample's estimate: its reasons, and the inliers and counted points of its fit (what AssessEvidenceShortage needs).
+    // The sample's estimate: its reasons, and the counts of its fit (what AssessEvidenceShortage needs, copied from the diagnostics in memory).
     std::vector<std::string> estimate_reasons;
-    std::uint32_t estimate_inliers{},estimate_points{};
+    a0::m2::experimental::content_registration::EvidenceCounts estimate_evidence;
     a0::m2::experimental::registration_gate::GateState gate{a0::m2::experimental::registration_gate::GateState::not_run};
     a0::m2::experimental::registration_gate::GateCause gate_cause{a0::m2::experimental::registration_gate::GateCause::none};
     // The codes of the gate's own findings (the `reason` of each entry of RegistrationGateResult::gate_findings).
@@ -190,7 +190,7 @@ struct RecalibrationSampleFacts {
     if(facts.skip){add(FindingClass::rejected,"sample-skipped");return findings;}
     if(!facts.composed){add(FindingClass::rejected,"sample-failed");return findings;}
     if(facts.estimate==cr::RegistrationState::undetermined){
-        const auto assessed=cr::AssessEvidenceShortage(facts.estimate_reasons,facts.estimate_inliers,facts.estimate_points,limits);
+        const auto assessed=cr::AssessEvidenceShortage(facts.estimate_reasons,facts.estimate_evidence,limits);
         if(assessed.shortage_only)add(FindingClass::unverified,"sample-estimate-undetermined",facts.estimate_reasons.front());
         else add(FindingClass::rejected,"sample-estimate-doubtful",assessed.doubt);
     }
@@ -629,7 +629,7 @@ inline bool IsCanonicalOriginal(const fs::path& file,const wchar_t* alias){
             const auto& capture=record.registration;
             sample.composed=true;sample.estimate=capture.registration.state;sample.gate=capture.gate.state;sample.gate_cause=capture.gate.cause;
             sample.estimate_reasons=capture.registration.reasons;
-            sample.estimate_inliers=capture.registration.diagnostics.inliers;sample.estimate_points=capture.registration.diagnostics.points;
+            sample.estimate_evidence=cr::EvidenceCountsOf(capture.registration.diagnostics);
             for(const auto& gate_finding:capture.gate.gate_findings)sample.gate_findings.push_back(gate_finding.reason);
             for(const auto& skipped:capture.time_budget.skipped)
                 if(skipped.stage==m2e::ReviewStage::gate)sample.gate_skipped_reason=skipped.reason;
