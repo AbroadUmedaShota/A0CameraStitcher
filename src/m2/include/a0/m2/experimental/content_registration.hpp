@@ -512,14 +512,14 @@ struct RegistrationResult {
 
 // Whether an `undetermined` estimate lacks only evidence (#434), or shows a sign that the placement does not fit. The one place that
 // decides it: the check of a recalibration and its sample composite both use it, and so does every sentence that tells the two apart.
-//   shortage_only  every reason is one of "too few marks": coarse-no-unique-blocks, repeating-only, too-few-points,
-//                  prediction-uncertain, too-dark, brown-lowe only when V1 cannot be passed by that many points even if every one
+//   shortage_only  every reason is one of "too few marks": coarse-no-unique-blocks, repeating-only, prediction-uncertain, too-dark,
+//                  brown-lowe only when V1 cannot be passed by that many points even if every one
 //                  of them is an inlier (points * (1 - beta) <= alpha): it is the number of points, and not the outliers, that fails it,
-//                  and unique-blocks only in the two cases S1 and S2 below.
+//                  unique-blocks only in the two cases S1 and S2 below, and too-few-points only in the cases T0 and T1 below.
 //                  Nothing was found wrong; there was too little to measure.
 //   doubt          the first reason that is not of that kind (coarse-ambiguous, coarse-inconsistent, fit-failed, not-converged,
-//                  residual-shape, starts-disagree, no-overlap, estimate-failed, displacement-failed, time-budget, brown-lowe and
-//                  unique-blocks in every other case, and any code this function does not know). One such reason is enough: the
+//                  residual-shape, starts-disagree, no-overlap, estimate-failed, displacement-failed, time-budget, brown-lowe,
+//                  unique-blocks and too-few-points in every other case, and any code this function does not know). One such reason is enough: the
 //                  placement may be wrong.
 // No reason at all is not "shortage only" (an undetermined estimate that says nothing is not trusted). The limits are the condition's
 // (alpha and beta of V1, and minimum_unique_blocks). brown-lowe is a doubt too when alpha is not finite or is negative, when beta is not
@@ -535,7 +535,12 @@ struct RegistrationResult {
 //       blocks that were used did not disagree by more than V2's own half line) and R = 0.
 // A block count that is over the half line, an anchor that was dropped from the fit, no anchor at all, or an anchor that pointed to
 // another place than the vote's winner (R >= 1) shows a disagreement or an estimate that cannot be trusted, not a lack of marks.
-// V2 (EstimateOn's verdict) and the coarse stage's vote depend on this: change them together.
+// too-few-points comes from the fine stage, which returns before V2 runs; the coarse stage's counts then stand in for V2 (a disagreement
+// that V2 would have named must not pass because the points were few). It is a shortage only in one of two cases:
+//   T0  nothing was counted (U = C = A = CA = 0): a follow-up estimate, or counts that were not carried. m is not read.
+//   T1  m >= 1, CA <= A <= U and CA <= C <= U hold, C >= m, 2C >= U (V2's own half line), and either CA >= m (V2 would pass) or
+//       1 <= A < m, CA = A and R = 0 (V2 would fail on the number of anchors alone: S2).
+// V2 (EstimateOn's verdict), the coarse stage's vote and the fine stage's early return depend on this: change them together.
 struct EvidenceShortage {
     bool shortage_only{};
     std::string doubt;
