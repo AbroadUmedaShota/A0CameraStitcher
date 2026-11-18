@@ -1586,3 +1586,185 @@ T3の確定の前の条件（所有者の承認に入れる）: (1) 計画はCAM
 - 許可リストと手順: `src/phase0/include/a0/phase0/experimental/wpd_live_capture_probe.hpp`（このheaderはoptionが無いと`#error`で止まる）。sessionの持ち主の状態: `preview_session_owner.hpp`。画面とCameraの側: `src/phase0/experimental/wpd_dual_preview_live_probe*.hpp`。
 - 試験: `wpd_live_capture_probe_contracts`（許可リストと手順を偽の本体で）、`preview_session_owner_contracts`、`preview_live_capture_probe_ui_contracts`（optionがONのbuildだけ。カメラを使わない）、`preview_live_capture_probe_binary_contracts`（OFFのexeに入口が無いこと）、`preview_live_capture_probe_source_contracts`（シャッターの組み立てと送信が1か所、ボタンへの合成クリックが試験の中だけ）。
 - 手順と実機の操作: `docs/WPD_STILL_CAPTURE.md`の「ライブを開いたまま撮る探り」。
+
+## ADR-0045: 4台（2×2）の配置に備えて、カメラの名前・位置・継ぎ目と、基準と対象のカメラの欄の呼び方を先に決める（文書だけ）
+
+- 状態: Proposed（#438）。所有者の決定待ち。文書だけの案で、コード・書式・試験は変えない。
+- 決定日: 未定
+- 関連: #438、#434（撮影の1組からの校正の取り直しと、その記録3種）、#429（継ぎ目の色の計画）、#437（ライブのCの位置P）、ADR-0030、ADR-0031、ADR-0034（rig profile 2.0.0）、ADR-0036（表示専用の合成C）、ADR-0037（縦一直線の継ぎ目）、ADR-0038・ADR-0041（設定の書き込み）、ADR-0043（色の計画）、ADR-0044（不変条件6）、`docs/design/rig-profile-v2.md`、`docs/design/fixed-composite-registration-formats.md`、`docs/design/recalibration-from-pair.md`
+- 背景: 今はD810を2台、左右に並べて使っている（CAM-Aが左、CAM-Bが右。吊り下げで、合成の前に両方の画像を180°回す）。上段に2台・下段に2台の2×2、合わせて4台の配置が前提になる可能性が高い。まだ確定ではない。確定してから書式を直すと、公開済みの書式の版上げと、ライブのCとJPEGのCの一致の試験の書き直しが要る。確定の前に位置合わせや画面を4台用に作り変えると、使わないかもしれない作りを抱える。そこで呼び方だけを先に決め、これから足す書式・記録の欄を、4台になっても名前を変えずに済む形にする。
+
+### ADR-0045の所有者の決定（#438）
+
+所有者の決定待ち。選んでいただく点は、決定1の名前の案（表の案1〜4）と、下の「所有者に確かめる事」。
+
+### 今の呼び方（コードで確かめた事）
+
+2026-11-18に、手元のmain（ee77d69）の木をgrepとファイルの読み取りで確かめた。行番号はこのcommitの物。
+
+- カメラの名前はalias `CAM-A`・`CAM-B`。本体とaliasの対応は照合のファイル（`IdentityMap`）に置き、リポジトリには本体の識別子を書かない。
+- 書式の中でカメラを書く形が4つ混ざっている。
+  1. aliasを鍵にしたオブジェクト: rig profile 2.0.0の`cameras`・`calibration.inputSha256`・`calibration.fitResidualPixels`（`docs/schemas/rig-profile.v2.schema.json`）、照合のファイル。
+  2. aliasを値に持つ欄: 報告v1〜v8の`inputs[].alias`、`a0.saved-review-evaluation-inputs.v1`の`cameraAlias`。
+  3. 欄の名前や符号に記号を埋めた物: #434の記録の`cameraASha256`・`cameraBSha256`・`cameraBResidualPx`、色の計画v1の`bindings[].kind`の`capture-original-a`・`capture-original-b`。
+  4. 名前と位置を1つにした符号: profileの`documentPlane.cameraOrder`（`CAM-A-left-CAM-B-right`・`CAM-A-top-CAM-B-bottom`）と、コードの`StitchLayout`。
+- 左右は文書の座標（x右・y下、profileの`conventions.documentPlane`）で、取付の向きを当てた後の向き。吊り下げでは画像の左右が部屋と逆に写るので、`rotated-180`では両方の画像を180°回してからAを左、Bを右に並べる（`docs/WPD_PREVIEW_MERGE.md`の#361の節）。取付の向き（条件v3の`mountOrientation`）はリグ全体で1つの値で、片側だけの回転は対象外。
+- 基準と対象: 条件v3の`basePose`、報告v8の`registration.pose`、ライブの位置P（`live_placement.hpp`）、#434の推定の記録の`estimate.pose`は、どれもCAM-Aに対するCAM-Bの姿勢で、どちらのカメラかを書く欄が無い。色もAを基準にBへ倍率を掛ける（`seam_blend.hpp`の#415の注、ADR-0043）。
+- 継ぎ目: 条件v3と報告v8の`seam`は出力の列（`column`）1つで、CAM-AとCAM-Bの間の縦の継ぎ目1本を暗に指す。色の計画v1の結び目は、継ぎ目に沿った位置`yMm`。
+- 「C」: ライブの合成と保存の合成を「C」と呼んでいる。ADR-0036の題（表示専用の合成C）、画面の題「A/B Live + C（…）」（`preview_window_title.hpp`）、見出し「C 仮Merge（未校正）」（`preview_merge.hpp`）、書式の文書の「LC＝ライブの C の担当」「C の px」、ログの`live_c_*`。docsでは14のファイルが「ライブのC」「合成C」「Cの画素」などの形でCを合成の意味に使う（grepで数えた）。一方で文の中のカメラは、単独の「A」「B」で書いている（「Bの姿勢」）。
+
+### 決定（案）
+
+1. **カメラの名前**: 名前はaliasで、付けた順の記号とする。位置（上下・左右）も役（基準・対象）も名前に入れない。位置はrig profileに、役は記録の欄に書く。今の2台は`CAM-A`・`CAM-B`のまま変えない。3台目・4台目は「C」を使わず`CAM-D`・`CAM-E`とする（下の表の案1。推奨）。文の中では`CAM-D`か「カメラD」と書き、単独の「C」はこれまでどおり合成だけを指す。画面の「CAM-A（左）」の括弧の位置は名前の一部でなく、profileの位置から出す表示とする（今は`wpd_dual_preview_ui.hpp`の719・820行に直書き）。
+
+| 案 | 3台目・4台目 | 合成の呼び名 | 良い所 | 困る所 |
+|---|---|---|---|---|
+| 1（推奨） | `CAM-D`・`CAM-E` | Cのまま | 今の画面・ログ・文書のCが全部そのまま正しい。過去の文書を読む時に、Cがカメラか合成かを迷わない | Cが抜けて見えるので、理由をprofileの文書と画面の説明に1行書く。DがD810のDと並ぶ（`CAM-`を付けて書けば分かれる） |
+| 2 | `CAM-C`・`CAM-D` | 合成の呼び名を変える（例「合成」「M」） | 記号が続いて自然 | 画面の題と見出し、その文字を見る試験、ADR-0036の題、docsのCを直す。直さない過去の文書ではCが合成のままなので、読むたびにどちらかを確かめる |
+| 3 | `CAM-C`・`CAM-D` | Cのまま。カメラは必ず`CAM-C`と書く | 直す物が無い | 今の文は単独のA・Bでカメラを指すので、「Cの姿勢」「Cの画素」がどちらを指すかが書き手の注意に頼る。ログの`live_c_*`とカメラCの欄が並ぶ |
+| 4 | 番号（`CAM-1`〜`CAM-4`） | Cのまま | 位置を番号で話す時に数が合う | 今のCAM-A・CAM-Bと同じ本体に2つの名前が付く。番号が位置の番号に見え、カメラを付け替えると番号と位置がずれる |
+
+2. **位置の呼び方**: 位置はカメラの段（上段・下段）とカメラの列（左・右）の組で呼び、4つを「上段・左」「上段・右」「下段・左」「下段・右」とする（短くは左上・右上・左下・右下）。数で書く時は(カメラの段, カメラの列)の組で、上・左から1で数える（左上が(1, 1)）。番号1つで呼ぶ時は左上から1・2、左下から3・4とし、これは表示の呼び名でカメラの名前ではない。上下左右は文書の座標（x右・y下）で、取付の向きを当てた後、つまり合成（C）の画面とJPEGで見た向きとする。部屋で見た向きと、カメラの画像のままの向きでは呼ばない。「段」「列」だけで書かず「カメラの段」「カメラの列」と書く（「段」はADR-0044の段P・段1や推定の段G1〜G4に、「列」は継ぎ目の列（出力の画素の列）に使っている）。
+   - 名前と位置の対応はrig profileにだけ書く。照合のファイル（本体とalias）には位置を書かない。画面・ログ・報告の位置の表示はprofileから引く。
+   - 記録に書く形（案。profile 3.0.0で決める）: `cameras.<alias>.position`に`{"cameraRow": 1, "cameraColumn": 2}`。`row`・`column`だけの名前は出力の画素の行と列（`seam.column`・`rowsPx`）に、`grid`は層2の格子に使っているので避ける。
+   - 下段の取付の向きは未定とする。上段と下段で向きが違えば、リグ全体で1つの`mountOrientation`では書けず、カメラごとの向きが要る。置き場所（profileのカメラごとか、条件か）はprofile 3.0.0で決める。
+   - 今の2台は、カメラの段が1つ・列が2つの場合として読む（決定5）。
+
+3. **継ぎ目の呼び方**: 隣り合う2台の間の継ぎ目を、その2台の組で呼ぶ。縦の継ぎ目（上下に走る線で、左右の2台を分ける）は左のカメラ、右のカメラの順に、横の継ぎ目（左右に走る線で、上下の2台を分ける）は上のカメラ、下のカメラの順に書く。文では「縦の継ぎ目CAM-A–CAM-B」「横の継ぎ目CAM-A–CAM-D」（後者は例。どのカメラがどこに入るかは未定）。
+   - 記録の欄（案）: `{"direction": "vertical", "cameras": ["CAM-A", "CAM-B"]}`。`direction`は`vertical`か`horizontal`、`cameras`は2つのaliasを上の順で。
+   - 2×2では継ぎ目が4区間になる。上段の縦の継ぎ目（左上–右上）、下段の縦の継ぎ目（左下–右下）、左側の横の継ぎ目（左上–左下）、右側の横の継ぎ目（右上–右下）。
+   - 4台が集まる所は「継ぎ目の交点」と呼ぶ。欄（案）は`{"cameras": [左上, 右上, 左下, 右下]}`（それぞれalias）。上段と下段の縦の継ぎ目が同じ出力の列に並ぶか（1本の直線か）はADR-0037を4台へ広げる時の決定で、ここでは決めない。並ばない時は交点が1点にならず、横の継ぎ目の上で3台が集まる点が2つできる。
+   - 今の2台の`seam.column`は、縦の継ぎ目CAM-A–CAM-Bの列として読む。交点は無い。
+
+4. **基準と対象のカメラの欄**: 2台の関係を表す値（姿勢、位置のずれ、色の倍率、継ぎ目のずれ）には、`referenceCamera`（基準のカメラ。その値を測る時に動かさない側）と`targetCamera`（対象のカメラ。その値で動かす・補正する側）を付け、値はaliasにする。
+   - 星形（今）では、どの対も`referenceCamera`が`CAM-A`。輪で閉じる形では、継ぎ目ごとの測定はその継ぎ目の2台を基準と対象にし、輪を閉じた後の各カメラの姿勢は、全体で動かさない1台を`referenceCamera`、そのカメラを`targetCamera`にする。どちらの形でも欄の名前は変わらない。
+   - 1台ごとの値を並べる時は、aliasを鍵にしたオブジェクトにする（profile 2.0.0の`calibration.inputSha256`と同じ形。例`{"CAM-A": "<sha256>", "CAM-B": "<sha256>"}`）。対象のカメラの値を1つだけ持つ欄は、名前を役で始める（例`targetResidualPx`）。欄の名前や符号に記号を埋める形（`cameraASha256`、`capture-original-a`）は新しく作らない。
+   - ログ（`key=value`の行）は同じ語のsnake_case（`reference_camera=CAM-A target_camera=CAM-B`）、継ぎ目は`seam_direction=vertical seam_cameras=CAM-A,CAM-B`の形にする。
+   - 値はaliasだけ。本体の識別子は書かない（今の決まりのまま）。
+
+5. **今の2台の書式との対応**: 今ある書式は変えずに、次のとおり読む。基準・対象・継ぎ目・位置の欄が無い記録は、2台の既定（CAM-Aが基準、CAM-Bが対象、縦の継ぎ目CAM-A–CAM-Bが1本、カメラの段が1つで列が2つ）として読む。4台の記録は版の違う書式になるので、欄の無い記録を4台の記録として読む事は無い。
+
+| 今の書式と欄 | この案での読み方 |
+|---|---|
+| profile 2.0.0 `cameraOrder`: `CAM-A-left-CAM-B-right` | カメラの段が1つ・列が2つ。CAM-Aが(1, 1)、CAM-Bが(1, 2) |
+| profile 2.0.0 `cameraOrder`: `CAM-A-top-CAM-B-bottom` | カメラの段が2つ・列が1つ。CAM-Aが(1, 1)、CAM-Bが(2, 1)。継ぎ目は横の継ぎ目CAM-A–CAM-B |
+| 条件v3 `basePose`、報告v8 `registration`・`geometryLevel.mapping.pose`、ライブのP（`LivePlacementFields`の`tx_mm=`ほか） | 基準CAM-A、対象CAM-B |
+| 条件v3・報告v8 `seam.column` | 縦の継ぎ目CAM-A–CAM-Bの出力の列 |
+| 条件v3 `mountOrientation` | 全カメラに同じ向き |
+| 報告の`inputs[].alias`、`cameraAlias` | そのまま（値がalias） |
+| #434の記録の`cameraASha256`・`cameraBSha256`・`cameraBResidualPx` | CAM-A・CAM-Bの値。基準CAM-A、対象CAM-B |
+| 色の計画v1 `globalGainBgr`・`knots[].yMm`、`capture-original-a`・`capture-original-b` | 基準CAM-A、対象CAM-B、縦の継ぎ目CAM-A–CAM-Bに沿った位置 |
+
+### 理由
+
+- 名前に位置を入れると、カメラを付け替えた時や取付の向きを変えた時に、照合のファイル（本体とalias）と過去の記録の名前が合わなくなる。位置をprofileに置けば、付け替えはprofileの改訂で済む。
+- 欄の名前に記号を埋める形（`cameraBResidualPx`）は、輪で閉じる形で対象がBでない時に名前と中身が食い違い、4台では台数の分だけ欄が増える。役の欄（`referenceCamera`・`targetCamera`）とaliasを鍵にしたオブジェクトなら、台数と解き方が変わっても欄の名前は変わらない。
+- 継ぎ目を2台の組で呼べば、継ぎ目の場所はprofileの位置から決まり、継ぎ目の番号と場所の対応表が要らない。
+- 欄の無い記録を2台の既定として読む決まりを先に置けば、今の書式を版上げせずに読み続けられる。
+- 呼び方だけなら、4台が来なくても失う物が無い。版上げと作り変えは4台が確定してからにする。
+
+### 守る不変条件
+
+1. 1つの本体には1つのalias。aliasは位置で変えない。
+2. 位置の正本はrig profile。画面・ログ・報告は位置をprofileから引き、文字列に直書きしない。
+3. 上下左右は文書の座標で、取付の向きを当てた後の向き。
+4. 2台の関係を表す値には、基準と対象のカメラを欄で書く。欄の無い今の書式は決定5の既定で読む。
+5. ライブのログとJPEGの報告は、同じカメラ・同じ継ぎ目に同じ語と同じaliasを使う。
+6. 単独の「C」は合成だけを指す（案1の時。案2を選ぶ時はこの項を改める）。
+
+### 退ける案
+
+| 案 | 退ける理由 |
+|---|---|
+| 名前に位置を入れる（`CAM-TL`など） | 付け替えや取付の向きの変更のたびに、照合と記録の名前が変わる |
+| 今すぐN台の書式を作る（profile 3.0.0、条件v4・報告v9） | 4台が来なければ、版と読み手と一致の試験が増えるだけになる |
+| 継ぎ目を番号で呼ぶ（継ぎ目1、継ぎ目2） | 番号と場所の対応表が別に要り、配置が変わると番号の意味が変わる |
+| 基準と対象を記号の欄で書く（`cameraA*`・`cameraB*`） | 輪で閉じる形では、基準がCAM-Aとは限らない |
+| 位置の欄を`row`・`column`にする | 出力の画素の行と列（`seam.column`など）と読み違える |
+| 位置を0から数える | 文と画面の呼び名（1から）と記録の数が1つずれる。数え方の変換は書き手と読み手の1か所に置く |
+
+### 2台を決め打ちにしている場所
+
+ee77d69で確かめた。直すのは4台が確定した後（下の「待つ物」）。
+
+| 場所 | 2台の決め打ち | 4台で要る物 |
+|---|---|---|
+| `src/phase0/include/a0/phase0/phase0.hpp` 418〜440、472〜477、502〜503 | `IdentityMap`がaliasごとの欄`cam_a_`・`cam_b_`を持ち、照合と取り込みの数もA・Bごとの欄 | aliasの表で持つ |
+| `src/phase0/hardware_camera_agent.cpp` 394〜395、1381〜1399 | 受け付けるaliasは`CAM-A`か`CAM-B`だけ。照合のファイルの鍵はちょうどこの2つ（`RequireExactFields`） | aliasの表、照合のファイルの書式の版 |
+| `src/phase0/experimental/wpd_dual_preview_ui.hpp` 2〜10、484、719、820 | カメラ・worker・ID・撮影ボタンが`std::array<…,2>`。aliasを`i==0?"CAM-A":"CAM-B"`で決め、表と窓の見出しに「CAM-A（左）」「CAM-B（右）」を直書き | 台数と位置をprofileから取る |
+| `src/phase0/experimental/wpd_dual_preview_main.cpp` 72〜77、115〜132、713〜716 | 照合でCAM-AとCAM-Bの2つを探す。両方の点検の待ち合わせが`ready_count<2`。全カメラのWPDの呼び出しを1つのmutexで順に通す | 待ち合わせの数。4台を同じmutexで回すと1台あたりのフレームの間隔が延びる（※推定） |
+| `src/phase0/include/a0/phase0/experimental/still_pair.hpp` 58〜66、82〜83、118、185〜196 | 撮影の1取引がAのシャッター、Bのシャッターの2台で、`shutter_gap_ms`は2台の差 | 4台の順と180秒の配分、シャッターの間隔の記録 |
+| `src/phase0/include/a0/phase0/experimental/d810_settings_write.hpp` 38〜39、222 | `enum class D810Camera {A, B}`、Aの露出をBへ写す`copy_a_to_b` | 写す元と先の組、書く順 |
+| `src/m2/include/a0/m2/render.hpp` 27〜30 | `StitchLayout`が「A左・B右」と「A上・B下」の2つ | カメラの段と列の並び |
+| `src/m2/rig_profile_v2.cpp` 316〜335 | `cameraOrder`の2つの符号と、`cameras`の鍵がちょうど`CAM-A`・`CAM-B` | profile 3.0.0 |
+| `docs/schemas/rig-profile.v2.schema.json` 64〜65、79〜86、108〜126 | 同上（schemaの`enum`と`required`）。`calibration.inputSha256`・`fitResidualPixels`の必須の鍵も`CAM-A`・`CAM-B` | profile 3.0.0 |
+| `src/m2/include/a0/m2/experimental/seam_blend.hpp` 44〜56、215〜218 | 合成の入力が`camera_a`（左）と`camera_b`（右）。色はAを基準にBへ掛け、右の端へ向けて薄める | 横の継ぎ目と交点の混ぜ方、色の基準 |
+| `src/m2/content_registration.cpp` 1783〜1796、2216〜2217 | 推定はA左・B右だけを受け付け、Bの姿勢だけを動かす（星形）。残差は縦の継ぎ目の列（`seam_column`）の近くで見る | 継ぎ目ごとの推定と、輪で閉じる解き方 |
+| `src/m2/include/a0/m2/seam_gate.hpp` 72〜74 | ゲートは出力の行ごとに継ぎ目の列（`seam_x`）を測る。縦の継ぎ目だけ | 横の継ぎ目のゲート |
+| `src/phase0/include/a0/phase0/experimental/live_placement.hpp` 18〜26、101〜114 | ライブのCの位置PはカメラB 1台の位置。ログの欄はどのカメラの値かを書かない | 対象のカメラごとのP、ログの基準と対象の欄 |
+| `src/m2/fixed_composite_recalibration.cpp` 420〜432、507〜524 | 取り直すのはCAM-Bの写像だけ。記録の欄が`cameraASha256`・`cameraBSha256`・`cameraBResidualPx` | 決定4の形 |
+| `src/phase0/include/a0/phase0/experimental/recalibration_job.hpp` 389 | 校正の報告の`originals`が`cameraASha256`・`cameraBSha256` | 決定4の形 |
+| `src/m2/still_review_report_impl.hpp` 533〜535、680 | 報告の`inputs`がちょうど2つで、順にCAM-A・CAM-B | 報告v9でN個 |
+| `python/a0seam/record.py` 35 | 色の計画v1の`bindings`の符号がA・Bの原画像（`capture-original-a`・`capture-original-b`）。結び目は縦の継ぎ目に沿った`yMm` | 継ぎ目と基準・対象の欄 |
+| `?"CAM-A…":"CAM-B…"`の形の直書き全体 | srcの16ファイル33行、testsの8ファイル19行（grepで数えた） | aliasの表を引く1か所 |
+| `AGENTS.md` 6・34・42行 | 範囲が「Nikon D810 x2」。登録したA/Bの照合。撮影の1取引がA、Bの2台で、WPDのsessionが2つ | 所有者の決定で範囲を改める |
+| ADR-0030（不変条件のCAM-A→CAM-B）、ADR-0031（左右二画面）、ADR-0037（縦一直線の継ぎ目）、ADR-0038（AからBへ写す）、ADR-0041（Bを先に、Aを最後に書く）、ADR-0043（Aを基準にBの色を合わせる）、ADR-0044 不変条件6（WPDのsessionは2つまで） | 2台を前提にした決定 | 4台が確定した時に改訂する |
+
+### 今やる物と待つ物
+
+今やる物（4台が来なくても損が出ない物。どれも本ADRが採用された後に、それぞれのIssueで行う）:
+
+1. 新しいコードと書式に、`i==0?"CAM-A":"CAM-B"`の形、欄の名前や符号に記号を埋める形、名前に位置を添えた直書きの文字列を増やさない。今ある物は直さない。
+2. #434の記録3種（推定の記録`a0.pair-recalibration-estimate.v1`、校正の報告`a0.pair-recalibration-report.v1`、確定の記録`a0.pair-recalibration-confirmation.v1`。公開のmainにはまだ無い）に`referenceCamera`・`targetCamera`を足す。案として、`inputs`・`originals`をaliasを鍵にしたオブジェクトに、`cameraBResidualPx`を`targetResidualPx`に改める。版を上げずにできるかは未決の1。
+3. #429の色の計画（`a0.seam-color-plan.v1`）に、継ぎ目（`direction`と2台のalias）と`referenceCamera`・`targetCamera`を入れる。v1は公開のmainにある（`python/a0seam`）。計画を読むC++の読み手と書式の文書はまだ無い（ADR-0043の未決）ので、読み手を作る前に足すのが一番安い。`bindings`の`capture-original-a`・`capture-original-b`は今の意味のまま残す。v1に足すかv2にするかは未決の2。
+4. 新しく書く文書では、単独の「C」を合成にだけ使い、カメラの位置は決定2の向きで書く。
+
+待つ物（4台が確定してから、別のIssueで）:
+
+- rig profile 3.0.0（N台の`cameras`、`position`、カメラごとの取付の向き、`cameraOrder`の置き換え）。
+- 条件v4・報告v9（継ぎ目ごとの位置、基準と対象の欄、交点）。
+- 推定器の輪で閉じる解き方。今はCAM-Aを中心にCAM-Bだけを動かす星形で、2×2では対角の2台が交点の近くでしか重ならない（※推定）ので、星形のままでは対角のカメラを測りにくい。
+- 継ぎ目のゲートと合成の、横の継ぎ目と交点（ADR-0037の縦一直線を4台へ）。
+- ライブのCの位置PのN台化と、色合わせを4台で閉じる形（ADR-0043の基準はA）。
+- 撮影の順と180秒の配分、WPDのsessionの数（ADR-0044の不変条件6）、ADR-0030の不変条件のCAM-A→CAM-B。
+- 照合のファイルの4台化。
+- 画面の2×2化（ADR-0031の左右二画面）。
+- 設定の書き込みの4台化（ADR-0038の写す元と先、ADR-0041の書く順）。
+- ログに`reference_camera`・`target_camera`を足す事。足す時は、ライブとJPEGの両方の行を書く1つの関数（`LivePlacementFields`）に足す。
+
+### 製品の条件との関係
+
+所有者の製品の条件は、ライブのCと書き出すJPEGのCの位置合わせが食い違わない事（映像の側でずらした量が、JPEGに同じだけ効く事）。今はライブの位置Pと撮影の記録の位置を同じ関数（`live_placement.hpp`の`LivePlacementFields`、101〜114行）が書き、2つのログの行を文字列で比べられる。4台でもこれを保つため、呼び方と欄の名前はライブのログとJPEGの報告で同じ物を使う。カメラはalias、役は`referenceCamera`・`targetCamera`（ログでは`reference_camera`・`target_camera`）、継ぎ目は向きと2台の組。片方だけが別の名前を使うと、同じカメラ・同じ継ぎ目の値をライブとJPEGで突き合わせられなくなる。本ADRは文書だけで、ライブのCにもJPEGのCにも、位置合わせの結果にも触れない。
+
+### 所有者に確かめる事
+
+| 確かめる事 | 答えで変わる所 |
+|---|---|
+| 3台目・4台目の名前（決定1の案1〜4） | 決定1、不変条件6、今やる物の4 |
+| 位置を番号1つで呼ぶ時の並び（左上から1・2、左下から3・4でよいか）と、それが合成の画面で見た並びか、部屋で見た並びか | 決定2の番号の対応 |
+| 今の2台（CAM-A・CAM-B）が上段・下段のどちらに入るか | profileでの2台の位置（名前は変わらない） |
+| 下段の取付の向き（上段と同じく吊り下げで180°回すか、別の向きか） | カメラごとの向きの欄が要るか（profile 3.0.0） |
+| 紙の大きさと向き（A0横のままか、より大きい紙か） | profileの`documentPlane.paper`（今は`ISO-216-A0`だけ）、出力のラスタ |
+| 要る細かさ（DPI。今の候補は180 DPI） | 1台が写す範囲と重なりの幅。4台にする目的が広さか細かさか |
+| 撮影にかけられる時間（今は2台で1つの180秒） | 撮影の順と時間の配分 |
+| 4台の重なりの幅（縦の継ぎ目と横の継ぎ目のそれぞれ） | 推定器の帯の幅、交点の扱い、作る時の検査 |
+| ライブのCも4台で見るか、撮影の合成だけを4台にするか | 待つ物の順番（ライブのPのN台化を先にするか） |
+
+### 影響と改定の対象
+
+| 対象 | 扱い |
+|---|---|
+| `docs/DECISIONS.md` | 本ADRを足す（Proposed）。ほかのADRの本文は変えない |
+| コード・試験・書式・`AGENTS.md` | 変えない |
+| #434の記録3種、色の計画 | 採用された後に、今やる物の2・3として別のcommitで変える |
+| ADR-0030・0031・0037・0038・0041・0043・0044、`AGENTS.md`の6・34・42行 | 4台が確定した時に改訂の対象になる。今は変えない |
+
+### 未決（※要確認）
+
+1. **書式の決まりの「main」**: `docs/design/fixed-composite-registration-formats.md`の1節の決まり8は「main に入った後の変更は新しい版（v4・v9）にし、古い読み手を残す」、同じ文書の状態の節は「v3 と v8 は main に入るまで凍結しない」と書く。
+   - 読める事: 決まりが名指すのは条件v3と報告v8。#434の記録3種はこの文書の表に無く、記録を説明する`docs/design/recalibration-from-pair.md`の6節と`docs/WPD_STILL_REVIEW.md`にも版の決まりは無い。条件v3と報告v8は公開のmainにもあるので、mainをどちらに読んでも凍結済み。3種のうち推定の記録と校正の報告には製品の読み手が無く（試験だけが読む）、確定の記録は`wpd_recalibration_ui.hpp`の`RecalibrationRecordedAsUnchecked`が`schema`・`revisionSha256`・`unverified`の3つだけを読むので、欄を足しても今の読み手は読める。推定の記録のSHA-256は条件v3の`reportSha256`とprofileの`provenanceId`に入るので、欄を足すと、これから作る記録のSHA-256の値が変わる（既にある記録は変わらない）。
+   - 読めない事: 「main」が公開のmainだけか、pushしていない手元のmainも含むか（2026-11-18に`git rev-list --count origin/main..main`で99。手元のmainは公開のmainより99 commit先）。決まり8が条件v3・報告v8以外の記録にも及ぶか。
+   - 答えで変わる所: 今やる物の2を、v1のまま欄を足してできるか、v2にするか。
+2. 色の計画v1に欄を足す時の扱い。v1は公開のmainにあり、書式の文書と読み手がまだ無い。v1のまま足すかv2にするかは、計画の書式の文書を書く時に決める。
+3. 2×2の対角の2台がどれだけ重なるか（交点の近くだけか）と、星形のまま測れる範囲（※推定。配置と重なりの幅が決まってから確かめる）。
+4. 位置の欄の名前（`cameraRow`・`cameraColumn`）と、カメラごとの取付の向きの置き場所は、profile 3.0.0で決める。
