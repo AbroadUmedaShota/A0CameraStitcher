@@ -89,7 +89,7 @@ inline constexpr std::chrono::seconds kRecalibrationSampleWindow{900};
 //                 that is not "too few marks"
 //   unverified    reestimate-not-verified when that estimator was undetermined and every one of its reasons is "too few marks"
 // `reason` of an estimate-not-verified finding is the estimator's first reason code; of a reestimate-doubtful finding, the first reason
-// that is not "too few marks". `limits` are the condition's (alpha and beta of the estimator's first check).
+// that is not "too few marks". `limits` are the condition's (alpha and beta of the estimator's first check, and the minimum number of unique blocks).
 [[nodiscard]] inline std::vector<RecalibrationFinding> ClassifyProposal(const a0::m2::experimental::recalibration::Proposal& proposal,
     const a0::m2::experimental::content_registration::RegistrationLimits& limits){
     namespace rc=a0::m2::experimental::recalibration;

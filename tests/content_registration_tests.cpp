@@ -10,6 +10,7 @@
 #include <cstring>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <numbers>
 #include <sstream>
 #include <string>
@@ -745,6 +746,19 @@ ps::Scene SceneWithSheet(const ps::Rig& rig, const ps::SeamPlacement& seam, cons
     return scene;
 }
 
+// The scene of a spec in which the two cameras see two different sheets: a mark that lies in one place on A's paper and in another place
+// on B's (the generator's own steps, with the sheet changed between the two renderings; the truth is that of the spec).
+ps::Scene SceneWithSheets(const ps::Rig& rig, const ps::SeamPlacement& seam, const ps::SceneSpec& spec, const ps::Sheet& sheet_a, const ps::Sheet& sheet_b,
+                          const ps::SceneOptions& options) {
+    ps::SceneModel model(rig, seam, spec);
+    ps::Scene scene{spec, {}, {}, ps::MakeTruth(model, options.truth)};
+    model.sheet = sheet_a;
+    scene.image_a = ps::RenderRaw(model, ps::Camera::a);
+    model.sheet = sheet_b;
+    scene.image_b = ps::RenderRaw(model, ps::Camera::b);
+    return scene;
+}
+
 std::string DescribeCoarse(const cr::RegistrationResult& r) {
     std::ostringstream s;
     const auto& d = r.diagnostics;
@@ -878,6 +892,80 @@ void Repeating() {
                 std::to_string(r.diagnostics.unique_blocks) + "," + std::to_string(r.diagnostics.consistent_blocks) + "," +
                 std::to_string(r.diagnostics.anchor_blocks) + "," + std::to_string(r.diagnostics.consistent_anchor_blocks) + ")");
             Check(r.has_estimate, spec.name + ": the fit still ran (the followers help the start)");
+        }
+    }
+
+    // Shades in the rows of three blocks (two neighbours and the one below): three anchors. On B's paper the third block's cells hold what
+    // the next cell holds on A's paper, so that block's mark points to the cell next to the place the other two give: a mark that disagrees
+    // with the vote's winner. It does not vote. V2 then sees two anchors, below the minimum of three, which is also what a paper with two
+    // marks gives; only the vote's rival tells the two apart. The same papers without the third block's shades are the control (a lack
+    // of marks, and a shortage).
+    {
+        ps::SceneSpec spec;
+        spec.name = "table_rival_anchor";
+        spec.field.plane = ps::PlaneOver(seam, 3.0, 0, 0);
+        auto settings = SurfaceSettings(seam.column);
+        settings.design.coarse_block_rows = 128;
+        settings.limits.minimum_unique_blocks = 3;
+        const auto empty_scene = SceneWithSheet(rig, seam, spec, ShadedTableSheet(period_mm, 0.0), options);
+        const auto blocks = cr::EstimateRegistration(empty_scene.image_a, empty_scene.image_b, parameters, settings, Threads()).diagnostics.coarse_blocks;
+        Check(blocks.size() >= 4, spec.name + ": the band holds several blocks");
+        if (blocks.size() >= 4) {
+            const std::size_t first = blocks.size()/2-1;
+            const auto inner = [&](std::size_t i) {
+                const auto& b = blocks[i];
+                return std::pair<double, double>{frame.top_mm+(b.y0+0.5)*frame.pitch_mm+period_mm, frame.top_mm+(b.y0+b.rows+0.5)*frame.pitch_mm-period_mm};
+            };
+            const auto shaded = ShadedTableSheet(period_mm, 60.0), empty = ShadedTableSheet(period_mm, 0.0);
+            const auto in_block = [&](std::size_t i, double y) { const auto rows = inner(i); return y >= rows.first && y < rows.second; };
+            // The first two blocks are shaded; the third is shaded only when `third`, and holds the next cell's shade when `next_cell`.
+            const auto sheet = [&](bool third, bool next_cell) -> ps::Sheet {
+                return [=](double x, double y) {
+                    if (in_block(first, y) || in_block(first+1, y)) return shaded(x, y);
+                    if (third && in_block(first+2, y)) return shaded(next_cell ? x+period_mm : x, y);
+                    return empty(x, y);
+                };
+            };
+            const auto run = [&](bool third, bool moved) {
+                const auto scene = SceneWithSheets(rig, seam, spec, sheet(third, false), sheet(third, moved), options);
+                const auto r = cr::EstimateRegistration(scene.image_a, scene.image_b, parameters, settings, Threads());
+                std::cerr << spec.name << (third ? (moved ? " (third block moved)" : " (third block as on A)") : " (control: no third block)") << ": " << Describe(r) << " "
+                          << DescribeCoarse(r) << "; blocks used " << r.diagnostics.unique_blocks << " consistent " << r.diagnostics.consistent_blocks << " anchors "
+                          << r.diagnostics.anchor_blocks << " consistent " << r.diagnostics.consistent_anchor_blocks << '\n';
+                return r;
+            };
+            const auto describe_counts = [](const cr::RegistrationResult& r) {
+                const auto& d = r.diagnostics;
+                return std::string("counts ") + std::to_string(d.unique_blocks) + "," + std::to_string(d.consistent_blocks) + "," + std::to_string(d.anchor_blocks) +
+                    "," + std::to_string(d.consistent_anchor_blocks) + ", rival " + std::to_string(d.coarse_vote.rival_anchor_support);
+            };
+            // Papers on which every anchor votes: no shade in the third block, and the same shades on both papers. Two anchors, below the
+            // minimum, and nothing that disagrees: a lack of marks.
+            const std::pair<const char*, bool> agreeing[] = {{"no shade in the third block", false}, {"the third block as on A", true}};
+            for (const auto& [what, third] : agreeing) {
+                const auto r = run(third, false);
+                const std::string name = spec.name + " (" + what + ")";
+                Check(r.state == cr::RegistrationState::undetermined && r.reasons.size() == 1 && r.reasons.front() == "unique-blocks", name + ": the one reason is unique-blocks (" + Describe(r) + ")");
+                Check(r.diagnostics.coarse_vote.decided && r.diagnostics.coarse_vote.rival_anchor_support == 0, name + ": every anchor votes (" + describe_counts(r) + ")");
+                Check(r.diagnostics.anchor_blocks == 2 && r.diagnostics.consistent_anchor_blocks == 2, name + ": two anchors, none dropped (" + describe_counts(r) + ")");
+                Check(cr::AssessEvidenceShortage(r, settings.limits).shortage_only, name + ": classified as a shortage of marks (" + describe_counts(r) + ")");
+            }
+            // The third block's mark points to the next cell: the vote decides on the other two, the third is an anchor that did not vote.
+            {
+                const auto r = run(true, true);
+                const std::string name = spec.name + " (the third block moved)";
+                unsigned unvoted_anchors = 0;
+                for (const auto& b : r.diagnostics.coarse_blocks)
+                    if ((b.status == cr::CoarseBlockStatus::unique || b.status == cr::CoarseBlockStatus::resolved) && !b.voted) ++unvoted_anchors;
+                Check(r.diagnostics.coarse_vote.decided && r.diagnostics.coarse_vote.anchor_support == 2, name + ": the vote decides on two anchors (" + describe_counts(r) + ")");
+                Check(r.diagnostics.coarse_vote.rival_anchor_support >= 1, name + ": an anchor agrees with another place (" + describe_counts(r) + ")");
+                Check(unvoted_anchors == 1, name + ": one anchor did not vote");
+                Check(r.diagnostics.anchor_blocks == 2 && r.diagnostics.consistent_anchor_blocks == 2 &&
+                        r.diagnostics.unique_blocks >= settings.limits.minimum_unique_blocks, name + ": the counts are those of a lack of marks (" + describe_counts(r) + ")");
+                Check(r.state == cr::RegistrationState::undetermined && r.reasons.size() == 1 && r.reasons.front() == "unique-blocks", name + ": the one reason is unique-blocks (" + Describe(r) + ")");
+                const auto verdict = cr::AssessEvidenceShortage(r, settings.limits);
+                Check(!verdict.shortage_only && verdict.doubt == "unique-blocks", name + ": classified as a doubt, not a shortage of marks (" + describe_counts(r) + ")");
+            }
         }
     }
     std::cerr << "repeating cases took " << std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count() << " s\n";
@@ -1125,23 +1213,26 @@ void BasePose() {
 
 // ---- Evidence shortage (#434): "too few marks" is told from "does not fit" by every reason, in one function -------------
 // The limits are this test's (alpha 8, beta 0.3: with no outlier, V1 is passed only by 12 points or more; minimum_unique_blocks 3).
+constexpr std::uint32_t kNotCarried = std::numeric_limits<std::uint32_t>::max();   // the rival anchors of counts that were not carried
 void Evidence() {
     cr::RegistrationLimits limits;
     limits.brown_lowe_alpha = 8.0;
     limits.brown_lowe_beta = 0.3;
     limits.minimum_unique_blocks = 3;
     const auto counts = [](std::uint32_t inliers, std::uint32_t points, std::uint32_t unique, std::uint32_t consistent, std::uint32_t anchors,
-                           std::uint32_t consistent_anchors) {
+                           std::uint32_t consistent_anchors, std::uint32_t rival = kNotCarried) {
         cr::EvidenceCounts c;
         c.inliers = inliers; c.points = points;
         c.unique_blocks = unique; c.consistent_blocks = consistent; c.anchor_blocks = anchors; c.consistent_anchor_blocks = consistent_anchors;
+        c.rival_anchor_support = rival;   // the default is "not carried": the value that EvidenceCounts itself starts with
         return c;
     };
     const auto assess = [&](std::vector<std::string> reasons, std::uint32_t inliers = 0, std::uint32_t points = 0) {
         return cr::AssessEvidenceShortage(reasons, counts(inliers, points, 0, 0, 0, 0), limits);
     };
-    // The block counts of a unique-blocks estimate that V2 failed on the number of anchors alone (6 blocks used, all consistent, 1 anchor).
-    const auto few_anchors = counts(0, 0, 6, 6, 1, 1);
+    // The block counts of a unique-blocks estimate that V2 failed on the number of anchors alone (6 blocks used, all consistent, 1 anchor,
+    // and every anchor voted: no rival anchor).
+    const auto few_anchors = counts(0, 0, 6, 6, 1, 1, 0);
     const auto assess_blocks = [&](std::vector<std::string> reasons, const cr::EvidenceCounts& c) {
         return cr::AssessEvidenceShortage(reasons, c, limits);
     };
@@ -1213,38 +1304,60 @@ void Evidence() {
         Check(cr::AssessEvidenceShortage({"too-few-points"}, counts(0, 0, 0, 0, 0, 0), unset).shortage_only, "the other reasons do not need the limits");
     }
     // unique-blocks (#434): one code for two places of the estimator, told by the counts (U unique, C consistent, A anchors, CA consistent
-    // anchors; m = 3). A shortage is a lack of marks (S1: the coarse stage stopped on the number of blocks; S2: V2 failed on the anchors
-    // alone, with nothing dropped and no more than half of the blocks in disagreement). Everything else is a doubt named unique-blocks.
+    // anchors, R the vote's rival anchors; m = 3). A shortage is a lack of marks (S1: the coarse stage stopped on the number of blocks;
+    // S2: V2 failed on the anchors alone, with nothing dropped and no more than half of the blocks in disagreement), and in both every
+    // anchor voted (R = 0). Everything else is a doubt named unique-blocks. R "not carried" is the value EvidenceCounts starts with.
     {
-        struct Row { std::uint32_t u, c, a, ca; bool shortage; const char* what; };
+        Check(cr::EvidenceCounts{}.rival_anchor_support == kNotCarried, "EvidenceCounts: a rival that was not carried is the largest value");
+        struct Row { std::uint32_t u, c, a, ca, r; bool shortage; const char* what; };
         const Row rows[] = {
-            {2, 0, 1, 0, true,  "S1, surface: the coarse stage stopped on the number of blocks"},
-            {2, 0, 2, 0, true,  "S1, pose only: stopped (anchors = blocks)"},
-            {1, 0, 0, 0, true,  "S1: one block"},
-            {0, 0, 0, 0, false, "no counts carried"},
-            {2, 1, 1, 0, false, "stopped, yet a consistent block is counted"},
-            {3, 0, 3, 0, false, "as many blocks as the minimum, none consistent"},
-            {8, 3, 8, 3, false, "pose only: more than half of the blocks disagree"},
-            {7, 3, 7, 3, false, "pose only: 2C = 6 < 7"},
-            {6, 3, 6, 3, false, "pose only: anchors reach the minimum (the estimator does not give this)"},
-            {6, 6, 1, 1, true,  "S2: the form of table_one_shaded_block"},
-            {5, 5, 2, 2, true,  "S2"},
-            {6, 3, 2, 2, true,  "S2: on the half line (2C = U)"},
-            {7, 3, 2, 2, false, "below the half line (2C = 6 < 7)"},
-            {6, 5, 1, 0, false, "the only anchor was dropped"},
-            {6, 5, 2, 1, false, "an anchor was dropped"},
-            {8, 6, 4, 2, false, "anchors at the minimum or more were dropped below it"},
-            {5, 5, 0, 0, false, "no anchor (the form of a record read back)"},
-            {6, 2, 2, 2, false, "C below the minimum"},
-            {4, 5, 2, 2, false, "C above U"},
-            {6, 6, 2, 3, false, "CA above A"},
+            {2, 0, 1, 0, 0, true,  "S1, surface: the coarse stage stopped on the number of blocks"},
+            {2, 0, 2, 0, 0, true,  "S1, pose only: stopped (anchors = blocks)"},
+            {1, 0, 1, 0, 0, true,  "S1: one block, which is an anchor"},
+            {1, 0, 0, 0, 0, false, "S1 form with no anchor (the form of a record read back)"},
+            {2, 0, 2, 0, 1, false, "S1, and an anchor pointed to another place than the vote's winner"},
+            {2, 0, 2, 0, kNotCarried, false, "S1, and the rival was not carried"},
+            {1, 0, 2, 0, 0, false, "A above U"},
+            {2, 0, 3, 0, 0, false, "A above U"},
+            {0, 0, 0, 0, 0, false, "no counts carried"},
+            {2, 1, 1, 0, 0, false, "stopped, yet a consistent block is counted"},
+            {3, 0, 3, 0, 0, false, "as many blocks as the minimum, none consistent"},
+            {8, 3, 8, 3, 0, false, "pose only: more than half of the blocks disagree"},
+            {7, 3, 7, 3, 0, false, "pose only: 2C = 6 < 7"},
+            {6, 3, 6, 3, 0, false, "pose only: anchors reach the minimum (the estimator does not give this)"},
+            {5, 5, 1, 1, 0, true,  "S2: the form of table_one_shaded_block"},
+            {6, 6, 1, 1, 0, true,  "S2: one anchor with followers"},
+            {5, 5, 2, 2, 0, true,  "S2"},
+            {6, 3, 2, 2, 0, true,  "S2: on the half line (2C = U)"},
+            {3, 3, 1, 1, 0, true,  "S2: U = m exactly"},
+            {4294967295u, 2147483648u, 1, 1, 0, true,  "S2: 2C does not overflow 32 bits (2C = U + 1)"},
+            {4294967295u, 2147483647u, 1, 1, 0, false, "2C = 2^32 - 2 is below U"},
+            {6, 6, 2, 2, 1, false, "S2, and an anchor pointed to another place than the vote's winner"},
+            {3, 3, 2, 2, 1, false, "the same with U = m"},
+            {6, 6, 1, 1, kNotCarried, false, "S2, and the rival was not carried"},
+            {4, 2, 1, 1, 0, false, "C below the minimum, and on the half line"},
+            {3, 2, 1, 1, 0, false, "C below the minimum"},
+            {7, 3, 2, 2, 0, false, "below the half line (2C = 6 < 7)"},
+            {6, 5, 1, 0, 0, false, "the only anchor was dropped"},
+            {6, 5, 2, 1, 0, false, "an anchor was dropped"},
+            {8, 6, 4, 2, 0, false, "anchors at the minimum or more were dropped below it"},
+            {5, 5, 0, 0, 0, false, "no anchor (the form of a record read back)"},
+            {6, 2, 2, 2, 0, false, "C below the minimum"},
+            {4, 5, 2, 2, 0, false, "C above U"},
+            {6, 6, 2, 3, 0, false, "CA above A"},
         };
         for (const auto& row : rows) {
-            const auto v = assess_blocks({"unique-blocks"}, counts(0, 0, row.u, row.c, row.a, row.ca));
+            const auto v = assess_blocks({"unique-blocks"}, counts(0, 0, row.u, row.c, row.a, row.ca, row.r));
             const std::string name = std::string("unique-blocks (") + std::to_string(row.u) + "," + std::to_string(row.c) + "," +
-                std::to_string(row.a) + "," + std::to_string(row.ca) + "): " + row.what;
+                std::to_string(row.a) + "," + std::to_string(row.ca) + "," + (row.r == kNotCarried ? std::string("not carried") : std::to_string(row.r)) +
+                "): " + row.what;
             Check(v.shortage_only == row.shortage, name + (row.shortage ? " is a shortage" : " is a doubt"));
             Check(row.shortage ? v.doubt.empty() : v.doubt == "unique-blocks", name + ": the doubt is " + (row.shortage ? "empty" : "unique-blocks"));
+        }
+        // Only whether R is 0 matters, not its size.
+        for (const std::uint32_t r : {1u, 2u, 5u, 1000u}) {
+            Check(!assess_blocks({"unique-blocks"}, counts(0, 0, 2, 0, 2, 0, r)).shortage_only, "unique-blocks: S1 with a rival of " + std::to_string(r) + " is a doubt");
+            Check(!assess_blocks({"unique-blocks"}, counts(0, 0, 6, 6, 1, 1, r)).shortage_only, "unique-blocks: S2 with a rival of " + std::to_string(r) + " is a doubt");
         }
         // The line follows the condition's minimum: unset is a doubt, and (6,6,3,3) is a shortage at 4 and a doubt at 3.
         auto unset_minimum = limits;
@@ -1252,15 +1365,20 @@ void Evidence() {
         Check(!cr::AssessEvidenceShortage({"unique-blocks"}, few_anchors, unset_minimum).shortage_only, "unique-blocks: no minimum is a doubt");
         auto four = limits;
         four.minimum_unique_blocks = 4;
-        Check(cr::AssessEvidenceShortage({"unique-blocks"}, counts(0, 0, 6, 6, 3, 3), four).shortage_only, "unique-blocks: the line follows the minimum (4)");
-        Check(!assess_blocks({"unique-blocks"}, counts(0, 0, 6, 6, 3, 3)).shortage_only, "unique-blocks: the same counts are a doubt at 3");
+        Check(cr::AssessEvidenceShortage({"unique-blocks"}, counts(0, 0, 6, 6, 3, 3, 0), four).shortage_only, "unique-blocks: the line follows the minimum (4)");
+        Check(!cr::AssessEvidenceShortage({"unique-blocks"}, counts(0, 0, 6, 6, 3, 3, 1), four).shortage_only, "unique-blocks: at 4, a rival anchor makes it a doubt");
+        Check(!assess_blocks({"unique-blocks"}, counts(0, 0, 6, 6, 3, 3, 0)).shortage_only, "unique-blocks: the same counts are a doubt at 3");
         // Several reasons: the block counts decide unique-blocks, and the other reasons keep their own rules.
         Check(assess_blocks({"unique-blocks", "too-few-points"}, few_anchors).shortage_only, "unique-blocks + too-few-points: a shortage on S2");
-        const auto disagree = assess_blocks({"unique-blocks", "too-few-points"}, counts(0, 0, 8, 3, 8, 3));
+        const auto disagree = assess_blocks({"unique-blocks", "too-few-points"}, counts(0, 0, 8, 3, 8, 3, 0));
         Check(!disagree.shortage_only && disagree.doubt == "unique-blocks", "unique-blocks + too-few-points: a doubt when the blocks disagree");
+        const auto rival = assess_blocks({"unique-blocks", "too-few-points"}, counts(0, 0, 6, 6, 2, 2, 1));
+        Check(!rival.shortage_only && rival.doubt == "unique-blocks", "unique-blocks + too-few-points: a doubt when an anchor pointed elsewhere");
         auto brown = few_anchors;
         brown.inliers = 5; brown.points = 9;
         Check(assess_blocks({"unique-blocks", "brown-lowe"}, brown).shortage_only, "unique-blocks + brown-lowe (5 of 9): a shortage");
+        brown.rival_anchor_support = 1;
+        Check(!assess_blocks({"unique-blocks", "brown-lowe"}, brown).shortage_only, "unique-blocks + brown-lowe (5 of 9): a doubt when an anchor pointed elsewhere");
         Check(assess({"too-few-points"}).shortage_only, "too-few-points alone is a shortage whatever the block counts");
     }
     // The result form gives the same answer as the three numbers.
@@ -1276,11 +1394,20 @@ void Evidence() {
         r.reasons = {"unique-blocks"};
         r.diagnostics.unique_blocks = 6; r.diagnostics.consistent_blocks = 6; r.diagnostics.anchor_blocks = 1; r.diagnostics.consistent_anchor_blocks = 1;
         Check(cr::AssessEvidenceShortage(r, limits).shortage_only, "the result form: unique-blocks on one anchor");
+        r.diagnostics.coarse_vote.rival_anchor_support = 1;
+        Check(!cr::AssessEvidenceShortage(r, limits).shortage_only, "the result form: unique-blocks on one anchor, with a rival anchor");
+        r.diagnostics.coarse_vote.rival_anchor_support = 0;
         r.diagnostics.consistent_anchor_blocks = 0;
         Check(!cr::AssessEvidenceShortage(r, limits).shortage_only, "the result form: unique-blocks with the anchor dropped");
-        const auto copied = cr::EvidenceCountsOf(r.diagnostics);
-        Check(copied.inliers == 11 && copied.points == 20 && copied.unique_blocks == 6 && copied.consistent_blocks == 6 &&
-                copied.anchor_blocks == 1 && copied.consistent_anchor_blocks == 0, "EvidenceCountsOf copies the six counts");
+        // Every count goes through EvidenceCountsOf, each with a value of its own, so that two of them cannot be swapped without being seen.
+        cr::RegistrationDiagnostics d;
+        d.inliers = 11; d.points = 22; d.unique_blocks = 33; d.consistent_blocks = 44; d.anchor_blocks = 55; d.consistent_anchor_blocks = 66;
+        d.coarse_vote.rival_anchor_support = 77;
+        const auto copied = cr::EvidenceCountsOf(d);
+        Check(copied.inliers == 11 && copied.points == 22 && copied.unique_blocks == 33 && copied.consistent_blocks == 44 &&
+                copied.anchor_blocks == 55 && copied.consistent_anchor_blocks == 66 && copied.rival_anchor_support == 77,
+            "EvidenceCountsOf copies the seven counts");
+        Check(cr::EvidenceCountsOf(cr::RegistrationDiagnostics{}).rival_anchor_support == 0, "EvidenceCountsOf: no vote is no rival (0)");
     }
 }
 }

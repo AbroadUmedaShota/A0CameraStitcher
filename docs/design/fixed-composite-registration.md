@@ -79,7 +79,7 @@ p を更新したら置き直して測り直す（外側の繰り返し、回数
 | 検査 | 内容 | 理由の符号 |
 |---|---|---|
 | V1 | Brown と Lowe: 内側の点 > α + β·数えた点 | `brown-lowe` |
-| V2 | 一意なブロックの数と、姿勢との整合したブロックの数。紙面を推定する形では、これに加えて、当てはめに合う錨（一意か、色で `resolved` のブロック）の数も `minimum_unique_blocks` 以上であること。錨に付いていくだけのブロックは錨に数えない（11.3 の推定の 4。`content_registration.cpp` の `consistent_anchor_blocks`） | `unique-blocks`（早い段で足りなければ段 1 の理由） |
+| V2 | 一意なブロックの数と、姿勢との整合したブロックの数。紙面を推定する形では、これに加えて、当てはめに合う錨（一意か、色で `resolved` のブロック）の数も `minimum_unique_blocks` 以上であること。錨に付いていくだけのブロックは錨に数えない（11.3 の推定の 4。`content_registration.cpp` の `consistent_anchor_blocks`）。校正の分類（`AssessEvidenceShortage`）はこの式、粗い段の数え方（目印を除く前の `anchor_blocks` と除いた後の `consistent_anchor_blocks`）、票の `rival_anchor_support` に依る。これらを変える時は、分類も同じ commit で見直し、security を通す | `unique-blocks`（早い段で足りなければ段 1 の理由） |
 | V3 | 継ぎ目の列の、重なりが覆う全行での予測の不確かさ σ_pred の最大。共分散から変位への伝播（数値の微分）で、2×2 の大きい方の固有値の平方根 | `prediction-uncertain` |
 | V4 | 範囲。成分ごと（位置 √(tx²+ty²)、回転 \|rz\|、傾き √(rx²+ry²)、高さ \|tz\|）に超過を返す | `out-of-envelope` の状態と超過した成分 |
 | V5 | 残りの形。Ω に近い内側の点の rms と p95、2 方向の点を 3 行ずつ×左右に分けた箱の平均の偏り。紙面を推定する形では基線に直交の成分だけで判定する（11.3 の推定の 4） | `residual-shape` |

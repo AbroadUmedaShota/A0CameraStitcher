@@ -28,6 +28,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <numbers>
 #include <sstream>
@@ -188,6 +189,7 @@ RecalibrationComputation FakeComputation(Fake mode, std::vector<std::string>* st
             // The blocks are those of an estimate that V2 failed on one anchor alone (a shortage), so residual-shape is the doubt that is named.
             p.verification.evidence.unique_blocks = 6; p.verification.evidence.consistent_blocks = 6;
             p.verification.evidence.anchor_blocks = 1; p.verification.evidence.consistent_anchor_blocks = 1;
+            p.verification.evidence.rival_anchor_support = 0;   // every anchor voted
             break;
         case Fake::check_failed:
             // What VerifyCandidate returns when the estimator refuses its settings.
@@ -304,20 +306,24 @@ void Decisions() {
     }
     // The check on the new profile when it is undetermined: told by ALL of its reasons (the table of the ruling, one function in m2).
     {
-        // u, c, a, ca: the block counts (unique, consistent, anchors, consistent anchors) that tell the two sources of unique-blocks apart.
+        // u, c, a, ca, r: the block counts (unique, consistent, anchors, consistent anchors) and the vote's rival anchors that tell the two
+        // sources of unique-blocks apart. r not given is "not carried" (the value EvidenceCounts starts with), which is a doubt.
         struct Case {const char* name; std::vector<std::string> reasons; std::uint32_t inliers, points; FindingClass klass; const char* code; const char* reason;
-            std::uint32_t u{}, c{}, a{}, ca{};};
+            std::uint32_t u{}, c{}, a{}, ca{}, r{std::numeric_limits<std::uint32_t>::max()};};
         const Case cases[] = {
-            {"one reason of the family", {"unique-blocks"}, 0, 0, FindingClass::unverified, "reestimate-not-verified", "unique-blocks", 6, 6, 1, 1},
-            {"unique-blocks, the coarse stage stopped on the number of blocks", {"unique-blocks"}, 0, 0, FindingClass::unverified, "reestimate-not-verified", "unique-blocks", 2, 0, 1, 0},
-            {"unique-blocks, more than half of the blocks disagree", {"unique-blocks"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "unique-blocks", 8, 3, 8, 3},
-            {"unique-blocks, the only anchor was dropped", {"unique-blocks"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "unique-blocks", 6, 5, 1, 0},
+            {"one reason of the family", {"unique-blocks"}, 0, 0, FindingClass::unverified, "reestimate-not-verified", "unique-blocks", 6, 6, 1, 1, 0},
+            {"unique-blocks, the coarse stage stopped on the number of blocks", {"unique-blocks"}, 0, 0, FindingClass::unverified, "reestimate-not-verified", "unique-blocks", 2, 0, 1, 0, 0},
+            {"unique-blocks, S2 and an anchor pointed to another place than the vote's winner", {"unique-blocks"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "unique-blocks", 6, 6, 2, 2, 1},
+            {"unique-blocks, S1 and an anchor pointed to another place than the vote's winner", {"unique-blocks"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "unique-blocks", 2, 0, 2, 0, 1},
+            {"unique-blocks, S2 and the rival was not carried", {"unique-blocks"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "unique-blocks", 6, 6, 1, 1},
+            {"unique-blocks, more than half of the blocks disagree", {"unique-blocks"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "unique-blocks", 8, 3, 8, 3, 0},
+            {"unique-blocks, the only anchor was dropped", {"unique-blocks"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "unique-blocks", 6, 5, 1, 0, 0},
             {"unique-blocks, no counts carried", {"unique-blocks"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "unique-blocks"},
             {"every reason of the family", {"coarse-no-unique-blocks", "repeating-only", "too-few-points", "prediction-uncertain", "too-dark"}, 0, 0, FindingClass::unverified, "reestimate-not-verified", "coarse-no-unique-blocks"},
-            {"a shortage and a doubt", {"unique-blocks", "residual-shape"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "residual-shape", 6, 6, 1, 1},
-            {"a doubt first", {"residual-shape", "unique-blocks"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "residual-shape", 6, 6, 1, 1},
+            {"a shortage and a doubt", {"unique-blocks", "residual-shape"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "residual-shape", 6, 6, 1, 1, 0},
+            {"a doubt first", {"residual-shape", "unique-blocks"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "residual-shape", 6, 6, 1, 1, 0},
             {"a code nobody knows", {"a-code-nobody-knows"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "a-code-nobody-knows"},
-            {"a shortage and a code nobody knows", {"unique-blocks", "a-code-nobody-knows"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "a-code-nobody-knows", 6, 6, 1, 1},
+            {"a shortage and a code nobody knows", {"unique-blocks", "a-code-nobody-knows"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "a-code-nobody-knows", 6, 6, 1, 1, 0},
             {"no reason", {}, 0, 0, FindingClass::rejected, "reestimate-doubtful", ""},
             {"the estimate failed", {"estimate-failed"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "estimate-failed"},
             {"the displacement could not be found", {"displacement-failed"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "displacement-failed"},
@@ -330,7 +336,7 @@ void Decisions() {
             {"brown-lowe, nothing counted", {"brown-lowe"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "brown-lowe"},
             {"brown-lowe, no inlier", {"brown-lowe"}, 0, 5, FindingClass::rejected, "reestimate-doubtful", "brown-lowe"},
             {"brown-lowe, more inliers than points", {"brown-lowe"}, 11, 5, FindingClass::rejected, "reestimate-doubtful", "brown-lowe"},
-            {"brown-lowe beside a shortage", {"unique-blocks", "brown-lowe"}, 5, 9, FindingClass::unverified, "reestimate-not-verified", "unique-blocks", 6, 6, 1, 1},
+            {"brown-lowe beside a shortage", {"unique-blocks", "brown-lowe"}, 5, 9, FindingClass::unverified, "reestimate-not-verified", "unique-blocks", 6, 6, 1, 1, 0},
             {"brown-lowe beside a doubt", {"brown-lowe", "starts-disagree"}, 5, 9, FindingClass::rejected, "reestimate-doubtful", "starts-disagree"},
         };
         for (const auto& c : cases) {
@@ -340,7 +346,7 @@ void Decisions() {
             p.verification.reasons = c.reasons; p.verification.inliers = c.inliers; p.verification.points = c.points;
             const auto evidence = [&] {
                 cr::EvidenceCounts e;
-                e.inliers = c.inliers; e.points = c.points; e.unique_blocks = c.u; e.consistent_blocks = c.c; e.anchor_blocks = c.a; e.consistent_anchor_blocks = c.ca;
+                e.inliers = c.inliers; e.points = c.points; e.unique_blocks = c.u; e.consistent_blocks = c.c; e.anchor_blocks = c.a; e.consistent_anchor_blocks = c.ca; e.rival_anchor_support = c.r;
                 return e;
             }();
             p.verification.evidence = evidence;
@@ -424,6 +430,7 @@ void Decisions() {
             t.estimate = cr::RegistrationState::undetermined; t.estimate_reasons = {"unique-blocks"};
             t.estimate_evidence.unique_blocks = 6; t.estimate_evidence.consistent_blocks = 6;
             t.estimate_evidence.anchor_blocks = 1; t.estimate_evidence.consistent_anchor_blocks = 1;
+            t.estimate_evidence.rival_anchor_support = 0;   // every anchor voted
         };
         f = one(few_anchors);
         CHECK(Is(f, FindingClass::unverified, "sample-estimate-undetermined"));
@@ -433,6 +440,14 @@ void Decisions() {
         });
         CHECK(Is(f, FindingClass::rejected, "sample-estimate-doubtful") && f[0].reason == "unique-blocks");
         f = one([&](auto& t) { few_anchors(t); t.estimate_evidence.consistent_anchor_blocks = 0; });
+        CHECK(Is(f, FindingClass::rejected, "sample-estimate-doubtful") && f[0].reason == "unique-blocks");
+        // An anchor that pointed to another place than the vote's winner: a doubt, and the same when the rival was not carried.
+        f = one([&](auto& t) {
+            few_anchors(t);
+            t.estimate_evidence.anchor_blocks = 2; t.estimate_evidence.consistent_anchor_blocks = 2; t.estimate_evidence.rival_anchor_support = 1;
+        });
+        CHECK(Is(f, FindingClass::rejected, "sample-estimate-doubtful") && f[0].reason == "unique-blocks");
+        f = one([&](auto& t) { few_anchors(t); t.estimate_evidence.rival_anchor_support = std::numeric_limits<std::uint32_t>::max(); });
         CHECK(Is(f, FindingClass::rejected, "sample-estimate-doubtful") && f[0].reason == "unique-blocks");
         f = one([&](auto& t) { few_anchors(t); t.gate = gate::GateState::fail; });   // a failure beside a doubt stays a failure
         CHECK(f.size() == 2 && f[1].klass == FindingClass::rejected && f[1].code == "gate-fail");

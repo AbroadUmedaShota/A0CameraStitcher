@@ -502,7 +502,8 @@ struct RegistrationResult {
     RegistrationDiagnostics diagnostics;
 };
 // Codes in RegistrationResult::reasons:
-//   no-overlap, coarse-no-unique-blocks, coarse-inconsistent, too-few-points, fit-failed, brown-lowe (V1), unique-blocks (V2),
+//   no-overlap, coarse-no-unique-blocks, coarse-inconsistent, too-few-points, fit-failed, brown-lowe (V1),
+//   unique-blocks (V2; the coarse stage gives it too, when it stops on the number of blocks),
 //   prediction-uncertain (V3), residual-shape (V5), not-converged, starts-disagree (V6),
 //   repeating-only (surface mode: every block with content repeats and the colour of its cells does not tell its peaks
 //                   apart; there is no anchor and no estimate),
@@ -526,23 +527,28 @@ struct RegistrationResult {
 // 0 < inliers <= points must hold (no counts, no inliers, or more inliers than points show a fit that cannot be trusted).
 //
 // unique-blocks comes from two places of the estimator (the coarse stage, and V2 at the verdict) under one code, and is told apart by the
-// block counts (U unique, C consistent, A anchor, CA consistent anchor; m minimum_unique_blocks). It is a shortage only when m >= 1,
+// block counts (U unique, C consistent, A anchor, CA consistent anchor; m minimum_unique_blocks; R rival_anchor_support, the anchors of
+// the coarse vote that agree with a hypothesis other than the winner's: only whether it is 0 is read). It is a shortage only when m >= 1,
 // CA <= A <= U and CA <= C <= U hold and one of these is true; in every other case (including counts that were not carried) it is a doubt:
-//   S1  the coarse stage stopped on the number of blocks: 1 <= U < m, C = 0 and CA = 0.
-//   S2  V2 failed on the number of anchors alone: U >= m, C >= m, 2C >= U, 1 <= A < m and CA = A (no anchor was dropped, and the
-//       blocks that were used did not disagree by more than V2's own half line).
-// A block count that is over the half line, an anchor that was dropped from the fit, or no anchor at all shows a disagreement or an
-// estimate that cannot be trusted, not a lack of marks. V2 (EstimateOn's verdict) depends on this: change them together.
+//   S1  the coarse stage stopped on the number of blocks: 1 <= A <= U < m, C = 0, CA = 0 and R = 0.
+//   S2  V2 failed on the number of anchors alone: U >= m, C >= m, 2C >= U, 1 <= A < m, CA = A (no anchor was dropped, and the
+//       blocks that were used did not disagree by more than V2's own half line) and R = 0.
+// A block count that is over the half line, an anchor that was dropped from the fit, no anchor at all, or an anchor that pointed to
+// another place than the vote's winner (R >= 1) shows a disagreement or an estimate that cannot be trusted, not a lack of marks.
+// V2 (EstimateOn's verdict) and the coarse stage's vote depend on this: change them together.
 struct EvidenceShortage {
     bool shortage_only{};
     std::string doubt;
 };
 // The counts AssessEvidenceShortage reads, copied from the in-memory diagnostics of an estimate. A report read back from a file does not
-// carry the anchor counts (they are 0 there), so such a record is classified as a doubt for unique-blocks.
+// carry the anchor counts (they are 0 there, so it has no anchor), so unique-blocks is always a doubt for such a record.
 struct EvidenceCounts {
     std::uint32_t inliers{}, points{};
     std::uint32_t unique_blocks{}, consistent_blocks{};
     std::uint32_t anchor_blocks{}, consistent_anchor_blocks{};
+    // CoarseVote::rival_anchor_support of the estimate (0 when there was no vote: pose only). The default means "not carried" and is read
+    // as a disagreement, so an estimate whose counts were not copied is a doubt.
+    std::uint32_t rival_anchor_support{std::numeric_limits<std::uint32_t>::max()};
 };
 [[nodiscard]] EvidenceCounts EvidenceCountsOf(const RegistrationDiagnostics& diagnostics);
 [[nodiscard]] EvidenceShortage AssessEvidenceShortage(const std::vector<std::string>& reasons, const EvidenceCounts& counts,
