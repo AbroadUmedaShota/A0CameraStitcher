@@ -996,6 +996,8 @@ CoarseVote Vote(std::vector<CoarseBlock>& blocks, const std::vector<std::vector<
             const Point ps = predict(s.h, blocks[b].at.y), pw = predict(won.h, blocks[b].at.y);
             apart = apart || std::hypot(ps.x-pw.x, ps.y-pw.y) > tolerance;
         }
+        // AssessEvidenceShortage reads whether rival_anchor_support is 0 (S1, S2 and T): it is 0 exactly when every anchor voted. If this count
+        // changes, review that classification in the same commit.
         if (outside) vote.rival_anchor_support = std::max(vote.rival_anchor_support, s.anchors);
         if (apart) vote.rival_support = std::max(vote.rival_support, s.support);
     }
@@ -1260,6 +1262,8 @@ CoarseOutcome CoarseStage(const BgrImage& image_a, const BgrImage& image_b, cons
     };
     if (model.surface) for (const auto& block : out.blocks) if (used(block)) ++out.unique;
     // The anchors are counted apart: the followers help the start of the fit, but only an anchor is evidence of the place (V2).
+    // This count is taken before any block is dropped (A); the count below, after the drops, is CA. AssessEvidenceShortage tells a lack of
+    // marks (CA = A) from a dropped anchor (CA < A) by this order: if either count moves, review that classification in the same commit.
     for (const auto& block : out.blocks) if (used(block) && is_anchor(block)) ++out.anchors;
     if (out.unique < 1) { out.reason = "coarse-no-unique-blocks"; return out; }
 
@@ -1322,6 +1326,7 @@ CoarseOutcome CoarseStage(const BgrImage& image_a, const BgrImage& image_b, cons
     }
     for (const auto i : kept) {
         out.blocks[i].consistent = true; ++out.consistent;
+        // CA: the anchors that remain after the drops (compare with A above; see AssessEvidenceShortage).
         if (is_anchor(out.blocks[i])) ++out.consistent_anchors;
     }
     out.state = state;
@@ -1505,6 +1510,7 @@ EvidenceCounts EvidenceCountsOf(const RegistrationDiagnostics& diagnostics) {
     counts.consistent_blocks = diagnostics.consistent_blocks;
     counts.anchor_blocks = diagnostics.anchor_blocks;
     counts.consistent_anchor_blocks = diagnostics.consistent_anchor_blocks;
+    counts.rival_anchor_support = diagnostics.coarse_vote.rival_anchor_support;
     return counts;
 }
 EvidenceShortage AssessEvidenceShortage(const std::vector<std::string>& reasons, const EvidenceCounts& counts,
@@ -1514,18 +1520,36 @@ EvidenceShortage AssessEvidenceShortage(const std::vector<std::string>& reasons,
     const std::uint32_t inliers = counts.inliers, points = counts.points;
     for (const auto& reason : reasons) {
         bool shortage = false;
-        for (const char* known : {"coarse-no-unique-blocks", "repeating-only", "too-few-points", "prediction-uncertain", "too-dark"})
+        for (const char* known : {"coarse-no-unique-blocks", "repeating-only", "prediction-uncertain", "too-dark"})
             if (reason == known) shortage = true;
-        if (reason == "unique-blocks") {
-            // One code, two places of the estimator: the coarse stage (too few unique blocks, nothing counted as consistent yet) and
-            // V2 at the verdict (see the comment there, which depends on these two cases). Only a lack of marks is a shortage; blocks
-            // that disagree with the fit, or an anchor that was dropped from it, are a doubt.
+        if (reason == "too-few-points") {
+            // The fine stage stopped for want of points, so V2 never ran; the coarse stage's counts stand in for it (see the comment at the
+            // early return in EstimateOn). T0: the coarse stage counted nothing (a follow-up estimate, or counts that were not carried): a shortage as before.
+            // T1: the counts are those V2 passes (the consistent blocks reach the minimum and are at least half of the blocks used, and
+            // the anchors that agree reach it too), or those that V2 fails on the number of anchors alone (S2). Anything else is a
+            // disagreement that V2 would have named, and it is a doubt whatever the number of points.
             const std::uint32_t m = limits.minimum_unique_blocks;
             const std::uint32_t u = counts.unique_blocks, c = counts.consistent_blocks;
             const std::uint32_t a = counts.anchor_blocks, ca = counts.consistent_anchor_blocks;
             const bool sane = m >= 1 && ca <= a && a <= u && ca <= c && c <= u;
-            const bool coarse_stopped = u >= 1 && u < m && c == 0 && ca == 0;                                        // S1
-            const bool anchors_only = u >= m && c >= m && 2ull*c >= u && a >= 1 && a < m && ca == a;               // S2
+            const bool no_rival = counts.rival_anchor_support == 0;
+            const bool nothing_counted = u == 0 && c == 0 && a == 0 && ca == 0;                                      // T0
+            const bool v2_would_pass = sane && c >= m && 2ull*c >= u &&                                               // T1
+                (ca >= m || (a >= 1 && a < m && ca == a && no_rival));
+            shortage = nothing_counted || v2_would_pass;
+        }
+        if (reason == "unique-blocks") {
+            // One code, two places of the estimator: the coarse stage (too few unique blocks, nothing counted as consistent yet) and
+            // V2 at the verdict (see the comment there, which depends on these two cases). Only a lack of marks is a shortage; blocks
+            // that disagree with the fit, an anchor that was dropped from it, or an anchor that pointed to another place than the
+            // vote's winner (r >= 1; the vote's rival is not part of the counts above) are a doubt.
+            const std::uint32_t m = limits.minimum_unique_blocks;
+            const std::uint32_t u = counts.unique_blocks, c = counts.consistent_blocks;
+            const std::uint32_t a = counts.anchor_blocks, ca = counts.consistent_anchor_blocks;
+            const bool sane = m >= 1 && ca <= a && a <= u && ca <= c && c <= u;
+            const bool no_rival = counts.rival_anchor_support == 0;
+            const bool coarse_stopped = a >= 1 && u < m && c == 0 && ca == 0 && no_rival;                            // S1
+            const bool anchors_only = u >= m && c >= m && 2ull*c >= u && a >= 1 && a < m && ca == a && no_rival;    // S2
             shortage = sane && (coarse_stopped || anchors_only);
         }
         if (reason == "brown-lowe") {
@@ -2101,6 +2125,9 @@ RegistrationResult EstimateOn(const BgrImage& camera_a, const BgrImage& camera_b
     diag.last_placement = diag.last_placement_calibrated ? kIdentity : model.Transform(first.placed);
     diag.last_points = first.points;
     diag.fit_window = first.window;
+    // A fine stage that stops (too-few-points) returns here, before V2 runs, so V2 does not name a disagreement among the blocks it counted.
+    // AssessEvidenceShortage (T) reads the coarse stage's counts in V2's place; a new early return with a code that it counts as a shortage
+    // needs the same, and a change to the early returns means reviewing T in the same commit.
     if (!first.ok) { result.reasons.push_back(first.reason); return result; }
     const State fitted = first.state;
     const PoseParameters pose = fitted.pose;
@@ -2297,7 +2324,8 @@ RegistrationResult EstimateOn(const BgrImage& camera_a, const BgrImage& camera_b
     // V2. Surface mode: the blocks counted include the repeating blocks that follow the vote's winner, and a block that repeats
     // has a strong peak next to almost any place, so it is no evidence of the one the winner gives. The line is therefore held
     // against the anchors that agree with the fit as well: one anchor with followers is not a verified estimate.
-    // AssessEvidenceShortage (S1 and S2) tells a lack of marks from a disagreement by these same counts and depends on this expression.
+    // AssessEvidenceShortage (S1, S2 and T) tells a lack of marks from a disagreement by these same counts, and by whether the coarse vote
+    // had a rival anchor (R), and depends on this expression: change them together.
     const bool too_few_blocks = diag.consistent_blocks < settings.limits.minimum_unique_blocks || 2*diag.consistent_blocks < diag.unique_blocks;
     const bool too_few_anchors = model.surface && diag.consistent_anchor_blocks < settings.limits.minimum_unique_blocks;
     if (too_few_blocks || too_few_anchors) result.reasons.push_back("unique-blocks");

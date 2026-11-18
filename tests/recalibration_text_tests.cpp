@@ -166,7 +166,8 @@ void Sentences() {
         CHECK(!Has(RecalibrationFindingSentence({FindingClass::rejected, "gate-unknown", "a-code-nobody-knows"}).reason, "a-code-nobody-knows"));   // a code is never put on the screen
     }
     // A check or a sample that is undetermined for a reason beyond "too few marks" says "a sign that it does not fit", with the reason's own words;
-    // the same table as the estimate of the pair (one place for the words of a reason).
+    // the same table as the estimate of the pair (one place for the words of a reason), except unique-blocks and too-few-points, whose words
+    // for a disagreement of the blocks differ from their words for a lack of marks (below).
     for (const char* code : {"reestimate-doubtful", "sample-estimate-doubtful"}) {
         const std::string head = std::string(code) == "reestimate-doubtful" ? "合っていない疑い" : "食い違いの印";
         const auto sentence = [&](const char* r) { return RecalibrationFindingSentence({FindingClass::rejected, code, r}); };
@@ -180,8 +181,16 @@ void Sentences() {
         const auto blocks = sentence("unique-blocks");
         CHECK(Has(blocks.reason, head) && Has(blocks.reason, "互いに合いませんでした") && !Has(blocks.reason, "模様が足りません"));
         CHECK(Has(blocks.remedy, "置き直す") && !Has(blocks.remedy, "文字や図形が上から下まである紙"));
+        // too-few-points reaches a doubtful finding the same way (the fine stage stopped for want of points, and the coarse stage's blocks
+        // disagreed): the sentence is the one of unique-blocks, not "too few points".
+        const auto points = sentence("too-few-points");
+        CHECK(Has(points.reason, head) && Has(points.reason, "互いに合いませんでした") && !Has(points.reason, "点が足りません") && !Has(points.reason, "模様が足りません"));
+        CHECK(Has(points.remedy, "置き直す") && !Has(points.remedy, "文字や図形が多い紙") && points.reason == blocks.reason && points.remedy == blocks.remedy);
+        CHECK(Plain(points.reason) && Plain(points.remedy));
         // The sentence of a lack of marks (estimate-not-verified) is the one that stays.
         CHECK(Has(RecalibrationFindingSentence({FindingClass::no_candidate, "estimate-not-verified", "unique-blocks"}).reason, "模様が足りません"));
+        // and so is that of too-few-points, which stays what it was.
+        CHECK(Has(RecalibrationFindingSentence({FindingClass::no_candidate, "estimate-not-verified", "too-few-points"}).reason, "位置を測れる点が足りません"));
     }
     // The sample's estimate shows a sign of misfit while the gate may have passed: the sentence itself says that "within the line" does not save it.
     CHECK(Has(RecalibrationFindingSentence({FindingClass::rejected, "sample-estimate-doubtful", "residual-shape"}).reason, "継ぎ目のずれが基準内でも、この校正は使えません"));

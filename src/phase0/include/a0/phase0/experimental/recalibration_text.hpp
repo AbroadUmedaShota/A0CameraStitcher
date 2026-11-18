@@ -129,11 +129,12 @@ struct RecalibrationSentence {std::string reason,remedy;};
     return {"位置を確かに決められませんでした","模様の多い紙で撮り直してください"};
 }
 
-// The sentence of a reason in a "doubtful" finding (the estimate found a sign that the placement does not fit). `unique-blocks` is the one
-// code that the estimator also gives for a lack of marks; here it comes only when AssessEvidenceShortage found the blocks in disagreement
-// (a shortage never reaches a doubtful finding), so the sentence of "too few marks" would say the opposite of what was found.
+// The sentence of a reason in a "doubtful" finding (the estimate found a sign that the placement does not fit). `unique-blocks` and
+// `too-few-points` are the codes that the estimator also gives for a lack of marks; here they come only when AssessEvidenceShortage found
+// the blocks in disagreement (a shortage never reaches a doubtful finding), so the sentence of "too few marks" would say the opposite of
+// what was found.
 [[nodiscard]] inline RecalibrationSentence RecalibrationDoubtfulReasonSentence(const std::string& r){
-    if(r=="unique-blocks")return {"位置を決める模様どうしが、互いに合いませんでした","紙を平らに置き直すか、紙を替えて撮り直してください"};
+    if(r=="unique-blocks" || r=="too-few-points")return {"位置を決める模様どうしが、互いに合いませんでした","紙を平らに置き直すか、紙を替えて撮り直してください"};
     return RecalibrationEstimateReasonSentence(r);
 }
 
