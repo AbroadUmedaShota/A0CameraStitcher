@@ -191,7 +191,7 @@ Outcome Run(const StillReviewRequest& request){
     o.text=ReadText(o.result.report);
     // The registered members alone first, so that a refusal says which check refused.
     if(request.fixed_composite_registration)try{(void)ReadFixedCompositeRegistrationReport(o.text,kHash);}
-    catch(const std::exception& error){std::cerr<<"  the v8 reader refused the written report ("<<o.text.size()<<" bytes): "<<error.what()<<std::endl;}
+    catch(const std::exception& error){std::cerr<<"  the reader refused the written report ("<<o.text.size()<<" bytes): "<<error.what()<<std::endl;}
     o.saved=LoadSavedStillReview(o.result.report);
     return o;
 }
@@ -209,7 +209,7 @@ std::string base_profile;
 
 void Written(const Outcome& o,const Settings& s,const char* name){
     std::cout<<name<<": "<<Describe(o)<<'\n';
-    CHECK(o.saved.fixed_composite_registration.has_value() && !o.saved.fixed_composite_lens && o.text.find("\"a0.uncalibrated-still-review.v8\"")!=std::string::npos);
+    CHECK(o.saved.fixed_composite_registration.has_value() && !o.saved.fixed_composite_lens && o.text.find("\"a0.uncalibrated-still-review.v9\"")!=std::string::npos);
     CHECK(o.text.find("\"translation\"")==std::string::npos && o.text.find("\"geometryBasis\":\"fixed-composite-registration\"")!=std::string::npos);
     CHECK(o.saved.width==s.loaded.condition.raster.width_pixels && o.saved.height==s.loaded.condition.raster.height_pixels);
     const auto& f=*o.saved.fixed_composite_registration;
@@ -239,8 +239,9 @@ void Tamper(const Outcome& o){
     };
 #define REJECTED(a,b) rejected(a,b,__LINE__)
     const auto& f=*o.saved.fixed_composite_registration;
-    REJECTED("a0.uncalibrated-still-review.v8","a0.uncalibrated-still-review.v7");
-    REJECTED("a0.uncalibrated-still-review.v8","a0.uncalibrated-still-review.v9");
+    REJECTED("a0.uncalibrated-still-review.v9","a0.uncalibrated-still-review.v7");
+    REJECTED("a0.uncalibrated-still-review.v9","a0.uncalibrated-still-review.v8");   // v8 has no confirmedPosition members
+    REJECTED("a0.uncalibrated-still-review.v9","a0.uncalibrated-still-review.v10");
     REJECTED("\"productQualityAccepted\":false","\"productQualityAccepted\":true");
     REJECTED("\"geometryBasis\":\"fixed-composite-registration\"","\"geometryBasis\":\"fixed-composite-lens\"");
     REJECTED("\"fixedCompositeRegistration\":{","\"fixedCompositeRegistration\":{\"extra\":0,");
@@ -297,6 +298,84 @@ void SameAsV7(const Settings& s){
     CHECK(v8.saved.jpeg_sha256==v7.saved.jpeg_sha256);
     CHECK(f.assessment.state!=AssessmentState::within_criteria);
 }
+// The confirmed position through the writer (#437, report v9): what is written, read back and drawn with.
+// `textured` is the pair the estimate is trusted on (G1 without a position) and `plain` its capture without one: a position of this condition that
+// was set by hand is the level and changes the JPEG; the condition's own position and another condition's change nothing, byte for byte.
+// Flat frames follow: the estimate decides nothing there, so any position of this condition is the level, whatever its source.
+void ConfirmedThroughTheWriter(const Settings& s,const Frames& textured,const Outcome& plain){
+    std::cout<<"a confirmed position through the writer\n";
+    const auto& base=s.loaded.condition.base_pose;
+    CHECK(plain.text.find("\"a0.uncalibrated-still-review.v9\"")!=std::string::npos &&
+        plain.text.find("\"confirmedPosition\":null,\"confirmedPositionCheck\":null,\"geometryLevel\":{\"level\":\"G1\"")!=std::string::npos);
+    CHECK(!plain.saved.fixed_composite_registration->registration.confirmed_position && !plain.saved.fixed_composite_registration->registration.confirmed_check);
+    int counter=0;
+    const auto run_with=[&](const Frames& frames,const ConfirmedPosition& p){
+        const auto name="with-"+std::to_string(++counter);
+        auto q=RequestFor(frames,name.c_str(),s,4);
+        q.fixed_composite_registration->confirmed_position=p;
+        return Run(q);
+    };
+    const auto position=[&](ConfirmedPositionSource source,const content_registration::PoseParameters& pose,const SurfacePlane& plane,const std::string& sha){
+        ConfirmedPosition p;p.mapping=RegisteredMapping{pose,plane,std::nullopt};p.source=source;p.serial=4;p.condition_sha256=sha;
+        if(source==ConfirmedPositionSource::manual){p.base_source=ConfirmedPositionSource::auto_start;p.manual_entered=HandCounts{-3,1,-1};}
+        return p;
+    };
+    const auto registration=[](const Outcome& o)->const CaptureRegistration&{return o.saved.fixed_composite_registration->registration;};
+    const content_registration::PoseParameters pose{0.1,0,0.05,0.5,0.25,0};
+    const SurfacePlane plane{0.5,0.001,0};
+    // The condition's own position, and a position of another condition: recorded, not used; the JPEG is the capture without a position, byte for byte.
+    {
+        const auto own=run_with(textured,position(ConfirmedPositionSource::auto_start,base,{},s.loaded.file_sha256));
+        CHECK(own.saved.jpeg_sha256==plain.saved.jpeg_sha256 && registration(own).level.level==registration(plain).level.level && registration(own).confirmed_position && !registration(own).confirmed_check->used);
+        const auto foreign=run_with(textured,position(ConfirmedPositionSource::manual,pose,plane,std::string(64,'e')));
+        CHECK(foreign.saved.jpeg_sha256==plain.saved.jpeg_sha256 && registration(foreign).level.level==registration(plain).level.level && registration(foreign).confirmed_position && !registration(foreign).confirmed_check->used);
+        CHECK(foreign.text.find("\"source\":\"manual\",\"baseSource\":\"auto-start\"")!=std::string::npos &&
+            foreign.text.find("\"manualEntered\":{\"seamDxPx\":-12,\"seamDyPx\":4,\"rotationDeg\":-0.050000000000000003}")!=std::string::npos);
+    }
+    // A position of this condition set by hand: the level, the JPEG is its drawing and not the estimate's, the record has it as given, and the estimate's
+    // difference to it is recorded. A tool that places B by a similarity refuses the report, as it refuses every registered one.
+    {
+        const auto given=position(ConfirmedPositionSource::manual,pose,plane,s.loaded.file_sha256);
+        const auto o=run_with(textured,given);
+        const auto& r=registration(o);
+        std::cout<<"  hand position on the textured pair: level "<<GeometryLevelCode(r.level.level)<<", difference "<<(r.confirmed_check&&r.confirmed_check->seam_difference_px?std::to_string(*r.confirmed_check->seam_difference_px):std::string("none"))<<'\n';
+        CHECK(registration(plain).level.level==GeometryLevel::g1 && r.level.level==GeometryLevel::confirmed && r.level.reasons.empty() && r.confirmed_check && r.confirmed_check->used);
+        CHECK(r.confirmed_check && r.confirmed_check->seam_difference_px && *r.confirmed_check->seam_difference_px>0);
+        CHECK(r.confirmed_position && r.confirmed_position->mapping.pose.rx_deg==pose.rx_deg && r.confirmed_position->mapping.pose.tx_mm==pose.tx_mm && r.confirmed_position->mapping.surface.h0_mm==0.5 &&
+            r.confirmed_position->source==ConfirmedPositionSource::manual && r.confirmed_position->serial==4 && r.confirmed_position->manual_entered==given.manual_entered);
+        CHECK(r.level.mapping.pose.ty_mm==pose.ty_mm && r.level.mapping.surface.slope_x==0.001 && !r.level.mapping.parallax);
+        CHECK(o.saved.jpeg_sha256!=plain.saved.jpeg_sha256);
+        // The estimate on the originals is the one without a position, bit for bit (the position is not an input of it).
+        CHECK(std::memcmp(&r.registration.pose,&registration(plain).registration.pose,sizeof r.registration.pose)==0 && r.registration.covariance==registration(plain).registration.covariance &&
+            r.registration.state==registration(plain).registration.state);
+        bool notice=false;
+        for(const auto& w:o.saved.fixed_composite_registration->warnings)notice=notice || w.code==WarningCode::position_by_hand;
+        CHECK(notice);
+        REJECT(MakeFixedCompositeCondition(o.saved,kCreated,1.0));
+        REJECT(SavedStillReviewRenderParameters(o.saved));
+    }
+    // Flat frames: no estimate, so any source of a position of this condition is the level (and the drawing is the same grey either way).
+    {
+        const auto frames=MakeFrames(root,"flat-confirmed",Flat(128),Flat(128));
+        const auto flat=Run(RequestFor(frames,"plain",s,4));
+        CHECK(registration(flat).level.level==GeometryLevel::g4 && flat.text.find("\"confirmedPosition\":null,\"confirmedPositionCheck\":null,\"geometryLevel\":{\"level\":\"G4\"")!=std::string::npos);
+        for(const auto source:{ConfirmedPositionSource::after_capture,ConfirmedPositionSource::manual}){
+            const auto given=position(source,pose,plane,s.loaded.file_sha256);
+            const auto o=run_with(frames,given);
+            const auto& r=registration(o);
+            CHECK(r.level.level==GeometryLevel::confirmed && r.confirmed_check && r.confirmed_check->used && !r.confirmed_check->seam_difference_px && r.confirmed_position->source==source);
+            bool notice=false;
+            for(const auto& w:o.saved.fixed_composite_registration->warnings)notice=notice || w.code==(source==ConfirmedPositionSource::manual?WarningCode::position_by_hand:WarningCode::position_from_live);
+            CHECK(notice);
+        }
+        // A position the report cannot carry: refused with nothing created.
+        auto bad=position(ConfirmedPositionSource::auto_start,pose,plane,s.loaded.file_sha256);bad.mapping.pose.rz_deg=std::numeric_limits<double>::quiet_NaN();
+        auto q=RequestFor(frames,"bad-position",s,4);q.fixed_composite_registration->confirmed_position=bad;
+        REJECT(WriteUncalibratedStillReview(q));
+        CHECK(!fs::exists(frames.root/"bad-position"));
+    }
+}
+
 }
 
 int main(int argc,char** argv){
@@ -326,6 +405,7 @@ int main(int argc,char** argv){
         Tamper(four);
         Refusals(four,upright,frames);
         SameAsV7(upright);
+        ConfirmedThroughTheWriter(upright,frames,four);
         std::cout<<"checks="<<checks<<" failures="<<failures<<" seconds="<<Since(started)<<"\n";
         std::error_code ignored;fs::remove_all(root,ignored);
         return failures?1:0;

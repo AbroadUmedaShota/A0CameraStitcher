@@ -12,6 +12,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 namespace a0::m2::experimental {
 // The pure parts of the confirmed position of the development preview (#437 stage 2, docs/DECISIONS.md ADR-0046): how a number is
@@ -28,6 +29,10 @@ namespace a0::m2::experimental {
     std::ostringstream out;out.imbue(std::locale::classic());out<<std::setprecision(17)<<(value==0?0.0:value);
     return out.str();
 }
+
+// ---- The two cameras of a position ----
+// How a record names them (ADR-0045: the reference camera and the target camera). The report's confirmedPosition and the logs write these.
+inline constexpr std::string_view kConfirmedReferenceCamera="CAM-A",kConfirmedTargetCamera="CAM-B";
 
 // ---- The entered amounts of a hand step ----
 // A person moves the position along and across the seam and about the optical axis. The amounts are counted in the smallest step

@@ -58,6 +58,8 @@ namespace a0::phase0::experimental {
 //  seam-unmeasurable     rows_mm: the rows
 //  seam-wide-search      value: the offset along the baseline, px (or mm)
 //  geometry-level        the level and its reasons come from RegistrationTextContext::geometry_level
+//  position-by-hand, position-from-live, estimate-beyond-envelope (report v9, #437)
+//                        no value; estimate-beyond-envelope names the pose components that exceeded in `interpretations` (camera-position ...)
 
 // What the sentence of a warning needs besides the warning itself: the drawing-frame values behind the pose and the surface.
 struct RegistrationTextContext {
@@ -258,6 +260,7 @@ inline HeightMm HeightInMm(const ex::RegistrationWarning& w, const RegistrationT
     case L::g2: return "G2（姿勢と紙面を補正）";
     case L::g3: return "G3（一様なずれだけ）";
     case L::g4: return "G4（固定の合成条件のまま）";
+    case L::confirmed: return "確定した位置（ライブの位置。紙の浮きは補正しない）";
     }
     return "不明な段";
 }
@@ -275,7 +278,7 @@ inline HeightMm HeightInMm(const ex::RegistrationWarning& w, const RegistrationT
     if (!reasons.empty()) {
         text += "。理由: ";
         for (std::size_t i = 0; i < reasons.size(); ++i) text += (i ? "、" : "") + reasons[i];
-    } else if (level.level != a0::m2::experimental::GeometryLevel::g1) {
+    } else if (level.level != a0::m2::experimental::GeometryLevel::g1 && level.level != a0::m2::experimental::GeometryLevel::confirmed) {
         text += "。理由: 上の段に必要な推定が確かでないか、使えなかったため";
     }
     if (level.beyond_envelope_applied) text += "。許容の範囲を超えた量も、推定が確かなので当てています";
@@ -521,6 +524,16 @@ inline HeightMm HeightInMm(const ex::RegistrationWarning& w, const RegistrationT
         return "位置合わせは、推定が確かでない部分を当てない段で行いました" + why;
     }
     case C::time_budget: return "時間が足りなかったため、一部の処理を省きました";
+    case C::position_by_hand: return "手で直した位置で作りました";
+    case C::position_from_live: return "ライブで決めた位置で作りました（撮影の後の自動調整では位置を決められませんでした）";
+    case C::estimate_beyond_envelope: {
+        constexpr std::array<std::pair<const char*, const char*>, 4> kComponents{{{"camera-position", "位置"}, {"camera-rotation", "回り"}, {"camera-tilt", "傾き"}, {"camera-height", "高さ"}}};
+        std::string names;
+        for (const auto& entry : kComponents)
+            if (Has(warning.interpretations, entry.first)) names += (names.empty() ? "" : "、") + std::string(entry.second);
+        return "撮影した画像から推定した B の位置は、許容の範囲を超えています" + (names.empty() ? std::string{} : "（" + names + "）") +
+            "。設置が動いたかもしれません。推定の位置は当てず、確定した位置で作りました";
+    }
     }
     return "確認が必要な項目があります";
 }
@@ -826,6 +839,38 @@ inline bool DxUnmeasured(const ex::registration_gate::RegistrationGateResult& ga
         break;
     }
     return "合成画像を目で見て確かめてください";
+}
+
+// ---- The confirmed position (#437, report v9) ----
+// What a person is told about the position the window gave the capture, once the composite is made: whose position the JPEG has, and when
+// the live view and the JPEG differ. Made from the record alone (the position, its check, the level, the condition's hash and base pose), so
+// the window and a saved report say the same. Empty when there is nothing to say: no position was given, it is the condition's own, or the
+// estimate on the originals was used and the position was not.
+[[nodiscard]] inline std::string ConfirmedPositionText(const a0::m2::experimental::SavedFixedCompositeRegistration& record) {
+    using namespace registration_text_detail;
+    namespace ex2 = a0::m2::experimental;
+    const auto& capture = record.registration;
+    if (!capture.confirmed_position || !capture.confirmed_check) return {};
+    const auto& position = *capture.confirmed_position;
+    const auto& check = *capture.confirmed_check;
+    const bool by_hand = position.source == ex2::ConfirmedPositionSource::manual;
+    if (position.condition_sha256 != record.condition_sha256) {
+        return std::string("撮影の前に固定の合成条件が変わったので、ライブの位置を使わずに、新しい条件で JPEG を作りました。") +
+            (by_hand ? "手で直した位置を捨て、ライブは新しい条件の位置に戻し、自動調整を 1 回行います" : "ライブは新しい条件の位置に戻し、自動調整を 1 回行います");
+    }
+    if (ex2::IsConditionPosition(position, record.base_pose)) return {};
+    if (check.used) {
+        if (!by_hand) return "ライブで決めた位置で作りました（撮影の後の自動調整では位置を決められませんでした）";
+        return "手で直した位置で JPEG を作りました（" +
+            (check.seam_difference_px ? "自動で測ると継ぎ目で最大 " + Q(*check.seam_difference_px, Unit::px) + " 違います" : std::string("自動では測れませんでした")) + "）";
+    }
+    if (capture.level.level != ex2::GeometryLevel::g4) return {};
+    std::string why = "安い検査に通らないため";
+    if (!capture.level.reasons.empty()) {
+        why = capture.level.reasons.back() == "output-uncovered-at-level" ? "出力の端が覆われないため" : "継ぎ目が重なりの外に出るため";
+    }
+    if (by_hand) return "手で直した位置では" + why + "、JPEG は条件の位置で作りました。ライブは手で直した位置のままです";
+    return "撮影の後の自動調整では位置を決められず、ライブで決めた位置では" + why + "、JPEG は条件の位置で作りました。ライブも条件の位置にしました";
 }
 
 // The assessment as a heading for the list of warnings (not "合格").

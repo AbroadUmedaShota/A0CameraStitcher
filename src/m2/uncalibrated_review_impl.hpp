@@ -119,6 +119,8 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
             !hash_valid(g.condition_sha256) || g.thread_count>256)
             throw std::invalid_argument("registered fixed composite review is exclusive and needs the condition, its profile and the condition hash");
         reg_condition=g.condition;reg_profile=g.profile;
+        // A position the report cannot carry is refused before anything is created.
+        if(g.confirmed_position)ValidateConfirmedPosition(*g.confirmed_position);
         // A capture draws with the condition, so a base pose outside the envelope is refused here whatever the revision's kind.
         try{ValidateFixedCompositeConditionV3(*reg_condition);RequireFixedCompositeBasePoseInEnvelopeV3(*reg_condition);}
         catch(const FixedCompositePoseOutsideEnvelope& error){throw FixedCompositeUnavailable(FixedCompositeSkip::pose_outside_envelope,error.what());}
@@ -232,6 +234,8 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
         };
         q.remaining_ms=[deadline=r.deadline]{return std::chrono::duration<double,std::milli>(deadline-std::chrono::steady_clock::now()).count();};
         q.thread_count=review_threads;
+        // #437: the window's confirmed position and the condition it is compared with. The estimate does not see them (p_b stays its start).
+        q.confirmed_position=r.fixed_composite_registration->confirmed_position;q.condition_sha256=r.fixed_composite_registration->condition_sha256;
         const auto started=std::chrono::steady_clock::now();
         // Nothing is created before this point, so a refusal here leaves only the originals.
         try{reg_prepared=PrepareCaptureRegistration(q);}
@@ -404,7 +408,7 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
     std::ostringstream report;
     report.imbue(std::locale::classic());report<<std::setprecision(17);
     const bool similarity=r.manual_revision && (r.manual_revision->rotation_degrees!=0 || r.manual_revision->scale!=1);
-    const char* schema=reg_record?"a0.uncalibrated-still-review.v8":lens_record?"a0.uncalibrated-still-review.v7":fixed_record?"a0.uncalibrated-still-review.v6":automatic?"a0.uncalibrated-still-review.v5":similarity?"a0.uncalibrated-still-review.v3":r.manual_revision?"a0.uncalibrated-still-review.v2":"a0.uncalibrated-still-review.v1";
+    const char* schema=reg_record?"a0.uncalibrated-still-review.v9":lens_record?"a0.uncalibrated-still-review.v7":fixed_record?"a0.uncalibrated-still-review.v6":automatic?"a0.uncalibrated-still-review.v5":similarity?"a0.uncalibrated-still-review.v3":r.manual_revision?"a0.uncalibrated-still-review.v2":"a0.uncalibrated-still-review.v1";
     report<<"{\"schema\":\""<<schema<<"\",\"pairId\":\""<<r.pair_id
         <<"\",\"state\":\"UncalibratedReviewReady\",\"productQualityAccepted\":false,\"physicalScaleVerified\":false,\"liveToStillFieldOfViewVerified\":false,\"automaticRetryCount\":0,\"inputs\":["
         <<"{\"alias\":\"CAM-A\",\"path\":\""<<ReviewPathJson(a_path)<<"\",\"sha256\":\""<<r.camera_a_sha256<<"\",\"bytes\":"<<a.compressed.size()<<"},"
@@ -441,7 +445,7 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
         }else report<<"null";
         report<<"}";
     }
-    if(reg_record){report<<",\"geometryBasis\":\"fixed-composite-registration\",\"fixedCompositeRegistration\":"<<FixedCompositeRegistrationJson(*reg_record);WriteFixedSeamBlendJson(report,*seam);
+    if(reg_record){report<<",\"geometryBasis\":\"fixed-composite-registration\",\"fixedCompositeRegistration\":"<<FixedCompositeRegistrationJson(*reg_record,RegistrationReportFormat::v9);WriteFixedSeamBlendJson(report,*seam);
         report<<",\"warnings\":"<<RegistrationWarningsJson(reg_record->warnings)<<",\"assessment\":"<<RegistrationAssessmentJson(reg_record->assessment);}
     else if(lens_record){report<<",\"geometryBasis\":\"fixed-composite-lens\"";WriteFixedCompositeLensJson(report,*lens_record);WriteFixedSeamBlendJson(report,*seam);}
     else if(fixed_record){report<<",\"geometryBasis\":\"fixed-composite\",\"adjustment\":{\"anchor\":\"image-center\",\"rotationDegrees\":"<<fixed_condition->mapping.rotation_degrees<<",\"scale\":"<<fixed_condition->mapping.scale<<"},\"crop\":{\"left\":"<<parameters.crop.left<<",\"top\":"<<parameters.crop.top<<",\"right\":"<<parameters.crop.right<<",\"bottom\":"<<parameters.crop.bottom<<"}";

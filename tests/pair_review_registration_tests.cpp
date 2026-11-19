@@ -181,6 +181,78 @@ int main(int argc, char** argv) {
             }
         }
 
+        // 1b. A confirmed position set by hand (#437): the window gives it to the composite, the writer records it, and the log line of the capture is made from the
+        // report read back from the file (never from the window's own copy). The line and the report's numbers are the same strings; the sentence says whose position it is.
+        {
+            m2e::ConfirmedPosition given;
+            given.mapping = m2e::RegisteredMapping{m2e::content_registration::PoseParameters{0.125, -0.0625, 0.1875, 0.75, -0.375, 0.25}, m2e::SurfacePlane{1.5, 0.00390625, -0.001953125}, std::nullopt};
+            given.source = m2e::ConfirmedPositionSource::manual;
+            given.base_source = m2e::ConfirmedPositionSource::auto_button;
+            given.manual_entered = m2e::HandCounts{3, 0, -1};
+            given.serial = 12;
+            given.condition_sha256 = settings.loaded.file_sha256;
+            auto outcome = ComposePairWithSelection(selection, RequestFor(frames, "review-hand", m2e::MountOrientation::normal, std::chrono::seconds(900)), std::nullopt, given);
+            CHECK(outcome.review.has_value() && !outcome.skip);
+            if (outcome.review && outcome.review->fixed_composite_registration) {
+                const auto& review = *outcome.review;
+                const auto saved = m2e::LoadSavedStillReview(review.report);
+                const auto text = ReadText(review.report);
+                CHECK(saved.fixed_composite_registration.has_value());
+                const auto& written = review.fixed_composite_registration->registration;
+                std::cout << "hand position: level " << m2e::GeometryLevelCode(written.level.level) << ", difference "
+                          << (written.confirmed_check && written.confirmed_check->seam_difference_px ? std::to_string(*written.confirmed_check->seam_difference_px) : std::string("none")) << '\n';
+                CHECK(written.level.level == m2e::GeometryLevel::confirmed && written.confirmed_check && written.confirmed_check->used);
+                CHECK(written.confirmed_check && written.confirmed_check->seam_difference_px && *written.confirmed_check->seam_difference_px > 0);   // the estimate hit, and the hand position differs from it
+                if (saved.fixed_composite_registration) {
+                    const auto& read = saved.fixed_composite_registration->registration;
+                    CHECK(read.confirmed_position && read.level.level == m2e::GeometryLevel::confirmed && read.level.mapping.pose.tx_mm == given.mapping.pose.tx_mm);
+                    // The line, from the record read back.
+                    const auto line = ConfirmedPositionLogLine(*saved.fixed_composite_registration);
+                    CHECK(line == ConfirmedPositionLogLine(*review.fixed_composite_registration));
+                    CHECK(Contains(line, "pair_review_confirmed_position given=1 serial=12 source=manual base_source=auto-button reference_camera=CAM-A target_camera=CAM-B " + LivePlacementFields(given.mapping) +
+                                             " manual_seam_dx_px=12 manual_seam_dy_px=0 manual_rotation_deg=-0.050000000000000003 condition_sha256=" + settings.loaded.file_sha256 + " condition_matches=1 used=1 seam_difference_px="));
+                    CHECK(Contains(line, " level=confirmed quality_accepted=0"));
+                    // The nine numbers of the line are the strings the report holds (found in the report's own text, not rebuilt from the values).
+                    const auto at = text.find("\"confirmedPosition\":{");
+                    CHECK(at != std::string::npos);
+                    const std::pair<const char*, const char*> keys[] = {{"rxDeg", "rx_deg"}, {"ryDeg", "ry_deg"}, {"rzDeg", "rz_deg"}, {"txMm", "tx_mm"}, {"tyMm", "ty_mm"}, {"tzPercent", "tz_percent"},
+                                                                         {"h0Mm", "h0_mm"}, {"slopeX", "slope_x"}, {"slopeY", "slope_y"}};
+                    for (const auto& [json_key, log_key] : keys) {
+                        const auto from = text.find("\"" + std::string(json_key) + "\":", at) + std::string(json_key).size() + 3;
+                        const auto json_number = text.substr(from, text.find_first_of(",}", from) - from);
+                        const auto log_at = line.find(" " + std::string(log_key) + "=") + std::string(log_key).size() + 2;
+                        const auto log_number = line.substr(log_at, line.find(' ', log_at) - log_at);
+                        CHECK(!json_number.empty() && json_number == log_number);
+                    }
+                    // The difference at the seam: the report's number and the log's.
+                    const auto diff_json_at = text.find("\"seamDifferencePx\":", at);
+                    const auto diff_from = diff_json_at + std::string("\"seamDifferencePx\":").size();
+                    const auto diff_json = text.substr(diff_from, text.find_first_of(",}", diff_from) - diff_from);
+                    const auto diff_log_at = line.find(" seam_difference_px=") + std::string(" seam_difference_px=").size();
+                    CHECK(diff_json_at != std::string::npos && diff_json == line.substr(diff_log_at, line.find(' ', diff_log_at) - diff_log_at));
+                }
+                // The status row says it, the warning is a notice, and the log has the line next to the first one.
+                const auto lines = DescribeRegistrationReview(review);
+                bool said = false;
+                for (const auto& s : lines.status) said = said || Contains(s, "手で直した位置で JPEG を作りました（自動で測ると継ぎ目で最大 ");
+                CHECK(said);
+                CHECK(lines.log.size() >= 3 && Contains(lines.log[1], "pair_review_confirmed_position given=1"));
+                bool notice = false;
+                for (const auto& w : lines.warnings) notice = notice || Contains(w, "【お知らせ】手で直した位置で作りました");
+                CHECK(notice);
+                for (const auto& s : lines.status) CHECK(!Contains(s, "CAM-A") && !Contains(s, "CAM-B") && !Contains(s, root.string()));
+                for (const auto& s : lines.warnings) CHECK(!Contains(s, "CAM-A") && !Contains(s, "CAM-B"));
+            }
+            // The codes the live log and the report share are the same words.
+            CHECK(m2e::ConfirmedPositionSourceCode(m2e::ConfirmedPositionSource::fixed_condition) == LivePlacementSourceCode(LivePlacementSource::fixed_condition) &&
+                  m2e::ConfirmedPositionSourceCode(m2e::ConfirmedPositionSource::auto_start) == LivePlacementSourceCode(LivePlacementSource::auto_start) &&
+                  m2e::ConfirmedPositionSourceCode(m2e::ConfirmedPositionSource::auto_button) == LivePlacementSourceCode(LivePlacementSource::auto_button) &&
+                  m2e::ConfirmedPositionSourceCode(m2e::ConfirmedPositionSource::after_capture) == LivePlacementSourceCode(LivePlacementSource::after_capture));
+            // A capture without a position says so in one line, and nothing about cameras.
+            const auto none = ConfirmedPositionLogLine(m2e::SavedFixedCompositeRegistration{});
+            CHECK(none == "pair_review_confirmed_position given=0 used=0 quality_accepted=0");
+        }
+
         // 2. The same pair with less time: the stages the time holds are run and the others are named. The deadline is the only
         // difference; the composite and the report are still made, and the dropped stages are on the row and in the log.
         // 70 s: with the draft costs the first plan then keeps the coarse stage and the gate at most, and drops the fine stage whatever the

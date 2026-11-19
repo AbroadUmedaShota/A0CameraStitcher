@@ -1,8 +1,8 @@
-# 固定の合成条件 v3 と報告 v8 の書式
+# 固定の合成条件 v3 と報告 v8・v9 の書式
 
 Issue #417（撮影ごとに図面の中身で左右のカメラの継ぎ目を合わせる）で、複数の実装が同時に書く条件 v3 と報告 v8 の欄を 1 か所に固めた表。設計の正本は `fixed-composite-registration.md` の 11 節（11.9 の配線、11.17 の警告、11.19〜11.22、11.25、11.27）。この文書は欄の名前・型・単位・必須か・埋める担当・予約かを決めるだけで、処理の説明は設計に任せる。実測の値、機体の識別子、パス、作業の日付は書かない。
 
-状態: v3 と v8 は main に入るまで凍結しない。表の中身は、設計の追補（11.16 以降）と所有者の決定（12 項）に合わせてある。所有者の確認済み: 古い試し撮りの記録（この書式より前の v8）は読めなくてよい。版は上げず、欄を省略可にもしない。v3 の `basePose` が `registration.envelope` の内にあることは手直し（`manual-adjustment`）の書き込みと読み込みでは求めず、条件を撮影やライブの C に使う読み手が求める。
+状態: v3 と v8 は main に入るまで凍結しない。v8 は main に入ったので、その後の変更は報告 v9（4.13）にした（#437。v8 の読み手は残す）。表の中身は、設計の追補（11.16 以降）と所有者の決定（12 項）に合わせてある。所有者の確認済み: 古い試し撮りの記録（この書式より前の v8）は読めなくてよい。版は上げず、欄を省略可にもしない。v3 の `basePose` が `registration.envelope` の内にあることは手直し（`manual-adjustment`）の書き込みと読み込みでは求めず、条件を撮影やライブの C に使う読み手が求める。
 
 ## 1. 欄を足す時の決まり
 
@@ -273,6 +273,86 @@ Issue #417（撮影ごとに図面の中身で左右のカメラの継ぎ目を�
 
 書き手（`FixedCompositeRegistrationJson`）も 3 の派生値が合わない記録を書かない（`std::logic_error`）。
 
+### 4.13 報告 v9（`a0.uncalibrated-still-review.v9`、#437 段 2）
+
+開発用プレビューの窓が持つ「確定した位置」（ライブの合成と JPEG の合成が共有する CAM-B の位置。ADR-0046）を、撮影ごとに記録する版。条件 v3 の撮影の報告は、以後すべて v9 で書く（v8 は書かない）。v8 の読み手は残し、v8 の報告を今までどおり読む。決まり 8 により、欄を足す変更なので版を上げた（既にある欄だけを使う符号の追加ではない: 出どころ・通し番号・手で入れた量に新しい欄が要る）。
+
+v8 との差はこれだけで、ほかの欄は名前・型・単位・並びとも v8 のまま。
+
+| JSON の名前 | C++ の名前 | 型 | 必須 | 埋める担当 |
+|---|---|---|---|---|
+| `schema` | （定数） | 文字列 `a0.uncalibrated-still-review.v9` | 必須 | J8 |
+| `fixedCompositeRegistration.confirmedPosition`（`pointSource` の後、`geometryLevel` の前） | `registration.confirmed_position` | null か 4.13.1 のオブジェクト | 必須（null 可） | J8（窓が渡した値をそのまま） |
+| `fixedCompositeRegistration.confirmedPositionCheck`（上の直後） | `registration.confirmed_check` | null か `{used, seamDifferencePx}` | 必須（null 可） | J8 |
+| `geometryLevel.level` | `registration.level.level` | `G1`〜`G4` か `confirmed` | 必須 | J8 |
+
+- `confirmedPosition` が null なのは、窓が位置を渡さなかった撮影（校正の取り直しの見本の合成、窓を持たない呼び手）。この時 `confirmedPositionCheck` も null で、撮影は位置が無かった時と同じ。2 つは両方 null か両方オブジェクト
+- 位置を渡さない撮影の v9 のテキストは、v8 のテキストに、スキーマの文字列と、`,"confirmedPosition":null,"confirmedPositionCheck":null`（`,"geometryLevel":` の直前）を足した物と、1 字も違わない（試験で固定）
+- `placement` を名前に使わない。v8 の `gate.placement`（大域的な配置の確かめ方）と警告 `placement-unverified`・`placement-mismatch` が別の意味で使っている
+
+#### 4.13.1 `confirmedPosition`
+
+`{referenceCamera, targetCamera, serial, source, baseSource, conditionSha256, pose, surface, manualEntered}`
+
+- `referenceCamera`: 文字列 `CAM-A`、`targetCamera`: 文字列 `CAM-B`（ADR-0045。値は 2 台のまま。読み手は他の値を拒否）
+- `serial`: 整数（0 以上）。窓が撮影の要求の時に持っていた、位置の変化の通し番号
+- `source`: `fixed-condition`／`auto-start`／`auto-button`／`after-capture`／`manual`。ライブのログの `source=` と同じ語
+- `baseSource`: `source` が `manual` の時だけ符号（手で直す前の出どころ。`manual` 以外の 4 つのどれか）、ほかは null
+- `conditionSha256`: 位置が属する条件のファイルの SHA-256（64 桁の小文字 16 進）
+- `pose`: 条件の `basePose` と同じ 6 値（CAM-A に対する CAM-B の姿勢）。`surface`: `{h0Mm, slopeX, slopeY}`（紙面。層 2 は無い）
+- `manualEntered`: `source` が `manual` の時だけ `{seamDxPx, seamDyPx, rotationDeg}`（手で入れた量の合計。継ぎ目の列に沿って出力 px、継ぎ目を横切る向きに出力 px、光軸まわりの度）、ほかは null。値は最小の刻み（左右・上下は 4 px、回りは 0.05°）の整数の数から 1 回で作った値で、読み手は値から整数の数を戻し、同じ値になる事を確かめる（その数が 3 つとも 0 の記録は書かない: 合計が 0 に戻った位置は手で直した位置ではない）
+- 数は 2 節の書き方（`FormatRecordNumber`）。ライブのログと撮影の側のログ（`LivePlacementFields`）の 9 数も同じ関数で書くので、報告の文字列とログの文字列が一致する
+
+#### 4.13.2 `confirmedPositionCheck`
+
+`{used, seamDifferencePx}`
+
+- `used`: 位置で合成を作ったか。`geometryLevel.level` が `confirmed` である事と同値（読み手が確かめる）
+- `seamDifferencePx`: 数か null。原寸の推定が当たる時（G1 か G2 の候補が安い検査に通った時。位置を手で直した時はその候補を使わずに確かめるだけ）、その写像（層 2 を除く）と位置の、継ぎ目の列に沿った差の最大（出力 px）。当たらない時、位置が別の条件の物の時は null。測り方は `SeamDifferencePx`（出力の上で、継ぎ目の列の行 0・32・64… と最後の行）の 1 つで、画面の撮影の後の文の数とライブのログの `seam_difference_px=` も同じ関数から出す。報告の読み手は値を作り直さず（作り直すには profile の写像が要る）、記録の値として読み、範囲（有限で 0 以上、位置と条件が同じで推定が確かな時だけ非 null）だけ確かめる
+
+#### 4.13.3 段 `confirmed` と候補の順
+
+位置は、条件の SHA-256 が撮影の時に読んだ条件と同じで、条件の位置（`basePose`・紙面 0、ビットで同じ。-0 と +0 は同じ）でない時だけ候補になる（そうでなければ候補は v8 のまま）。
+
+| 位置の出どころ | 候補の順（最初に安い検査を通った物） |
+|---|---|
+| 条件の位置、別の条件の位置、位置が無い | G1・G2・G3・G4（v8 のまま） |
+| `auto-start`・`auto-button`・`after-capture` | G1・G2・`confirmed`・G4（G3 は作らない） |
+| `manual` | `confirmed`・G4（G1・G2 は確かめるだけで使わない） |
+
+- `confirmed` の写像は、`confirmedPosition` の `pose`・`surface` とビットで同じで、層 2 は無い（`geometryLevel.mapping.parallax` は null。`applied.pose` は true）
+- 位置が推定の始め・事前分布・範囲の基準に入る事は無い。`registration` は位置を渡さない時とビットで同じ
+- `confirmed` の時、層 2 の帯は捨て、ゲートは自分の帯で測る
+- 写像が安い検査に落ちた時は `reasons`（`seam-outside-overlap-at-level`・`output-uncovered-at-level`）を残して次へ下げる。手で直した位置が落ちた時は G4（位置は手のまま、窓の側の扱い）
+
+読み手が確かめる事（`geometryLevel` の写像に加えて）:
+
+- `used` と level `confirmed` が同値。level `confirmed` は、位置があり、その条件が撮影の条件と同じで、条件の位置でなく、写像が位置とビットで同じ
+- `source` が `fixed-condition` の位置は条件の位置（位置と条件が同じ時）
+- `seamDifferencePx` が非 null なら、位置と条件が同じで、推定が確か（`verified`・`out-of-envelope`）
+- 位置と条件が同じで条件の位置でない時、手の位置の level は `confirmed` か G4、ほかの位置の level は G3 でない
+
+#### 4.13.4 警告と符号（v9 だけ）
+
+警告の符号 `position-by-hand`・`position-from-live`・`estimate-beyond-envelope`、成分の符号 `confirmed-position`。v8 の読み手は拒否する。
+
+- `position-by-hand`（notice、`remedy` `none`、`applied` true）: level が `confirmed` で位置の出どころが `manual`
+- `position-from-live`（notice、`none`、`applied` true）: level が `confirmed` で出どころが `manual` 以外
+- `estimate-beyond-envelope`（notice、`remedy` `check-camera-mount`、`applied` false、`interpretations` に超えた成分の符号 `camera-position`・`camera-rotation`・`camera-tilt`・`camera-height`）: level が `confirmed` で、原寸の推定が確か（`Trusted`）で、その成分が線を超えた時。適用しなかった推定が範囲の外だった事（設置が動いたかもしれない事）を、位置の成分の警告から消さないため
+- どれも `value` 0・`limit` null・`unit` `rows`（量の無い符号）、`component` `confirmed-position`
+- level `confirmed` の `camera-*`・`surface-*`（exceeded）は、推定でなく位置の成分から、G1・G2 の推定の成分と同じ導き方で作る（`applied` true）。`beyondEnvelopeApplied` も位置の成分と紙面で見る
+- `assessment` の導き方は変えない。手で直した事・ライブで決めた事は品質の証拠にも不合格の理由にもしない
+
+#### 4.13.5 例（数は例の値）
+
+```
+..."pointSource":null,"confirmedPosition":{"referenceCamera":"CAM-A","targetCamera":"CAM-B","serial":9,"source":"manual","baseSource":"auto-button","conditionSha256":"<64 桁>","pose":{"rxDeg":0.25,"ryDeg":-0.125,"rzDeg":0.0625,"txMm":1.5,"tyMm":-0.5,"tzPercent":0.25},"surface":{"h0Mm":1,"slopeX":0.0078125,"slopeY":-0.00390625},"manualEntered":{"seamDxPx":12,"seamDyPx":-4,"rotationDeg":0.20000000000000001}},"confirmedPositionCheck":{"used":true,"seamDifferencePx":1.5},"geometryLevel":{"level":"confirmed",...
+```
+
+#### 4.13.6 ログ（撮影の側）
+
+撮影の側の行は、窓が写した値でなく、JPEG の作り手が書いた記録（報告を読み直した物）から書く: `pair_review_confirmed_position given=1 serial=<n> source=<符号> base_source=<符号か none> reference_camera=CAM-A target_camera=CAM-B <9 数> manual_seam_dx_px=<数> manual_seam_dy_px=<数> manual_rotation_deg=<数>（手でない時は manual_entered=none） condition_sha256=<hash> condition_matches=0|1 used=0|1 seam_difference_px=<数か none> level=<符号> quality_accepted=0`。位置が無かった時は `pair_review_confirmed_position given=0 used=0 quality_accepted=0`。9 数は `LivePlacementFields`、2 台の名前は `LivePlacementCameraFields`（ライブの行 `C live_placement serial=… source=… <9 数> condition_sha256=… drawn=1 reference_camera=CAM-A target_camera=CAM-B …` も同じ 2 関数）が書き、数の字面は報告と同じ。
+
 ## 5. 符号
 
 ### 5.1 警告の符号（`code`）と `class`・`remedy`
@@ -302,10 +382,13 @@ Issue #417（撮影ごとに図面の中身で左右のカメラの継ぎ目を�
 | `seam-wide-search` | notice | `none` |
 | `geometry-level` | notice | `none` |
 | `time-budget` | notice | `none` |
+| `position-by-hand` | notice | `none`（v9 のみ。4.13.4） |
+| `position-from-live` | notice | `none`（v9 のみ） |
+| `estimate-beyond-envelope` | notice | `check-camera-mount`（v9 のみ） |
 
 ### 5.2 成分の符号（`component`）
 
-`camera-position`、`camera-rotation`、`camera-tilt`、`camera-height`、`surface-height`、`surface-tilt`、`output-edge`、`seam-lift`、`fold`、`gutter`、`seam`、`placement`、`gate`、`geometry-level`、`time-budget`（※仮。設計は例だけを挙げている）。
+`camera-position`、`camera-rotation`、`camera-tilt`、`camera-height`、`surface-height`、`surface-tilt`、`output-edge`、`seam-lift`、`fold`、`gutter`、`seam`、`placement`、`gate`、`geometry-level`、`time-budget`（※仮。設計は例だけを挙げている）。v9 だけ `confirmed-position`。
 
 ### 5.3 直し方の符号（`remedy`）
 
@@ -313,7 +396,7 @@ Issue #417（撮影ごとに図面の中身で左右のカメラの継ぎ目を�
 
 ### 5.4 その他
 
-- 段（`level`）: `G1`／`G2`／`G3`／`G4`。段を下げた理由の符号は `seam-outside-overlap-at-level`、`output-uncovered-at-level`（設計 11.18）。符号を足す時は 1 節の 6
+- 段（`level`）: `G1`／`G2`／`G3`／`G4`、v9 だけ `confirmed`（4.13.3）。段を下げた理由の符号は `seam-outside-overlap-at-level`、`output-uncovered-at-level`（設計 11.18）。符号を足す時は 1 節の 6
 - 層 2 の理由の符号: `not-implemented`（層 2 が入る前の固定値。今は書かない）、`disabled`、`pose-untrusted`、`time-budget`、`baseline-unmeasured`、`too-few-points`、`beyond-lift-line`、`layer-two-failed`（層 2 か、その下の写像 M0・帯の測定が例外を投げた）（`parallax_correction.hpp` の注）。行の `reason` の符号も同じ注
 - 推定の理由の符号に増えた物（`registration.reasons`）: `repeating-only`、`coarse-ambiguous`、`time-budget`（`content_registration.hpp` の注）、`estimate-failed`（推定か、その設定の検査が例外を投げた。撮影の経路が書く）
 - 折り目の種類: `fold`／`gutter`

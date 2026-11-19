@@ -114,6 +114,14 @@ struct LivePlacementView {
         " "+k+"tz_percent="+number(p.tz_percent)+" "+k+"h0_mm="+number(s.h0_mm)+" "+k+"slope_x="+number(s.slope_x)+" "+k+"slope_y="+number(s.slope_y);
 }
 
+// The two cameras of every position the logs write, as `key=value` fields (ADR-0045's reference and target camera, the names the report's
+// confirmedPosition carries). The live log's position line and the capture's confirmed-position line both call this one function, so the
+// cameras read the same in both; the nine numbers stay in LivePlacementFields (which a `before_` line also uses, and which therefore
+// does not carry the cameras).
+[[nodiscard]] inline std::string LivePlacementCameraFields(){
+    return "reference_camera="+std::string(a0::m2::experimental::kConfirmedReferenceCamera)+" target_camera="+std::string(a0::m2::experimental::kConfirmedTargetCamera);
+}
+
 // Whether a mapping carries a layer 2 that moves something (a profile with a q sample that is not 0).
 [[nodiscard]] inline bool LivePlacementHasLayerTwo(const a0::m2::experimental::RegisteredMapping& mapping){
     return mapping.parallax.has_value() && !mapping.parallax->IsZero();

@@ -597,7 +597,7 @@ private:
         logged_serial_=machine_.Serial();
         std::ostringstream line;line.imbue(std::locale::classic());
         line<<"C live_placement serial="<<machine_.Serial()<<" source="<<LivePlacementSourceCode(machine_.Source())<<' '<<LivePlacementFields(machine_.Placement())
-            <<" condition_sha256="<<machine_.ConditionSha256()<<" drawn=1 quality_accepted=0";
+            <<" condition_sha256="<<machine_.ConditionSha256()<<" drawn=1 "<<LivePlacementCameraFields()<<" quality_accepted=0";
         return line.str();
     }
     // What a shot did, once: P before the shot, the level, how far P moved (seam_difference_px, when it was measured) and layer 2 that C does not draw.
