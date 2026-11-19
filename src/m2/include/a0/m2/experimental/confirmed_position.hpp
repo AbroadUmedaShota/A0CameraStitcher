@@ -34,6 +34,14 @@ namespace a0::m2::experimental {
 // How a record names them (ADR-0045: the reference camera and the target camera). The report's confirmedPosition and the logs write these.
 inline constexpr std::string_view kConfirmedReferenceCamera="CAM-A",kConfirmedTargetCamera="CAM-B";
 
+// ---- The condition's own position ----
+// Whether a mapping is the condition's own position: the base pose and no paper surface, compared by value (-0 and +0 are the same,
+// NaN is never the same). The machine that holds the position and the capture that is given it both call this one function.
+[[nodiscard]] inline bool IsConditionPosition(const RegisteredMapping& mapping,const content_registration::PoseParameters& base_pose){
+    return mapping.pose.rx_deg==base_pose.rx_deg && mapping.pose.ry_deg==base_pose.ry_deg && mapping.pose.rz_deg==base_pose.rz_deg &&
+        mapping.pose.tx_mm==base_pose.tx_mm && mapping.pose.ty_mm==base_pose.ty_mm && mapping.pose.tz_percent==base_pose.tz_percent && mapping.surface.IsZero();
+}
+
 // ---- The entered amounts of a hand step ----
 // A person moves the position along and across the seam and about the optical axis. The amounts are counted in the smallest step
 // (4 output px along or across the seam, 0.05 degrees about the axis) as whole numbers, so that a sum that comes back to exactly 0 is

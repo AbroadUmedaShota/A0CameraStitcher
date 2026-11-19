@@ -656,7 +656,10 @@ int main() {
         const auto beyond = RegistrationWarningText(beyond_warning, none);
         CheckText(by_hand, "手で直した位置で作りました", "position-by-hand");
         CheckText(from_live, "ライブで決めた位置で作りました（撮影の後の自動調整では位置を決められませんでした）", "position-from-live");
-        CheckText(beyond, "撮影した画像から推定した B の位置は、許容の範囲を超えています（位置、回り）。設置が動いたかもしれません。推定の位置は当てず、確定した位置で作りました", "estimate-beyond-envelope");
+        CheckText(beyond, "撮影した画像から測った B の位置が、許される範囲より大きく動いています（位置、回り）。設置が動いたかもしれません。この JPEG はライブの画面で決めていた位置で作り、測った位置は当てていません。校正の取り直しが要るかもしれません", "estimate-beyond-envelope");
+        beyond_warning.interpretations = {"camera-height", "surface-height", "surface-tilt"};
+        CheckText(RegistrationWarningText(beyond_warning, none), "撮影した画像から測った B の位置が、許される範囲より大きく動いています（高さ、紙の高さ、紙の傾き）。設置が動いたかもしれません。この JPEG はライブの画面で決めていた位置で作り、測った位置は当てていません。校正の取り直しが要るかもしれません", "estimate-beyond-envelope with the paper");
+        beyond_warning.interpretations = {"camera-position", "camera-rotation"};
         for (const auto& text : {by_hand, from_live, beyond}) CheckSentence(text, "a sentence of v9");
         Check(by_hand != from_live && from_live != beyond && by_hand != beyond, "distinct sentences of v9");
         beyond_warning.interpretations.clear();
@@ -664,6 +667,11 @@ int main() {
         Check(!Contains(RegistrationWarningText(beyond_warning, none), "（）"), "no empty brackets");
         CheckText(RegistrationWarningLine(W(Code::position_by_hand, Cls::notice, 0, std::nullopt, Unit::rows), none), "【お知らせ】手で直した位置で作りました", "line of position-by-hand");
         CheckText(RegistrationWarningLine(beyond_warning, none), "【お知らせ】" + RegistrationWarningText(beyond_warning, none) + "。カメラの取り付けを確かめてください", "line of estimate-beyond-envelope");
+        {
+            auto unverified = beyond_warning;
+            unverified.warning_class = Cls::unverified;
+            CheckText(RegistrationWarningLine(unverified, none), "【確かめられていません】" + RegistrationWarningText(unverified, none) + "。カメラの取り付けを確かめてください", "line of estimate-beyond-envelope, as the report derives it");
+        }
         for (const auto code : {Code::position_by_hand, Code::position_from_live, Code::estimate_beyond_envelope})
             for (const auto cls : {Cls::exceeded, Cls::unverified, Cls::notice})
                 for (const double value : {0.0, 2.5, std::nan("")})

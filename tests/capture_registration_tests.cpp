@@ -1149,6 +1149,17 @@ bool SameEstimate(const cr::RegistrationResult& a,const cr::RegistrationResult& 
     for(std::size_t i=0;same && i<a.components.size();++i)same=a.components[i].value==b.components[i].value && a.components[i].exceeded==b.components[i].exceeded;
     return same;
 }
+// What a capture estimated, all of it: the pose and its covariance, the paper plane, the coarse shift and layer 2's result.
+bool SameCaptureEstimate(const ex::CaptureRegistration& a,const ex::CaptureRegistration& b){
+    if(!SameEstimate(a.registration,b.registration))return false;
+    if(a.surface.state!=b.surface.state || std::memcmp(&a.surface.plane,&b.surface.plane,sizeof a.surface.plane)!=0 || a.surface.tilt_deg!=b.surface.tilt_deg ||
+        a.surface.covariance!=b.surface.covariance || a.surface.exceeded.height!=b.surface.exceeded.height || a.surface.exceeded.tilt!=b.surface.exceeded.tilt)return false;
+    if(a.coarse_shift.has_value()!=b.coarse_shift.has_value())return false;
+    if(a.coarse_shift && (a.coarse_shift->surface_height_mm!=b.coarse_shift->surface_height_mm || a.coarse_shift->translation_x_mm!=b.coarse_shift->translation_x_mm ||
+        a.coarse_shift->translation_y_mm!=b.coarse_shift->translation_y_mm))return false;
+    return a.parallax.state==b.parallax.state && a.parallax.reasons==b.parallax.reasons && a.parallax.rows.size()==b.parallax.rows.size() && a.parallax.folds.size()==b.parallax.folds.size() &&
+        a.parallax.summary.max_shift_px==b.parallax.summary.max_shift_px;
+}
 const ex::RegistrationWarning* FindWarning(const std::vector<ex::RegistrationWarning>& v,ex::WarningCode code){for(const auto& w:v)if(w.code==code)return &w;return nullptr;}
 
 void ConfirmedValues(){
@@ -1254,11 +1265,37 @@ void ConfirmedLevels(){
     CHECK(d.level==ex::GeometryLevel::confirmed && d.reasons.empty() && !d.estimate_hit && !d.beyond_envelope_applied);
     in.confirmed_position=nullptr;
     CHECK(ex::SelectGeometryLevel(in).level==ex::GeometryLevel::g4);   // without the position it is G4, as before
-    // A position that is itself beyond its range is applied and says so.
-    auto beyond_pose=kPositionPose;beyond_pose.tx_mm+=12;
+    // A position that is itself beyond a range is used only when the condition applies what is beyond a range (as the estimate is): refused without
+    // applyBeyondEnvelope, whatever its source, and applied with it, saying so. A position set by hand is never beyond the pose envelope.
+    auto beyond_pose=base;beyond_pose.tx_mm+=12;
     const auto beyond=Position(ex::ConfirmedPositionSource::auto_start,beyond_pose);
-    in.confirmed_position=&beyond;d=ex::SelectGeometryLevel(in);
+    in.confirmed_position=&beyond;
+    CHECK(Throws([&]{(void)ex::SelectGeometryLevel(in);}));          // strict lines
+    in.registration=&untrusted;in.coarse_shift.reset();in.lines=&lines;      // no estimate stands in the way
+    d=ex::SelectGeometryLevel(in);
+    CHECK(d.level==ex::GeometryLevel::confirmed && d.beyond_envelope_applied && SameBits(d.mapping.pose,beyond_pose));
+    const auto beyond_hand=Position(ex::ConfirmedPositionSource::manual,beyond_pose);
+    in.confirmed_position=&beyond_hand;
+    CHECK(Throws([&]{(void)ex::SelectGeometryLevel(in);}));          // even with applyBeyondEnvelope: a step past the range is refused
+    in.lines=&strict;CHECK(Throws([&]{(void)ex::SelectGeometryLevel(in);}));
+    for(const auto edge:{base.tx_mm+10.0,base.tx_mm-10.0}){            // exactly at the limit is inside
+        auto at_edge=base;at_edge.tx_mm=edge;
+        const auto hand_edge=Position(ex::ConfirmedPositionSource::manual,at_edge);
+        in.confirmed_position=&hand_edge;in.lines=&strict;
+        CHECK(ex::SelectGeometryLevel(in).level==ex::GeometryLevel::confirmed);
+    }
+    auto rotated=base;rotated.rz_deg+=2.0001;                          // a component of the pose that is not the position
+    const auto hand_rotated=Position(ex::ConfirmedPositionSource::manual,rotated);
+    in.confirmed_position=&hand_rotated;in.lines=&lines;CHECK(Throws([&]{(void)ex::SelectGeometryLevel(in);}));
+    // The paper surface's range is not read for a position set by hand: a pose that is inside with a surface that is outside is the level when the condition applies it.
+    const auto hand_surface=Position(ex::ConfirmedPositionSource::manual,kPositionPose,ex::SurfacePlane{45,0.002,0});
+    in.confirmed_position=&hand_surface;in.lines=&lines;
+    d=ex::SelectGeometryLevel(in);
     CHECK(d.level==ex::GeometryLevel::confirmed && d.beyond_envelope_applied);
+    in.lines=&strict;CHECK(Throws([&]{(void)ex::SelectGeometryLevel(in);}));
+    // A position of the source "fixed-condition" is the condition's own, so one that is not is refused.
+    const auto fixed_moved=Position(ex::ConfirmedPositionSource::fixed_condition,kPositionPose);
+    in.confirmed_position=&fixed_moved;in.lines=&lines;CHECK(Throws([&]{(void)ex::SelectGeometryLevel(in);}));
     in.registration=&r.registration.registration;in.lines=&lines;
     // Not trusted, with a coarse shift: the position, never G3.
     in.registration=&untrusted;in.coarse_shift=ex::UniformShift{3,0.5,-0.25};in.confirmed_position=&auto_position;
@@ -1426,6 +1463,18 @@ void ConfirmedReport(){
         CHECK(refused(WithPosition(ex::GeometryLevel::g1,auto_p,false,-0.5)) && refused(WithPosition(ex::GeometryLevel::g1,auto_p,false,std::nan(""))));
         auto fixed_but_not=Position(ex::ConfirmedPositionSource::fixed_condition,kPositionPose);
         CHECK(refused(WithPosition(ex::GeometryLevel::g2,fixed_but_not,false)));       // "fixed-condition" is the condition's own position
+        // The ranges: a position set by hand with its pose outside the envelope, and a position beyond a range that the condition does not apply, are refused
+        // at any level; the same positions of another condition are only recorded.
+        auto far_pose=kPositionPose;far_pose.tx_mm=Record(ex::GeometryLevel::g2).base_pose.tx_mm+12;
+        const auto far_hand=Position(ex::ConfirmedPositionSource::manual,far_pose),far_auto=Position(ex::ConfirmedPositionSource::auto_button,far_pose);
+        CHECK(refused(WithPosition(ex::GeometryLevel::confirmed,far_hand,true)) && refused(WithPosition(ex::GeometryLevel::g4,far_hand,false)));
+        CHECK(!refused(WithPosition(ex::GeometryLevel::confirmed,far_auto,true)));     // the condition applies what is beyond a range
+        auto no_apply=WithPosition(ex::GeometryLevel::confirmed,far_auto,true);no_apply.limits.apply_beyond_envelope=false;
+        CHECK(refused(no_apply));
+        auto no_apply_g4=WithPosition(ex::GeometryLevel::g4,far_auto,false);no_apply_g4.limits.apply_beyond_envelope=false;
+        CHECK(refused(no_apply_g4));
+        auto other_far=Position(ex::ConfirmedPositionSource::manual,far_pose,{},fx::Hex64('8'));
+        CHECK(!refused(WithPosition(ex::GeometryLevel::g4,other_far,false)));
         // A check without a position, a position without a check, the level confirmed without either.
         auto lone=Record(ex::GeometryLevel::g2);lone.registration.confirmed_check=ex::ConfirmedPositionCheck{false,std::nullopt};CHECK(refused(lone));
         auto bare=WithPosition(ex::GeometryLevel::g2,auto_p,false);bare.registration.confirmed_check.reset();CHECK(refused(bare));
@@ -1463,11 +1512,12 @@ void ConfirmedWarnings(){
         CHECK(!HasCode(r.warnings,ex::WarningCode::camera_position) && !HasCode(r.warnings,ex::WarningCode::surface_height) && FindWarning(r.warnings,ex::WarningCode::position_from_live));
         CHECK(HasCode(r.warnings,ex::WarningCode::geometry_level) && !r.registration.level.beyond_envelope_applied && r.assessment.state!=ex::AssessmentState::outside_criteria);
     }
-    // The position beyond its ranges: its own components are warned about, applied, from p_b; the level says it applied a beyond-range amount.
+    // The position beyond its ranges (an automatic one, which the condition applies): its own components are warned about, applied, from p_b; the level
+    // says it applied a beyond-range amount.
     {
         auto pose=kPositionPose;pose.tx_mm=base.tx_mm+12;pose.rz_deg=base.rz_deg+2.5;
         const ex::SurfacePlane plane{45,0.2,0};
-        const auto r=WithPosition(ex::GeometryLevel::confirmed,Position(ex::ConfirmedPositionSource::manual,pose,plane),true);
+        const auto r=WithPosition(ex::GeometryLevel::confirmed,Position(ex::ConfirmedPositionSource::auto_start,pose,plane),true);
         const auto* position=FindWarning(r.warnings,ex::WarningCode::camera_position);
         const auto* rotation=FindWarning(r.warnings,ex::WarningCode::camera_rotation);
         const auto* height=FindWarning(r.warnings,ex::WarningCode::surface_height);
@@ -1481,11 +1531,24 @@ void ConfirmedWarnings(){
             CHECK(tilt->applied && std::abs(tilt->value-expected_tilt)<1e-12 && tilt->limit==8.0);
         }
         CHECK(r.registration.level.beyond_envelope_applied && r.assessment.state==ex::AssessmentState::outside_criteria);
-        CHECK(FindWarning(r.warnings,ex::WarningCode::position_by_hand) && Reads(ReportTextV9(r)));
+        CHECK(FindWarning(r.warnings,ex::WarningCode::position_from_live) && Reads(ReportTextV9(r)));
+        // The same position by hand is a position that a report cannot carry as the level: the pose is outside the envelope, and a step past it is refused.
+        CHECK(Throws([&]{(void)ReportTextV9(WithPosition(ex::GeometryLevel::confirmed,Position(ex::ConfirmedPositionSource::manual,pose,plane),true));}));
         // In the order of the codes: the pose warnings, the surface warnings, ... and the notices of the position last.
         std::size_t last=0;bool ordered=true;
         for(const auto& w:r.warnings){const auto i=static_cast<std::size_t>(w.code);ordered=ordered && i>=last;last=i;}
         CHECK(ordered && static_cast<int>(ex::WarningCode::position_by_hand)>static_cast<int>(ex::WarningCode::time_budget));
+    }
+    // A position set by hand has its pose inside the envelope; only its paper surface can be beyond a range (which the condition applies): the surface's
+    // components are warned about, the pose's are not.
+    {
+        const ex::SurfacePlane plane{45,0.2,0};
+        const auto r=WithPosition(ex::GeometryLevel::confirmed,Position(ex::ConfirmedPositionSource::manual,kPositionPose,plane),true);
+        CHECK(FindWarning(r.warnings,ex::WarningCode::surface_height) && FindWarning(r.warnings,ex::WarningCode::surface_tilt) && !HasCode(r.warnings,ex::WarningCode::camera_position));
+        CHECK(r.registration.level.beyond_envelope_applied && FindWarning(r.warnings,ex::WarningCode::position_by_hand) && Reads(ReportTextV9(r)));
+        // The condition that does not apply what is beyond a range refuses it.
+        auto strict=r;strict.limits.apply_beyond_envelope=false;
+        CHECK(Throws([&]{(void)ReportTextV9(strict);}));
     }
     // A trusted estimate beyond its range that was not applied: the notice that the camera may have moved, with the components that exceeded.
     {
@@ -1497,9 +1560,28 @@ void ConfirmedWarnings(){
         r.registration.level.level=ex::GeometryLevel::confirmed;r.registration.level.mapping=ex::ConfirmedMappingOf(*r.registration.confirmed_position);
         ex::DeriveSavedFixedCompositeRegistration(r,kHash);
         const auto* beyond=FindWarning(r.warnings,ex::WarningCode::estimate_beyond_envelope);
-        CHECK(beyond && beyond->warning_class==ex::WarningClass::notice && beyond->component==ex::WarningComponent::confirmed_position && beyond->remedy==ex::Remedy::check_camera_mount &&
+        CHECK(beyond && beyond->warning_class==ex::WarningClass::unverified && beyond->component==ex::WarningComponent::confirmed_position && beyond->remedy==ex::Remedy::check_camera_mount &&
             !beyond->applied && beyond->value==0 && !beyond->limit);
         if(beyond)CHECK(beyond->interpretations==std::vector<std::string>({"camera-position","camera-rotation"}));
+        // The photographs say that the setup moved while the picture shows the live view position: the assessment is not "within criteria", whatever the gate says.
+        CHECK(r.registration.gate.state==rg::GateState::pass && r.assessment.state==ex::AssessmentState::not_judged && r.assessment.exceeded.empty() &&
+            r.assessment.unverified==std::vector<ex::WarningCode>{ex::WarningCode::estimate_beyond_envelope});
+        {
+            // The paper plane that the estimate found beyond its range is said as well (it is not left out of the notice), and alone it gives the same assessment.
+            auto plane=Record(ex::GeometryLevel::g2);
+            plane.registration.surface.state=ex::SurfaceState::estimated;plane.registration.surface.plane={45,0.2,0};plane.registration.surface.tilt_deg=std::atan(0.2)*180.0/3.14159265358979323846;
+            plane.registration.confirmed_position=Position(ex::ConfirmedPositionSource::auto_button,kPositionPose);
+            plane.registration.confirmed_check=ex::ConfirmedPositionCheck{true,std::nullopt};
+            plane.registration.level.level=ex::GeometryLevel::confirmed;plane.registration.level.mapping=ex::ConfirmedMappingOf(*plane.registration.confirmed_position);
+            ex::DeriveSavedFixedCompositeRegistration(plane,kHash);
+            const auto* named=FindWarning(plane.warnings,ex::WarningCode::estimate_beyond_envelope);
+            CHECK(named && named->warning_class==ex::WarningClass::unverified && named->interpretations==std::vector<std::string>({"surface-height","surface-tilt"}));
+            CHECK(plane.assessment.state==ex::AssessmentState::not_judged && Reads(ReportTextV9(plane)));
+            // A plane that is within its range says nothing.
+            plane.registration.surface.plane={1,0.01,0};plane.registration.surface.tilt_deg=0.5;
+            ex::DeriveSavedFixedCompositeRegistration(plane,kHash);
+            CHECK(!HasCode(plane.warnings,ex::WarningCode::estimate_beyond_envelope));
+        }
         // The estimate's own components are not warned about (it was not applied; the position's components are within).
         CHECK(!HasCode(r.warnings,ex::WarningCode::camera_position) && !HasCode(r.warnings,ex::WarningCode::camera_rotation) && FindWarning(r.warnings,ex::WarningCode::position_from_live));
         CHECK(Reads(ReportTextV9(r)));
@@ -1545,7 +1627,7 @@ void ConfirmedCapture(){
         for(const auto source:{ex::ConfirmedPositionSource::fixed_condition,ex::ConfirmedPositionSource::auto_start}){
             auto r=with(Position(source,request.base_pose));
             auto p=ex::PrepareCaptureRegistration(r);
-            CHECK(p.composite.image.bgr==p0.composite.image.bgr && p.capture.level.level==ex::GeometryLevel::g1 && SameEstimate(p.capture.registration,p0.capture.registration));
+            CHECK(p.composite.image.bgr==p0.composite.image.bgr && p.capture.level.level==ex::GeometryLevel::g1 && SameCaptureEstimate(p.capture,p0.capture));
             CHECK(p.capture.confirmed_position && p.capture.confirmed_check && !p.capture.confirmed_check->used && p.capture.confirmed_check->seam_difference_px);
             CHECK(p.capture.level.mapping.parallax.has_value()==p0.capture.level.mapping.parallax.has_value() && SameBits(p.capture.level.mapping.pose,p0.capture.level.mapping.pose));
         }
@@ -1555,7 +1637,7 @@ void ConfirmedCapture(){
     {
         auto r=with(Position(ex::ConfirmedPositionSource::auto_button,position_pose,position_plane));
         auto p=ex::PrepareCaptureRegistration(r);
-        CHECK(p.capture.level.level==ex::GeometryLevel::g1 && p.composite.image.bgr==p0.composite.image.bgr && SameEstimate(p.capture.registration,p0.capture.registration));
+        CHECK(p.capture.level.level==ex::GeometryLevel::g1 && p.composite.image.bgr==p0.composite.image.bgr && SameCaptureEstimate(p.capture,p0.capture));
         CHECK(p.capture.confirmed_check && !p.capture.confirmed_check->used && p.capture.confirmed_check->seam_difference_px && *p.capture.confirmed_check->seam_difference_px>0);
         // The number is the one function's, for the estimate's pose and surface (no layer 2) and the position.
         const cr::PoseModel model_b(g.parameters.camera_b);
@@ -1574,7 +1656,7 @@ void ConfirmedCapture(){
         auto position=Position(ex::ConfirmedPositionSource::manual,position_pose,position_plane);
         auto r=with(position);
         auto p=ex::PrepareCaptureRegistration(r);
-        CHECK(p.capture.level.level==ex::GeometryLevel::confirmed && p.capture.level.reasons.empty() && SameEstimate(p.capture.registration,p0.capture.registration));
+        CHECK(p.capture.level.level==ex::GeometryLevel::confirmed && p.capture.level.reasons.empty() && SameCaptureEstimate(p.capture,p0.capture));
         CHECK(SameBits(p.capture.level.mapping.pose,position_pose) && p.capture.level.mapping.surface.h0_mm==0.5 && p.capture.level.mapping.surface.slope_x==0.001 && !p.capture.level.mapping.parallax);
         CHECK(p.composite.image.bgr==render_with(ex::RegisteredMapping{position_pose,position_plane,std::nullopt},a,b,seam));
         CHECK(p.composite.image.bgr!=p0.composite.image.bgr && !p.band && !p.layout_before_layer_two);
@@ -1595,7 +1677,7 @@ void ConfirmedCapture(){
     {
         auto r=with(Position(ex::ConfirmedPositionSource::manual,position_pose,position_plane,fx::Hex64('8')));
         auto p=ex::PrepareCaptureRegistration(r);
-        CHECK(p.capture.level.level==ex::GeometryLevel::g1 && p.composite.image.bgr==p0.composite.image.bgr && SameEstimate(p.capture.registration,p0.capture.registration));
+        CHECK(p.capture.level.level==ex::GeometryLevel::g1 && p.composite.image.bgr==p0.composite.image.bgr && SameCaptureEstimate(p.capture,p0.capture));
         CHECK(p.capture.confirmed_position && p.capture.confirmed_check && !p.capture.confirmed_check->used && !p.capture.confirmed_check->seam_difference_px);
         ex::MeasureCaptureRegistrationGate(r,p);
         CHECK(Reads(ReportTextV9(ex::RecordOfCapture(Identity(),r,p,kHash))));
@@ -1625,7 +1707,7 @@ void ConfirmedCapture(){
         r.cover_check=[inner=r.cover_check,estimate_pose](const ex::RegisteredMapping& m){auto c=inner(m);if(SameBits(m.pose,estimate_pose))c.seam_covered=false;return c;};
         auto p=ex::PrepareCaptureRegistration(r);
         CHECK(p.capture.level.level==ex::GeometryLevel::confirmed && p.capture.level.reasons==std::vector<std::string>(2,"seam-outside-overlap-at-level"));
-        CHECK(p.composite.image.bgr==render_with(ex::RegisteredMapping{position_pose,position_plane,std::nullopt},a,b,seam) && SameEstimate(p.capture.registration,p0.capture.registration));
+        CHECK(p.composite.image.bgr==render_with(ex::RegisteredMapping{position_pose,position_plane,std::nullopt},a,b,seam) && SameCaptureEstimate(p.capture,p0.capture));
         CHECK(p.capture.confirmed_check && p.capture.confirmed_check->used && !p.capture.confirmed_check->seam_difference_px);   // the estimate did not hit
         ex::MeasureCaptureRegistrationGate(r,p);
         CHECK(Reads(ReportTextV9(ex::RecordOfCapture(Identity(),r,p,kHash))));
@@ -1663,6 +1745,101 @@ void ConfirmedCapture(){
     {
         auto r=with(Position(ex::ConfirmedPositionSource::auto_button,position_pose));r.confirmed_position->mapping.pose.rx_deg=std::nan("");
         CHECK(Throws([&]{(void)ex::PrepareCaptureRegistration(r);}));
+    }
+    // 7b. Scene (a) on the real estimator: camera B was moved by 1.5 mm after the calibration (the photographs of B are taken from a shifted camera while the
+    // profile is the calibration's), the condition's position range is 0.5 mm and it does not apply what is beyond a range. The estimate on the originals is
+    // trusted but outside the envelope, so it is no candidate; the automatic position is the level, the notice says that the setup moved, and the assessment is
+    // not "within criteria" although the gate passes.
+    {
+        const double shift=1.5;
+        const auto moved_b=rig::Raw(rig::Camera(520,180+shift,700,-0.4,0.2,-0.1),false);
+        auto r=Request(g,a,moved_b,4);r.condition_sha256=sha;
+        r.estimator.envelope.position_mm=0.5;r.lines.envelope=r.estimator.envelope;r.lines.apply_beyond_envelope=false;
+        r.confirmed_position=Position(ex::ConfirmedPositionSource::auto_button,position_pose,position_plane);
+        auto p=ex::PrepareCaptureRegistration(r);
+        const auto state=p.capture.registration.state;
+        std::cout<<"  shift "<<shift<<" pose tx "<<p.capture.registration.pose.tx_mm<<" ty "<<p.capture.registration.pose.ty_mm<<" rz "<<p.capture.registration.pose.rz_deg<<" has "<<p.capture.registration.has_estimate;
+        for(const auto& k:p.capture.registration.components)std::cout<<" ["<<k.value<<"/"<<k.limit<<(k.exceeded?"!":"")<<"]";
+        std::cout<<'\n';
+        std::cout<<"  scene (a) on the rig: estimate "<<cr::RegistrationStateCode(state)<<", level "<<ex::GeometryLevelCode(p.capture.level.level)<<'\n';
+        CHECK(state==cr::RegistrationState::out_of_envelope);
+        if(state==cr::RegistrationState::out_of_envelope){
+            CHECK(p.capture.level.level==ex::GeometryLevel::confirmed && p.capture.level.reasons.empty() && !p.capture.level.estimate_hit);
+            CHECK(p.capture.confirmed_check && p.capture.confirmed_check->used && !p.capture.confirmed_check->seam_difference_px);
+            ex::MeasureCaptureRegistrationGate(r,p);
+            const auto record=ex::RecordOfCapture(Identity(),r,p,kHash);
+            const auto* notice=FindWarning(record.warnings,ex::WarningCode::estimate_beyond_envelope);
+            CHECK(notice && notice->warning_class==ex::WarningClass::unverified && !notice->interpretations.empty() && Reads(ReportTextV9(record)));
+            CHECK(record.assessment.state!=ex::AssessmentState::within_criteria);
+        }
+    }
+    // 9. The ranges (ADR-0046 decisions 4 and 5): a position of this condition that its ranges do not allow is refused at the entrance, before the estimate runs,
+    // the cheap check is asked or anything is drawn, so that no JPEG is made that a report cannot describe. A position of another condition is not read.
+    {
+        auto far_pose=position_pose;far_pose.tx_mm=request.base_pose.tx_mm+11;   // the envelope's position range is 10 mm
+        int asked=0;
+        const auto counted=[&](ex::CaptureRegistrationRequest r){
+            r.cover_check=[inner=r.cover_check,&asked](const ex::RegisteredMapping& m){++asked;return inner(m);};
+            return r;
+        };
+        const auto refuses=[&](ex::CaptureRegistrationRequest r){
+            asked=0;
+            const bool threw=Throws([&]{(void)ex::PrepareCaptureRegistration(counted(std::move(r)));});
+            return threw && asked==0;
+        };
+        // By hand: a pose outside the envelope is refused, with or without applyBeyondEnvelope.
+        auto hand_far=with(Position(ex::ConfirmedPositionSource::manual,far_pose,position_plane));
+        CHECK(refuses(hand_far));
+        hand_far.lines.apply_beyond_envelope=false;CHECK(refuses(hand_far));
+        // Automatic: refused when the condition does not apply what is beyond a range, a level of its own when it does.
+        auto auto_far=with(Position(ex::ConfirmedPositionSource::auto_button,far_pose,position_plane));
+        auto_far.lines.apply_beyond_envelope=false;CHECK(refuses(auto_far));
+        // A position of the source fixed-condition that is not the condition's own.
+        CHECK(refuses(with(Position(ex::ConfirmedPositionSource::fixed_condition,position_pose))));
+        // The surface's range (not the pose's): by hand it is read only as a range that the condition applies or not.
+        const ex::SurfacePlane high{45,0.001,0};   // the surface envelope's height is 40 mm
+        auto hand_high=with(Position(ex::ConfirmedPositionSource::manual,position_pose,high));
+        hand_high.lines.apply_beyond_envelope=false;CHECK(refuses(hand_high));
+        // The same positions that are allowed.
+        {
+            const auto wa=rig::Raw(g.a,true),wb=rig::Raw(g.b,true);
+            auto blank=Request(g,wa,wb,4);blank.condition_sha256=sha;
+            auto allowed=blank;allowed.confirmed_position=Position(ex::ConfirmedPositionSource::auto_button,far_pose,position_plane);
+            auto pa=ex::PrepareCaptureRegistration(allowed);
+            CHECK(pa.capture.level.level==ex::GeometryLevel::confirmed && pa.capture.level.beyond_envelope_applied && SameBits(pa.capture.level.mapping.pose,far_pose));
+            ex::MeasureCaptureRegistrationGate(allowed,pa);
+            const auto record=ex::RecordOfCapture(Identity(),allowed,pa,kHash);
+            CHECK(Reads(ReportTextV9(record)) && FindWarning(record.warnings,ex::WarningCode::camera_position) && FindWarning(record.warnings,ex::WarningCode::position_from_live));
+            auto hand_surface=blank;hand_surface.confirmed_position=Position(ex::ConfirmedPositionSource::manual,position_pose,high);
+            auto ph=ex::PrepareCaptureRegistration(hand_surface);
+            CHECK(ph.capture.level.level==ex::GeometryLevel::confirmed && ph.capture.level.beyond_envelope_applied);
+            ex::MeasureCaptureRegistrationGate(hand_surface,ph);
+            const auto hand_record=ex::RecordOfCapture(Identity(),hand_surface,ph,kHash);
+            CHECK(Reads(ReportTextV9(hand_record)) && FindWarning(hand_record.warnings,ex::WarningCode::surface_height) && !FindWarning(hand_record.warnings,ex::WarningCode::camera_position));
+            // Exactly at the pose envelope's limit is inside.
+            auto edge_pose=position_pose;edge_pose.tx_mm=request.base_pose.tx_mm+10.0;edge_pose.ty_mm=request.base_pose.ty_mm;
+            auto edge=blank;edge.confirmed_position=Position(ex::ConfirmedPositionSource::manual,edge_pose,position_plane);
+            CHECK(ex::PrepareCaptureRegistration(edge).capture.level.level==ex::GeometryLevel::confirmed);
+        }
+        // Another condition's position is recorded and not read, wherever it is.
+        auto other=with(Position(ex::ConfirmedPositionSource::manual,far_pose,position_plane,fx::Hex64('8')));
+        auto po=ex::PrepareCaptureRegistration(other);
+        CHECK(po.capture.level.level==ex::GeometryLevel::g1 && po.capture.confirmed_check && !po.capture.confirmed_check->used);
+        // The gate's wide-search diagnostic runs for the level confirmed as it does for G3 and G4 (a level that no estimate stands behind): the same pair
+        // measured at the level confirmed and at G4 (the cheap check refuses the position) carries the same diagnostic result.
+        {
+            const auto position=Position(ex::ConfirmedPositionSource::manual,position_pose,position_plane);
+            auto confirmed=with(position);
+            auto pc_=ex::PrepareCaptureRegistration(confirmed);
+            ex::MeasureCaptureRegistrationGate(confirmed,pc_);
+            auto refused_position=with(position);
+            refused_position.cover_check=[inner=refused_position.cover_check,position_pose](const ex::RegisteredMapping& m){auto c=inner(m);if(SameBits(m.pose,position_pose))c.seam_covered=false;return c;};
+            auto p4=ex::PrepareCaptureRegistration(refused_position);
+            ex::MeasureCaptureRegistrationGate(refused_position,p4);
+            CHECK(pc_.capture.level.level==ex::GeometryLevel::confirmed && p4.capture.level.level==ex::GeometryLevel::g4);
+            CHECK(pc_.capture.gate.state!=rg::GateState::not_run && p4.capture.gate.state!=rg::GateState::not_run);
+            CHECK(pc_.capture.gate.wide_search.has_value()==p4.capture.gate.wide_search.has_value());
+        }
     }
 }
 

@@ -312,9 +312,6 @@ const char* PositionFault(const ConfirmedPosition& p){
     }
     return "";
 }
-bool SamePoseBits(const cr::PoseParameters& a,const cr::PoseParameters& b){
-    return a.rx_deg==b.rx_deg && a.ry_deg==b.ry_deg && a.rz_deg==b.rz_deg && a.tx_mm==b.tx_mm && a.ty_mm==b.ty_mm && a.tz_percent==b.tz_percent;
-}
 // The whole counts of the smallest hand step that give exactly these values (HandValuesOf), or none.
 std::optional<HandCounts> CountsOfHandValues(double dx_px,double dy_px,double rotation_deg){
     const auto count=[](double value,double per_count,bool divide)->std::optional<std::int32_t>{
@@ -859,6 +856,7 @@ RegistrationAssessment ReadAssessment(const Value& v,RegistrationReportFormat fo
     if(ReadBool(At(v,"qualityAccepted")) || ReadBool(At(v,"acceptanceEvidence")))Reject("quality flags");
     return a;
 }
+// Compared by value: -0 and +0 are the same, NaN is never the same.
 bool SamePose(const cr::PoseParameters& a,const cr::PoseParameters& b){
     return a.rx_deg==b.rx_deg && a.ry_deg==b.ry_deg && a.rz_deg==b.rz_deg && a.tx_mm==b.tx_mm && a.ty_mm==b.ty_mm && a.tz_percent==b.tz_percent;
 }
@@ -866,6 +864,21 @@ bool SamePlane(const SurfacePlane& a,const SurfacePlane& b){return a.h0_mm==b.h0
 bool SameProfile(const ParallaxProfile& a,const ParallaxProfile& b){
     return a.baseline.x==b.baseline.x && a.baseline.y==b.baseline.y && a.row_spacing_px==b.row_spacing_px && a.first_row_px==b.first_row_px &&
         a.q_px==b.q_px && a.a_px==b.a_px && a.l_px==b.l_px && a.seam_column==b.seam_column;
+}
+// What a position of the capture's own condition (its hash is the condition's) must satisfy to be used for a composite (ADR-0046 decisions 4 and
+// 5; empty: it can be used). A position that is the condition's own is always usable. Otherwise
+//  - a position that came from the condition (fixed-condition) is the condition's own, so any other is not a position of that source;
+//  - a position set by hand has every pose component inside the pose envelope (the paper surface's range is not read: a hand step does not move it);
+//  - any position that is beyond a range (pose, or the paper surface's) is used only when the condition applies what is beyond a range
+//    (applyBeyondEnvelope), as the estimate on the originals and the live view's estimate are.
+// A step past the range is refused, never clamped, so the refusal is the capture's own and not a warning on a composite that was made with it.
+// The capture's entrance (before anything is drawn), the geometry level and the record's reader and writer all call this one function.
+const char* PositionRangeFault(const ConfirmedPosition& p,const cr::PoseParameters& base_pose,const RegistrationLines& lines){
+    if(IsConditionPosition(p,base_pose))return "";
+    if(p.source==ConfirmedPositionSource::fixed_condition)return "fixed-condition position that is not the condition's";
+    if(p.source==ConfirmedPositionSource::manual && AnyExceeded(RegistrationComponentsFromBase(p.mapping.pose,base_pose,lines.envelope)))return "hand position outside the envelope";
+    if(PositionBeyond(p.mapping,base_pose,lines) && !lines.apply_beyond_envelope.value_or(false))return "position outside the envelope that the condition does not apply";
+    return "";
 }
 // What the confirmed position and its check must satisfy against the rest of the record (the reader and the writer check the same). An
 // empty string: consistent; else the first thing that is not. Everything here follows from what the record holds: the position, the
@@ -886,7 +899,7 @@ const char* ConfirmedFault(const SavedFixedCompositeRegistration& r){
     if(check.used!=confirmed_level)return "position used and level";
     if(confirmed_level && (!same_condition || condition_position || !SamePose(c.level.mapping.pose,p.mapping.pose) || !SamePlane(c.level.mapping.surface,p.mapping.surface) ||
         c.level.mapping.parallax))return "level confirmed and position";
-    if(same_condition && p.source==ConfirmedPositionSource::fixed_condition && !condition_position)return "fixed-condition position that is not the condition's";
+    if(same_condition){if(const char* fault=PositionRangeFault(p,r.base_pose,r.limits);*fault)return fault;}
     if(check.seam_difference_px){
         if(!same_condition || !Trusted(c.registration) || !std::isfinite(*check.seam_difference_px) || *check.seam_difference_px<0)return "position seam difference";
     }
@@ -901,7 +914,7 @@ const char* ConfirmedFault(const SavedFixedCompositeRegistration& r){
 
 // ---- Pure pieces ----
 bool IsConditionPosition(const ConfirmedPosition& p,const cr::PoseParameters& base_pose){
-    return SamePoseBits(p.mapping.pose,base_pose) && p.mapping.surface.IsZero();
+    return IsConditionPosition(p.mapping,base_pose);
 }
 RegisteredMapping ConfirmedMappingOf(const ConfirmedPosition& p){return RegisteredMapping{p.mapping.pose,p.mapping.surface,std::nullopt};}
 void ValidateConfirmedPosition(const ConfirmedPosition& p){
@@ -1063,20 +1076,25 @@ std::vector<RegistrationWarning> DeriveRegistrationWarnings(const CaptureRegistr
         out.push_back(std::move(w));
     }
     // #437 (report v9): a composite made with the confirmed position says whose position it is; and when the estimate on the originals was
-    // trusted but beyond its range (so it was not applied), that the camera may have moved, which the position's own components do not say.
+    // trusted but beyond a range (so it was not applied), that the camera may have moved, which the position's own components do not say. That
+    // one is unverified, not a notice: the picture shows the position that the live view decided while the photographs say the setup moved, so
+    // the assessment is not "within criteria" however the gate came out.
     if(confirmed && c.confirmed_position){
         auto w=Make(c.confirmed_position->source==ConfirmedPositionSource::manual?WarningCode::position_by_hand:WarningCode::position_from_live,WarningClass::notice,
             WarningComponent::confirmed_position,0,std::nullopt,WarningUnit::rows,Remedy::none);
         w.applied=true;out.push_back(std::move(w));
     }
-    if(confirmed && trusted && AnyExceeded(c.registration.components)){
-        auto w=Make(WarningCode::estimate_beyond_envelope,WarningClass::notice,WarningComponent::confirmed_position,0,std::nullopt,WarningUnit::rows,Remedy::check_camera_mount);
+    const bool estimate_surface_beyond=c.surface.state==SurfaceState::estimated && (c.surface.exceeded.height || c.surface.exceeded.tilt);
+    if(confirmed && trusted && (AnyExceeded(c.registration.components) || estimate_surface_beyond)){
+        auto w=Make(WarningCode::estimate_beyond_envelope,WarningClass::unverified,WarningComponent::confirmed_position,0,std::nullopt,WarningUnit::rows,Remedy::check_camera_mount);
         for(const auto& k:c.registration.components){
             if(!k.exceeded)continue;
             const auto name=k.component==cr::EnvelopeComponent::position?WarningCode::camera_position:k.component==cr::EnvelopeComponent::rotation?WarningCode::camera_rotation:
                 k.component==cr::EnvelopeComponent::tilt?WarningCode::camera_tilt:WarningCode::camera_height;
             w.interpretations.emplace_back(WarningCodeText(name));
         }
+        if(estimate_surface_beyond && c.surface.exceeded.height)w.interpretations.emplace_back(WarningCodeText(WarningCode::surface_height));
+        if(estimate_surface_beyond && c.surface.exceeded.tilt)w.interpretations.emplace_back(WarningCodeText(WarningCode::surface_tilt));
         out.push_back(std::move(w));
     }
     const auto timed_out=[](const SkippedStage& s){return s.stage!=ReviewStage::gate && s.reason==kTimeBudgetReason;};
@@ -1212,7 +1230,10 @@ GeometryLevelDecision SelectGeometryLevel(const GeometryLevelInput& in){
     const auto& l=*in.lines;const bool apply=*l.apply_beyond_envelope;const auto& e=*in.registration;
     // A confirmed position that is not the condition's own changes the candidates (ADR-0046); the condition's own keeps them as they were.
     const ConfirmedPosition* position=in.confirmed_position;
-    if(position)ValidateConfirmedPosition(*position);
+    if(position){
+        ValidateConfirmedPosition(*position);
+        if(const char* fault=PositionRangeFault(*position,in.base_pose,l);*fault)throw std::invalid_argument(std::string("confirmed position: ")+fault);
+    }
     const bool position_row=position && !IsConditionPosition(*position,in.base_pose);
     const bool by_hand=position_row && position->source==ConfirmedPositionSource::manual;
     std::vector<std::pair<GeometryLevel,RegisteredMapping>> candidates;
@@ -1497,7 +1518,14 @@ PreparedCaptureRegistration PrepareCaptureRegistration(const CaptureRegistration
     if(!r.camera_a || !r.camera_b || !r.parameters || !r.cover_check || !r.lines.apply_beyond_envelope || r.thread_count<1 || r.thread_count>256)
         throw std::invalid_argument("capture registration needs both images, the parameters, the cheap check, applyBeyondEnvelope and 1..256 threads");
     if(r.estimator.geometry.mixing_width_px!=r.blend.width_pixels)throw std::invalid_argument("the mixing width is not the blend's");
-    if(r.confirmed_position)ValidateConfirmedPosition(*r.confirmed_position);   // a position a report cannot carry: refused before anything is drawn
+    if(r.confirmed_position){
+        // A position a report cannot carry, or one of this condition that its ranges do not allow: refused before anything is drawn (and so
+        // before a JPEG is written that no report could describe).
+        ValidateConfirmedPosition(*r.confirmed_position);
+        if(!r.condition_sha256.empty() && r.confirmed_position->condition_sha256==r.condition_sha256){
+            if(const char* fault=PositionRangeFault(*r.confirmed_position,r.base_pose,r.lines);*fault)throw std::invalid_argument(std::string("confirmed position: ")+fault);
+        }
+    }
     if(!std::isfinite(r.design.estimator_stop_margin_ms) || r.design.estimator_stop_margin_ms<0)
         throw std::invalid_argument("the estimator's stop margin is not finite and non-negative");
     if(r.design.verify_period_rows && r.design.verify_phase>=r.design.verify_period_rows)

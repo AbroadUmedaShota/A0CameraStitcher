@@ -88,7 +88,7 @@ struct ConfirmedPositionCheck {
     bool used{};
     std::optional<double> seam_difference_px;
 };
-// The position is the condition's own (the base pose, no surface), bit for bit (-0 and +0 are the same).
+// The position is the condition's own (the base pose, no surface), compared by value (-0 and +0 are the same).
 [[nodiscard]] bool IsConditionPosition(const ConfirmedPosition& position,const content_registration::PoseParameters& base_pose);
 // The mapping the position draws: its pose and surface, no layer 2.
 [[nodiscard]] RegisteredMapping ConfirmedMappingOf(const ConfirmedPosition& position);

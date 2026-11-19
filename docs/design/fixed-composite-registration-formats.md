@@ -324,11 +324,14 @@ v8 との差はこれだけで、ほかの欄は名前・型・単位・並び�
 - 位置が推定の始め・事前分布・範囲の基準に入る事は無い。`registration` は位置を渡さない時とビットで同じ
 - `confirmed` の時、層 2 の帯は捨て、ゲートは自分の帯で測る
 - 写像が安い検査に落ちた時は `reasons`（`seam-outside-overlap-at-level`・`output-uncovered-at-level`）を残して次へ下げる。手で直した位置が落ちた時は G4（位置は手のまま、窓の側の扱い）
+- 撮影の入口で断る位置: 条件の SHA-256 が撮影の条件と同じで、条件の位置でない位置のうち、(1) 出どころが `manual` で姿勢の 4 成分（位置・回り・傾き・高さ。条件の `basePose` からの差）のどれかが `registration.envelope` の外（ちょうど端は内。紙面の範囲は見ない）、(2) 姿勢か紙面のどれかが範囲の外で、条件の `applyBeyondEnvelope` が false、(3) 出どころが `fixed-condition` なのに条件の位置でない。推定も描画も安い検査も始める前に `std::invalid_argument` で断り、JPEG は作らない（書き手が後で落ちて、報告の無い JPEG が残る事を無くす）。範囲の外の自動の位置は、条件が `applyBeyondEnvelope` を認める時だけ使い、`beyondEnvelopeApplied` と警告で言う
+- ゲートの広い探索の診断（`wide_search`）は、`confirmed` でも G3・G4 と同じに走らせる（推定が裏に付かない段のため）
 
 読み手が確かめる事（`geometryLevel` の写像に加えて）:
 
 - `used` と level `confirmed` が同値。level `confirmed` は、位置があり、その条件が撮影の条件と同じで、条件の位置でなく、写像が位置とビットで同じ
-- `source` が `fixed-condition` の位置は条件の位置（位置と条件が同じ時）
+- `source` が `fixed-condition` の位置は条件の位置（位置と条件が同じ時。上の範囲の決まりの (3)）
+- 位置と条件が同じで条件の位置でない時、撮影の入口と同じ範囲の決まり（上の「撮影の入口で断る位置」の 3 つ）に合わない位置の記録は、どの level でも拒否する（書き手も読み手も）
 - `seamDifferencePx` が非 null なら、位置と条件が同じで、推定が確か（`verified`・`out-of-envelope`）
 - 位置と条件が同じで条件の位置でない時、手の位置の level は `confirmed` か G4、ほかの位置の level は G3 でない
 
@@ -338,7 +341,7 @@ v8 との差はこれだけで、ほかの欄は名前・型・単位・並び�
 
 - `position-by-hand`（notice、`remedy` `none`、`applied` true）: level が `confirmed` で位置の出どころが `manual`
 - `position-from-live`（notice、`none`、`applied` true）: level が `confirmed` で出どころが `manual` 以外
-- `estimate-beyond-envelope`（notice、`remedy` `check-camera-mount`、`applied` false、`interpretations` に超えた成分の符号 `camera-position`・`camera-rotation`・`camera-tilt`・`camera-height`）: level が `confirmed` で、原寸の推定が確か（`Trusted`）で、その成分が線を超えた時。適用しなかった推定が範囲の外だった事（設置が動いたかもしれない事）を、位置の成分の警告から消さないため
+- `estimate-beyond-envelope`（**unverified**、`remedy` `check-camera-mount`、`applied` false、`interpretations` に超えた成分の符号 `camera-position`・`camera-rotation`・`camera-tilt`・`camera-height`、推定の紙面が範囲の外なら `surface-height`・`surface-tilt`）: level が `confirmed` で、原寸の推定が確か（`Trusted`）で、その姿勢の成分か紙面（推定した時の高さ・傾き）が線を超えた時。適用しなかった推定が範囲の外だった事（設置が動いたかもしれない事）を、位置の成分の警告から消さないため。unverified なので `assessment` は `not-judged` で、ゲートが通っても `within-criteria` にならない（所有者の決定。写真が言う設置の動きと、画面で決めた位置で作った JPEG の食い違いを「基準内」と言わない）。JPEG は今のまま確定した位置で作る
 - どれも `value` 0・`limit` null・`unit` `rows`（量の無い符号）、`component` `confirmed-position`
 - level `confirmed` の `camera-*`・`surface-*`（exceeded）は、推定でなく位置の成分から、G1・G2 の推定の成分と同じ導き方で作る（`applied` true）。`beyondEnvelopeApplied` も位置の成分と紙面で見る
 - `assessment` の導き方は変えない。手で直した事・ライブで決めた事は品質の証拠にも不合格の理由にもしない

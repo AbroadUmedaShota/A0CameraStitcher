@@ -227,6 +227,30 @@ void Tamper(const Outcome& o){
     const auto report=damaged/"uncalibrated-review.json";
     const auto loads=[&](const std::string& text){WriteText(report,text);try{(void)LoadSavedStillReview(report);}catch(const std::exception&){return false;}return true;};
     CHECK(loads(o.text));
+    {
+        // A report that was written without a position is, apart from its schema, the v8 report plus two null members. The v8 file as a whole is read by
+        // the loader (the schema picks the reader) and gives the record that the v9 file gives.
+        const std::string nulls=",\"confirmedPosition\":null,\"confirmedPositionCheck\":null";
+        auto v8=o.text;
+        const auto at=v8.find(nulls);
+        Check(at!=std::string::npos && v8.find(nulls,at+1)==std::string::npos,"the v9 file has the two null members once",__LINE__);
+        if(at!=std::string::npos)v8.erase(at,nulls.size());
+        const std::string v9_schema="a0.uncalibrated-still-review.v9";
+        const auto schema=v8.find(v9_schema);
+        Check(schema!=std::string::npos,"the v9 file names its schema",__LINE__);
+        if(schema!=std::string::npos)v8.replace(schema,v9_schema.size(),"a0.uncalibrated-still-review.v8");
+        WriteText(report,v8);
+        try{
+            const auto read=LoadSavedStillReview(report);
+            const auto& v8_record=read.fixed_composite_registration;
+            CHECK(v8_record.has_value() && v8_record->registration.level.level==o.saved.fixed_composite_registration->registration.level.level &&
+                !v8_record->registration.confirmed_position && !v8_record->registration.confirmed_check);
+            if(v8_record){
+                CHECK(FixedCompositeRegistrationJson(*v8_record)==FixedCompositeRegistrationJson(*o.saved.fixed_composite_registration));
+                CHECK(FixedCompositeRegistrationJson(*v8_record,RegistrationReportFormat::v9)==FixedCompositeRegistrationJson(*o.saved.fixed_composite_registration,RegistrationReportFormat::v9));
+            }
+        }catch(const std::exception& error){Check(false,("the v8 file is read: "+std::string(error.what())).c_str(),__LINE__);}
+    }
     const auto changed=[&](const std::string& from,const std::string& to){
         const auto at=o.text.find(from);
         if(at==std::string::npos||o.text.find(from,at+1)!=std::string::npos){Check(false,("token not unique: "+from).c_str(),__LINE__);return std::string(o.text);}

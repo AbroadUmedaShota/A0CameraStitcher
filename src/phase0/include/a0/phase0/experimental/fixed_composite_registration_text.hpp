@@ -527,12 +527,13 @@ inline HeightMm HeightInMm(const ex::RegistrationWarning& w, const RegistrationT
     case C::position_by_hand: return "手で直した位置で作りました";
     case C::position_from_live: return "ライブで決めた位置で作りました（撮影の後の自動調整では位置を決められませんでした）";
     case C::estimate_beyond_envelope: {
-        constexpr std::array<std::pair<const char*, const char*>, 4> kComponents{{{"camera-position", "位置"}, {"camera-rotation", "回り"}, {"camera-tilt", "傾き"}, {"camera-height", "高さ"}}};
+        constexpr std::array<std::pair<const char*, const char*>, 6> kComponents{{{"camera-position", "位置"}, {"camera-rotation", "回り"}, {"camera-tilt", "傾き"},
+            {"camera-height", "高さ"}, {"surface-height", "紙の高さ"}, {"surface-tilt", "紙の傾き"}}};
         std::string names;
         for (const auto& entry : kComponents)
             if (Has(warning.interpretations, entry.first)) names += (names.empty() ? "" : "、") + std::string(entry.second);
-        return "撮影した画像から推定した B の位置は、許容の範囲を超えています" + (names.empty() ? std::string{} : "（" + names + "）") +
-            "。設置が動いたかもしれません。推定の位置は当てず、確定した位置で作りました";
+        return "撮影した画像から測った B の位置が、許される範囲より大きく動いています" + (names.empty() ? std::string{} : "（" + names + "）") +
+            "。設置が動いたかもしれません。この JPEG はライブの画面で決めていた位置で作り、測った位置は当てていません。校正の取り直しが要るかもしれません";
     }
     }
     return "確認が必要な項目があります";
