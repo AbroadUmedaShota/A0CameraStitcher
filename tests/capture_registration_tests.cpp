@@ -1758,10 +1758,6 @@ void ConfirmedCapture(){
         r.confirmed_position=Position(ex::ConfirmedPositionSource::auto_button,position_pose,position_plane);
         auto p=ex::PrepareCaptureRegistration(r);
         const auto state=p.capture.registration.state;
-        std::cout<<"  shift "<<shift<<" pose tx "<<p.capture.registration.pose.tx_mm<<" ty "<<p.capture.registration.pose.ty_mm<<" rz "<<p.capture.registration.pose.rz_deg<<" has "<<p.capture.registration.has_estimate;
-        for(const auto& k:p.capture.registration.components)std::cout<<" ["<<k.value<<"/"<<k.limit<<(k.exceeded?"!":"")<<"]";
-        std::cout<<'\n';
-        std::cout<<"  scene (a) on the rig: estimate "<<cr::RegistrationStateCode(state)<<", level "<<ex::GeometryLevelCode(p.capture.level.level)<<'\n';
         CHECK(state==cr::RegistrationState::out_of_envelope);
         if(state==cr::RegistrationState::out_of_envelope){
             CHECK(p.capture.level.level==ex::GeometryLevel::confirmed && p.capture.level.reasons.empty() && !p.capture.level.estimate_hit);
