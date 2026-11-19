@@ -473,6 +473,20 @@ else()
     target_compile_options(a0_m2_fixed_composite_recalibration PRIVATE -Wall -Wextra -Wpedantic -ffp-contract=off)
 endif()
 
+# The checks that a hand step of the confirmed position passes (#437 stage 2, ADR-0046): the pose envelope and the cheap cover check on the position a
+# hand step gives. Pure computation: no camera, window, clock or file. It needs the condition library (the cover check) and the estimator's range check, so
+# it is a library of its own; the arithmetic of confirmed_position.hpp (how a number is written, the entered amounts, the expression that turns them into a
+# position, the difference at the seam) is header only. No link isolation is asserted: the condition library links BCrypt.
+add_library(a0_m2_confirmed_position src/m2/confirmed_position_check.cpp)
+target_include_directories(a0_m2_confirmed_position PUBLIC src/m2/include)
+target_link_libraries(a0_m2_confirmed_position PUBLIC a0_m2_fixed_composite_v2 a0_m2_capture_registration a0_m2_fixed_composite_maps a0_m2_seam_blend
+    a0_m2_registration_pose a0_m2_render)
+if(MSVC)
+    target_compile_options(a0_m2_confirmed_position PRIVATE /W4 /permissive- /EHsc /fp:precise /utf-8)
+else()
+    target_compile_options(a0_m2_confirmed_position PRIVATE -Wall -Wextra -Wpedantic -ffp-contract=off)
+endif()
+
 # Development-only probe of #417 (P0): reads a saved pair and a fixed composite condition v2, measures the
 # B-minus-A displacement field over the overlap band and fits registration models to it. Never part of the
 # product; it composes nothing and uses no camera.
@@ -1449,6 +1463,17 @@ if(BUILD_TESTING)
         endif()
         add_test(NAME pair_review_registration_contracts COMMAND a0_pair_review_registration_tests "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2")
         set_tests_properties(pair_review_registration_contracts PROPERTIES TIMEOUT 3000)
+        # The cheap check of a hand step of the confirmed position and the one a capture makes on the same mapping (#437 stage 2): near the edges of a
+        # full-size frame, on mappings that pass and mappings that fail, they answer alike. Full-size blank frames, no camera, no window.
+        add_executable(a0_confirmed_position_cover_tests tests/confirmed_position_cover_tests.cpp)
+        target_include_directories(a0_confirmed_position_cover_tests PRIVATE src/phase0/include src/common/include)
+        target_link_libraries(a0_confirmed_position_cover_tests PRIVATE a0_m2_offline_stitcher a0_m2_fixed_composite a0_m2_fixed_composite_v2 a0_m2_capture_registration a0_m2_rig_profile_v2 ole32 windowscodecs)
+        target_compile_definitions(a0_confirmed_position_cover_tests PRIVATE NOMINMAX)
+        if(MSVC)
+            target_compile_options(a0_confirmed_position_cover_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+        endif()
+        add_test(NAME pair_review_cover_check_contracts COMMAND a0_confirmed_position_cover_tests "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2")
+        set_tests_properties(pair_review_cover_check_contracts PROPERTIES TIMEOUT 1800)
         # The seam's top, middle and bottom at native size (#418 stage 0): the row and column decisions, the crops against
         # the composite's pixels, the PNG record, and the inspector (--export-seam-crops, --seam-crops-smoke). No camera.
         add_executable(a0_seam_crops_tests tests/seam_crops_tests.cpp)
@@ -2107,6 +2132,12 @@ if(BUILD_TESTING)
     target_link_libraries(m2_fixed_composite_recalibration_contracts PRIVATE a0_m2_fixed_composite_recalibration ole32 windowscodecs)
     a0_add_registration_lane_test(m2_capture_registration_contracts tests/capture_registration_tests.cpp)
     target_link_libraries(m2_capture_registration_contracts PRIVATE a0_m2_capture_registration a0_m2_fixed_composite_v2)
+    # The pure parts of the confirmed position (#437 stage 2): the one written form of a number, the entered amounts and the expression that turns them
+    # into a position (against the condition tool's earlier expression), the difference at the seam, and the envelope and cover checks of a hand step.
+    a0_add_registration_lane_test(m2_confirmed_position_contracts tests/confirmed_position_tests.cpp
+        "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2")
+    target_include_directories(m2_confirmed_position_contracts PRIVATE src/phase0/include src/common/include)
+    target_link_libraries(m2_confirmed_position_contracts PRIVATE a0_m2_confirmed_position a0_m2_fixed_composite_v2)
     a0_add_registration_lane_test(m2_fixed_composite_registration_text_contracts tests/fixed_composite_registration_text_tests.cpp)
     target_include_directories(m2_fixed_composite_registration_text_contracts PRIVATE src/phase0/include)
     target_link_libraries(m2_fixed_composite_registration_text_contracts PRIVATE a0_m2_capture_registration)

@@ -1,6 +1,7 @@
 #include "a0/m2/experimental/capture_registration.hpp"
 
 #include "a0/common/protocol_json.hpp"
+#include "a0/m2/experimental/confirmed_position.hpp"
 #include "a0/m2/experimental/fixed_composite_maps.hpp"
 
 #include <algorithm>
@@ -24,10 +25,10 @@ namespace sg=seam_gate;
 namespace json=a0::common::protocol_json;
 
 // ---- Writing ----
-// Numbers as the formats document says: 17 significant digits, classic locale, -0 as 0.
+// Numbers as the formats document says: 17 significant digits, classic locale, -0 as 0 (FormatRecordNumber, which the log writes with too).
 std::string Num(double v){
     if(!std::isfinite(v))throw std::logic_error("a report number is not finite");
-    std::ostringstream out;out.imbue(std::locale::classic());out<<std::setprecision(17)<<(v==0?0.0:v);return out.str();
+    return FormatRecordNumber(v);
 }
 std::string Int(std::uint64_t v){return std::to_string(v);}
 std::string Text(std::string_view v){return "\""+json::JsonEscape(v)+"\"";}

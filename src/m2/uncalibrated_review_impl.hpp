@@ -70,6 +70,12 @@ bool SameLensRaster(const render::OutputRaster& a,const render::OutputRaster& b)
         a.dpi==b.dpi && a.width_pixels==b.width_pixels && a.height_pixels==b.height_pixels;
 }
 }
+// RegisteredMappingCoverOnThreads, exported (declared in still_review.hpp) so that a test can hold it against CheckRegisteredMappingCover: a hand
+// step of the confirmed position is checked with the one before the capture makes the other, so the two have to answer alike (#437).
+MappingCoverCheck RegisteredMappingCoverOfCapturedFrames(const render::DocumentRenderParameters& parameters,const RegisteredMapping& mapping,
+    std::uint32_t seam_column,const SeamBlendSettings& blend,const render::BgrImage& a,const render::BgrImage& b,unsigned threads){
+    return RegisteredMappingCoverOnThreads(parameters,mapping,seam_column,blend,a,b,threads);
+}
 #include "still_review_report_impl.hpp"
 StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
     const auto active=[&]{if(std::chrono::steady_clock::now()>=r.deadline)throw std::runtime_error("review transaction deadline; files retained");};

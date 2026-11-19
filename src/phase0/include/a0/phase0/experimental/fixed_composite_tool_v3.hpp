@@ -1,4 +1,5 @@
 #pragma once
+#include "a0/m2/experimental/confirmed_position.hpp"
 #include "a0/m2/experimental/fixed_composite_condition_v2.hpp"
 #include "a0/m2/experimental/fixed_composite_condition_v3.hpp"
 #include "a0/m2/experimental/fixed_composite_creation.hpp"
@@ -122,28 +123,13 @@ inline render::Point RelativeDisplacement(const cr::PoseModel& model,const cr::P
 inline cr::PoseParameters Added(const cr::PoseParameters& a,const cr::PoseParameters& b){
     return {a.rx_deg+b.rx_deg,a.ry_deg+b.ry_deg,a.rz_deg+b.rz_deg,a.tx_mm+b.tx_mm,a.ty_mm+b.ty_mm,a.tz_percent+b.tz_percent};
 }
-// The pose change (rz as entered, tx and ty found) whose displacement at the seam column's middle row is (dx, dy). Newton on two unknowns
-// with a finite-difference Jacobian; the displacement is almost linear in them, so a few steps are enough. Throws when it does not converge.
+// The pose change (rz as entered, tx and ty found) whose displacement at the seam column's middle row is (dx, dy). The condition's manual adjustment
+// has no paper surface, so this is the one expression of the confirmed position (confirmed_position.hpp, SolveHandChange) with the table plane for
+// the surface; the centre of camera A and the plane origin act only for a surface. Throws when it does not converge.
 inline cr::PoseParameters SolveManualChange(const cr::PoseModel& model,const cr::PlaneFrame& frame,const cr::PoseParameters& base,
     const m2::FixedCompositeRevisionChangeV3::Entered& entered,double x,double y){
-    cr::PoseParameters delta{};delta.rz_deg=entered.rotation_deg;
-    const auto at=[&](const cr::PoseParameters& d){return RelativeDisplacement(model,frame,base,Added(base,d),x,y);};
-    constexpr double kStepMm=1e-3,kToleranceMm=1e-12;
-    for(int i=0;i<12;++i){
-        const auto d=at(delta);
-        const double ex=entered.seam_dx_px-d.x,ey=entered.seam_dy_px-d.y;
-        if(std::hypot(ex,ey)<1e-10)return delta;
-        auto px=delta;px.tx_mm+=kStepMm;auto py=delta;py.ty_mm+=kStepMm;
-        const auto dx=at(px),dy=at(py);
-        const double a=(dx.x-d.x)/kStepMm,c=(dx.y-d.y)/kStepMm,b=(dy.x-d.x)/kStepMm,e=(dy.y-d.y)/kStepMm;   // [a b; c e] (tx, ty) = (ex, ey)
-        const double det=a*e-b*c;
-        if(!(std::abs(det)>kToleranceMm))throw std::invalid_argument("the seam displacement does not determine a translation");
-        delta.tx_mm+=(ex*e-b*ey)/det;delta.ty_mm+=(a*ey-c*ex)/det;
-        if(!std::isfinite(delta.tx_mm) || !std::isfinite(delta.ty_mm))throw std::invalid_argument("the seam displacement gives no pose");
-    }
-    const auto d=at(delta);
-    if(std::hypot(entered.seam_dx_px-d.x,entered.seam_dy_px-d.y)>1e-6)throw std::invalid_argument("the seam displacement could not be turned into a pose");
-    return delta;
+    return m2::SolveHandChange(model,cr::CameraCentre{},render::Point{},frame,m2::RegisteredMapping{base,{},std::nullopt},
+        m2::HandValues{entered.seam_dx_px,entered.seam_dy_px,entered.rotation_deg},x,y);
 }
 // The largest displacement along the seam column between two poses (rows every 32, the estimator's measure).
 inline double MaximumSeamDisplacement(const cr::PoseModel& model,const cr::PlaneFrame& frame,const cr::PoseParameters& from,const cr::PoseParameters& to,

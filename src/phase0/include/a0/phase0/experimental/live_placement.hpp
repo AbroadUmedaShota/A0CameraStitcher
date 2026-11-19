@@ -1,4 +1,5 @@
 #pragma once
+#include "a0/m2/experimental/confirmed_position.hpp"
 #include "a0/m2/experimental/registration_mapping.hpp"
 #include "a0/phase0/experimental/live_registration_tracker.hpp"
 #include <cmath>
@@ -103,9 +104,7 @@ struct LivePlacementView {
 // `prefix` goes in front of every key (a line that carries two positions).
 [[nodiscard]] inline std::string LivePlacementNumber(double value){
     if(!std::isfinite(value))return std::string("nan");
-    if(value==0)return std::string("0");
-    std::ostringstream s;s.imbue(std::locale::classic());s<<std::setprecision(17)<<value;
-    return s.str();
+    return a0::m2::experimental::FormatRecordNumber(value);
 }
 [[nodiscard]] inline std::string LivePlacementFields(const a0::m2::experimental::RegisteredMapping& mapping,std::string_view prefix={}){
     const auto number=[](double value){return LivePlacementNumber(value);};
