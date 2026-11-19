@@ -95,8 +95,7 @@ Issue #417（撮影ごとに図面の中身で左右のカメラの継ぎ目を�
 
 - `translation` は書かない（v7 と同じ）
 - 最上位の並び: `schema`, `pairId`, `state`, `productQualityAccepted`, `physicalScaleVerified`, `liveToStillFieldOfViewVerified`, `automaticRetryCount`, `inputs`, `previewGeometry`, `mountOrientation`（あれば）, `sourceDimensions`, `output`, `geometryBasis`, `fixedCompositeRegistration`, `blend`, `warnings`, `assessment`
-- 設計 11.27.2 の表は最上位の欄の 1 つを `seamBlend` と書いているが、v7 の JSON の名前は `blend`。「v7 と同じ」を優先して `blend` とする（※要確認）
-- 依頼文は `surface`・`parallax`・`folds`・`geometryLevel`・`gate` を最上位と書いたが、追補の 11.27.2 に合わせて `fixedCompositeRegistration` の中に置く
+- `surface`・`parallax`・`folds`・`geometryLevel`・`gate` は最上位ではなく `fixedCompositeRegistration` の中に置く（追補の 11.27.2）
 
 ### 4.2 `fixedCompositeRegistration`
 
@@ -109,13 +108,13 @@ Issue #417（撮影ごとに図面の中身で左右のカメラの継ぎ目を�
 | `layout` | `layout`（`RegistrationGeometry`） | `{mixingWidthPx, omegaMarginPx, guardPx, bandHalfWidthPx}` 整数 | 必須 | J8 | |
 | `basePose` | `base_pose` | 条件の写し（3 節と同じ 6 値） | 必須 | J8 | |
 | `limits` | `limits`（`RegistrationLines`） | 判定に使った線の写し（4.3） | 必須 | J8 | |
-| `registration` | `registration.registration`（`RegistrationResult`） | オブジェクト（4.6） | 必須 | EST（構造体）、J8（書く） | `design`・`display.outputFrame` の中身 |
+| `registration` | `registration.registration`（`RegistrationResult`） | オブジェクト（4.6） | 必須 | EST（構造体）、J8（書く） | `design` の中身 |
 | `surface` | `registration.surface`（`SurfaceEstimate`） | オブジェクト（4.7） | 必須 | EST、J8 | |
-| `parallax` | `registration.parallax`（`ParallaxResult`） | オブジェクト（4.8） | 必須 | PX1（構造体）、J8 | `design`・`profile` の要素の並び |
-| `folds` | `registration.parallax.folds` | 線の列（空可） | 必須 | PX1 | 要素の欄 |
+| `parallax` | `registration.parallax`（`ParallaxResult`） | オブジェクト（4.8） | 必須 | PX1（構造体）、J8 | |
+| `folds` | `registration.parallax.folds` | 線の列（空可） | 必須 | PX1 | |
 | `pointSource` | `registration.point_source` | null か オブジェクト（4.8.1） | 必須 | J8 | |
 | `geometryLevel` | `registration.level` | オブジェクト（4.9） | 必須 | J8 | |
-| `gate` | `registration.gate` | オブジェクト（4.10） | 必須 | GΩ（構造体）、J8 | `lift`・`wideSearch`・`design` の中身 |
+| `gate` | `registration.gate` | オブジェクト（4.10） | 必須 | GΩ（構造体）、J8 | |
 | `timeBudget` | `registration.time_budget` | オブジェクト（4.11） | 必須 | J8 | |
 | `geometryHash` | `registration.geometry_hash` | ハッシュ | 必須 | J8（関数の宣言は C0） | |
 
@@ -387,7 +386,7 @@ v8 との差はこれだけで、ほかの欄は名前・型・単位・並び�
 | `time-budget` | notice | `none` |
 | `position-by-hand` | notice | `none`（v9 のみ。4.13.4） |
 | `position-from-live` | notice | `none`（v9 のみ） |
-| `estimate-beyond-envelope` | notice | `check-camera-mount`（v9 のみ） |
+| `estimate-beyond-envelope` | unverified | `check-camera-mount`（v9 のみ。4.13.4） |
 
 ### 5.2 成分の符号（`component`）
 
@@ -415,11 +414,9 @@ v8 との差はこれだけで、ほかの欄は名前・型・単位・並び�
 | 条件 `registration.live` | `null`（ライブの推定は接続済み。null の間は走らない） | 所有者（値の案は LC、設計 11.29 N4） |
 | 条件 `revisionRules.manualAdjustmentMaxSeamPx` | `null`（上限なし） | 所有者の決定 9 により null のまま |
 | 条件 `registration.surfaceScaleWarnPercent` の値 | `null`（警告なし） | 所有者の決定 10 により null のまま |
-| 報告 `registration.design`・`parallax.design`・`gate.design` | `{}` | 設計定数が決まった順に各担当 |
-| 報告 `registration.display.outputFrame` | `null` | EST |
-| 報告 `parallax.profile` の要素の並び | `[]` | PX1 |
-| 報告 `folds` の要素の欄 | `[]` | PX1 |
-| 報告 `gate.lift`・`gate.wideSearch` の中身 | `null` | GΩ |
+| 報告 `registration.design` | `{}` | 設計定数が決まった担当 |
+
+前にこの表にあった報告の `parallax.design`・`gate.design`・`registration.display.outputFrame`・`parallax.profile` の要素・`folds` の要素・`gate.lift`・`gate.wideSearch` は、中身を決めた（4.6・4.8・4.10）。読み手はその中身を厳格に確かめる。
 
 ## 7. 設計・追補・依頼文との差
 

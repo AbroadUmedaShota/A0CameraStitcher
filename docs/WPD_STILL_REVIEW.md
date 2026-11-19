@@ -815,7 +815,7 @@ check_seconds=<検査の秒数>
 
 ## 条件 v3 の両台撮影の保存の流れとログ (#417 J8w)
 
-> 設計は [固定の合成条件に紙面と姿勢を足す設計](design/fixed-composite-registration.md) の 11.9（JPEG の経路の順）、追補の 11.19.4（改訂の置き方）・11.25（180 秒の期限）。開発用プレビューの「両台撮影」（`SavePairReview`）が、設定のフォルダに条件 v3 の改訂があるとき、報告 v8 を書く経路に入る。撮影の手順（シャッター、取り込み、180 秒の期限、原画像の保存と hash）は変えていない。
+> 設計は [固定の合成条件に紙面と姿勢を足す設計](design/fixed-composite-registration.md) の 11.9（JPEG の経路の順）、追補の 11.19.4（改訂の置き方）・11.25（180 秒の期限）。開発用プレビューの「両台撮影」（`SavePairReview`）が、設定のフォルダに条件 v3 の改訂があるとき、報告 v9 を書く経路に入る（#437 段 2 より前は v8）。v9 は、窓がライブの確定した位置を渡した時にその位置と使い方を記録する版で、欄は [書式の文書](design/fixed-composite-registration-formats.md) の 4.13（`confirmedPosition`・`confirmedPositionCheck`・段 `confirmed`）。撮影の手順（シャッター、取り込み、180 秒の期限、原画像の保存と hash）は変えていない。
 
 ### どの条件で合成するか
 
@@ -823,7 +823,7 @@ check_seconds=<検査の秒数>
 
 | 設定のフォルダの状態 | 撮影の結果 |
 |---|---|
-| 有効な改訂だけ | 新しい経路。報告は v8 |
+| 有効な改訂だけ | 新しい経路。報告は v9（位置を渡されない撮影の v9 は、v8 にスキーマの文字列と、`confirmedPosition`・`confirmedPositionCheck` の 2 つの null を足した物） |
 | v2 の条件だけ | 今までの経路。報告は v7（動作・ログ・報告のバイトは変えていない） |
 | v1 の条件だけ | 今までの経路。報告は v6（同上） |
 | 条件が無い（改訂のフォルダが無い、または改訂が 1 つも無い） | 合成しない。原画像 2 枚を残す。理由 `condition-absent` |
@@ -841,7 +841,7 @@ v2 から v3 への切り替えは人が行う: v2 のファイルを別の名�
 1. 両台のシャッター、原画像の取り込みと保存（変わらない）。
 2. 条件を読む（上の表）。使えなければ、原画像 2 枚を残して理由を画面とログに出して終わる。
 3. 原画像 2 枚を同時に復号する。ゲートが終わるまで持ち続ける（7360×4912 の 2 枚で約 217 MB）。
-4. 姿勢と紙面の推定 → 層 2 → 段（G1〜G4）の選び → 合成 → 符号化・JPEG の書き込みと読み直し → Ω のゲート → 報告 v8（追補 11.25 の順。合成を先に書き、ゲートは後）。
+4. 姿勢と紙面の推定 → 層 2 → 段（G1〜G4。窓が確定した位置を渡した時は、その出どころで候補の順が変わり `confirmed` も入る。書式の文書 4.13.3）の選び → 合成 → 符号化・JPEG の書き込みと読み直し → Ω のゲート → 報告 v9（追補 11.25 の順。合成を先に書き、ゲートは後）。
 5. **基準外でも合成は保存する**。警告は画面の状態の行・ログ・報告に出るが、「書き出せません」とは言わない。
 
 **期限は延ばさない。** 期限は撮影の要求から 180 秒（`RequestCapture`）で、そのままの時刻を書き手の `StillReviewRequest::deadline` に渡す。書き手は復号の後に残りの時間を測り、`PlanReviewStages` が回す段を決める（落とす順は追補 11.25.3: 広い探索の診断 → 帯の全域の測定 → 層 2 → 折り目の当て直し → 細の段と当てはめ → 粗の段 → ゲート。合成・符号化・書き込み・報告は落とさない）。落とした段は報告の `timeBudget`・状態の行・ログに出る。時刻で変わるのは回す段だけで、回した段の値は時刻に依らない。合成の JPEG を保存して検証した後に期限を過ぎても、出来上がった JPEG と報告は消さない（所有者の決定）。ゲートが始まる前に過ぎていれば `not-run` として報告を書き、状態の行に「制限時間（180秒）を過ぎましたが、合成は作れています」を足す。
@@ -859,15 +859,16 @@ B の傾き 0.4°（許容 1°）、回転 0.8°（許容 2°）、高さ +3 mm�
 時間が足りなかったため、次の処理を省きました: 細かい位置合わせ        ← 省いた段があるときだけ
 ```
 
-上は文の形の例で、数値は説明用。G2 以下では 2 行目の後ろに理由（「上の段に必要な推定が確かでないか、使えなかったため」など）が付く。長い文は折り返され、4 行を超えた分は画面では切れる。全文はログと報告にある。確認画面（#418）が警告の一覧を出す。
+上は文の形の例で、数値は説明用。G2 以下では 2 行目の後ろに理由（「上の段に必要な推定が確かでないか、使えなかったため」など）が付く。長い文は折り返され、4 行を超えた分は画面では切れる。全文はログと報告にある。確認画面（#418）が警告の一覧を出す。v9 で確定した位置を渡された撮影では、段の文の次の行に位置の文が入る（例「手で直した位置で JPEG を作りました（自動で測ると継ぎ目で最大 1.50 px 違います）」「ライブで決めた位置で作りました（撮影の後の自動調整では位置を決められませんでした）」）。位置で作れずに条件の位置で作った時（「手で直した位置では継ぎ目が重なりの外に出るため、JPEG は条件の位置で作りました。ライブは手で直した位置のままです」など）と、撮影の前に条件が変わって位置を使わなかった時も、そう言う。位置が条件の位置のままの時と、原寸の推定を使った時は、この行は無い。
 
 ### ログの読み方
 
-ログ（標準出力）の行は `key=value` で、機体の識別子と道筋は出さない（警告の文にも含まれない）。v8 の撮影では次の行が `pair_review_saved` と `pair_review_blend method=fixed-seam` の後に続く。
+ログ（標準出力）の行は `key=value` で、機体の識別子と道筋は出さない（警告の文にも含まれない）。条件 v3 の撮影（報告 v8・v9）では次の行が `pair_review_saved` と `pair_review_blend method=fixed-seam` の後に続く。v9 の撮影では、どの行も書いた直後にファイルから読み直した報告から書く。
 
 | 行の先頭 | 中身 |
 |---|---|
-| `pair_review_registration level=G1` | 段（`G1`〜`G4`）、`estimate=`（姿勢の推定の状態: `verified`・`out_of_envelope`・`undetermined`）、`surface=`（`estimated`・`not-estimated`・`disabled`）、`layer2=`（`applied`・`not-applied`・`disabled`）、`applied_pose/surface/parallax=`（その段で写像に入れた物）、`gate=`（`pass`・`fail`・`undetermined`・`not-run`）と `gate_cause=`、`gate_maximum_px=`（ゲートの最大。無ければ `none`）、`assessment=`（`within-criteria`・`outside-criteria`・`not-judged`）、警告の数（`warnings=`、うち `exceeded=`・`unverified=`・`notices=`）、`condition_sequence=`（使った改訂の番号）、`geometry_hash=`、`quality_accepted=0` |
+| `pair_review_registration level=G1` | 段（`G1`〜`G4`、v9 では `confirmed` も）、`estimate=`（姿勢の推定の状態: `verified`・`out_of_envelope`・`undetermined`）、`surface=`（`estimated`・`not-estimated`・`disabled`）、`layer2=`（`applied`・`not-applied`・`disabled`）、`applied_pose/surface/parallax=`（その段で写像に入れた物）、`gate=`（`pass`・`fail`・`undetermined`・`not-run`）と `gate_cause=`、`gate_maximum_px=`（ゲートの最大。無ければ `none`）、`assessment=`（`within-criteria`・`outside-criteria`・`not-judged`）、警告の数（`warnings=`、うち `exceeded=`・`unverified=`・`notices=`）、`condition_sequence=`（使った改訂の番号）、`geometry_hash=`、`quality_accepted=0` |
+| `pair_review_confirmed_position` | 窓が渡した確定した位置（v9）。位置を渡された時は `given=1 serial=… source=… base_source=…|none reference_camera=CAM-A target_camera=CAM-B <9 数>`、続けて手の位置なら `manual_seam_dx_px=… manual_seam_dy_px=… manual_rotation_deg=…`（手でない時は `manual_entered=none`）、`condition_sha256=… condition_matches=0|1 used=0|1 seam_difference_px=<数>|none level=… quality_accepted=0`。渡されなかった時は `given=0 used=0 quality_accepted=0`。9 数・2 台の名前・手の量は、ライブの行 `C live_placement` と同じ関数で書くので、欄の名前ごとに字面で突き合わせられる（欄の並びは違う。書式の文書 4.13.6） |
 | `pair_review_registration_pose` | 推定した姿勢の 4 成分を `成分=値/許容`（許容を超えたものは末尾に `!`）と、`surface_height_mm=`・`surface_tilt_deg=`（紙面）、`text=`（画面と同じ文） |
 | `pair_review_registration_gate text=` | ゲートの状態と最大の文 |
 | `pair_review_registration_warning index=N class=… code=…` | 警告 1 件ごと。`class=` は `exceeded`・`unverified`・`notice`、`code=` は報告の符号、`applied=` は補正を写像に入れたか、`text=` が画面と同じ文（基準外、確かめられていません、お知らせの順は報告の符号の順） |
