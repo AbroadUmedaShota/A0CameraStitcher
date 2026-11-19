@@ -21,6 +21,7 @@ HandStepVerdict CheckHandStep(const HandStepInput& in){
     if(raster.height_pixels==0 || in.seam_column>=raster.width_pixels)throw std::invalid_argument("the seam column is outside the output raster");
     if(in.hand_base.parallax)throw std::invalid_argument("a hand step starts from a position without layer 2");
     if(!Finite(in.hand_base))throw std::invalid_argument("a hand step needs a finite starting position");
+    if(in.threads<1 || in.threads>kSeamBlendMaxThreads)throw std::invalid_argument("a hand step's cover check takes 1..256 threads");
 
     HandStepVerdict verdict;
     verdict.mapping=in.hand_base;
@@ -56,7 +57,7 @@ HandStepVerdict CheckHandStep(const HandStepInput& in){
     // The cheap cover check, the way SelectGeometryLevel reads a candidate: a mapping that cannot be checked does not cover.
     verdict.cover_checked=true;
     try{
-        const auto cover=CheckRegisteredMappingCover(*in.parameters,result,in.seam_column,in.blend);
+        const auto cover=CheckRegisteredMappingCover(*in.parameters,result,in.seam_column,in.blend,in.threads);
         verdict.seam_covered=cover.seam_covered;verdict.output_covered=cover.output_covered;
     }catch(const std::invalid_argument&){
         verdict.seam_covered=false;verdict.output_covered=false;

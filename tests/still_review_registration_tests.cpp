@@ -289,6 +289,13 @@ void Refusals(const Outcome& o,const Settings& s,const Frames& frames){
     // The registered composite is exclusive.
     auto both=RequestFor(frames,"both",s,4);both.blend=BlendMethod::seam_cut;REJECT(WriteUncalibratedStillReview(both));
     auto no_hash=RequestFor(frames,"no-hash",s,4);no_hash.fixed_composite_registration->condition_sha256="x";REJECT(WriteUncalibratedStillReview(no_hash));
+    // A thread count past the limit is refused with its own reason (not as a missing condition), before anything is made.
+    {
+        auto many=RequestFor(frames,"many-threads",s,kSeamBlendMaxThreads+1);
+        std::string reason;
+        try{(void)WriteUncalibratedStillReview(many);}catch(const std::invalid_argument& e){reason=e.what();}
+        CHECK(reason=="registered fixed composite review: thread count must be 0 (one per hardware thread) or 1..256" && !fs::exists(frames.root/"many-threads"));
+    }
     // Another orientation: no composite, only the originals.
     auto turned=RequestFor(frames,"turned-capture",s,4);turned.geometry.orientation=MountOrientation::rotated_180;
     bool skipped=false;try{(void)WriteUncalibratedStillReview(turned);}catch(const FixedCompositeUnavailable& e){skipped=e.Skip()==FixedCompositeSkip::orientation_differs;}

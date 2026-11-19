@@ -435,9 +435,9 @@ struct StillReviewResult {
 // Exists only in the explicitly enabled development preview build. A separate
 // uncalibrated review report, never a successful product StitchJob manifest.
 StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& request);
-// The cheap check of a candidate mapping that the capture's registration makes with the decoded frames of the pair (design 11.23.4): the seam with
+// The cheap check of a candidate mapping that the capture's registration makes (design 11.23.4): the seam with
 // half the blend width inside the overlap on every row, and the outer edge of the output covered. Exported for the tests, which hold it against
-// CheckRegisteredMappingCover (fixed_composite_creation_v3.hpp) for the same mapping; the two give the same answer.
+// CheckRegisteredMappingCover (fixed_composite_creation_v3.hpp) for the same mapping: it calls it, on `threads` threads. The frames are not read.
 [[nodiscard]] MappingCoverCheck RegisteredMappingCoverOfCapturedFrames(const render::DocumentRenderParameters& parameters,const RegisteredMapping& mapping,
     std::uint32_t seam_column,const SeamBlendSettings& blend,const render::BgrImage& a,const render::BgrImage& b,unsigned threads);
 struct SavedStillReview {

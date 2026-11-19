@@ -8,12 +8,14 @@
 // rig profile v2 fixture folder. The expected answer of one check is the other check's: neither is made from the function that is checked here.
 #include "a0/m2/experimental/confirmed_position_check.hpp"
 #include "a0/m2/experimental/fixed_composite_creation_v3.hpp"
+#include "a0/m2/experimental/fixed_composite_maps.hpp"
 #include "a0/m2/experimental/seam_blend.hpp"
 #include "a0/m2/experimental/still_review.hpp"
 #include "a0/m2/optical_planner.hpp"
 #include "confirmed_position_rig.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <functional>
@@ -44,6 +46,33 @@ struct Answer {
 template<class Call> Answer Safe(Call call){
     try{const auto c=call();return {c.seam_covered,c.output_covered};}
     catch(const std::invalid_argument&){return {false,false};}
+}
+// The answer as it is, an exception included (its type and text): what each caller is given before it reads it its own way.
+template<class Call> std::string Exact(Call call){
+    try{const auto c=call();return std::string("seam=")+(c.seam_covered?"1":"0")+" output="+(c.output_covered?"1":"0");}
+    catch(const std::invalid_argument& e){return std::string("invalid_argument: ")+e.what();}
+    catch(const std::exception& e){return std::string("other: ")+e.what();}
+}
+// The cover as it was made before the check stopped making a frame (#437): the seam on two blank frames of the full sensor size, and the outer
+// edge counted by this test (a sample covered by neither camera's sensor).
+m2::MappingCoverCheck CoverWithFrames(const render::DocumentRenderParameters& parameters,const m2::RegisteredMapping& mapping,std::uint32_t seam,
+    const render::BgrImage& frame_a,const render::BgrImage& frame_b){
+    const auto input=m2::RegisteredDocumentMappedFixedSeamInput(parameters,mapping,seam);
+    m2::MappingCoverCheck cover;
+    try{cover.seam_covered=m2::CanRenderMappedFixedSeam(frame_a,frame_b,input,seam,m2::kSeamBlendDesign);}
+    catch(const std::invalid_argument&){cover.seam_covered=false;}
+    const auto covered=[&](const render::OutputToCamera& map,double x,double y){
+        render::Point raw{};
+        if(!map({x,y},raw))return false;
+        if(!std::isfinite(raw.x) || !std::isfinite(raw.y))throw std::invalid_argument("output-to-camera mapping returned nonfinite camera coordinates");
+        return raw.x>=0.0 && raw.y>=0.0 && raw.x<static_cast<double>(frame_a.width) && raw.y<static_cast<double>(frame_a.height);
+    };
+    std::uint32_t uncovered=0;
+    const auto edge=[&](std::uint32_t x,std::uint32_t y){if(!covered(input.camera_a,x,y) && !covered(input.camera_b,x,y))++uncovered;};
+    for(std::uint32_t x=0;x<input.width;++x){edge(x,0);if(input.height>1)edge(x,input.height-1);}
+    for(std::uint32_t y=1;y+1<input.height;++y){edge(0,y);if(input.width>1)edge(input.width-1,y);}
+    cover.output_covered=uncovered==0;
+    return cover;
 }
 
 struct Family {
@@ -96,6 +125,7 @@ int main(int argc,char* argv[]){
 
         std::map<std::string,int> seen;   // how many mappings gave each answer
         int compared=0,disagreed=0;
+        int unchanged=0,changed=0;        // the cover against the cover as it was made with frames, and the threads of its scan
         for(const auto& output:outputs){
             auto parameters=rig.binding.parameters;parameters.raster=output.raster;
             const auto fast=[&](const m2::RegisteredMapping& m){
@@ -107,6 +137,13 @@ int main(int argc,char* argv[]){
             const auto compare=[&](const m2::RegisteredMapping& m,const std::string& where){
                 const auto a=fast(m),b1=capture(m,1),b3=capture(m,3);
                 ++compared;
+                {
+                    const auto before=Safe([&]{return CoverWithFrames(parameters,m,output.seam,frame_a,frame_b);});
+                    bool same=a==before;
+                    for(const unsigned threads:{2u,4u,8u})same=same && Safe([&]{return m2::CheckRegisteredMappingCover(parameters,m,output.seam,m2::kSeamBlendDesign,threads);})==a;
+                    ++unchanged;
+                    if(!same){++changed;std::cerr<<"  CHANGED ("<<output.name<<", "<<where<<"): check seam="<<a.seam<<" output="<<a.output<<"; with frames seam="<<before.seam<<" output="<<before.output<<'\n';}
+                }
                 if(!(a==b1) || !(a==b3)){
                     ++disagreed;
                     std::cerr<<"  DISAGREE ("<<output.name<<", "<<where<<"): check seam="<<a.seam<<" output="<<a.output<<"; capture seam="<<b1.seam<<" output="<<b1.output<<'\n';
@@ -141,6 +178,96 @@ int main(int argc,char* argv[]){
         CHECK(seen["seam not covered, output covered"]>5);
         CHECK(seen["seam covered, output not covered"]>5);
         CHECK(seen["neither"]>5);
+        // The cover with no frame answers as the cover that made one, on every mapping above, and on 1, 2, 4 and 8 threads.
+        CHECK(unchanged==compared && changed==0);
+
+        // The three checks of a position give the same answer to the same position: a hand press (CheckHandStep, which the window runs on its
+        // threads), an estimate of the live view before it is drawn (the window gives the runtime CheckRegisteredMappingCover) and a capture's
+        // candidate (RegisteredMappingCoverOfCapturedFrames). Hand steps along the seam, across it and about the axis are taken up to where the
+        // cover refuses them, with an envelope too wide to refuse anything, and the three answer on the steps on both sides of that edge.
+        {
+            int hand_compared=0,hand_disagreed=0,hand_refused=0,hand_accepted=0;
+            for(const auto& output:outputs){
+                auto parameters=rig.binding.parameters;parameters.raster=output.raster;
+                if(!Safe([&]{return m2::CheckRegisteredMappingCover(parameters,m2::RegisteredMapping{},output.seam,m2::kSeamBlendDesign);}).Passes())continue;
+                m2::HandStepInput in;
+                in.parameters=&parameters;in.seam_column=output.seam;in.base_pose={};
+                in.envelope.position_mm=1e9;in.envelope.rotation_deg=1e9;in.envelope.tilt_deg=1e9;in.envelope.height_percent=1e9;
+                in.hand_base=m2::RegisteredMapping{};
+                const auto verdict_of=[&](const m2::HandCounts& total,unsigned threads){auto q=in;q.total=total;q.threads=threads;return m2::CheckHandStep(q);};
+                for(const auto& unit:{m2::HandCounts{1,0,0},m2::HandCounts{-1,0,0},m2::HandCounts{0,1,0},m2::HandCounts{0,-1,0},m2::HandCounts{0,0,4},m2::HandCounts{0,0,-4}}){
+                    const auto times=[&](int k){return m2::HandCounts{unit.seam_dx*k,unit.seam_dy*k,unit.rotation*k};};
+                    int k=1;
+                    while(k<4096 && verdict_of(times(k),1).status==m2::HandStepStatus::accepted)k*=2;
+                    if(k>=4096){std::cerr<<"  hand steps ("<<output.name<<"): nothing refused up to "<<k<<" steps\n";continue;}
+                    int low=k/2,high=k;   // low passes (or is 0), high is refused
+                    while(high-low>1){const int mid=(low+high)/2;(verdict_of(times(mid),1).status==m2::HandStepStatus::accepted?low:high)=mid;}
+                    for(int j=std::max(1,low-2);j<=high+2;++j){
+                        for(const unsigned threads:{1u,2u,4u,8u}){
+                            const auto verdict=verdict_of(times(j),threads);
+                            if(verdict.status!=m2::HandStepStatus::accepted && verdict.status!=m2::HandStepStatus::refused_cover)continue;   // unsolvable: no position to compare
+                            const auto estimate=Exact([&]{return m2::CheckRegisteredMappingCover(parameters,verdict.mapping,output.seam,m2::kSeamBlendDesign,threads);});
+                            const auto captured=Exact([&]{return m2::RegisteredMappingCoverOfCapturedFrames(parameters,verdict.mapping,output.seam,m2::kSeamBlendDesign,frame_a,frame_b,threads);});
+                            const std::string hand=std::string("seam=")+(verdict.seam_covered?"1":"0")+" output="+(verdict.output_covered?"1":"0");
+                            // A check that threw is read as "not covered" by the hand step, the runtime and SelectGeometryLevel alike.
+                            const std::string read=estimate.rfind("seam=",0)==0?estimate:std::string("seam=0 output=0");
+                            const bool accepted=verdict.status==m2::HandStepStatus::accepted;
+                            ++hand_compared;(accepted?hand_accepted:hand_refused)+=1;
+                            if(hand!=read || captured!=estimate || accepted!=(read=="seam=1 output=1")){
+                                ++hand_disagreed;
+                                std::cerr<<"  DISAGREE hand step ("<<output.name<<", "<<j<<" steps, "<<threads<<" threads): hand "<<hand<<"; estimate "<<estimate<<"; capture "<<captured<<'\n';
+                            }
+                        }
+                    }
+                }
+            }
+            std::cerr<<"three checks on "<<hand_compared<<" hand positions: accepted "<<hand_accepted<<", refused by the cover "<<hand_refused<<'\n';
+            CHECK(hand_compared>100 && hand_accepted>20 && hand_refused>20 && hand_disagreed==0);
+            // A position that cannot be checked: the estimate's check and the capture's throw the same (the type and the text); a hand step never has
+            // such a position (its start is refused as not a request, and a solved position that is not finite is unsolvable).
+            auto parameters=rig.binding.parameters;parameters.raster=outputs[0].raster;
+            for(const auto& bad:{m2::RegisteredMapping{{std::nan(""),0,0,0,0,0},{},std::nullopt},m2::RegisteredMapping{{},{std::nan(""),0,0},std::nullopt}}){
+                const auto estimate=Exact([&]{return m2::CheckRegisteredMappingCover(parameters,bad,outputs[0].seam,m2::kSeamBlendDesign,4);});
+                const auto captured=Exact([&]{return m2::RegisteredMappingCoverOfCapturedFrames(parameters,bad,outputs[0].seam,m2::kSeamBlendDesign,frame_a,frame_b,4);});
+                std::cerr<<"  a position that is not finite: "<<estimate<<'\n';
+                CHECK(estimate.rfind("invalid_argument: ",0)==0 && captured==estimate);
+                m2::HandStepInput in;in.parameters=&parameters;in.seam_column=outputs[0].seam;
+                in.envelope.position_mm=1;in.envelope.rotation_deg=1;in.envelope.tilt_deg=1;in.envelope.height_percent=1;
+                in.hand_base=bad;in.total=m2::HandCounts{1,0,0};
+                bool refused=false;try{(void)m2::CheckHandStep(in);}catch(const std::invalid_argument&){refused=true;}
+                CHECK(refused);
+            }
+            // Threads outside 1..256: every check refuses them as a request, not as a position that fails.
+            for(const unsigned threads:{0u,m2::kSeamBlendMaxThreads+1}){
+                CHECK(Exact([&]{return m2::CheckRegisteredMappingCover(parameters,m2::RegisteredMapping{},outputs[0].seam,m2::kSeamBlendDesign,threads);})=="invalid_argument: registered mapping cover: thread count must be 1..256");
+                CHECK(Exact([&]{return m2::RegisteredMappingCoverOfCapturedFrames(parameters,m2::RegisteredMapping{},outputs[0].seam,m2::kSeamBlendDesign,frame_a,frame_b,threads);})=="invalid_argument: registered mapping cover: thread count must be 1..256");
+                m2::HandStepInput in;in.parameters=&parameters;in.seam_column=outputs[0].seam;
+                in.envelope.position_mm=1;in.envelope.rotation_deg=1;in.envelope.tilt_deg=1;in.envelope.height_percent=1;
+                in.total=m2::HandCounts{1,0,0};in.threads=threads;
+                bool refused=false;try{(void)m2::CheckHandStep(in);}catch(const std::invalid_argument&){refused=true;}
+                CHECK(refused);
+            }
+            // The time of one hand press's check on this rig's largest output (a record, not a limit: the full-size times are measured apart).
+            {
+                const auto& wide=outputs[2];
+                auto p=rig.binding.parameters;p.raster=wide.raster;
+                m2::HandStepInput in;in.parameters=&p;in.seam_column=wide.seam;
+                in.envelope.position_mm=1e9;in.envelope.rotation_deg=1e9;in.envelope.tilt_deg=1e9;in.envelope.height_percent=1e9;
+                in.total=m2::HandCounts{3,0,0};
+                for(const unsigned threads:{1u,4u}){
+                    in.threads=threads;
+                    std::vector<double> ms;
+                    for(int i=0;i<32;++i){
+                        const auto t0=std::chrono::steady_clock::now();
+                        const auto verdict=m2::CheckHandStep(in);
+                        ms.push_back(std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-t0).count());
+                        if(i==0)CHECK(verdict.cover_checked);
+                    }
+                    std::sort(ms.begin()+2,ms.end());   // the first two are a warm-up
+                    std::cerr<<"info one hand press's check, output "<<wide.raster.width_pixels<<"x"<<wide.raster.height_pixels<<", "<<threads<<" threads: median "<<ms[2+(ms.size()-2)/2]<<" ms, fastest "<<ms[2]<<" ms, slowest "<<ms.back()<<" ms\n";
+                }
+            }
+        }
 
         // A frame that is not of the full size is checked by CheckRegisteredMappingCover itself, so the answer is the same by construction.
         {

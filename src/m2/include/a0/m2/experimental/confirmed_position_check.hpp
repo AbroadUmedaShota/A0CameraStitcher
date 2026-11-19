@@ -18,8 +18,8 @@ namespace a0::m2::experimental {
 //   pose p_b by RegistrationComponentsFromBase; exactly at a limit is inside). The paper surface's range and layer 2's line are not.
 //   A hand step moves position and rotation only, so a position whose tilt or height is already outside the envelope has no step
 //   that leads inside, and a position whose position or rotation is outside has only the steps whose result is inside.
-// - The cover check is CheckRegisteredMappingCover with the condition's profile, the seam column and the design's blend width, the
-//   answer a capture's RegisteredMappingCoverOnThreads gives for the same mapping.
+// - The cover check is CheckRegisteredMappingCover with the condition's profile, the seam column and the design's blend width: the same
+//   function a capture's RegisteredMappingCoverOnThreads calls for the same mapping. `threads` are the threads of its scan.
 // - A sum of 0 in all three counts is not a step. It is accepted, gives hand_base back as it is, and is neither measured against the
 //   envelope nor covered again: that position was the one drawn before the first hand press, and going back to it is always allowed.
 // - Order: the solve (cheap), then the envelope (cheap), then the cover (the costly one), so a refusal by the envelope costs no cover.
@@ -41,6 +41,7 @@ struct HandStepInput {
     content_registration::RegistrationEnvelope envelope;            // the condition's registration.envelope (all four limits set)
     RegisteredMapping hand_base;                                    // the position before the first hand press: its surface is kept, no layer 2
     HandCounts total;                                               // the sum of the amounts entered since
+    unsigned threads{1};                                            // the threads of the cover check's scan (1..kSeamBlendMaxThreads); the verdict does not depend on them
 };
 
 struct HandStepVerdict {
@@ -59,6 +60,7 @@ struct HandStepVerdict {
 };
 
 // Throws std::invalid_argument for input that is not a request (no parameters, a seam column outside the raster, an envelope that is not
-// set, a hand_base that carries layer 2 or is not finite); a step that cannot be taken is a verdict, not an exception.
+// set, a hand_base that carries layer 2 or is not finite, threads outside 1..kSeamBlendMaxThreads); a step that cannot be taken is a verdict,
+// not an exception.
 [[nodiscard]] HandStepVerdict CheckHandStep(const HandStepInput& input);
 }

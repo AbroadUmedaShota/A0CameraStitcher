@@ -1467,7 +1467,7 @@ if(BUILD_TESTING)
         # full-size frame, on mappings that pass and mappings that fail, they answer alike. Full-size blank frames, no camera, no window.
         add_executable(a0_confirmed_position_cover_tests tests/confirmed_position_cover_tests.cpp)
         target_include_directories(a0_confirmed_position_cover_tests PRIVATE src/phase0/include src/common/include)
-        target_link_libraries(a0_confirmed_position_cover_tests PRIVATE a0_m2_offline_stitcher a0_m2_fixed_composite a0_m2_fixed_composite_v2 a0_m2_capture_registration a0_m2_rig_profile_v2 ole32 windowscodecs)
+        target_link_libraries(a0_confirmed_position_cover_tests PRIVATE a0_m2_offline_stitcher a0_m2_fixed_composite a0_m2_fixed_composite_v2 a0_m2_capture_registration a0_m2_confirmed_position a0_m2_rig_profile_v2 ole32 windowscodecs)
         target_compile_definitions(a0_confirmed_position_cover_tests PRIVATE NOMINMAX)
         if(MSVC)
             target_compile_options(a0_confirmed_position_cover_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
