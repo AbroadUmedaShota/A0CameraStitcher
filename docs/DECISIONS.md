@@ -1589,7 +1589,7 @@ T3の確定の前の条件（所有者の承認に入れる）: (1) 計画はCAM
 
 ## ADR-0045: 4台（2×2）の配置に備えて、カメラの名前・位置・継ぎ目と、基準と対象のカメラの欄の呼び方を先に決める（文書だけ）
 
-- 状態: Proposed（#438）。2026-11-18に所有者が、3台目・4台目のカメラの名前、合成の新しい呼び名、その呼び名に直す時期の3点を決めた（下の「ADR-0045の所有者の決定」）。ほかの点は決定待ち。文書だけの案で、コード・書式・試験は変えない。
+- 状態: Proposed（#438）。2026-11-18に所有者が、3台目・4台目のカメラの名前、合成の新しい呼び名、その呼び名に直す時期の3点を決めた（下の「ADR-0045の所有者の決定」）。ほかの点は決定待ち。文書だけの案で、コード・書式・試験は変えない。ただし#434の記録3種だけは、2026-11-19の所有者の決定により、本ADRの採用を待たずに先に形を変えた（下の「ADR-0045の所有者の決定」、今やる物の2）。
 - 決定日: 未定（上の3点は2026-11-18）
 - 関連: #438、#434（撮影の1組からの校正の取り直しと、その記録3種）、#429（継ぎ目の色の計画）、#437（ライブのCの位置P）、ADR-0030、ADR-0031、ADR-0034（rig profile 2.0.0）、ADR-0036（表示専用の合成C）、ADR-0037（縦一直線の継ぎ目）、ADR-0038・ADR-0041（設定の書き込み）、ADR-0043（色の計画）、ADR-0044（不変条件6）、`docs/design/rig-profile-v2.md`、`docs/design/fixed-composite-registration-formats.md`、`docs/design/recalibration-from-pair.md`
 - 背景: 今はD810を2台、左右に並べて使っている（CAM-Aが左、CAM-Bが右。吊り下げで、合成の前に両方の画像を180°回す）。上段に2台・下段に2台の2×2、合わせて4台の配置が前提になる可能性が高い。まだ確定ではない。確定してから書式を直すと、公開済みの書式の版上げと、ライブのCとJPEGのCの一致の試験の書き直しが要る。確定の前に位置合わせや画面を4台用に作り変えると、使わないかもしれない作りを抱える。そこで呼び方だけを先に決め、これから足す書式・記録の欄を、4台になっても名前を変えずに済む形にする。
@@ -1606,11 +1606,18 @@ T3の確定の前の条件（所有者の承認に入れる）: (1) 計画はCAM
 
 2026-11-19に、所有者が#434の記録3種（推定の記録・校正の報告・確定の記録）について次の3点を決めた。決定4・5を、この3種の分だけ先に決めた事になる。ADR全体の状態はProposedのまま。
 
-1. 形は、基準と対象のカメラの欄を足し、欄の名前に記号を埋めている所をaliasで引く形に揃える。`referenceCamera`・`targetCamera`を3種に足し、推定の記録の`inputs`と校正の報告の`originals`を`originalSha256`（aliasを鍵にしたオブジェクト）に、`cameraBResidualPx`を`targetResidualPx`に、校正の報告の`edgeShareA`・`edgeShareB`を`edgeShare`（aliasを鍵にしたオブジェクト）に改める。
-2. 版はv1のまま。公開した後に3種の形を変える時はv2にする。この決まりを`docs/design/recalibration-from-pair.md`の6節に書いた。
-3. 校正をONにしたビルドを実機で動かした事は無い。実機に古い形の記録は無い前提で、古い形を読む仕組みは作らない。
+1. 形は「揃える」案（基準・対象のカメラの欄を足し、欄の名前にA・Bを埋めている所をカメラの名前で引く形に改める）。
+2. 版はv1のまま。公開した後に形を変える時はv2にする。
+3. 校正をONにしたビルドを実機で動かした事は無い。
 
-この3点を、今やる物の2、未決の1、所有者に確かめる事の表に入れた。
+これに合わせて決めた事（設計とレビュー。所有者の決定ではない）:
+
+- 欄の名前: `referenceCamera`・`targetCamera`を3種に足し、推定の記録の`inputs`と校正の報告の`originals`を`originalSha256`（aliasを鍵にしたオブジェクト）に、`cameraBResidualPx`を`targetResidualPx`に、校正の報告の`edgeShareA`・`edgeShareB`を`edgeShare`（aliasを鍵にしたオブジェクト）に改めた。
+- 版の決まりの書き方: 公開のmainに入った後に、欄を足す・除く、欄の名前・型・意味を変える時は新しい版（v2）にする。`docs/design/recalibration-from-pair.md`の6節に書いた。
+- 書式の文書（`docs/design/fixed-composite-registration-formats.md`）の1節の決まり8は条件v3・報告v8の決まりで、記録3種には及ぼさない（未決の1）。
+- 決定3から、実機に改める前の形の記録は無い前提とし、改める前の形を読む仕組みは作らない。
+
+所有者の決定とこれに合わせて決めた事を、決定5の表、今やる物の2、影響と改定の対象、未決の1、所有者に確かめる事の表に入れた。
 
 ### 今の呼び方（コードで確かめた事）
 
@@ -1620,7 +1627,7 @@ T3の確定の前の条件（所有者の承認に入れる）: (1) 計画はCAM
 - 書式の中でカメラを書く形が4つ混ざっている。
   1. aliasを鍵にしたオブジェクト: rig profile 2.0.0の`cameras`・`calibration.inputSha256`・`calibration.fitResidualPixels`（`docs/schemas/rig-profile.v2.schema.json`）、照合のファイル。
   2. aliasを値に持つ欄: 報告v1〜v8の`inputs[].alias`、`a0.saved-review-evaluation-inputs.v1`の`cameraAlias`。
-  3. 欄の名前や符号に記号を埋めた物: #434の記録の`cameraASha256`・`cameraBSha256`・`cameraBResidualPx`、色の計画v1の`bindings[].kind`の`capture-original-a`・`capture-original-b`。
+  3. 欄の名前や符号に記号を埋めた物: #434の記録の`cameraASha256`・`cameraBSha256`・`cameraBResidualPx`（2026-11-19に決定4の形に改めた）、色の計画v1の`bindings[].kind`の`capture-original-a`・`capture-original-b`。
   4. 名前と位置を1つにした符号: profileの`documentPlane.cameraOrder`（`CAM-A-left-CAM-B-right`・`CAM-A-top-CAM-B-bottom`）と、コードの`StitchLayout`。
 - 左右は文書の座標（x右・y下、profileの`conventions.documentPlane`）で、取付の向きを当てた後の向き。吊り下げでは画像の左右が部屋と逆に写るので、`rotated-180`では両方の画像を180°回してからAを左、Bを右に並べる（`docs/WPD_PREVIEW_MERGE.md`の#361の節）。取付の向き（条件v3の`mountOrientation`）はリグ全体で1つの値で、片側だけの回転は対象外。
 - 基準と対象: 条件v3の`basePose`、報告v8の`registration.pose`、ライブの位置P（`live_placement.hpp`）、#434の推定の記録の`estimate.pose`は、どれもCAM-Aに対するCAM-Bの姿勢で、どちらのカメラかを書く欄が無い。色もAを基準にBへ倍率を掛ける（`seam_blend.hpp`の#415の注、ADR-0043）。
@@ -1675,7 +1682,7 @@ T3の確定の前の条件（所有者の承認に入れる）: (1) 計画はCAM
    - ログ（`key=value`の行）は同じ語のsnake_case（`reference_camera=CAM-A target_camera=CAM-B`）、継ぎ目は`seam_direction=vertical seam_cameras=CAM-A,CAM-B`の形にする。
    - 値はaliasだけ。本体の識別子は書かない（今の決まりのまま）。
 
-5. **今の2台の書式との対応**: 今ある書式は変えずに、次のとおり読む。基準・対象・継ぎ目・位置の欄が無い記録は、2台の既定（CAM-Aが基準、CAM-Bが対象、縦の継ぎ目CAM-A–CAM-Bが1本、カメラの段が1つで列が2つ）として読む。4台の記録は版の違う書式になるので、欄の無い記録を4台の記録として読む事は無い。
+5. **今の2台の書式との対応**: 今ある書式は（#434の記録3種を除き）変えずに、次のとおり読む。基準・対象・継ぎ目・位置の欄が無い記録は、2台の既定（CAM-Aが基準、CAM-Bが対象、縦の継ぎ目CAM-A–CAM-Bが1本、カメラの段が1つで列が2つ）として読む。4台の記録は版の違う書式になるので、欄の無い記録を4台の記録として読む事は無い。
 
 | 今の書式と欄 | この案での読み方 |
 |---|---|
@@ -1685,7 +1692,7 @@ T3の確定の前の条件（所有者の承認に入れる）: (1) 計画はCAM
 | 条件v3・報告v8 `seam.column` | 縦の継ぎ目CAM-A–CAM-Bの出力の列 |
 | 条件v3 `mountOrientation` | 全カメラに同じ向き |
 | 報告の`inputs[].alias`、`cameraAlias` | そのまま（値がalias） |
-| #434の記録の`cameraASha256`・`cameraBSha256`・`cameraBResidualPx` | CAM-A・CAM-Bの値。基準CAM-A、対象CAM-B |
+| #434の記録3種の`referenceCamera`・`targetCamera`、`originalSha256`・`edgeShare`（aliasが鍵）、`targetResidualPx`（2026-11-19に決定4の形に改めた） | 役の欄のとおり読む。改める前の形（`cameraASha256`・`cameraBSha256`・`cameraBResidualPx`など）の記録は無い前提で、読まない（所有者の決定3による） |
 | 色の計画v1 `globalGainBgr`・`knots[].yMm`、`capture-original-a`・`capture-original-b` | 基準CAM-A、対象CAM-B、縦の継ぎ目CAM-A–CAM-Bに沿った位置 |
 
 6. **合成の呼び名の移行（CからMへ）**: 直す作業（「待つ物」の「合成の呼び名をCからMに直す作業」）の前と後で、次のように書き、読む。直す時期は所有者の決定3（4台が確定してから）。
@@ -1750,8 +1757,8 @@ ee77d69で確かめた（製品の層の`src/m3`の行は2026-11-19に同じ木�
 | `src/m2/content_registration.cpp` 1783〜1796、2216〜2217 | 推定はA左・B右だけを受け付け、Bの姿勢だけを動かす（星形）。残差は縦の継ぎ目の列（`seam_column`）の近くで見る | 継ぎ目ごとの推定と、輪で閉じる解き方 |
 | `src/m2/include/a0/m2/seam_gate.hpp` 72〜74 | ゲートは出力の行ごとに継ぎ目の列（`seam_x`）を測る。縦の継ぎ目だけ | 横の継ぎ目のゲート |
 | `src/phase0/include/a0/phase0/experimental/live_placement.hpp` 18〜26、101〜114 | ライブのCの位置PはカメラB 1台の位置。ログの欄はどのカメラの値かを書かない | 対象のカメラごとのP、ログの基準と対象の欄 |
-| `src/m2/fixed_composite_recalibration.cpp` 420〜432、507〜524 | 取り直すのはCAM-Bの写像だけ。記録の欄が`cameraASha256`・`cameraBSha256`・`cameraBResidualPx` | 決定4の形 |
-| `src/phase0/include/a0/phase0/experimental/recalibration_job.hpp` 389 | 校正の報告の`originals`が`cameraASha256`・`cameraBSha256` | 決定4の形 |
+| `src/m2/fixed_composite_recalibration.cpp` 420〜432、507〜524 | 取り直すのはCAM-Bの写像だけ。記録の欄が`cameraASha256`・`cameraBSha256`・`cameraBResidualPx` | 決定4の形（記録の欄は2026-11-19に決定4の形に改めた） |
+| `src/phase0/include/a0/phase0/experimental/recalibration_job.hpp` 389 | 校正の報告の`originals`が`cameraASha256`・`cameraBSha256` | 決定4の形（2026-11-19に改めた） |
 | `src/m2/still_review_report_impl.hpp` 533〜535、680 | 報告の`inputs`がちょうど2つで、順にCAM-A・CAM-B | 報告v9でN個 |
 | `python/a0seam/record.py` 35 | 色の計画v1の`bindings`の符号がA・Bの原画像（`capture-original-a`・`capture-original-b`）。結び目は縦の継ぎ目に沿った`yMm` | 継ぎ目と基準・対象の欄 |
 | `src/m3/Foundation/DualCamera/DualCameraProductModel.cs` 92、98、132〜134 | 製品のrig profile（`DualCameraRigProfile`、`SchemaVersion` 1.1.0）の`CameraAliases`の既定が`CAM-A`・`CAM-B`で、`Validate`が数2とこの並びちょうどを求める。`Layout`は「A左・B右」と「A上・B下」の2つ、姿勢は`CameraBToCameraA`の1つ | aliasの表、カメラの段と列の並び、対ごとの姿勢 |
@@ -1765,10 +1772,10 @@ ee77d69で確かめた（製品の層の`src/m3`の行は2026-11-19に同じ木�
 
 ### 今やる物と待つ物
 
-今やる物（4台が来なくても損が出ない物。どれも本ADRが採用された後に、それぞれのIssueで行う）:
+今やる物（4台が来なくても損が出ない物。どれも本ADRが採用された後に、それぞれのIssueで行う。2だけは2026-11-19の所有者の決定により、採用の前に#434で先に行った）:
 
 1. 新しいコードと書式に、`i==0?"CAM-A":"CAM-B"`の形、欄の名前や符号に記号を埋める形、名前に位置を添えた直書きの文字列を増やさない。今ある物は直さない。
-2. #434の記録3種（推定の記録`a0.pair-recalibration-estimate.v1`、校正の報告`a0.pair-recalibration-report.v1`、確定の記録`a0.pair-recalibration-confirmation.v1`。2026-11-18の時点で公開のmainには無く、本ADRと同じpushで公開される）に`referenceCamera`・`targetCamera`を足す。`inputs`・`originals`を`originalSha256`（aliasを鍵にしたオブジェクト）に、`cameraBResidualPx`を`targetResidualPx`に、校正の報告の`edgeShareA`・`edgeShareB`を`edgeShare`（aliasを鍵にしたオブジェクト）に改める。2026-11-19の所有者の決定1〜3により、この3種の分だけ先に行い、版はv1のままにする（未決の1）。
+2. #434の記録3種（推定の記録`a0.pair-recalibration-estimate.v1`、校正の報告`a0.pair-recalibration-report.v1`、確定の記録`a0.pair-recalibration-confirmation.v1`。2026-11-18の時点で公開のmainには無く、本ADRと同じpushで公開される）に`referenceCamera`・`targetCamera`を足す。`inputs`・`originals`を`originalSha256`（aliasを鍵にしたオブジェクト）に、`cameraBResidualPx`を`targetResidualPx`に、校正の報告の`edgeShareA`・`edgeShareB`を`edgeShare`（aliasを鍵にしたオブジェクト）に改める。2026-11-19の所有者の決定1〜3により、この3種の分だけ先に行い、版はv1のままにした（未決の1）。
 3. #429の色の計画（`a0.seam-color-plan.v1`）に、継ぎ目（`direction`と2台のalias）と`referenceCamera`・`targetCamera`を入れる。v1は公開のmainにある（`python/a0seam`）。計画を読むC++の読み手と書式の文書はまだ無い（ADR-0043の未決）ので、読み手を作る前に足すのが一番安い。`bindings`の`capture-original-a`・`capture-original-b`は今の意味のまま残す。v1に足すかv2にするかは未決の2。
 4. 新しく書く文書では、3台目・4台目のカメラを単独の記号で書かず、`CAM-C`・`CAM-D`か「カメラC」「カメラD」と書く。合成は、直す作業が済むまで今の「C」のままで、文では「合成」「ライブの合成」「保存の合成」と言葉で書く方を勧める（画面やログの文字を引く時は「C」）。「M」は、直す作業が済むまで合成の名前に使わない（決定6）。カメラの位置は決定2の向きで書く。
 
@@ -1824,9 +1831,10 @@ ee77d69で確かめた（製品の層の`src/m3`の行は2026-11-19に同じ木�
 
 | 対象 | 扱い |
 |---|---|
-| `docs/DECISIONS.md` | 本ADRを足す（Proposed）。2026-11-18の所有者の決定を入れた。ほかのADRの本文は変えない |
-| コード・試験・書式・`AGENTS.md` | 変えない |
-| #434の記録3種、色の計画 | 採用された後に、今やる物の2・3として別のcommitで変える |
+| `docs/DECISIONS.md` | 本ADRを足す（Proposed）。2026-11-18の所有者の決定と、2026-11-19の所有者の決定（とそれに合わせて決めた事）を入れた。ほかのADRの本文は変えない |
+| コード・試験・書式・`AGENTS.md` | 変えない（#434の記録3種を書くコードとその試験、記録を説明する文書を除く。次の行） |
+| #434の記録3種 | 2026-11-19の所有者の決定により、本ADRの採用を待たずに、今やる物の2として#434のcommitで変えた。版はv1のまま |
+| 色の計画 | 採用された後に、今やる物の3として別のcommitで変える |
 | ADR-0023・0030・0031・0037・0038・0041・0043・0044、`AGENTS.md`の6・34・42行 | 4台が確定した時に改訂の対象になる。今は変えない |
 | 合成のC（画面の文字、その文字を見る試験、docs、ログの行の頭の「C 」、試験の名前、コードの識別子） | 4台が確定した後、待つ物の「合成の呼び名をCからMに直す作業」で変える。今は変えない。範囲は待つ物の表 |
 | ADR-0036の題（表示専用の合成C）など、Cを合成の意味で使うADRの本文 | 変えず、決定6の読み方で読む（※要確認。未決の7） |
@@ -1837,7 +1845,8 @@ ee77d69で確かめた（製品の層の`src/m3`の行は2026-11-19に同じ木�
 1. **書式の決まりの「main」**: `docs/design/fixed-composite-registration-formats.md`の1節の決まり8は「main に入った後の変更は新しい版（v4・v9）にし、古い読み手を残す」、同じ文書の状態の節は「v3 と v8 は main に入るまで凍結しない」と書く。
    - 読める事: 決まりが名指すのは条件v3と報告v8。#434の記録3種はこの文書の表に無く、記録を説明する`docs/design/recalibration-from-pair.md`の6節と`docs/WPD_STILL_REVIEW.md`にも版の決まりは無い。条件v3と報告v8は公開のmainにもあるので、mainをどちらに読んでも凍結済み。3種のうち推定の記録と校正の報告には製品の読み手が無く（試験だけが読む）、確定の記録は`wpd_recalibration_ui.hpp`の`RecalibrationRecordedAsUnchecked`が`schema`・`revisionSha256`・`unverified`の3つだけを読むので、欄を足しても今の読み手は読める。推定の記録のSHA-256は条件v3の`reportSha256`とprofileの`provenanceId`に入るので、欄を足すと、これから作る記録のSHA-256の値が変わる（既にある記録は変わらない）。
    - 読めない事: 決まり8の「main」は、手元のmainに統合した時点を指すか、公開した時点を指すか。決まり8が条件v3・報告v8以外の記録にも及ぶか。pushの後は、記録3種がどちらの読み方でもmainに入っているので、残る問いは「決まり8が条件v3・報告v8以外の記録に及ぶか」の1つになる。
-   - 決定（2026-11-19、所有者）: 記録3種は版をv1のままにして、欄を足す・名前を改める。公開した後に形を変える時はv2にする。この決まりは`docs/design/recalibration-from-pair.md`の6節に書いた。決まり8は条件v3・報告v8の決まりのままで、記録3種には及ぼさない。実機に古い形の記録は無い前提で、古い形を読む仕組みは作らない。
+   - 所有者の決定（2026-11-19）: 版はv1のまま。公開した後に形を変える時はv2にする。
+   - これに合わせて決めた事（設計とレビュー）: 公開のmainに入った後に、欄を足す・除く、欄の名前・型・意味を変える時は新しい版（v2）にする。この決まりは`docs/design/recalibration-from-pair.md`の6節に書いた。決まり8は条件v3・報告v8の決まりのままで、記録3種には及ぼさない。校正をONにしたビルドを実機で動かした事は無い（所有者の決定3）ので、実機に改める前の形の記録は無い前提とし、改める前の形を読む仕組みは作らない。
 2. 色の計画v1に欄を足す時の扱い。v1は公開のmainにあり、書式の文書と読み手がまだ無い。v1のまま足すかv2にするかは、計画の書式の文書を書く時に決める。
 3. 2×2の対角の2台がどれだけ重なるか（交点の近くだけか）と、星形のまま測れる範囲（※推定。配置と重なりの幅が決まってから確かめる）。
 4. 位置の欄の名前（`cameraRow`・`cameraColumn`）と、カメラごとの取付の向きの置き場所は、profile 3.0.0で決める。
