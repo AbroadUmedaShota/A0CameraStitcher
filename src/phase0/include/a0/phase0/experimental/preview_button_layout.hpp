@@ -38,6 +38,8 @@ struct LayoutButton {
     int width{};
     int gap_before{kLayoutGap};   // to the previous button of the row (to the one at its right, for a right-aligned one)
     bool right_aligned{false};
+    bool new_row{false};          // starts a row of its own (left-aligned buttons)
+    bool skip{false};             // stands aside in this layout: no place is made for it
 };
 struct LayoutBox {int x{},y{},width{},height{kLayoutButtonHeight},row{};};
 struct FlowResult {
@@ -53,16 +55,16 @@ inline FlowResult FlowButtons(const std::vector<LayoutButton>& items,int area_le
     FlowResult result;result.boxes.assign(items.size(),LayoutBox{});
     int row=-1,cursor=area_left;bool first=true;
     for(std::size_t i=0;i<items.size();++i){
-        if(items[i].right_aligned)continue;
+        if(items[i].right_aligned || items[i].skip)continue;
         int x=first?area_left:cursor+items[i].gap_before;
-        if(row<0 || (!first && x+items[i].width>area_right)){++row;x=area_left;}
+        if(row<0 || (!first && (items[i].new_row || x+items[i].width>area_right))){++row;x=area_left;}
         first=false;
         result.boxes[i]={x,top+row*pitch,items[i].width,kLayoutButtonHeight,row};cursor=x+items[i].width;
     }
     const int left_rows=row+1;
     row=left_rows-1;first=true;int edge=area_right;int smallest=0;bool any=false;
     for(std::size_t i=0;i<items.size();++i){
-        if(!items[i].right_aligned)continue;
+        if(!items[i].right_aligned || items[i].skip)continue;
         int x=first?area_right-items[i].width:edge-items[i].gap_before-items[i].width;
         if(row<left_rows || (!first && x<area_left)){++row;x=area_right-items[i].width;}
         first=false;
@@ -78,12 +80,20 @@ inline constexpr int kPaneButtonCount=4;
 inline std::vector<LayoutButton> PaneButtonItems(){
     return {{115},{115},{115},{145}};
 }
-// Buttons under the middle of the client area, in this order. The first five move C, the last three stand at the right.
+// Buttons under the middle of the client area, in this order. The first five move C, the last three stand at the right (a condition v3 also has
+// the hand buttons, listed after them: PreviewHandButton).
 enum PreviewLowerButton {
     kLowerMerge0=0,kLowerMerge1,kLowerMerge2,kLowerMerge3,kLowerMerge4,
     kLowerPair,kLowerReview,kLowerSeam,kLowerInspect,kLowerSession,kLowerSettings,kLowerButtonCount
 };
-inline std::vector<LayoutButton> LowerButtonItems(){
+// The hand buttons of a condition v3 (#437 stage 2) stand after the others, on a row of their own: along the seam (left, right), across it (up,
+// down), about the optical axis (counter-clockwise, clockwise) and the switch of the step. Then the four position buttons of the uncalibrated C
+// stand aside (the button of the automatic estimate stays).
+enum PreviewHandButton {
+    kPreviewHandLeft=0,kPreviewHandRight,kPreviewHandUp,kPreviewHandDown,kPreviewHandCounterClockwise,kPreviewHandClockwise,kPreviewHandStep,kPreviewHandButtonCount
+};
+inline constexpr int kLowerHandFirst=kLowerButtonCount;   // index of the first hand button in the plan's list when the hand buttons are in it
+inline std::vector<LayoutButton> LowerButtonItems(bool hand_controls=false){
     std::vector<LayoutButton> items{{135},{135},{135},{135},{135}};
     items.push_back({235,28});                // pair shot
     items.push_back({225,15});                // saved result
@@ -91,6 +101,11 @@ inline std::vector<LayoutButton> LowerButtonItems(){
     items.push_back({200,15,true});           // inspect (rightmost)
     items.push_back({200,15,true});           // session
     items.push_back({200,15,true});           // settings
+    if(hand_controls){
+        for(int i=0;i<4;++i)items[static_cast<std::size_t>(kLowerMerge0+i)].skip=true;
+        const int widths[kPreviewHandButtonCount]{110,110,100,100,125,125,210};
+        for(int i=0;i<kPreviewHandButtonCount;++i){LayoutButton button{widths[i]};button.new_row=i==0;items.push_back(button);}
+    }
     return items;
 }
 
@@ -134,7 +149,7 @@ struct PreviewButtonPlan {
     int pane_rows{1},top_shift{0};
     int lower_rows{2},lower_shift{0};
 };
-inline PreviewButtonPlan PlanPreviewButtons(int client_width){
+inline PreviewButtonPlan PlanPreviewButtons(int client_width,bool hand_controls=false){
     PreviewButtonPlan plan;
     const int pane_width=client_width/2;
     for(int i=0;i<2;++i){
@@ -142,7 +157,7 @@ inline PreviewButtonPlan PlanPreviewButtons(int client_width){
         plan.pane[static_cast<std::size_t>(i)]=flow.boxes;plan.pane_rows=std::max(plan.pane_rows,flow.rows);
     }
     plan.top_shift=(plan.pane_rows-1)*kPaneRowPitch;
-    const auto lower=FlowButtons(LowerButtonItems(),kLayoutMargin,client_width-kLayoutRightMargin,kLowerButtonsTop,kLowerRowPitch);
+    const auto lower=FlowButtons(LowerButtonItems(hand_controls),kLayoutMargin,client_width-kLayoutRightMargin,kLowerButtonsTop,kLowerRowPitch);
     plan.lower=lower.boxes;plan.lower_rows=lower.rows;
     const bool shares_last_row=lower.rows==2 && lower.right_rows==1 && lower.right_left_edge>=kLowerTitleReserve;
     const int title_row=shares_last_row?kLowerSharedTitleRow:kLowerButtonsTop+kLowerRowPitch*lower.rows;

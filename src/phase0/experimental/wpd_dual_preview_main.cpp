@@ -40,6 +40,8 @@
 #include <stop_token>
 #endif
 #include "a0/phase0/experimental/live_registration_runtime.hpp"
+#include "a0/m2/experimental/confirmed_position_check.hpp" // #437 stage 2: the check of a hand step
+#include "a0/m2/experimental/fixed_composite_creation_v3.hpp"  // the cover check that an estimate's position passes
 #include "a0/m2/experimental/overlap_estimation.hpp"
 #include "a0/phase0/experimental/still_pair.hpp"
 #include "a0/phase0/experimental/wpd_still_pair.hpp"

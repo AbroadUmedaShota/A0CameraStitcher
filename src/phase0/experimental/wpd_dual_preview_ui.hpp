@@ -70,6 +70,9 @@ struct MergeView {
     // How C is drawn (#401). decided: the merge worker has chosen for the current frame size.
     // fixed_plan is the plan in use (fixed_composite) or the reason C is not drawn (unavailable).
     bool decided{};PreviewCMode mode{PreviewCMode::uncalibrated};FixedPreviewPlan fixed_plan;
+    // The plan that the picture in `pixels` was drawn with (set with them): what a pair capture and a hand step test the position against (#437).
+    // fixed_plan is the plan chosen for the next picture and can be ahead of it by a pass.
+    std::shared_ptr<const FixedPreviewPlan> drawn_plan;
     bool show_seam=true;std::uint32_t seam_column{}; // seam_column: in the pixels of `pixels`, set with them
     double ratio_minimum{1},ratio_maximum{1};
     std::wstring position_refusal;
@@ -102,6 +105,8 @@ void ApplyCalibrationTexts(){
 #endif
     if(preview_window && !closing)SetWindowTextW(preview_window,PreviewWindowTitle(fixed_source,note).c_str());
     if(pair_button)SetWindowTextW(pair_button,PairButtonLabel(fixed_source));
+    // The button of the estimate is "自動調整" with a condition v3 (the live C is placed by it and by the hand buttons); the uncalibrated C keeps its name.
+    if(merge_buttons[4])SetWindowTextW(merge_buttons[4],fixed_source.loaded_v3?L"自動調整":L"自動位置合わせ");
 }
 // The live registration of C for a condition v3 (#417 LC). live_runtime is replaced only by PrepareLiveRuntime (or the smoke), on the
 // UI thread while no merge worker exists; the merge worker, its helper thread and Paint only call the runtime's own thread-safe members.
@@ -112,6 +117,7 @@ std::optional<LiveTrackerDesign> live_design_override;
 // The position that the live C is drawn with (#437), carried from one session to the next: the runtime of a session starts from it and the
 // next session takes it back (PrepareLiveRuntime). Only the UI thread, while no merge worker exists, touches it.
 LivePlacementMachine live_placement_carry;
+#include "live_placement_controls_ui.hpp" // #437 stage 2: the hand buttons, the checks that the runtime is given, the capture's position
 // Read again at every preview session start, so a condition made between sessions is used.
 void LoadFixedSource(){
     try{
@@ -146,8 +152,10 @@ void LoadFixedSource(){
 // one after a shot) asks for nothing and draws with the position it was left with. Without a v3 condition there is no runtime, and C is
 // drawn as before. A setup failure leaves no runtime: C is drawn with the fixed mapping and says so.
 void PrepareLiveRuntime(){
+    DrainLiveHand(); // a check of a hand step that is still running commits to the machine that the next session carries over
     if(live_runtime)live_placement_carry=live_runtime->PlacementMachine();
     live_runtime.reset();
+    struct LayoutRefresh {~LayoutRefresh(){RefreshHandLayout();}} layout_refresh; // the hand buttons come and go with the runtime
     if(!fixed_source.loaded_v3)return;
     const auto& loaded=*fixed_source.loaded_v3;
     try{
@@ -158,6 +166,10 @@ void PrepareLiveRuntime(){
         config.mount=mount_orientation;
         config.condition_sha256=loaded.file_sha256;
         config.placement=live_placement_carry;
+        config.hand_check=CountedHandChecker(live_hand_check_override?live_hand_check_override:MakeWindowHandChecker(loaded));
+        config.mapping_check=live_mapping_check_override?live_mapping_check_override:MakeWindowMappingChecker(loaded);
+        // A condition that has a live estimate is never given an estimate that goes unchecked: a missing check is a mistake of the setup, not a pass.
+        if(config.live_enabled && (!config.mapping_check || !config.hand_check))throw std::logic_error("the live registration needs its position checks");
         config.log=[](const std::string& line){Log(line);};
         const char* reason=!live_placement_carry.Configured()?"start":live_placement_carry.ConditionSha256()!=loaded.file_sha256?"condition-changed":"resumed";
         auto runtime=std::make_shared<LiveRegistrationRuntime>(config,loaded.profile.parameters);
@@ -179,7 +191,8 @@ void PrepareLiveRuntime(){
 bool AskLiveEstimate(){
     if(!live_runtime || !live_runtime->Enabled())return false;
     const auto result=live_runtime->RequestEstimate(LiveEstimateAsk::button);
-    Log(std::string("C ui_live_estimate_requested=1 result=")+(result==LiveAskResult::accepted?"accepted":"busy")+" quality_accepted=0");
+    Log(std::string("C ui_live_estimate_requested=1 result=")+(result==LiveAskResult::accepted?"accepted":result==LiveAskResult::capturing?"capturing":"busy")+" quality_accepted=0");
+    SetLiveNotice(LiveEstimateRefusedText(result)); // empty when the estimate is asked for
     return true;
 }
 // A shot that ended with a JPEG made with the registered composite (#437 stage 1): the live C is drawn from now on with the mapping that the
@@ -196,7 +209,9 @@ void ApplyCaptureToLivePlacement(const a0::m2::experimental::StillReviewResult& 
     // A capture that was given a position says which one; level `confirmed` leaves P (and its source and serial) as it is.
     const std::optional<std::uint64_t> given_serial=record.registration.confirmed_position?std::optional<std::uint64_t>(record.registration.confirmed_position->serial):std::nullopt;
     const bool applied=live_runtime && live_runtime->ApplyCapture(level.mapping,code,record.condition_sha256,layer_two_max,given_serial);
-    Log("pair_review_placement source=after-capture level="+code+" "+LivePlacementFields(level.mapping)+" condition_sha256="+record.condition_sha256+" "+
+    live_capture_held=false;pending_confirmed.reset(); // the result ends the hold of the position, whatever the answer
+    // What the window did with the result. The capture's own lines (pair_review_*) are written from the report that was read back, not from here.
+    Log("C ui_apply_capture source=after-capture level="+code+" "+LivePlacementFields(level.mapping)+" condition_sha256="+record.condition_sha256+" "+
         LivePlacementLayerTwoFields(LivePlacementHasLayerTwo(level.mapping),layer_two_max)+" applied_to_live="+(applied?"1":"0")+" quality_accepted=0");
 }
 void LogPreviewChoice(const FixedPreviewChoice& choice){
@@ -265,7 +280,7 @@ bool CanRestartPreview(){
 #if defined(A0_ENABLE_WPD_RECALIBRATION)
     if(RecalibrationHoldsLive())return false; // the calibration restarts Live itself, after the person has decided
 #endif
-    return !SettingsReadBusy() && !settings_close_failed && !PanelHoldsLive() && LiveStoppedAndClosed();
+    return !SettingsReadBusy() && !settings_close_failed && !PanelHoldsLive() && !LiveHandBusy() && LiveStoppedAndClosed();
 }
 // Re-checked inside the handler, not only through the button state.
 bool CanReadSettings(){
@@ -310,7 +325,7 @@ PreviewEndRestartObservation ObserveCameraEndRestart(){
     view.merge_fresh=!stopping && merged.rendered_revision==merged.revision && !merged.pixels.bytes.empty() && PreviewPairFresh(Clock::now(),merged.source_a,merged.source_b);
     return view;
 }
-void ClearMerge(){std::lock_guard lock(merged.mutex);merged.pixels={};merged.source_a={};merged.source_b={};merged.auto_requested=false;merged.auto_busy=false;merged.decided=false;merged.position_refusal.clear();}
+void ClearMerge(){std::lock_guard lock(merged.mutex);merged.pixels={};merged.source_a={};merged.source_b={};merged.auto_requested=false;merged.auto_busy=false;merged.decided=false;merged.position_refusal.clear();merged.drawn_plan.reset();}
 Pixels ToPixels(const a0::m2::render::BgrImage& image){
     Pixels next{image.width,image.height,{}};next.bytes.resize(static_cast<size_t>(next.width)*next.height*4);
     for(size_t i=0,j=0;i<image.bgr.size();i+=3,j+=4)std::copy_n(image.bgr.data()+i,3,next.bytes.data()+j);
@@ -337,7 +352,7 @@ void PublishFixedC(const FixedPreviewChoice& choice,const a0::m2::render::BgrIma
     const auto current=[&]{return !stopping && !stop.stop_requested() && merged.revision==revision && PreviewPairFresh(Clock::now(),time_a,time_b);};
     if(choice.mode==PreviewCMode::unavailable){
         std::lock_guard lock(merged.mutex);
-        if(current()){merged.pixels={};merged.source_a=time_a;merged.source_b=time_b;merged.rendered_revision=revision;merged.error=FixedPreviewUnavailableText(*choice.plan.skip);}
+        if(current()){merged.pixels={};merged.drawn_plan.reset();merged.source_a=time_a;merged.source_b=time_b;merged.rendered_revision=revision;merged.error=FixedPreviewUnavailableText(*choice.plan.skip);}
         return;
     }
     try{
@@ -346,10 +361,11 @@ void PublishFixedC(const FixedPreviewChoice& choice,const a0::m2::render::BgrIma
         std::lock_guard lock(merged.mutex);
         if(current()){
             merged.pixels=std::move(next);merged.source_a=time_a;merged.source_b=time_b;merged.rendered_revision=revision;++merged.frames;merged.error.clear();
+            merged.drawn_plan=std::make_shared<const FixedPreviewPlan>(choice.plan);
             merged.ratio_minimum=drawn.record.ratio_minimum;merged.ratio_maximum=drawn.record.ratio_maximum;merged.seam_column=choice.plan.view.seam_column;
         }
     }catch(const std::exception&){
-        std::lock_guard lock(merged.mutex);merged.pixels={};
+        std::lock_guard lock(merged.mutex);merged.pixels={};merged.drawn_plan.reset();
         merged.error=L"固定の合成条件でCを描けませんでした。A/Bのフレームの大きさを確認してください";
     }
 }
@@ -514,17 +530,26 @@ bool FinishPreview(){
     all_sessions_passed=all_sessions_passed && passed;return passed;
 }
 // How far the wrapped rows of buttons push the content under them (preview_button_layout.hpp): the Live panes, and the lower half.
-int PreviewTopShift(int client_width){return PlanPreviewButtons(client_width).top_shift;}
-int PreviewLowerShift(int client_width){return PlanPreviewButtons(client_width).lower_shift;}
+int PreviewTopShift(int client_width){return PlanPreviewButtons(client_width,HandControlsInLayout()).top_shift;}
+int PreviewLowerShift(int client_width){return PlanPreviewButtons(client_width,HandControlsInLayout()).lower_shift;}
 void MoveBox(HWND button,const LayoutBox& box,int y_offset=0){if(button)MoveWindow(button,box.x,box.y+y_offset,box.width,box.height,TRUE);}
 void LayoutButtons(HWND hwnd){
-    RECT rect{};GetClientRect(hwnd,&rect);const auto plan=PlanPreviewButtons(rect.right);const int middle=rect.bottom/2;
+    RECT rect{};GetClientRect(hwnd,&rect);const bool hand=HandControlsInLayout();const auto plan=PlanPreviewButtons(rect.right,hand);const int middle=rect.bottom/2;
     for(int i=0;i<2;++i){
         const auto& boxes=plan.pane[static_cast<std::size_t>(i)];
         for(int j=0;j<3;++j)MoveBox(focus_buttons[i][j],boxes[static_cast<std::size_t>(j)]);
         MoveBox(capture_buttons[i],boxes[3]);
     }
-    for(int j=0;j<5;++j)MoveBox(merge_buttons[j],plan.lower[kLowerMerge0+j],middle);
+    for(int j=0;j<5;++j){
+        if(hand && j<4){if(merge_buttons[j]){ShowWindow(merge_buttons[j],SW_HIDE);merge_buttons_hidden_for_hand=true;}continue;}   // the position buttons of the uncalibrated C stand aside
+        if(merge_buttons_hidden_for_hand && merge_buttons[j])ShowWindow(merge_buttons[j],SW_SHOWNA);
+        MoveBox(merge_buttons[j],plan.lower[kLowerMerge0+j],middle);
+    }
+    if(!hand)merge_buttons_hidden_for_hand=false;
+    for(int k=0;k<kPreviewHandButtonCount;++k)if(hand_buttons[k]){
+        if(hand){MoveBox(hand_buttons[k],plan.lower[static_cast<std::size_t>(kLowerHandFirst+k)],middle);ShowWindow(hand_buttons[k],SW_SHOWNA);}
+        else ShowWindow(hand_buttons[k],SW_HIDE);
+    }
     MoveBox(pair_button,plan.lower[kLowerPair],middle);
     MoveBox(review_button,plan.lower[kLowerReview],middle);
     MoveBox(seam_button,plan.lower[kLowerSeam],middle);
@@ -540,6 +565,9 @@ void LayoutButtons(HWND hwnd){
 #if defined(A0_ENABLE_WPD_RECALIBRATION)
     LayoutRecalibrationButtons(rect);
 #endif
+}
+void RefreshHandLayout(){
+    if(preview_window && !closing){LayoutButtons(preview_window);InvalidateRect(preview_window,nullptr,FALSE);}
 }
 void OpenSavedInspector(){
     if(review_path.empty())return;
@@ -784,10 +812,24 @@ void RequestSettingsRead(){
 // needs (preview_button_layout.hpp, PlanLowerRows).
 inline constexpr int kLiveRowsHeight=kLowerOrientationHeight+kLowerStateMinHeight+2*kLowerRowGap;   // what the two rows took from the picture when they did not wrap
 struct LiveRowsTexts {std::wstring state,orientation;};
-LiveRowsTexts CurrentLiveRowsTexts(){
+// The state row: what the machine says of the position, and in front of it what the last press or capture said (a refusal, a dropped press), or
+// while a check of a hand press runs, that it runs. A hand-set position also says how big one live pixel is in the JPEG's pixels.
+// `drawn`: the plan that the picture on the screen was drawn with (merged.drawn_plan; the caller holds merged.mutex).
+LiveRowsTexts CurrentLiveRowsTexts(const std::shared_ptr<const FixedPreviewPlan>& drawn){
     std::string state,orientation;
-    if(live_runtime){const auto status=live_runtime->Status();state=status.state_text;orientation=status.orientation_line;}
-    else{state=LiveRegistrationStartFailedText();orientation=LiveOrientationRowText(LiveOrientationTextsOf(std::nullopt,std::nullopt));}
+    if(live_runtime){
+        const auto status=live_runtime->Status();orientation=status.orientation_line;
+        if(LiveHandBusy())state=LiveHandBusyText(hand_queued_presses);
+        else{
+            state=status.state_text;
+            // After a restart (or a shot) the screen is drawn with the condition's table until the table of P is baked: say so, so that the row does not
+            // describe a position that is not on the screen yet. A pending hand position, an estimate and a failed bake have their own words.
+            if(drawn && !live_runtime->DrawnWithPlacement(drawn) && !status.placement.hand_wanted && !status.bake_failed && status.placement.activity==LivePlacementActivity::idle)
+                state=LiveNotDrawnYetText()+"\n"+state;
+            if(status.placement.source==LivePlacementSource::manual){const auto scale=LiveHandScaleText(LivePixelInOutputPx(drawn));if(!scale.empty())state+="。"+scale;}
+        }
+    }else{state=LiveRegistrationStartFailedText();orientation=LiveOrientationRowText(LiveOrientationTextsOf(std::nullopt,std::nullopt));}
+    if(!live_notice.empty())state=live_notice+"\n"+state;
     return {WidenUtf8(state),WidenUtf8(orientation)};
 }
 // The height that `text` needs when it wraps at `width` with the font of `dc` (0 for no text).
@@ -898,7 +940,7 @@ std::array<std::uint64_t,6> Paint(HDC dc,RECT client){
     // The room of the note and of the state row is what their text needs at this width, so that neither is cut and neither covers the row under it.
     const bool show_rows=live_rows && !stopping;
     LiveRowsTexts rows_texts;
-    if(show_rows)rows_texts=CurrentLiveRowsTexts();
+    if(show_rows)rows_texts=CurrentLiveRowsTexts(merged.drawn_plan);
     const auto rows=LowerRowsOf(dc,client,status,rows_texts.state,show_rows);
     last_lower_rows=rows;
     TextOutW(dc,12,client.bottom/2+88+shift,title.c_str(),static_cast<int>(title.size()));
@@ -929,6 +971,11 @@ void RequestCapture(int index){
         const bool no_picture_by_condition=merged.decided && merged.mode==PreviewCMode::unavailable;
         if((merged.pixels.bytes.empty() && !no_picture_by_condition) || merged.rendered_revision!=merged.revision || !PreviewPairFresh(Clock::now(),merged.source_a,merged.source_b))return;
         pending_geometry={merged.source_width,merged.source_height,merged.overlap_pixels,merged.vertical_pixels,merged.revision,mount_orientation};
+        // The position that C is drawn with goes to the capture (#437): it is taken here, under the same lock that the picture's plan is read under, and
+        // only when the screen is drawn with it. A screen that is not drawn with it yet starts nothing and says what to do. A condition that C cannot be
+        // drawn with (no picture) has no position to give.
+        pending_confirmed.reset();
+        if(!no_picture_by_condition && !BeginLiveCapture(merged.drawn_plan))return;
     }
     capture_stop_requested=false;review_visible=false;capture_deadline=Clock::now()+std::chrono::seconds(180);
     capture_pending=index;capture_status=index==0?L"Aを撮影する準備中：両Liveを停止しています…":L"Bを撮影する準備中：両Liveを停止しています…";
@@ -940,6 +987,8 @@ void RequestCapture(int index){
 std::function<VerifiedStillPair(const std::array<std::wstring,2>&,Clock::time_point)> pair_capture_backend=
     [](const std::array<std::wstring,2>& ids,Clock::time_point deadline){return CaptureStillPairShutterFirst(ids,deadline);};
 std::optional<std::filesystem::path> pair_settings_folder_override,pair_review_root_override;
+// Only --pair-v3-ui-smoke sets this: it changes the report that was just written (it takes the path of the report), to see what a report that cannot be read back does.
+std::function<void(const std::filesystem::path&)> pair_report_tamper_override;
 // How a pair that did not complete is put into the outcome (#430): out of focus, whether the preflight stopped it before either shutter,
 // what each body answered, and the image notices a body left. The pair capture and the calibration's pair capture both call this, so the
 // status row (AdvanceCapture) says the same thing for the same failure. The caller then throws pair.error.
@@ -947,7 +996,8 @@ void RecordIncompletePair(CaptureUiOutcome& result,const VerifiedStillPair& pair
     result.capture.out_of_focus=pair.out_of_focus;result.preflight_refused=!pair.shutter_dispatched[0] && !pair.shutter_dispatched[1];
     result.preflight_status=DescribeStillPairPreflightRefusal(pair);result.late_object_status=DescribeStillPairLateObjects(pair);
 }
-CaptureUiOutcome SavePairReview(const std::array<std::wstring,2>& ids,ReviewGeometry geometry,Clock::time_point deadline){
+CaptureUiOutcome SavePairReview(const std::array<std::wstring,2>& ids,ReviewGeometry geometry,Clock::time_point deadline,
+    std::optional<a0::m2::experimental::ConfirmedPosition> confirmed_position=std::nullopt){
     CaptureUiOutcome result;
     const auto root=pair_review_root_override?*pair_review_root_override:DefaultIdentityMapPath().parent_path().parent_path()/"wpd-pair-reviews";
     EvidenceWriter evidence(root,NewRunId(),"wpd-uncalibrated-pair-review");
@@ -975,7 +1025,7 @@ CaptureUiOutcome SavePairReview(const std::array<std::wstring,2>& ids,ReviewGeom
         // v1, v2 or v3 by the selected record (pair_review_registration.hpp). The v3 composite takes the deadline of this capture as
         // the time left for its stages: the 180-second window is the one RequestCapture set and is not extended here.
         namespace m2e=a0::m2::experimental;
-        auto composed=ComposePairWithSelection(selection,request,merge_policy);
+        auto composed=ComposePairWithSelection(selection,request,merge_policy,std::move(confirmed_position));
         result.review=std::move(composed.review);result.composite_detail=composed.detail;
         const auto skip=composed.skip;
         if(!result.review){
@@ -983,6 +1033,16 @@ CaptureUiOutcome SavePairReview(const std::array<std::wstring,2>& ids,ReviewGeom
             evidence.RecordState("pair","OriginalsSavedCompositeSkipped",{},m2e::FixedCompositeSkipCode(*skip));
             Log("pair_composite_skipped=1 reason="+std::string(m2e::FixedCompositeSkipCode(*skip))+" originals_saved=2 calibrated=0");
             return result;
+        }
+        // The report is read back from the file, and from here on the composite is described by what was read: the status row, the log and the
+        // position that the live C takes after the shot. A report that cannot be read back (or has no registration record) is a composite that
+        // failed: it ends as every failure after the originals were saved does (the JPEG of a report that is not there is removed, the originals
+        // stay), and no position is applied.
+        if(result.review->fixed_composite_registration){
+            if(pair_report_tamper_override)pair_report_tamper_override(result.review->report);
+            const auto saved=a0::m2::experimental::LoadSavedStillReview(result.review->report);
+            if(!saved.fixed_composite_registration)throw std::runtime_error("the saved report holds no registration record");
+            result.review->fixed_composite_registration=saved.fixed_composite_registration;
         }
         // The composite and its report are both written and verified: a window that closed meanwhile does not undo them (owner's
         // decision). The row says the window was passed; the gate is not_run when it had no time.
@@ -1003,6 +1063,8 @@ CaptureUiOutcome SavePairReview(const std::array<std::wstring,2>& ids,ReviewGeom
                 <<" saturation_limited="<<seam->saturation_limited_pixels<<" ms="<<result.review->blend_milliseconds<<" quality_accepted=0";Log(line.str());}
         // v8 (#417): the level, the pose of B and the paper surface, the gate, every warning and the time of each stage. No path and
         // no camera identifier is in these lines.
+        // The lines of the capture are written from the report as it is on disk (it was read back above): what the log says is what a later reader of
+        // the report finds, and the position's line can be compared with the live log's as text.
         if(result.review->fixed_composite_registration)for(const auto& line:DescribeRegistrationReview(*result.review).log)Log(line);
         std::wcout<<L"saved_review="<<result.review->jpeg.wstring()<<std::endl;
     }catch(const std::exception& error){
@@ -1051,10 +1113,17 @@ std::wstring SavedCaptureStatus(const CaptureUiOutcome& result){
     if(result.review && result.review->automatic)status+=L" / "+StillAlignmentLine(*result.review->automatic);
     return status;
 }
+// The shot is over. A composite whose report was read back gives its position to the live C; anything else (no composite, a report that could not be
+// read back, a failed shot) frees the position. The next session begins free in any case.
+void ApplyOrEndCapture(const CaptureUiOutcome& result){
+    if(result.review && result.review->fixed_composite_registration)ApplyCaptureToLivePlacement(*result.review);
+    else EndLiveCaptureHold();
+}
 #if defined(A0_ENABLE_WPD_RECALIBRATION)
 #include "wpd_recalibration_ui.hpp" // #434: the calibration button (after SavePairReview, whose seams it uses)
 #endif
 void AdvanceCapture(HWND hwnd){
+    AdvanceLiveHand(); // the result of the check of a hand press, when it is in
     if(settings_future.valid() && settings_future.wait_for(std::chrono::seconds(0))==std::future_status::ready){
         auto outcome=settings_future.get();settings_stop.reset();ApplySettingsOutcome(outcome);
     }
@@ -1062,7 +1131,7 @@ void AdvanceCapture(HWND hwnd){
         const bool safe=FinishPreview();
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
         // The start of the capture worker looks at the write again: a write or reread, or a held capture, drops it.
-        if(capture_pending && !closing && !SettingsWriteAdmitsCapture())capture_pending.reset();
+        if(capture_pending && !closing && !SettingsWriteAdmitsCapture()){capture_pending.reset();EndLiveCaptureHold();}
         else
 #endif
         if(capture_pending && !closing){
@@ -1072,7 +1141,15 @@ void AdvanceCapture(HWND hwnd){
 #if defined(A0_ENABLE_WPD_RECALIBRATION)
                 const auto calibration_record=RecalibrationCaptureFor(index); // non-null: this pair is a calibration's (the originals only)
 #endif
-                capture_future=std::async(std::launch::async,[ids=registered_ids,index,geometry=pending_geometry,deadline=capture_deadline
+                // Only a pair capture is given the position that C was drawn with (a calibration's pair is not: it is a sample for the condition).
+                std::optional<a0::m2::experimental::ConfirmedPosition> confirmed=index==2?pending_confirmed:std::nullopt;
+#if defined(A0_ENABLE_WPD_RECALIBRATION)
+                if(calibration_record)confirmed.reset();
+                if(calibration_record || index!=2)EndLiveCaptureHold();
+#else
+                if(index!=2)EndLiveCaptureHold();
+#endif
+                capture_future=std::async(std::launch::async,[ids=registered_ids,index,geometry=pending_geometry,deadline=capture_deadline,confirmed
 #if defined(A0_ENABLE_WPD_RECALIBRATION)
                     ,calibration_record
 #endif
@@ -1081,10 +1158,10 @@ void AdvanceCapture(HWND hwnd){
 #if defined(A0_ENABLE_WPD_RECALIBRATION)
                         if(calibration_record)return SaveRecalibrationPair(ids,deadline,calibration_record);
 #endif
-                        if(index==2)return SavePairReview(ids,geometry,deadline);return CaptureUiOutcome{SaveStillOnce(ids[index],index==0?"CAM-A":"CAM-B",true,deadline),{}};}
+                        if(index==2)return SavePairReview(ids,geometry,deadline,confirmed);return CaptureUiOutcome{SaveStillOnce(ids[index],index==0?"CAM-A":"CAM-B",true,deadline),{}};}
                     catch(const std::exception& error){CaptureUiOutcome result;result.capture.error=ErrorSummary(error);return result;}
                 });
-            }else capture_status=L"Liveの安全な終了を確認できません。撮影せず停止しました。";
+            }else{capture_status=L"Liveの安全な終了を確認できません。撮影せず停止しました。";EndLiveCaptureHold();}
         }else if(!closing){
             manual_restart_waiting=false;
             capture_status.clear();
@@ -1123,10 +1200,10 @@ void AdvanceCapture(HWND hwnd){
                 review_visible=true;review_calibrated=ReviewIsCalibrated(*result.review);
             }
             // #437: the live C is drawn from now on with the position that this JPEG was made with; no estimate is asked for.
-            if(result.review)ApplyCaptureToLivePlacement(*result.review);
+            ApplyOrEndCapture(result);
             if(!closing)StartPreview();
         }else{
-            capture_restart_blocked=true;
+            capture_restart_blocked=true;EndLiveCaptureHold();
             all_sessions_passed=false;capture_status=L"撮影・保存に失敗しました。再撮影せず停止中です。";
             if(result.preflight_refused)capture_status=L"撮影前の確認で停止しました。A/Bどちらにもシャッターを送っていません。カメラ・接続状態を確認してください。";
             if(result.capture.out_of_focus)capture_status=result.preflight_refused?
@@ -1151,7 +1228,7 @@ void AdvanceCapture(HWND hwnd){
     if(closing && LiveProbeHoldsWindow())return; // the probe thread and a held session are waited for like a save in progress
 #endif
     // A settings read in progress is waited for: its Close must finish before the window (and the lease) goes.
-    if(closing && preview_joined && !capture_future.valid() && !settings_future.valid())DestroyWindow(hwnd);
+    if(closing && preview_joined && !capture_future.valid() && !settings_future.valid() && !LiveHandBusy())DestroyWindow(hwnd);
 }
 // --pair-v3-ui-smoke <rig profile v2 fixture folder> (#417 J8w): the pair capture's saving path with the conditions of a setup, through the
 // real SavePairReview and the status row, on a synthetic pair. No camera and no window; the settings folder and the review root are
@@ -1184,10 +1261,11 @@ int RunPairV3UiSmoke(const std::filesystem::path& fixtures){
         };
         const std::array<std::wstring,2> ids{L"synthetic-a",L"synthetic-b"};
         const auto good_backend=pair_capture_backend;
-        const auto capture=[&](const std::filesystem::path& settings,m2e::MountOrientation orientation=m2e::MountOrientation::normal,std::optional<Clock::time_point> deadline=std::nullopt){
+        const auto capture=[&](const std::filesystem::path& settings,m2e::MountOrientation orientation=m2e::MountOrientation::normal,std::optional<Clock::time_point> deadline=std::nullopt,
+            std::optional<m2e::ConfirmedPosition> position=std::nullopt){
             pair_settings_folder_override=settings;
             // A case that waits for its window to close passes the time of the close itself, so that the wait and the writer share one deadline.
-            return SavePairReview(ids,ReviewGeometry{460,307,229,3,11,orientation},deadline?*deadline:Clock::now()+std::chrono::seconds(900));
+            return SavePairReview(ids,ReviewGeometry{460,307,229,3,11,orientation},deadline?*deadline:Clock::now()+std::chrono::seconds(900),std::move(position));
         };
         const auto kept=[&](const CaptureUiOutcome& r){return r.capture.success && r.capture.closed && !r.review && r.composite_skip && std::filesystem::exists(r.originals[0]) && std::filesystem::exists(r.originals[1]);};
 
@@ -1287,6 +1365,111 @@ int RunPairV3UiSmoke(const std::filesystem::path& fixtures){
             level.mapping.parallax=layer_two;
             moved.fixed_composite_registration->registration.parallax.summary.max_shift_px=0.4;
             live_after_shot(moved,"live after the real review with a mapping that moves B (G1)",true);
+        }
+        // 1c. A shot with a hand-set position (#437 stage 2): a hand step through the real runtime and the real check of this condition, a pair capture
+        //     that is given the position, the report that the writer wrote (read back from the file), and the two log lines: the live line that was
+        //     written when the position was drawn, and the capture's line that is written from the report. Their serial, source, cameras and nine
+        //     numbers (and the amounts entered by hand) are compared as text. After the shot the live C keeps the hand-set position and says so.
+        {
+            fixed_source={};fixed_source.loaded_v3=v3.loaded;
+            mount_orientation=m2e::MountOrientation::normal;
+            live_placement_carry={};live_runtime.reset();
+            PrepareLiveRuntime();
+            check(live_runtime!=nullptr,"hand: a runtime for the condition");
+            if(live_runtime){
+                const auto plan=PlanFixedPreviewV3(v3.loaded,mount_orientation,400,267);
+                live_runtime->PublishBase(plan);
+                const LiveFrameSource no_frames{[]{return false;},nullptr};
+                const LiveEstimator never=[&](const LiveJob&,const a0::m2::render::BgrImage&,const a0::m2::render::BgrImage&){check(false,"hand: no estimate is asked for");return LiveEstimateOutcome{};};
+                (void)live_runtime->RunPass(no_frames,never);
+                auto drawn=live_runtime->CurrentPlan()?live_runtime->CurrentPlan():live_runtime->BasePlan();
+                const auto counts=m2e::AddHandCounts(LiveHandCountsOf(LiveHandButton::right,false),LiveHandCountsOf(LiveHandButton::turn_clockwise,true));
+                const auto step=live_runtime->HandStep(LiveHandCountsOf(LiveHandButton::right,false),drawn,true);
+                check(step.outcome==LiveHandOutcome::accepted,"hand: the first press is accepted by the real check");
+                (void)live_runtime->RunPass(no_frames,never);          // draws the position that waits
+                drawn=live_runtime->CurrentPlan();
+                const auto step_two=live_runtime->HandStep(LiveHandCountsOf(LiveHandButton::turn_clockwise,true),drawn,true);
+                check(step_two.outcome==LiveHandOutcome::accepted,"hand: the second press is accepted");
+                (void)live_runtime->RunPass(no_frames,never);
+                drawn=live_runtime->CurrentPlan();
+                const auto status=live_runtime->Status();
+                check(status.placement.source==LivePlacementSource::manual && status.placement.hand_entered && *status.placement.hand_entered==counts &&
+                    drawn && drawn->live && LivePlacementSameMapping(drawn->live->baked,status.placement.mapping),"hand: the live C is drawn with the hand-set position");
+                // the pair capture is given the position that is drawn
+                capture_pending.reset();capture_status.clear();
+                const bool began=BeginLiveCapture(drawn);
+                check(began && live_capture_held && pending_confirmed && pending_confirmed->source==m2e::ConfirmedPositionSource::manual &&
+                    pending_confirmed->serial==status.placement.serial && pending_confirmed->manual_entered && *pending_confirmed->manual_entered==counts &&
+                    pending_confirmed->base_source==m2e::ConfirmedPositionSource::fixed_condition && LivePlacementSameMapping(pending_confirmed->mapping,status.placement.mapping),
+                    "hand: the capture takes the position that is drawn, with its amounts");
+                const auto given=pending_confirmed;
+                const auto before=captured.str().size();
+                const auto shot_with_hand=capture(v3.folder,m2e::MountOrientation::normal,std::nullopt,given);
+                const auto log=captured.str().substr(before);
+                check(shot_with_hand.review && shot_with_hand.review->fixed_composite_registration,"hand: a composite is made");
+                if(shot_with_hand.review && shot_with_hand.review->fixed_composite_registration && given){
+                    const auto& record=*shot_with_hand.review->fixed_composite_registration;
+                    check(record.registration.level.level==m2e::GeometryLevel::confirmed && record.registration.confirmed_position && record.registration.confirmed_check &&
+                        record.registration.confirmed_check->used,"hand: the JPEG is made with the position (level confirmed)");
+                    // the report that is on disk gives the position back, nine numbers included, bit for bit
+                    const auto saved=m2e::LoadSavedStillReview(shot_with_hand.review->report);
+                    check(saved.fixed_composite_registration && saved.fixed_composite_registration->registration.confirmed_position,"hand: the report on disk has the position");
+                    if(saved.fixed_composite_registration && saved.fixed_composite_registration->registration.confirmed_position){
+                        const auto& read=*saved.fixed_composite_registration->registration.confirmed_position;
+                        check(read.source==m2e::ConfirmedPositionSource::manual && read.serial==given->serial && read.manual_entered && *read.manual_entered==counts &&
+                            LivePlacementSameMapping(read.mapping,given->mapping) && !read.mapping.parallax,"hand: the report's position is the one that was given");
+                        check(saved.fixed_composite_registration->registration.level.level==m2e::GeometryLevel::confirmed &&
+                            LivePlacementSameMapping(saved.fixed_composite_registration->registration.level.mapping,given->mapping),"hand: the JPEG's mapping is the position");
+                    }
+                    // the two lines, as text
+                    const auto line_of=[&](const std::string& text,const std::string& prefix)->std::string{
+                        const auto at=text.rfind(prefix);if(at==std::string::npos)return {};
+                        const auto end=text.find('\n',at);return text.substr(at,end==std::string::npos?std::string::npos:end-at);
+                    };
+                    const auto field=[](const std::string& line,const std::string& key)->std::string{
+                        const auto at=line.find(" "+key+"=");if(at==std::string::npos)return "<missing "+key+">";
+                        const auto begin=at+key.size()+2,end=line.find(' ',begin);return line.substr(begin,end==std::string::npos?std::string::npos:end-begin);
+                    };
+                    const auto live_line=line_of(captured.str(),"C live_placement serial="+std::to_string(given->serial)+" source=manual "),capture_line=line_of(log,"pair_review_confirmed_position given=1 ");
+                    check(!live_line.empty() && !capture_line.empty(),"hand: both lines exist");
+                    for(const char* key:{"serial","source","base_source","reference_camera","target_camera","rx_deg","ry_deg","rz_deg","tx_mm","ty_mm","tz_percent","h0_mm","slope_x","slope_y",
+                        "manual_seam_dx_px","manual_seam_dy_px","manual_rotation_deg","condition_sha256"})
+                        check(field(live_line,key)==field(capture_line,key) && field(live_line,key).find("<missing")==std::string::npos,(std::string("hand: the live line and the capture's line agree on ")+key).c_str());
+                    check(field(capture_line,"used")=="1" && field(capture_line,"level")=="confirmed" && field(capture_line,"reference_camera")=="CAM-A" && field(capture_line,"target_camera")=="CAM-B","hand: used, level and cameras");
+                    check(log.find("C ui_apply_capture")==std::string::npos && log.find("pair_review_placement")==std::string::npos,"hand: no line of the capture is written from the window's own copy of the record");
+                    // the status row: the JPEG was made with the position that was set by hand
+                    check(SavedCaptureStatus(shot_with_hand).find(L"手で直した位置で JPEG を作りました（")!=std::wstring::npos,"hand: the status row says the JPEG has the hand-set position");
+                    // after the shot the live C keeps the position, and says so (it does not say that it moved to the JPEG's position)
+                    ApplyCaptureToLivePlacement(*shot_with_hand.review);
+                    const auto after=live_runtime->Status();
+                    check(after.placement.source==LivePlacementSource::manual && after.placement.serial==given->serial && after.placement.hand_entered && *after.placement.hand_entered==counts &&
+                        LivePlacementSameMapping(after.placement.mapping,given->mapping),"hand: after the shot P is still the hand-set position");
+                    check(after.state_text.find("手で直した位置で JPEG を作りました。ライブは手で直した位置のままです")!=std::string::npos && after.state_text.find("移しました")==std::string::npos,
+                        "hand: the state row says the live C stays at the hand-set position");
+                }
+                // a shot that was not given a position (a calibration's sample, a caller without a window): the report has none
+                const auto without=capture(v3.folder);
+                check(without.review && without.review->fixed_composite_registration && !without.review->fixed_composite_registration->registration.confirmed_position,"hand: no position given, none recorded");
+                // A report that cannot be read back (it is taken away after it was written): the shot is a failed composite, the JPEG of a report that is not
+                // there is removed, no position is applied and the position is free again.
+                const auto position_before=live_runtime->Status().placement;
+                const bool began_again=BeginLiveCapture(live_runtime->CurrentPlan());
+                check(began_again && live_capture_held && pending_confirmed,"hand: a second capture holds the position");
+                pair_report_tamper_override=[](const std::filesystem::path& report){std::error_code removed;std::filesystem::remove(report,removed);};
+                const auto before_tamper=captured.str().size();
+                const auto lost=capture(v3.folder,m2e::MountOrientation::normal,std::nullopt,pending_confirmed);
+                pair_report_tamper_override=nullptr;
+                check(!lost.review && lost.composite_failure && lost.composite_cleanup==ReportlessCleanup::removed && std::filesystem::exists(lost.originals[0]) && std::filesystem::exists(lost.originals[1]),
+                    "hand: a report that cannot be read back is a failed composite, its JPEG is removed and the originals stay");
+                const auto lost_log=captured.str().substr(before_tamper);
+                check(lost_log.find("pair_composite_failed=1")!=std::string::npos && lost_log.find("pair_review_confirmed_position")==std::string::npos,"hand: the failure is logged and no line of the position is written from the writer's copy");
+                ApplyOrEndCapture(lost);
+                {const auto now=live_runtime->Status().placement;
+                    check(!live_capture_held && !pending_confirmed && !now.capturing && now.source==LivePlacementSource::manual && now.serial==position_before.serial &&
+                        LivePlacementSameMapping(now.mapping,position_before.mapping),"hand: nothing is applied and the position is free again");}
+            }
+            EndLiveCaptureHold();
+            live_placement_carry={};live_runtime.reset();fixed_source={};
         }
         // 2. A revision chain with a gap is a damaged condition: no composite, the originals are kept, the reason is on the row.
         {
@@ -1563,6 +1746,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM w,LPARAM l){
             }
             return 0;
         }
+        if(HandleLiveHandCommand(id,HIWORD(w),reinterpret_cast<HWND>(l)))return 0; // the hand buttons of the live C (#437 stage 2)
         if(id>=300 && id<=304 && HIWORD(w)==BN_CLICKED && reinterpret_cast<HWND>(l)==merge_buttons[id-300]){
             std::lock_guard lock(merged.mutex);
             if(stopping || !merged.source_width)return 0;
@@ -1625,6 +1809,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM w,LPARAM l){
         for(int i=0;i<2;++i){const bool enabled=CanFocus(*cameras[i]);for(auto button:focus_buttons[i])if(button)EnableWindow(button,enabled);}
         for(auto button:capture_buttons)if(button)EnableWindow(button,CanFocus(*cameras[0]) && CanFocus(*cameras[1]));
         if(pair_button)EnableWindow(pair_button,CanFocus(*cameras[0]) && CanFocus(*cameras[1]));
+        UpdateHandControls();
 #if defined(A0_ENABLE_WPD_LIVE_CAPTURE_PROBE)
         if(live_probe_button)EnableWindow(live_probe_button,LiveProbeCanPress());
 #endif
@@ -1741,7 +1926,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM w,LPARAM l){
 // text under its row, the status text of the lower half stays clear of every button, and the content under a wrapped row has moved
 // down. Returns false when the window could not be made.
 // A folder in A0_LAYOUT_SHOT_DIR (set by a person, never by the program) gets a picture of the window as <width>.bmp.
-bool CheckButtonLayoutAt(int width,int height,const std::function<void(bool)>& check){
+bool CheckButtonLayoutAt(int width,int height,const std::function<void(bool)>& check,bool hand_controls=false){
     static bool registered=false;
     const auto instance=GetModuleHandleW(nullptr);
     WNDCLASSW wc{};wc.lpfnWndProc=WindowProc;wc.hInstance=instance;wc.lpszClassName=L"A0ButtonLayoutUiSmoke";
@@ -1752,6 +1937,7 @@ bool CheckButtonLayoutAt(int width,int height,const std::function<void(bool)>& c
     for(auto& h:capture_buttons)slots.push_back(&h);
     for(auto& h:merge_buttons)slots.push_back(&h);
     for(HWND* h:{&pair_button,&review_button,&inspect_button,&session_button,&seam_button,&settings_button})slots.push_back(h);
+    for(auto& h:hand_buttons)slots.push_back(&h);
 #if defined(A0_ENABLE_WPD_RECALIBRATION)
     slots.push_back(&recal_enter_button);
 #endif
@@ -1762,8 +1948,10 @@ bool CheckButtonLayoutAt(int width,int height,const std::function<void(bool)>& c
     for(HWND* h:{&settings_copy_button,&settings_reread_button,&settings_confirm_button,&settings_discard_button})slots.push_back(h);
 #endif
     std::vector<HWND> saved;for(auto* slot:slots)saved.push_back(*slot);
+    const bool was_hidden_for_hand=merge_buttons_hidden_for_hand;
+    layout_force_hand=hand_controls;merge_buttons_hidden_for_hand=false;   // the layout of a condition v3 (with the hand buttons) or not
     HWND window=CreateWindowExW(0,wc.lpszClassName,L"button layout",WS_POPUP,0,0,width,height,nullptr,nullptr,instance,nullptr);
-    if(!window)return false;
+    if(!window){layout_force_hand.reset();return false;}
     const wchar_t* labels[]{L"AF",L"近くへ微調整",L"遠くへ微調整"};
     const wchar_t* merge_labels[]{L"重なり −1px",L"重なり ＋1px",L"Bを上へ 1px",L"Bを下へ 1px",L"自動位置合わせ"};
     const auto make=[&](HWND& slot,const wchar_t* text,DWORD style=BS_PUSHBUTTON){
@@ -1772,6 +1960,7 @@ bool CheckButtonLayoutAt(int width,int height,const std::function<void(bool)>& c
     bool made=true;
     for(int i=0;i<2;++i){for(int j=0;j<3;++j)made=make(focus_buttons[i][j],labels[j]) && made;made=make(capture_buttons[i],i==0?L"Aを撮影・保存":L"Bを撮影・保存") && made;}
     for(int j=0;j<5;++j)made=make(merge_buttons[j],merge_labels[j]) && made;
+    for(int i=0;i<kPreviewHandButtonCount;++i)made=make(hand_buttons[i],i==kPreviewHandStep?HandStepLabel(false):HandButtonLabel(i)) && made;
     made=make(pair_button,L"両台撮影 → 仮Merge保存") && make(review_button,L"撮影結果を見る") && make(inspect_button,L"拡大確認・再Merge") &&
         make(session_button,L"ライブ停止") && make(seam_button,L"継ぎ目の線を表示",BS_AUTOCHECKBOX) && make(settings_button,L"両台の設定を読む") && made;
 #if defined(A0_ENABLE_WPD_RECALIBRATION)
@@ -1788,7 +1977,8 @@ bool CheckButtonLayoutAt(int width,int height,const std::function<void(bool)>& c
     check(made && client.right==width && client.bottom==height);
     SendMessageW(window,WM_SIZE,SIZE_RESTORED,MAKELPARAM(client.right,client.bottom)); // the real window procedure lays the buttons out
     std::vector<std::pair<HWND,RECT>> boxes;
-    for(HWND* slot:slots)if(*slot){RECT r{};GetWindowRect(*slot,&r);MapWindowPoints(nullptr,window,reinterpret_cast<POINT*>(&r),2);boxes.push_back({*slot,r});}
+    // A button that stands aside in this layout is hidden by the layout (the four position buttons, or the hand buttons): it has no place to check.
+    for(HWND* slot:slots)if(*slot && (GetWindowLongPtrW(*slot,GWL_STYLE)&WS_VISIBLE)){RECT r{};GetWindowRect(*slot,&r);MapWindowPoints(nullptr,window,reinterpret_cast<POINT*>(&r),2);boxes.push_back({*slot,r});}
     const auto overlaps=[](const RECT& a,const RECT& b){return a.left<b.right && b.left<a.right && a.top<b.bottom && b.top<a.bottom;};
     const int middle=client.bottom/2,top_shift=PreviewTopShift(client.right),lower_shift=PreviewLowerShift(client.right);
     // The pictures of the two panes and of C, as Paint and the AF click conversion place them.
@@ -1817,7 +2007,7 @@ bool CheckButtonLayoutAt(int width,int height,const std::function<void(bool)>& c
         if(r.top<middle){if(r.bottom>82+top_shift && r.top>=kPaneButtonsTop && r.top<82+top_shift)++bad_text;}
         else if(r.top>=middle+kLowerButtonsTop && r.top<middle+kLowerTitleRow+lower_shift && r.bottom>middle+kLowerTitleRow+lower_shift)++bad_text;
     }
-    check(boxes.size()==slots.size());
+    check(boxes.size()==slots.size()-(hand_controls?4:static_cast<std::size_t>(kPreviewHandButtonCount)));   // the four position buttons, or the seven hand buttons, stand aside
     check(bad_inside==0);check(bad_overlap==0);check(bad_click==0);check(bad_picture==0);check(bad_text==0);check(bad_status==0);
     // The rows under the title of C keep clear of each other whatever their text needs at this width (#437): the note of a registered C with the
     // long profile name of a real rig, and a state row of three sentences, are measured with the font that Paint draws with.
@@ -1850,7 +2040,7 @@ bool CheckButtonLayoutAt(int width,int height,const std::function<void(bool)>& c
         if(measure)DeleteDC(measure);else ++bad_rows;
     }
     check(bad_rows==0);
-    Log("button_layout_ui width="+std::to_string(width)+" height="+std::to_string(height)+" client="+std::to_string(client.right)+"x"+std::to_string(client.bottom)+" buttons="+std::to_string(boxes.size())+" top_shift="+std::to_string(top_shift)+" lower_shift="+std::to_string(lower_shift)+
+    Log("button_layout_ui hand_controls="+std::string(hand_controls?"1":"0")+" width="+std::to_string(width)+" height="+std::to_string(height)+" client="+std::to_string(client.right)+"x"+std::to_string(client.bottom)+" buttons="+std::to_string(boxes.size())+" top_shift="+std::to_string(top_shift)+" lower_shift="+std::to_string(lower_shift)+
         " outside="+std::to_string(bad_inside)+" overlapping="+std::to_string(bad_overlap)+" unreachable="+std::to_string(bad_click)+" on_picture="+std::to_string(bad_picture)+" on_text="+std::to_string(bad_text)+" on_status="+std::to_string(bad_status)+" rows="+std::to_string(bad_rows));
     wchar_t shot_folder[MAX_PATH]{};const DWORD shot_length=GetEnvironmentVariableW(L"A0_LAYOUT_SHOT_DIR",shot_folder,MAX_PATH);
     if(const wchar_t* folder=shot_folder; shot_length>0 && shot_length<MAX_PATH){
@@ -1888,12 +2078,15 @@ bool CheckButtonLayoutAt(int width,int height,const std::function<void(bool)>& c
     }
     DestroyWindow(window);
     for(std::size_t i=0;i<slots.size();++i)*slots[i]=saved[i];
+    layout_force_hand.reset();merge_buttons_hidden_for_hand=was_hidden_for_hand;
     return true;
 }
 // Called at the end of a window smoke: the width a window can really have on a narrow screen (about 1000 in the client area) and a wide one.
 void CheckButtonLayouts(const std::function<void(bool)>& check){
-    for(const int width:{1000,1024,1056,1400,1920})if(!CheckButtonLayoutAt(width,1800,check))check(false);
-    if(!CheckButtonLayoutAt(1280,1440,check))check(false);   // a tall window of another width, in which the note under the title used to wrap over the state row
+    for(const bool hand:{false,true}){
+        for(const int width:{1000,1024,1056,1400,1920})if(!CheckButtonLayoutAt(width,1800,check,hand))check(false);
+        if(!CheckButtonLayoutAt(1280,1440,check,hand))check(false);   // a tall window of another width, in which the note under the title used to wrap over the state row
+    }
 }
 #include "wpd_dual_preview_af_smoke.hpp"
 #if defined(A0_ENABLE_WPD_RECALIBRATION)
@@ -2534,6 +2727,7 @@ int RunLiveCUiSmoke(){
     for(int j=0;j<5;++j)merge_buttons[j]=CreateWindowExW(0,L"BUTTON",L"x",WS_CHILD,0,0,10,10,window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(300+j)),instance,nullptr);
     seam_button=CreateWindowExW(0,L"BUTTON",L"x",WS_CHILD|BS_AUTOCHECKBOX,0,0,10,10,window,reinterpret_cast<HMENU>(404),instance,nullptr);
     bool controls=seam_button!=nullptr;for(const auto button:merge_buttons)controls=controls && button!=nullptr;
+    try{CreateHandButtons(window,instance);}catch(const std::exception&){controls=false;}
     if(!controls){DestroyWindow(window);return 2;}
     SendMessageW(seam_button,BM_SETCHECK,BST_CHECKED,0);
     HDC dc=CreateCompatibleDC(nullptr);BITMAPINFO info{};info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);info.bmiHeader.biWidth=1400;info.bmiHeader.biHeight=-960;
@@ -2573,12 +2767,16 @@ int RunLiveCUiSmoke(){
             lit(middle+last_lower_rows.orientation_top,middle+last_lower_rows.orientation_top+last_lower_rows.orientation_height)>100;};
     // fresh: a window that was just opened (nothing is carried from a session before); otherwise the runtime of the session before is
     // still there, as it is when StartPreview begins the next session.
+    bool real_mapping_check=false;
     const auto start=[&](bool live,bool scripted,bool fresh=true,const std::string& sha=std::string(64,'1')){
         fixed_source={};fixed_source.loaded_v3=condition(live,sha);
         if(fresh){live_placement_carry={};live_runtime.reset();}
         live_design_override=shortened;
         if(scripted)install_estimator();else live_estimator_override=nullptr;
         script->mode=0;script->calls=0;script->wrong_frames=0;{std::lock_guard lock(script->mutex);script->threads.clear();script->kinds.clear();}
+        // The scripted positions (a position that cannot be drawn, a long move) are not meant to pass the cover check: it is switched off for them, and
+        // the block that holds the real check connected (6e) switches it on.
+        live_mapping_check_override=real_mapping_check?LiveMappingChecker{}:LiveMappingChecker([](const m2::RegisteredMapping&){return std::vector<std::string>{};});
         PrepareLiveRuntime();
         merge_worker=std::jthread(MergeLoop);
     };
@@ -2748,13 +2946,21 @@ int RunLiveCUiSmoke(){
         std::cout.rdbuf(original_buffer);
         const auto text=captured.str();
         const std::string layer_two_fields=LivePlacementLayerTwoFields(true,0.4);   // "layer_two_dropped=1 layer_two_max_px=0.40000000000000002"
-        check(contains(text,"pair_review_placement source=after-capture level=G1 "+LivePlacementFields(jpeg_mapping)+" condition_sha256="+std::string(64,'1')+" "+layer_two_fields+" applied_to_live=1"));
+        check(contains(text,"C ui_apply_capture source=after-capture level=G1 "+LivePlacementFields(jpeg_mapping)+" condition_sha256="+std::string(64,'1')+" "+layer_two_fields+" applied_to_live=1"));
         check(contains(text,"C live_placement_after_capture serial="+std::to_string(serial+1)+" level=G1 before_source=auto-button ") && contains(text,layer_two_fields+" seam_difference_px="));
         const auto after=live_runtime->Status();
         check(after.placement.source==LivePlacementSource::after_capture && after.placement.serial==serial+1 && LivePlacementSameMapping(after.placement.mapping,jpeg_mapping) &&
             !after.placement.mapping.parallax);
         check(after.placement.capture && after.placement.capture->difference_px && contains(after.state_text,"撮影の後の自動調整で位置を確定しました（G1）") &&
             contains(after.state_text,"JPEGの局所の補正（最大 0.4 px）はライブのCには出ません") && contains(after.state_text,"JPEGの画素）動かしました。今のライブのCはJPEGと同じ位置です"));
+        // The number on the screen is the one measure that the log and the report use (SeamDifferencePx), here from the position before the shot to the
+        // JPEG's, computed apart from the runtime with the plan's own model, centre and frame.
+        if(const auto plan=live_runtime->BasePlan();plan && plan->live && after.placement.capture && after.placement.capture->difference_px){
+            const auto& context=*plan->live;
+            const double expected=m2::SeamDifferencePx(context.model_b,context.centre_a,context.origin_mm,cr::FrameOfRaster(context.raster),status.placement.mapping,jpeg_mapping,
+                context.seam_column,context.raster.height_pixels);
+            check(*after.placement.capture->difference_px==expected && expected>0);
+        }else check(false);
     }
     // The session that follows the shot (what StartPreview does): the position is carried, drawn into the new plan, and no estimate is asked
     // for; the pair stays admitted and the picture goes on.
@@ -2847,6 +3053,350 @@ int RunLiveCUiSmoke(){
     finish();
     live_runtime.reset();
 
+    // 6. Hand steps (#437 stage 2), through the real window procedure and the real checks of a condition (the cover check of a capture).
+    //    6a. The direction of each arrow, on a drawing: a frame of B with a bar (or a blob to the right of the axis) is drawn by the plan before and
+    //        after the presses, and the bar moves the way the button says, by about the size of the step (the arrows' signs are held to this).
+    //    6b. The step switch changes the counts of the next press. The state row says what was entered and how to go back.
+    //    6c. One check at a time on a thread of its own: a burst of presses costs the window nothing, its sum is checked once more, and every step
+    //        that was pressed is in the sum. A refused check takes the waiting presses with it. A capture that is asked for while a check runs
+    //        does not wait for it and drops what waits. A Live stop and restart in the middle of a check waits for it (and checks never overlap).
+    //    6d. A pair capture while the screen is not drawn with P is refused with its sentence and starts nothing; once drawn, it is given P.
+    const auto click_hand=[&](int index){SendMessageW(window,WM_COMMAND,MAKEWPARAM(kHandButtonFirstId+index,BN_CLICKED),reinterpret_cast<LPARAM>(hand_buttons[index]));};
+    const auto hand_settled=[&]{
+        AdvanceLiveHand();
+        if(LiveHandBusy() || !live_runtime)return false;
+        const auto status=live_runtime->Status();const auto drawn=DrawnPlanSnapshot();
+        return !status.placement.hand_wanted && drawn && drawn->live && LivePlacementSameMapping(drawn->live->baked,status.placement.mapping);
+    };
+    const auto marked_frame=[&](int kind){
+        Pixels p=frame(100,100,100);
+        const auto put=[&](int x0,int x1,int y0,int y1){for(int y=y0;y<y1;++y)for(int x=x0;x<x1;++x){auto* px=&p.bytes[(static_cast<size_t>(y)*p.width+x)*4];px[0]=px[1]=px[2]=255;}};
+        // C shows only a small part of B's frame (about columns 190 to 221 right of the seam, rows 118 to 148 for this rig), so the marks stand there.
+        if(kind==0)put(203,209,0,267);          // a vertical bar: along the seam's baseline
+        else if(kind==1)put(0,400,125,137);     // a horizontal bar: across it
+        else put(212,220,129,137);              // a blob to the right of the optical axis (B's centre is (200, 133))
+        return p;
+    };
+    // The weighted centre of what is brighter than the grey of the frames, in the pixels of the drawn picture of C.
+    const auto light_centre=[](const render::BgrImage& image){
+        double sx=0,sy=0,sw=0;
+        for(unsigned y=0;y<image.height;++y)for(unsigned x=0;x<image.width;++x){
+            const auto* px=&image.bgr[(static_cast<size_t>(y)*image.width+x)*3];
+            const double w=std::max(0.0,(px[0]+px[1]+px[2])/3.0-110.0);sx+=w*x;sy+=w*y;sw+=w;}
+        return std::array<double,3>{sw>0?sx/sw:0,sw>0?sy/sw:0,sw};
+    };
+    struct Seen {bool ok{false};double dx{},dy{},live_pixel_in_output{};};
+    // `presses` presses of the button of `index` on a drawing made with the frame `kind`; the picture is drawn from the plans in force.
+    const auto drawn_shift=[&](int kind,int index,int presses){
+        Seen seen;
+        cameras[1]->pixels=marked_frame(kind);
+        start(false,true);
+        bool ok=live_runtime!=nullptr && wait_for(picture_ready) && wait_for(hand_settled);
+        if(ok){
+            const auto before=DrawnPlanSnapshot();
+            auto a=SmallBgr(cameras[0]->pixels),b=SmallBgr(cameras[1]->pixels);
+            const auto c0=light_centre(RenderFixedPreview(*before,a,b).image);
+            for(int i=0;i<presses && ok;++i){click_hand(index);ok=wait_for(hand_settled);}
+            const auto after=DrawnPlanSnapshot();
+            ok=ok && after && after->live && c0[2]>0;
+            if(ok){
+                const auto c1=light_centre(RenderFixedPreview(*after,a,b).image);
+                seen.dx=c1[0]-c0[0];seen.dy=c1[1]-c0[1];seen.live_pixel_in_output=LivePixelInOutputPx(before);
+            }
+        }
+        seen.ok=ok;
+        finish();live_runtime.reset();
+        cameras[1]->pixels=frame(200,200,200);
+        return seen;
+    };
+    {
+        constexpr int presses=4;   // 4 x 12 px = 48 px of the JPEG; the turns are 9 x 0.2 degrees (the envelope allows 2 degrees)
+        const auto along=drawn_shift(0,kPreviewHandRight,presses);
+        const auto left=drawn_shift(0,kPreviewHandLeft,presses);
+        const auto down=drawn_shift(1,kPreviewHandDown,presses);
+        const auto up=drawn_shift(1,kPreviewHandUp,presses);
+        const auto clockwise=drawn_shift(2,kPreviewHandClockwise,9);
+        const auto counter=drawn_shift(2,kPreviewHandCounterClockwise,9);
+        check(along.ok && left.ok && down.ok && up.ok && clockwise.ok && counter.ok);
+        const double expected=along.live_pixel_in_output>0?presses*12.0/along.live_pixel_in_output:0;
+        std::ostringstream shifts;shifts.imbue(std::locale::classic());
+        shifts<<"C hand_arrows_drawn expected_px="<<expected<<" right="<<along.dx<<","<<along.dy<<" left="<<left.dx<<","<<left.dy<<" down="<<down.dx<<","<<down.dy
+            <<" up="<<up.dx<<","<<up.dy<<" clockwise="<<clockwise.dx<<","<<clockwise.dy<<" counter_clockwise="<<counter.dx<<","<<counter.dy;
+        Log(shifts.str());
+        // B's picture moves the way the arrow points: right and left along the seam's baseline, down and up across it (in the picture of C)
+        check(expected>0.3 && along.dx>0.5*expected && along.dx<1.6*expected && std::abs(along.dy)<0.3*along.dx);
+        check(left.dx<-0.5*expected && left.dx>-1.6*expected && std::abs(left.dy)<0.3*std::abs(left.dx));
+        check(down.dy>0.5*expected && down.dy<1.6*expected && std::abs(down.dx)<0.3*down.dy);
+        check(up.dy<-0.5*expected && up.dy>-1.6*expected && std::abs(up.dx)<0.3*std::abs(up.dy));
+        // about the axis: a blob to the right of it goes down for clockwise and up for counter-clockwise (1.8 degrees at about 18 px from the axis is about 0.6 px of the frame)
+        check(clockwise.dy>0.25 && clockwise.dy<4 && counter.dy<-0.25 && counter.dy>-4 && std::abs(clockwise.dy+counter.dy)<0.35*clockwise.dy);
+    }
+    // 6b. The window with a registered C: the step switch, the sentence of what was entered, the way back, the checks that it makes.
+    cameras[1]->pixels=frame(200,200,200);
+    start(false,true);
+    check(wait_for(picture_ready) && wait_for(hand_settled));
+    {
+        check(HandControlsInLayout() && live_runtime->Status().placement.source==LivePlacementSource::fixed_condition);
+        check(!hand_fine && std::wstring(HandStepLabel(hand_fine)).find(L"粗い")!=std::wstring::npos);
+        click_hand(kPreviewHandStep);
+        check(hand_fine && GetWindowTextLength(hand_buttons[kPreviewHandStep])>0);
+        std::wstring label(64,L'\0');label.resize(GetWindowTextW(hand_buttons[kPreviewHandStep],label.data(),64));
+        check(label==HandStepLabel(true));
+        const auto serial=live_runtime->Status().placement.serial;
+        const auto single_began=Clock::now();
+        click_hand(kPreviewHandRight);
+        check(wait_for(hand_settled));
+        Log("C hand_press_to_drawn_ms="+std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now()-single_began).count())+" check=real size=smoke-raster");
+        auto status=live_runtime->Status();
+        check(status.placement.source==LivePlacementSource::manual && status.placement.hand_entered && *status.placement.hand_entered==LiveHandCountsOf(LiveHandButton::right,true) &&
+            status.placement.serial==serial+1 && status.placement.base_source==LivePlacementSource::fixed_condition);
+        check(contains(status.state_text,"手で直しました（Bの絵の動き 左右 右へ 4 px・上下 0 px・回り 0°、撮影の画素。合計）。この位置で撮影します"));
+        paint();
+        check(lit_rows());
+        {std::lock_guard lock(merged.mutex);
+            const auto texts=CurrentLiveRowsTexts(merged.drawn_plan);
+            check(texts.state.find(L"ライブの 1 画素は撮影の約")!=std::wstring::npos && texts.state.find(L"拡大確認・再Merge")!=std::wstring::npos);}
+        // the same amount the other way comes back to exactly 0: the position is what it was before, the hand mark is gone, and it says so
+        click_hand(kPreviewHandLeft);
+        check(wait_for(hand_settled));
+        status=live_runtime->Status();
+        check(status.placement.source==LivePlacementSource::fixed_condition && !status.placement.hand_entered && !status.placement.base_source && status.placement.hand_returned &&
+            contains(status.state_text,"手で動かした量が 0 に戻ったので、手で直す前の位置に戻しました。撮影の後の自動調整で位置が変わります"));
+        // a step that the cover check refuses (a very long way) is refused with its sentence and the position stays: the amount is added until the real check says no
+        click_hand(kPreviewHandStep);
+        check(!hand_fine);
+        int accepted_presses=0;
+        for(int i=0;i<40;++i){
+            const auto before=live_runtime->Status().placement.serial;
+            click_hand(kPreviewHandRight);
+            if(!wait_for(hand_settled))break;
+            if(live_runtime->Status().placement.serial==before)break;
+            ++accepted_presses;
+        }
+        // the sentence is what the check said (the envelope or the cover), the position was not rounded to an edge, and nothing is still checked
+        check(!LiveHandBusy() && accepted_presses>0 && accepted_presses<40 && !live_notice.empty() && live_notice.find("位置は変えていません")!=std::string::npos &&
+            (live_notice.find("範囲の端です")!=std::string::npos || live_notice.find("継ぎ目が重なりの外")!=std::string::npos || live_notice.find("出力の端が覆われない")!=std::string::npos));
+        Log("C hand_steps_until_refused accepted_presses="+std::to_string(accepted_presses)+" notice="+live_notice);
+        check(live_runtime->Status().placement.hand_entered && live_runtime->Status().placement.hand_entered->seam_dx==accepted_presses*LiveHandCountsOf(LiveHandButton::right,false).seam_dx);
+        SetLiveNotice({});
+    }
+    check(hand_checks_peak==1);
+    finish();
+    live_runtime.reset();
+
+    // 6c. One check at a time. The check is slowed (a full-size position takes a moment) around the real one.
+    {
+        const auto real=MakeWindowHandChecker(condition(false,std::string(64,'1')));
+        const auto slow=[real](int milliseconds){return LiveHandChecker([real,milliseconds](const m2::RegisteredMapping& base,const m2::HandCounts& total){
+            std::this_thread::sleep_for(std::chrono::milliseconds(milliseconds));return real(base,total);});};
+        const auto reset_counters=[&]{hand_checks_running=0;hand_checks_peak=0;hand_checks_total=0;};
+        // A burst: five presses while the first is checked. The window thread is not held, the state row says what is going on, and in the end the
+        // position is the sum of all five presses, from one more check.
+        live_hand_check_override=slow(400);
+        start(false,true);
+        check(wait_for(picture_ready) && wait_for(hand_settled));
+        reset_counters();
+        const auto serial=live_runtime->Status().placement.serial;
+        const auto began=Clock::now();
+        for(int i=0;i<5;++i)click_hand(kPreviewHandRight);
+        const auto pressing=Clock::now()-began;
+        check(pressing<std::chrono::milliseconds(250));
+        check(LiveHandBusy() && hand_queued_presses==4);
+        {std::lock_guard lock(merged.mutex);
+            const auto texts=CurrentLiveRowsTexts(merged.drawn_plan);
+            check(texts.state.find(L"押したことを受け付けました。位置を確かめています…（続けて押した 4 回分は、確かめが終わってからまとめて入れます）")!=std::wstring::npos);}
+        paint();
+        check(lit_rows());
+        check(wait_for(hand_settled,20000));
+        Log("C hand_burst_to_drawn_ms="+std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now()-began).count())+" presses=5 check_ms=400 checks="+std::to_string(hand_checks_total.load()));
+        {
+            const auto status=live_runtime->Status();
+            m2::HandCounts sum{};for(int i=0;i<5;++i)sum=m2::AddHandCounts(sum,LiveHandCountsOf(LiveHandButton::right,false));
+            check(hand_checks_peak==1 && hand_checks_total==2);   // the first press, and the other four together
+            check(status.placement.source==LivePlacementSource::manual && status.placement.hand_entered && *status.placement.hand_entered==sum);
+            check(status.placement.serial==serial+2 && hand_queued_presses==0 && hand_queued.IsZero() && live_notice.empty());
+            // the position is the one that the sum gives from the position before (solved once: the same as one press of the sum)
+            const auto direct=real(status.placement.hand_base?*status.placement.hand_base:status.placement.mapping,sum);
+            check(direct.status==LiveHandCheck::Status::accepted && LivePlacementSameMapping(direct.mapping,status.placement.mapping));
+        }
+        finish();live_runtime.reset();
+
+        // A check that refuses takes the presses that waited with it, and says so; the position stays.
+        live_hand_check_override=[](const m2::RegisteredMapping&,const m2::HandCounts&){
+            std::this_thread::sleep_for(300ms);LiveHandCheck check;check.status=LiveHandCheck::Status::refused_cover;check.seam_covered=false;return check;};
+        start(false,true);
+        check(wait_for(picture_ready) && wait_for(hand_settled));
+        reset_counters();
+        {
+            const auto before=live_runtime->Status().placement;
+            for(int i=0;i<3;++i)click_hand(kPreviewHandDown);
+            check(wait_for(hand_settled,20000));
+            const auto after=live_runtime->Status().placement;
+            check(hand_checks_total==1 && hand_checks_peak==1);
+            check(after.source==LivePlacementSource::fixed_condition && !after.hand_entered && after.serial==before.serial && LivePlacementSameMapping(after.mapping,before.mapping));
+            check(live_notice.find("この位置では継ぎ目が重なりの外に出るため、動かせません。位置は変えていません 続けて押した 2 回分も入れていません")!=std::string::npos);
+            check(hand_queued_presses==0 && hand_queued.IsZero());
+        }
+        finish();live_runtime.reset();
+
+        // A capture asked for in the middle of a check does not wait for it: the position that is drawn is taken, what waits is dropped, and the
+        // result of the check does not change the position (the machine refuses it).
+        live_hand_check_override=slow(700);
+        start(false,true);
+        check(wait_for(picture_ready) && wait_for(hand_settled));
+        reset_counters();
+        {
+            const auto before=live_runtime->Status().placement;
+            click_hand(kPreviewHandRight);
+            for(int i=0;i<200 && hand_checks_running==0;++i)std::this_thread::sleep_for(10ms);   // the check has begun (it is the one that the capture must not wait for)
+            click_hand(kPreviewHandRight);
+            check(hand_checks_running==1 && LiveHandBusy() && hand_queued_presses==1);
+            const auto asked=Clock::now();
+            capture_pending.reset();
+            for(int i=0;i<40 && !capture_pending;++i){refresh();RequestCapture(2);if(!capture_pending)std::this_thread::sleep_for(50ms);}
+            const auto waited=Clock::now()-asked;
+            check(capture_pending && *capture_pending==2 && live_capture_held && pending_confirmed);
+            check(waited<std::chrono::milliseconds(450));   // the check (700 ms) was not waited for
+            check(live_notice==LiveHandDroppedByCaptureText() && hand_queued_presses==0 && hand_queued.IsZero());
+            check(live_runtime->Status().placement.capturing);
+            if(pending_confirmed)check(pending_confirmed->serial==before.serial && pending_confirmed->source==m2::ConfirmedPositionSource::fixed_condition && !pending_confirmed->manual_entered &&
+                LivePlacementSameMapping(pending_confirmed->mapping,before.mapping));
+            // the check ends: its press is not applied, and nothing is said over the sentence about the capture
+            for(int i=0;i<200 && LiveHandBusy();++i){std::this_thread::sleep_for(50ms);AdvanceLiveHand();}
+            check(!LiveHandBusy() && hand_checks_total==1 && hand_checks_peak==1);
+            const auto after=live_runtime->Status().placement;
+            check(after.source==LivePlacementSource::fixed_condition && !after.hand_entered && after.serial==before.serial && !live_runtime->PlacementMachine().HasPending());
+            check(live_notice==LiveHandDroppedByCaptureText());
+            // buttons and the automatic one are refused while the capture holds the position
+            click_hand(kPreviewHandRight);
+            for(int i=0;i<100 && LiveHandBusy();++i){std::this_thread::sleep_for(20ms);AdvanceLiveHand();}
+            check(live_runtime->Status().placement.source==LivePlacementSource::fixed_condition && live_runtime->Status().placement.serial==before.serial);
+            check(contains(live_runtime->Status().state_text,"撮影中は位置を動かせません"));
+            EndLiveCaptureHold();
+            check(!live_runtime->Status().placement.capturing);
+            SetLiveNotice({});
+        }
+        capture_pending.reset();
+        finish();live_runtime.reset();
+
+        // The Live is stopped and started again in the middle of a check: the restart waits for the check (the machine that the next session
+        // carries is the one the check commits to), checks never overlap, and what is drawn in the end is the position that the machine has.
+        live_hand_check_override=slow(500);
+        start(false,true);
+        check(wait_for(picture_ready) && wait_for(hand_settled));
+        reset_counters();
+        click_hand(kPreviewHandRight);click_hand(kPreviewHandRight);
+        check(LiveHandBusy());
+        stopping=true;
+        check(CanRestartPreview()==false);   // the restart waits for the check
+        finish();
+        start(false,true,false);
+        check(!LiveHandBusy() && hand_queued_presses==0 && hand_checks_total==1 && hand_checks_peak==1 && hand_checks_running==0);
+        check(wait_for(picture_ready) && wait_for(hand_settled));
+        {
+            const auto status=live_runtime->Status();
+            const bool by_hand=status.placement.source==LivePlacementSource::manual;
+            // either the press was applied (and is drawn now) or it was not; never half of it
+            check(by_hand?(status.placement.hand_entered && *status.placement.hand_entered==LiveHandCountsOf(LiveHandButton::right,false)):!status.placement.hand_entered);
+            Log(std::string("C hand_check_across_restart applied=")+(by_hand?"1":"0"));
+        }
+        finish();live_runtime.reset();
+        live_hand_check_override=nullptr;
+    }
+
+    // 6d. A pair capture while the screen is not drawn with P. Nothing is run: the plans are set by hand, so that the answer does not depend on a
+    //     worker's timing. P is a position that no table was baked for yet (what a session begins with after a shot).
+    {
+        live_hand_check_override=nullptr;
+        live_placement_carry={};live_runtime.reset();
+        fixed_source={};fixed_source.loaded_v3=condition(false,std::string(64,'1'));
+        PrepareLiveRuntime();
+        const auto plan0=PlanFixedPreviewV3(*fixed_source.loaded_v3,mount_orientation,400,267);
+        check(live_runtime && !plan0.skip && plan0.live);
+        live_runtime->PublishBase(plan0);
+        ApplyCaptureToLivePlacement(shot(jpeg_mapping,m2::GeometryLevel::g2,std::string(64,'1'),false));
+        {
+            const auto status=live_runtime->Status();
+            check(status.placement.source==LivePlacementSource::after_capture && !LivePlacementSameMapping(plan0.live->baked,status.placement.mapping));
+        }
+        {std::lock_guard lock(merged.mutex);
+            merged.decided=true;merged.mode=PreviewCMode::fixed_composite;merged.fixed_plan=plan0;merged.drawn_plan=std::make_shared<const FixedPreviewPlan>(plan0);
+            merged.pixels=Pixels{4,4,std::vector<unsigned char>(64,90)};merged.source_a=merged.source_b=Clock::now();merged.rendered_revision=merged.revision;}
+        stopping=false;
+        const auto before=live_runtime->Status().placement;
+        const auto asked_for_pair=[&]{
+            for(int i=0;i<40;++i){
+                refresh();{std::lock_guard lock(merged.mutex);merged.source_a=merged.source_b=Clock::now();merged.rendered_revision=merged.revision;}
+                capture_pending.reset();capture_status.clear();RequestCapture(2);
+                if(capture_pending || !capture_status.empty())return;
+                std::this_thread::sleep_for(50ms);
+            }
+        };
+        asked_for_pair();
+        check(!capture_pending && !stopping && !live_capture_held && !pending_confirmed);
+        check(capture_status==L"ライブの合成がまだ確定した位置で描けていないので、撮影できません。少し待ってからもう一度押してください");
+        check(live_notice==LiveCaptureRefusalText(LiveCaptureAdmission::not_drawn,false));
+        {const auto after=live_runtime->Status();
+            check(after.placement.serial==before.serial && !after.placement.capturing && LivePlacementSameMapping(after.placement.mapping,before.mapping) && after.placement.counters.captures_begun==before.counters.captures_begun);}
+        // P is drawn (the table was baked for it): the pair is taken with P, and given it
+        const LiveFrameSource no_frames{[]{return false;},nullptr};
+        const LiveEstimator never=[&](const LiveJob&,const render::BgrImage&,const render::BgrImage&){check(false);return LiveEstimateOutcome{};};
+        (void)live_runtime->RunPass(no_frames,never);
+        {std::lock_guard lock(merged.mutex);merged.fixed_plan=*live_runtime->CurrentPlan();merged.drawn_plan=live_runtime->CurrentPlan();}
+        asked_for_pair();
+        check(capture_pending && *capture_pending==2 && stopping && live_capture_held && pending_confirmed);
+        if(pending_confirmed){
+            const auto status=live_runtime->Status();
+            check(pending_confirmed->serial==status.placement.serial && pending_confirmed->source==m2::ConfirmedPositionSource::after_capture &&
+                LivePlacementSameMapping(pending_confirmed->mapping,status.placement.mapping) && pending_confirmed->condition_sha256==std::string(64,'1'));
+            check(status.placement.capturing && live_notice.empty());
+        }
+        // no result with a JPEG: the position is free again
+        EndLiveCaptureHold();
+        check(!live_capture_held && !pending_confirmed && !live_runtime->Status().placement.capturing);
+        capture_pending.reset();stopping=false;
+        // P drawn from a table that fails to bake: the sentence says what to do
+        live_placement_carry={};live_runtime.reset();
+        {std::lock_guard lock(merged.mutex);
+            merged.decided=true;merged.mode=PreviewCMode::fixed_composite;
+            merged.pixels=Pixels{4,4,std::vector<unsigned char>(64,90)};merged.source_a=merged.source_b=Clock::now();merged.rendered_revision=merged.revision;}
+        PrepareLiveRuntime();
+        live_runtime->PublishBase(plan0);
+        ApplyCaptureToLivePlacement(shot(m2::RegisteredMapping{cr::PoseParameters{0,0,0.4,3000.0,0,0},m2::SurfacePlane{},std::nullopt},m2::GeometryLevel::g2,std::string(64,'1'),false));
+        (void)live_runtime->RunPass(no_frames,never);
+        {std::lock_guard lock(merged.mutex);merged.fixed_plan=plan0;merged.drawn_plan=std::make_shared<const FixedPreviewPlan>(plan0);}
+        check(live_runtime->Status().bake_failed);
+        asked_for_pair();
+        check(!capture_pending && capture_status==L"ライブの合成がまだ確定した位置で描けていないので、撮影できません。「自動調整」を押すか、ライブを止めて再開してください");
+        SetLiveNotice({});
+        ClearMerge();stopping=true;
+        live_placement_carry={};live_runtime.reset();fixed_source={};
+    }
+    rearm();
+
+    // 6e. The position of an estimate is checked before it is drawn, with the check that a capture makes on its position (the condition's profile, seam
+    //     column and the design's blend width), and the check is connected: a position that fails it is not drawn, the position and the table stay, and the
+    //     row says why. (Nothing is checked when the check is not connected, so this holds the connection.)
+    {
+        real_mapping_check=true;
+        start(true,true);
+        check(wait_for(picture_ready));
+        check(wait_for([&]{const auto plan=drawn_plan();return plan.live && plan.live->baked.pose.tx_mm==pose_a.tx_mm;}));   // a position that passes is drawn
+        const auto before=live_runtime->Status();
+        check(before.placement.source==LivePlacementSource::auto_start && !before.bake_failed);
+        script->mode=2;   // B 3000 mm away: the seam is not inside the overlap
+        press(304);
+        check(wait_for([&]{const auto status=live_runtime->Status();return status.placement.activity==LivePlacementActivity::idle && status.placement.counters.not_decided>before.placement.counters.not_decided;}));
+        const auto after=live_runtime->Status();
+        check(after.placement.outcome==LivePlacementOutcomeKind::not_decided && after.placement.serial==before.placement.serial && LivePlacementSameMapping(after.placement.mapping,before.placement.mapping));
+        check(after.rebakes==before.rebakes && after.rebake_failures==before.rebake_failures && !after.bake_failed);
+        check(contains(after.state_text,"位置を決められませんでした（理由: 継ぎ目が重なりの外に出ます）") || contains(after.state_text,"位置を決められませんでした（理由: 出力の端が覆われません）"));
+        const auto plan=drawn_plan();
+        check(plan.live && plan.live->baked.pose.tx_mm==pose_a.tx_mm);
+        finish();live_runtime.reset();
+        real_mapping_check=false;
+    }
+
     // 5. A condition v2: no runtime, no rows; the picture starts where it always did.
     fixed_source={};fixed_source.loaded_v2=lens_condition();
     live_estimator_override=nullptr;
@@ -2866,6 +3416,7 @@ int RunLiveCUiSmoke(){
     finish();
 
     SelectObject(dc,old);DeleteObject(bitmap);DeleteDC(dc);DestroyWindow(window);
+    hand_buttons={};hand_fine=false;live_hand_check_override=nullptr;SetLiveNotice({});
     fixed_source={};live_runtime.reset();live_estimator_override=nullptr;live_design_override.reset();stopping=true;
     CheckButtonLayouts([&](bool ok){check(ok);}); // #437: the buttons at the width of a narrow screen and at a wide one
     Log("live_c_ui_checks="+std::to_string(checks)+" failures="+std::to_string(failures)+" camera_operations=0");return failures?1:0;
@@ -2886,6 +3437,7 @@ int RunPreviewWindow(const std::array<std::wstring,2>& ids){
     }
     constexpr std::array<const wchar_t*,5> merge_labels{L"重なり −1px",L"重なり ＋1px",L"Bを上へ 1px",L"Bを下へ 1px",L"自動位置合わせ"};
     for(int j=0;j<5;++j){merge_buttons[j]=CreateWindowExW(0,L"BUTTON",merge_labels[j],WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,0,0,0,0,window,reinterpret_cast<HMENU>(static_cast<INT_PTR>(300+j)),instance,nullptr);if(!merge_buttons[j])throw std::runtime_error("create merge button failed");EnableWindow(merge_buttons[j],FALSE);}
+    CreateHandButtons(window,instance); // #437 stage 2: shown only with a condition v3
     pair_button=CreateWindowExW(0,L"BUTTON",L"両台撮影 → 仮Merge保存",WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,0,0,0,0,window,reinterpret_cast<HMENU>(400),instance,nullptr);
     review_button=CreateWindowExW(0,L"BUTTON",L"撮影結果を見る",WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,0,0,0,0,window,reinterpret_cast<HMENU>(401),instance,nullptr);
     inspect_button=CreateWindowExW(0,L"BUTTON",L"拡大確認・再Merge",WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,0,0,0,0,window,reinterpret_cast<HMENU>(402),instance,nullptr);

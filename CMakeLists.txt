@@ -1567,7 +1567,7 @@ if(BUILD_TESTING)
         add_dependencies(A0CameraStitcher.WpdDualPreview A0CameraStitcher.StillReview)
         # The libraries the preview's main links; the test binary of the confirmation screen uses the same list, so a library
         # added to the preview is added to both here.
-        set(a0_wpd_dual_preview_link_libraries a0_phase0_core a0_wpd_live_view_transfer a0_m2_render a0_m2_overlap_estimation a0_m2_offline_stitcher a0_m2_fixed_composite a0_m2_fixed_composite_v2 a0_m2_content_registration user32 gdi32 windowscodecs ole32 PortableDeviceGuids)
+        set(a0_wpd_dual_preview_link_libraries a0_phase0_core a0_wpd_live_view_transfer a0_m2_render a0_m2_overlap_estimation a0_m2_offline_stitcher a0_m2_fixed_composite a0_m2_fixed_composite_v2 a0_m2_content_registration a0_m2_confirmed_position user32 gdi32 windowscodecs ole32 PortableDeviceGuids)
         target_link_libraries(A0CameraStitcher.WpdDualPreview PRIVATE ${a0_wpd_dual_preview_link_libraries})
         target_compile_definitions(A0CameraStitcher.WpdDualPreview PRIVATE UNICODE _UNICODE NOMINMAX)
         add_test(NAME preview_level_ui_contracts COMMAND A0CameraStitcher.WpdDualPreview --level-ui-smoke)
