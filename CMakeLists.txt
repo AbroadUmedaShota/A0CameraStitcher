@@ -1463,8 +1463,9 @@ if(BUILD_TESTING)
         endif()
         add_test(NAME pair_review_registration_contracts COMMAND a0_pair_review_registration_tests "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2")
         set_tests_properties(pair_review_registration_contracts PROPERTIES TIMEOUT 3000)
-        # The cheap check of a hand step of the confirmed position and the one a capture makes on the same mapping (#437 stage 2): near the edges of a
-        # full-size frame, on mappings that pass and mappings that fail, they answer alike. Full-size blank frames, no camera, no window.
+        # The cheap check of a hand step of the confirmed position and the one a capture makes on the same mapping (#437 stage 2): both are
+        # CheckRegisteredMappingCover, and near the edges of the output, on mappings that pass and mappings that fail, they answer alike and as the
+        # check made before on full-size blank frames did. No camera, no window.
         add_executable(a0_confirmed_position_cover_tests tests/confirmed_position_cover_tests.cpp)
         target_include_directories(a0_confirmed_position_cover_tests PRIVATE src/phase0/include src/common/include)
         target_link_libraries(a0_confirmed_position_cover_tests PRIVATE a0_m2_offline_stitcher a0_m2_fixed_composite a0_m2_fixed_composite_v2 a0_m2_capture_registration a0_m2_confirmed_position a0_m2_rig_profile_v2 ole32 windowscodecs)

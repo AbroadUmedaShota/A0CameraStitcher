@@ -1,11 +1,14 @@
 // The cheap cover check of a hand step of the confirmed position (CheckRegisteredMappingCover, #437 stage 2) and the one a capture makes on the
-// mapping it chose with its decoded frames (RegisteredMappingCoverOnThreads, reached through RegisteredMappingCoverOfCapturedFrames) have to answer
-// alike: a hand step that passes the first is not refused by the second after the shot, and the JPEG is made with the position that was drawn.
-// The second counts its own way on frames of the full sensor size and is the first itself on any other size, so this holds blank frames of the full
-// sensor size and puts both through mappings near the edge: along each axis of the mapping (position, rotation, height, the paper surface) the last
-// mapping that passes and the first that fails are found by bisection with the first check, then both checks answer on those and the mappings around
-// them, on an output that is inside the overlap and on outputs that reach past one camera. Camera, window and file free. Argument 1 is the shared
-// rig profile v2 fixture folder. The expected answer of one check is the other check's: neither is made from the function that is checked here.
+// mapping it chose (RegisteredMappingCoverOnThreads, reached through RegisteredMappingCoverOfCapturedFrames) have to answer alike: a hand step that
+// passes the first is not refused by the second after the shot, and the JPEG is made with the position that was drawn. The capture's check is now
+// CheckRegisteredMappingCover itself on the review's threads (it does not read the frames), so the two answer alike by construction; this test keeps
+// them from coming apart. It puts both through mappings near the edge: along each axis of the mapping (position, rotation, height, the paper
+// surface) the last mapping that passes and the first that fails are found by bisection with the first check, then both checks answer on those and
+// the mappings around them, on an output that is inside the overlap and on outputs that reach past one camera. Each answer is also held against
+// CoverWithFrames (the check as it was made before, on blank frames of the full sensor size) and against the first check on 2, 4 and 8 threads.
+// Only the count of the output's edge in CoverWithFrames is made apart from the function that is checked here: its seam answer comes from
+// CanRenderMappedFixedSeam, which calls the same size form (CanRenderMappedFixedSeamBySize) as CheckRegisteredMappingCover. Camera, window and file
+// free. Argument 1 is the shared rig profile v2 fixture folder.
 #include "a0/m2/experimental/confirmed_position_check.hpp"
 #include "a0/m2/experimental/fixed_composite_creation_v3.hpp"
 #include "a0/m2/experimental/fixed_composite_maps.hpp"
@@ -269,7 +272,7 @@ int main(int argc,char* argv[]){
             }
         }
 
-        // A frame that is not of the full size is checked by CheckRegisteredMappingCover itself, so the answer is the same by construction.
+        // The capture's check does not read the frames: on frames that are not of the full size it gives CheckRegisteredMappingCover's answer too.
         {
             render::BgrImage small_a{64,48,std::vector<std::uint8_t>(64*48*3,0)},small_b=small_a;
             auto parameters=rig.binding.parameters;

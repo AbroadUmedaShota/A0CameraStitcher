@@ -330,6 +330,7 @@ struct LiveStatus {
     LiveOrientationTexts orientation;
     std::string orientation_line;          // LiveOrientationRowText (UTF-8, one line)
     std::uint64_t rebakes{},rebake_failures{};
+    std::uint64_t rebakes_dropped{};       // tables that were baked and not taken (what was wanted changed while the bake ran)
 };
 
 // What the worker reads of the frames.
@@ -425,19 +426,25 @@ public:
     }
     // A hand press (LivePlacementMachine::PrepareHandStep has the rules). `live_running`: the window's Live runs and is not stopping. The
     // check runs with no lock held. Accepted: a position waits to be drawn, the worker bakes it, and P becomes it once drawn.
+    // While the press is checked, an estimate's position is neither baked nor drawn (Rebake), so that a press that is accepted withdraws it
+    // whichever of the two checks ran first (ADR-0046 decision 3); a press that is refused leaves it to the next pass.
     LiveHandResult HandStep(const a0::m2::experimental::HandCounts& delta,const std::shared_ptr<const FixedPreviewPlan>& drawn,bool live_running){
         LiveHandPrepared prepared;
         {
             std::lock_guard lock(mutex_);
             prepared=machine_.PrepareHandStep(delta,LiveHandContext{live_running,DrawnWithPlacementLocked(drawn)});
             if(prepared.outcome!=LiveHandOutcome::accepted)PublishStatusLocked();
+            else ++hand_checks_running_;
         }
         LiveHandResult result;
         if(prepared.outcome!=LiveHandOutcome::accepted){
             result.outcome=prepared.outcome;
         }else{
-            const auto check=EvaluateLiveHandCheck(config_.hand_check,prepared.proposal);
+            LiveHandCheck check;
+            try{check=EvaluateLiveHandCheck(config_.hand_check,prepared.proposal);}
+            catch(...){std::lock_guard lock(mutex_);--hand_checks_running_;PublishStatusLocked();throw;}
             std::lock_guard lock(mutex_);
+            --hand_checks_running_;
             result=machine_.CommitHandStep(prepared.proposal,check);
             PublishStatusLocked();
         }
@@ -610,6 +617,8 @@ private:
     [[nodiscard]] bool DrawnWithPlacementLocked(const std::shared_ptr<const Plan>& drawn) const {
         return drawn && drawn->live && LivePlacementSameMapping(drawn->live->baked,machine_.Placement());
     }
+    // An estimate's position waits to be drawn while a hand press is checked: it is not baked or drawn until the press is answered.
+    [[nodiscard]] bool EstimateHeldLocked() const {return hand_checks_running_>0 && machine_.PendingIsEstimate();}
     // Runs the caller's cheap check on an estimate that decided a position, with no lock held; what it finds (or what it throws) makes the
     // outcome not usable, with its reasons in front of the estimator's.
     void CheckEstimatedPosition(LiveEstimateOutcome& outcome) const {
@@ -657,6 +666,7 @@ private:
     // use was baked for; there is no distance below which a bake is skipped, so what C draws is P itself. The bake runs with no lock held; the
     // result is taken only if the base plan is still the one it was made for and the wanted mapping is still the one that was baked (a shot or
     // a new condition may have changed it meanwhile). A position that waits becomes P when it has been drawn, and is dropped when it could not be.
+    // An estimate's position is not baked, nor taken when its bake ends, while a hand press is checked (HandStep).
     void Rebake(LivePassResult& result,const std::function<bool()>& stop){
         std::shared_ptr<const Plan> from;
         std::uint64_t serial{},wanted_serial{};
@@ -668,6 +678,7 @@ private:
             serial=base_serial_;from=current_?current_:base_;
             wanted_serial=machine_.WantedSerial();wanted=machine_.Wanted();
             if(failed_wanted_serial_==wanted_serial)return;   // the same mapping failed already; wait for another
+            if(EstimateHeldLocked())return;   // a hand press is checked: the estimate's position waits for its answer
             if(LivePlacementSameMapping(from->live->baked,wanted)){
                 // Already drawn (P itself, or a position that came out the same as P).
                 if(machine_.HasPending())machine_.Committed();
@@ -685,8 +696,10 @@ private:
         std::optional<std::string> placement_line;
         {
             std::lock_guard lock(mutex_);
-            if(base_serial_!=serial)return;   // another base plan was published meanwhile; P is baked into it by the next pass
-            if(machine_.WantedSerial()!=wanted_serial)return;   // the wanted mapping changed meanwhile; the next pass bakes it
+            // A table that was baked and is not taken is counted (rebakes_dropped).
+            if(base_serial_!=serial){++rebakes_dropped_;return;}   // another base plan was published meanwhile; P is baked into it by the next pass
+            if(machine_.WantedSerial()!=wanted_serial){++rebakes_dropped_;return;}   // the wanted mapping changed meanwhile; the next pass bakes it
+            if(EstimateHeldLocked()){++rebakes_dropped_;return;}   // a hand press began to be checked meanwhile; the next pass bakes again if it is refused
             text<<"C live_rebake wanted_serial="<<wanted_serial<<" ms="<<milliseconds;
             if(baked.ok){
                 current_=std::make_shared<const Plan>(std::move(baked.plan));
@@ -772,7 +785,7 @@ private:
         next.state_text=LivePlacementStateText(view,bake_failed_);
         next.orientation=LiveOrientationTextsOf(orientation_a_,orientation_b_);
         next.orientation_line=LiveOrientationRowText(next.orientation);
-        next.rebakes=rebakes_;next.rebake_failures=rebake_failures_;
+        next.rebakes=rebakes_;next.rebake_failures=rebake_failures_;next.rebakes_dropped=rebakes_dropped_;
         status_=std::move(next);
     }
 
@@ -788,7 +801,8 @@ private:
     std::optional<CameraOrientation> orientation_a_,orientation_b_;
     std::optional<std::uint64_t> orientation_serial_;
     LiveStatus status_;
-    std::uint64_t rebakes_{},rebake_failures_{};
+    std::uint64_t rebakes_{},rebake_failures_{},rebakes_dropped_{};
+    unsigned hand_checks_running_{};   // hand presses between PrepareHandStep and CommitHandStep
     std::atomic<int> workers_running_{0};
 };
 }

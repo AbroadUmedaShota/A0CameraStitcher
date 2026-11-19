@@ -193,7 +193,7 @@ void AdvanceLiveHand(){
             const auto queue=LiveHandQueueDroppedText(hand_queued_presses);
             if(!queue.empty())text+=" "+queue;
             SetLiveNotice(text,!status.bake_failed);
-            hand_run_waits=false;hand_queued={};hand_queued_presses=0;
+            hand_run_waits=false;hand_queued={};hand_queued_presses=0;hand_stale_retries=0;
         }
         return;
     }
@@ -271,8 +271,12 @@ bool BeginLiveCapture(const std::shared_ptr<const FixedPreviewPlan>& drawn){
         capture_status=WidenUtf8(text);SetLiveNotice(text,begin.admission==LiveCaptureAdmission::not_drawn && !bake_failed);
         return false;
     }
+    // The position is made before the mark is set: when it cannot be made, the machine's capture is ended and no mark is left behind.
+    std::optional<a0::m2::experimental::ConfirmedPosition> position;
+    try{position=ConfirmedPositionOfGrant(*begin.grant);}
+    catch(...){live_runtime->EndCapture();throw;}
     live_capture_held=true;
-    pending_confirmed=ConfirmedPositionOfGrant(*begin.grant);
+    pending_confirmed=std::move(position);
     if(LiveHandBusy() || hand_queued_presses || (begin.dropped_pending && hand_waited)){
         // Only a check that still runs has a result to come; a run that waited to be drawn, or a press that waited, is simply dropped.
         hand_capture_dropped=hand_future.valid();

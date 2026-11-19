@@ -392,6 +392,8 @@ public:
     // The mapping that C has to be drawn with: the position that waits to be drawn (an estimate's or a hand step's), else P.
     [[nodiscard]] const a0::m2::experimental::RegisteredMapping& Wanted() const {return pending_?pending_->mapping:placement_;}
     [[nodiscard]] bool HasPending() const {return pending_.has_value();}
+    // The position that waits to be drawn is an estimate's (not a hand step's).
+    [[nodiscard]] bool PendingIsEstimate() const {return pending_ && pending_->kind==PendingKind::estimate;}
     // Changes whenever Wanted() does (a position waits, a position that waited is dropped, a shot, a new condition), not when a pending
     // position becomes P.
     [[nodiscard]] std::uint64_t WantedSerial() const {return wanted_serial_;}
