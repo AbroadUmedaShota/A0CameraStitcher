@@ -1453,14 +1453,16 @@ if(BUILD_TESTING)
         # the composite's pixels, the PNG record, and the inspector (--export-seam-crops, --seam-crops-smoke). No camera.
         add_executable(a0_seam_crops_tests tests/seam_crops_tests.cpp)
         target_include_directories(a0_seam_crops_tests PRIVATE src/phase0/include)
-        target_link_libraries(a0_seam_crops_tests PRIVATE a0_m2_offline_stitcher a0_m2_fixed_composite a0_phase0_core ole32 windowscodecs)
+        target_link_libraries(a0_seam_crops_tests PRIVATE a0_m2_offline_stitcher a0_m2_fixed_composite a0_m2_fixed_composite_v2 a0_m2_capture_registration a0_m2_rig_profile_v2 a0_phase0_core ole32 windowscodecs)
         target_compile_definitions(a0_seam_crops_tests PRIVATE NOMINMAX)
         if(MSVC)
             target_compile_options(a0_seam_crops_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
         endif()
         add_dependencies(a0_seam_crops_tests A0CameraStitcher.StillReview)
-        add_test(NAME seam_crops_contracts COMMAND a0_seam_crops_tests $<TARGET_FILE:A0CameraStitcher.StillReview>)
-        set_tests_properties(seam_crops_contracts PROPERTIES TIMEOUT 600)
+        # Argument 1 is the StillReview executable, 2 the shared rig profile v2 fixture folder: with it the test writes registered
+        # (report v8) reviews with the real writer and opens them in the window and in the export (#418).
+        add_test(NAME seam_crops_contracts COMMAND a0_seam_crops_tests $<TARGET_FILE:A0CameraStitcher.StillReview> "${CMAKE_SOURCE_DIR}/tests/fixtures/rig-profile-v2")
+        set_tests_properties(seam_crops_contracts PROPERTIES TIMEOUT 1500)
         # The command line of StillReview that makes and revises the fixed composite condition v3 (#417 SRV): the argument reader, the report,
         # the progress notice and the real executable on temporary folders; the third argument is the policy file template of docs/examples.
         # Camera and window free.
