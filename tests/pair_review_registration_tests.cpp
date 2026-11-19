@@ -133,10 +133,111 @@ void Sentences(const m2e::StillReviewResult& review, const char* name) {
 }
 }
 
+// What the sentence after the shot says the live view does, against what the machine does with the same result. The sentences are made from the record
+// alone (ConfirmedPositionText); the machine is given the level and the mapping that the record has.
+void SentencesAndMachine() {
+    const std::string sha(64, '7'), other(64, '8');
+    const m2e::content_registration::PoseParameters base{0.05, 0, 0, 0.5, 0, 0};
+    const m2e::RegisteredMapping condition{base, {}, std::nullopt};
+    const auto record = [&](m2e::ConfirmedPositionSource source, m2e::GeometryLevel level, bool used, const m2e::RegisteredMapping& position, const std::string& position_sha,
+                            std::vector<std::string> reasons, const m2e::RegisteredMapping& level_mapping) {
+        m2e::SavedFixedCompositeRegistration r;
+        r.condition_sha256 = sha;
+        r.base_pose = base;
+        m2e::ConfirmedPosition p;
+        p.mapping = position;
+        p.source = source;
+        p.serial = 0;
+        p.condition_sha256 = position_sha;
+        if (source == m2e::ConfirmedPositionSource::manual) { p.base_source = m2e::ConfirmedPositionSource::auto_button; p.manual_entered = m2e::HandCounts{3, 0, 0}; }
+        r.registration.confirmed_position = p;
+        r.registration.confirmed_check = m2e::ConfirmedPositionCheck{used, std::nullopt};
+        r.registration.level.level = level;
+        r.registration.level.reasons = std::move(reasons);
+        r.registration.level.mapping = level_mapping;
+        return r;
+    };
+    const auto estimate = m2e::RegisteredMapping{{0.15, -0.05, 0.1, 0.9, -0.25, 0.1}, {}, std::nullopt};
+    // A machine that holds an automatic position, or the same position moved by hand (the check is the test's own arithmetic).
+    const LiveHandChecker check = [](const m2e::RegisteredMapping& hand_base, const m2e::HandCounts& total) {
+        LiveHandCheck out;
+        out.status = LiveHandCheck::Status::accepted;
+        out.mapping = hand_base;
+        out.mapping.pose.tx_mm += m2e::HandValuesOf(total).seam_dx_px / 16.0;
+        return out;
+    };
+    const auto machine_at = [&](bool by_hand) {
+        LivePlacementMachine machine;
+        machine.BeginSession(sha, base, true);
+        const auto job = machine.BeginJob();
+        LiveEstimateOutcome outcome;
+        outcome.usable = true;
+        outcome.pose = estimate.pose;
+        machine.Accept(*job, outcome);
+        machine.Committed();
+        if (by_hand) { CHECK(machine.HandStep(m2e::HandCounts{3, 0, 0}, LiveHandContext{true, true}, check).outcome == LiveHandOutcome::accepted); machine.Committed(); }
+        return machine;
+    };
+    const auto apply = [&](LivePlacementMachine& machine, const m2e::SavedFixedCompositeRegistration& r) {
+        const auto& c = r.registration;
+        const auto grant = machine.BeginCapture(true).grant;
+        CHECK(grant.has_value());
+        return machine.ApplyCapture(c.level.mapping, std::string(m2e::GeometryLevelCode(c.level.level)), r.condition_sha256, std::nullopt, grant ? std::optional<std::uint64_t>(grant->serial) : std::nullopt);
+    };
+    // The live position was used (level confirmed): the live view stays where it was.
+    {
+        auto machine = machine_at(false);
+        const auto before = machine.View();
+        const auto r = record(m2e::ConfirmedPositionSource::auto_button, m2e::GeometryLevel::confirmed, true, machine.Placement(), sha, {}, machine.Placement());
+        CHECK(Contains(ConfirmedPositionText(r), "ライブで決めた位置で作りました"));
+        CHECK(apply(machine, r) && LivePlacementSameMapping(machine.Placement(), before.mapping) && machine.Source() == LivePlacementSource::auto_start && machine.Serial() == before.serial);
+    }
+    // The hand position was used: it stays by hand.
+    {
+        auto machine = machine_at(true);
+        const auto before = machine.View();
+        const auto r = record(m2e::ConfirmedPositionSource::manual, m2e::GeometryLevel::confirmed, true, machine.Placement(), sha, {}, machine.Placement());
+        CHECK(Contains(ConfirmedPositionText(r), "手で直した位置で JPEG を作りました"));
+        CHECK(apply(machine, r) && machine.Source() == LivePlacementSource::manual && LivePlacementSameMapping(machine.Placement(), before.mapping) && machine.Serial() == before.serial);
+    }
+    // The hand position was refused by the cheap check: the JPEG has the condition's position, the live view stays at the hand position.
+    {
+        auto machine = machine_at(true);
+        const auto before = machine.View();
+        const auto r = record(m2e::ConfirmedPositionSource::manual, m2e::GeometryLevel::g4, false, machine.Placement(), sha, {"seam-outside-overlap-at-level"}, condition);
+        CHECK(Contains(ConfirmedPositionText(r), "ライブは手で直した位置のままです"));
+        CHECK(apply(machine, r) && machine.Source() == LivePlacementSource::manual && LivePlacementSameMapping(machine.Placement(), before.mapping) && machine.Serial() == before.serial &&
+              machine.View().hand_entered == (m2e::HandCounts{3, 0, 0}));
+    }
+    // The live position was refused as well: the JPEG has the condition's position and the live view goes to it.
+    {
+        auto machine = machine_at(false);
+        const auto r = record(m2e::ConfirmedPositionSource::auto_button, m2e::GeometryLevel::g4, false, machine.Placement(), sha, {"output-uncovered-at-level", "output-uncovered-at-level", "output-uncovered-at-level"}, condition);
+        CHECK(Contains(ConfirmedPositionText(r), "ライブも条件の位置にしました"));
+        CHECK(apply(machine, r) && LivePlacementSameMapping(machine.Placement(), condition) && machine.Source() == LivePlacementSource::after_capture);
+    }
+    // The condition changed before the shot: the result is not applied to the live view, and the next session goes back to the new condition's position and asks once.
+    {
+        auto machine = machine_at(true);
+        const auto r = record(m2e::ConfirmedPositionSource::manual, m2e::GeometryLevel::g1, false, machine.Placement(), sha, {}, estimate);
+        auto changed = r;
+        changed.condition_sha256 = other;
+        CHECK(Contains(ConfirmedPositionText(changed), "手で直した位置を捨て、ライブは新しい条件の位置に戻し、自動調整を 1 回行います"));
+        const auto before = machine.View();
+        const auto grant = machine.BeginCapture(true).grant;
+        CHECK(grant && !machine.ApplyCapture(estimate, "G1", other, std::nullopt, grant->serial) && LivePlacementSameMapping(machine.Placement(), before.mapping) && machine.Source() == LivePlacementSource::manual);
+        machine.BeginSession(other, base, true);
+        const auto view = machine.View();
+        CHECK(view.source == LivePlacementSource::fixed_condition && LivePlacementSameMapping(view.mapping, condition) && view.hand_discarded_by_condition &&
+              view.activity == LivePlacementActivity::requested && view.ask == LiveEstimateAsk::condition_changed && machine.BeginJob().has_value());
+    }
+}
+
 int main(int argc, char** argv) {
     try {
         if (argc < 2) throw std::invalid_argument("usage: pair_review_registration_tests <rig-profile-v2 fixture folder>");
         pair_synthetic::detail::Hr(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
+        SentencesAndMachine();
         const auto base_profile = ReadText(fs::path(argv[1]) / "calibrated-draft.json");
         root = fs::current_path() / ("pair-review-registration-test-" + std::to_string(GetCurrentProcessId()) + "-" + std::to_string(GetTickCount64()));
         fs::create_directories(root);
@@ -247,7 +348,8 @@ int main(int argc, char** argv) {
             CHECK(m2e::ConfirmedPositionSourceCode(m2e::ConfirmedPositionSource::fixed_condition) == LivePlacementSourceCode(LivePlacementSource::fixed_condition) &&
                   m2e::ConfirmedPositionSourceCode(m2e::ConfirmedPositionSource::auto_start) == LivePlacementSourceCode(LivePlacementSource::auto_start) &&
                   m2e::ConfirmedPositionSourceCode(m2e::ConfirmedPositionSource::auto_button) == LivePlacementSourceCode(LivePlacementSource::auto_button) &&
-                  m2e::ConfirmedPositionSourceCode(m2e::ConfirmedPositionSource::after_capture) == LivePlacementSourceCode(LivePlacementSource::after_capture));
+                  m2e::ConfirmedPositionSourceCode(m2e::ConfirmedPositionSource::after_capture) == LivePlacementSourceCode(LivePlacementSource::after_capture) &&
+                  m2e::ConfirmedPositionSourceCode(m2e::ConfirmedPositionSource::manual) == LivePlacementSourceCode(LivePlacementSource::manual));
             // A capture without a position says so in one line, and nothing about cameras.
             const auto none = ConfirmedPositionLogLine(m2e::SavedFixedCompositeRegistration{});
             CHECK(none == "pair_review_confirmed_position given=0 used=0 quality_accepted=0");

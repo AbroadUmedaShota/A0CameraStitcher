@@ -192,7 +192,10 @@ void ApplyCaptureToLivePlacement(const a0::m2::experimental::StillReviewResult& 
     const auto& level=record.registration.level;
     const std::string code(a0::m2::experimental::GeometryLevelCode(level.level));
     const auto layer_two_max=LivePlacementLayerTwoMaxPx(level.mapping,record.registration.parallax.summary.max_shift_px);
-    const bool applied=live_runtime && live_runtime->ApplyCapture(level.mapping,code,record.condition_sha256,layer_two_max);
+    static_assert(a0::m2::experimental::GeometryLevelCode(a0::m2::experimental::GeometryLevel::confirmed)==kLiveCaptureConfirmedLevel);
+    // A capture that was given a position says which one; level `confirmed` leaves P (and its source and serial) as it is.
+    const std::optional<std::uint64_t> given_serial=record.registration.confirmed_position?std::optional<std::uint64_t>(record.registration.confirmed_position->serial):std::nullopt;
+    const bool applied=live_runtime && live_runtime->ApplyCapture(level.mapping,code,record.condition_sha256,layer_two_max,given_serial);
     Log("pair_review_placement source=after-capture level="+code+" "+LivePlacementFields(level.mapping)+" condition_sha256="+record.condition_sha256+" "+
         LivePlacementLayerTwoFields(LivePlacementHasLayerTwo(level.mapping),layer_two_max)+" applied_to_live="+(applied?"1":"0")+" quality_accepted=0");
 }

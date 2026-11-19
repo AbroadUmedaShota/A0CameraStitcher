@@ -209,10 +209,8 @@ inline RegistrationTextContext ContextOf(const ex::SavedFixedCompositeRegistrati
     line<<"pair_review_confirmed_position given=1 serial="<<p.serial<<" source="<<ex::ConfirmedPositionSourceCode(p.source)
         <<" base_source="<<(p.base_source?std::string(ex::ConfirmedPositionSourceCode(*p.base_source)):std::string("none"))
         <<' '<<LivePlacementCameraFields()<<' '<<LivePlacementFields(p.mapping);
-    if(p.manual_entered){
-        const auto v=ex::HandValuesOf(*p.manual_entered);
-        line<<" manual_seam_dx_px="<<LivePlacementNumber(v.seam_dx_px)<<" manual_seam_dy_px="<<LivePlacementNumber(v.seam_dy_px)<<" manual_rotation_deg="<<LivePlacementNumber(v.rotation_deg);
-    }else line<<" manual_entered=none";
+    if(p.manual_entered)line<<' '<<LivePlacementManualFields(*p.manual_entered);
+    else line<<" manual_entered=none";
     line<<" condition_sha256="<<p.condition_sha256<<" condition_matches="<<(p.condition_sha256==record.condition_sha256?1:0)<<" used="<<(check.used?1:0)
         <<" seam_difference_px="<<(check.seam_difference_px?LivePlacementNumber(*check.seam_difference_px):std::string("none"))
         <<" level="<<ex::GeometryLevelCode(capture.level.level)<<" quality_accepted=0";

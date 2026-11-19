@@ -173,6 +173,8 @@ inline constexpr std::string_view kLiveEstimatorUnavailableReason = "live-estima
     if (reason == "out-of-envelope") return "許容の範囲の外の値でした";
     if (reason == kLiveEstimatorUnavailableReason) return "映像からの推定は未接続です";
     if (reason == "bake-failed") return "推定した位置ではCを描けませんでした";
+    if (reason == kLivePositionSeamOutsideOverlapReason) return "継ぎ目が重なりの外に出ます";
+    if (reason == kLivePositionOutputUncoveredReason) return "出力の端が覆われません";
     if (reason == "estimate-refused" || reason == "estimator-exception") return "推定の処理が途中で失敗しました";
     return "推定が確かではありません";
 }
@@ -182,6 +184,7 @@ inline constexpr std::string_view kLiveEstimatorUnavailableReason = "live-estima
     case LivePlacementSource::auto_start: return "開始時の自動";
     case LivePlacementSource::auto_button: return "ボタンの自動";
     case LivePlacementSource::after_capture: return "撮影の後の位置";
+    case LivePlacementSource::manual: return "手で直した位置";
     }
     return {};
 }
