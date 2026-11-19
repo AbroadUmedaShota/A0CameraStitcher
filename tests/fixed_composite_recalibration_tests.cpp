@@ -549,6 +549,31 @@ void GeometryFromPose(){
         CHECK(!cand.check.details.empty());
     }
 
+    // The text of the estimate's record is not an input of the registration: two records that differ only in their text give the same
+    // mappings, raster, seam and base pose to the bit. What follows the text is the hashes (the condition's report hash, the profile's
+    // provenance identifier, and so the profile's and the revision's hashes).
+    {
+        const auto pose=PoseForShift(parameters.camera_b,30.0,false);
+        const auto first=rc::ProposeFromPose(MakeInputs(active,nullptr,nullptr),pose,fit,record);
+        const auto second=rc::ProposeFromPose(MakeInputs(active,nullptr,nullptr),pose,fit,"{\"schema\":\"another-test-record\",\"referenceCamera\":\"CAM-X\"}");
+        CHECK(first.candidate && second.candidate);
+        if(first.candidate && second.candidate){
+            const auto& a=*first.candidate;const auto& b=*second.candidate;
+            for(int i=0;i<9;++i){
+                const auto k=static_cast<std::size_t>(i);
+                CHECK(SameBits(a.binding.parameters.camera_a.document_to_image[k],b.binding.parameters.camera_a.document_to_image[k]));
+                CHECK(SameBits(a.binding.parameters.camera_b.document_to_image[k],b.binding.parameters.camera_b.document_to_image[k]));
+            }
+            const auto& ra=a.condition.raster;const auto& rb=b.condition.raster;
+            CHECK(ra.width_pixels==rb.width_pixels && ra.height_pixels==rb.height_pixels && ra.dpi==rb.dpi &&
+                ra.region_um.left==rb.region_um.left && ra.region_um.top==rb.region_um.top && ra.region_um.right==rb.region_um.right && ra.region_um.bottom==rb.region_um.bottom);
+            CHECK(a.condition.seam.column==b.condition.seam.column && a.condition.seam.origin==b.condition.seam.origin);
+            CHECK(a.condition.base_pose.IsZero() && b.condition.base_pose.IsZero());
+            CHECK(first.estimate_record_sha256!=second.estimate_record_sha256 && a.condition.revision.change.report_sha256!=b.condition.revision.change.report_sha256);
+            CHECK(a.profile_bytes!=b.profile_bytes && a.profile_name!=b.profile_name && a.sha256!=b.sha256);
+        }
+    }
+
     // A rig mounted a half turn stores the photographs the other way round: the same physical move gives the same distances of the seam to
     // the photographs' edges on the drawing's right (A) and left (B) as for the normal mounting (the stored x runs backwards).
     {
@@ -761,6 +786,29 @@ void Pipeline(){
         CHECK(At(At(record,"parent"),"revisionSha256").string==active.sha256 && At(At(record,"parent"),"reanchoredBefore").boolean==false);
         CHECK(At(At(record,"estimate"),"state").string=="verified" && At(At(record,"estimate"),"informationConditionNumber").kind==json::JsonKind::number);
         CHECK(proposal.estimate_record_text.find(":\\")==std::string::npos && proposal.estimate_record_text.find("/Users")==std::string::npos);
+        {
+            // The cameras are named by their roles and by their aliases; the writer takes the aliases from the roles' constants.
+            const std::string reference(rc::kReferenceCamera),target(rc::kTargetCamera);
+            CHECK(At(record,"referenceCamera").string==reference && At(record,"targetCamera").string==target);
+            CHECK(reference=="CAM-A" && target=="CAM-B");
+            const auto& originals=At(record,"originalSha256");
+            CHECK(originals.kind==json::JsonKind::object && originals.object.size()==2 && originals.object.count(reference)==1 && originals.object.count(target)==1);
+            CHECK(At(originals,reference.c_str()).string==in.original_a_sha256 && At(originals,target.c_str()).string==in.original_b_sha256);
+            const auto& residual=At(At(record,"estimate"),"targetResidualPx");
+            CHECK(residual.kind==json::JsonKind::object && residual.object.count("rms")==1 && residual.object.count("max")==1 && residual.object.count("points")==1);
+            // The shape as written: the roles after the time, the hashes in the alias order, and no field that names a camera by a letter.
+            const auto& text=proposal.estimate_record_text;
+            CHECK(text.find("\"measuredAt\":\"2000-01-01T00:00:00Z\",\"referenceCamera\":\"CAM-A\",\"targetCamera\":\"CAM-B\",\"originalSha256\":{\"CAM-A\":\""+std::string(64,'1')+
+                "\",\"CAM-B\":\""+std::string(64,'2')+"\"},\"parent\":")!=std::string::npos);
+            for(const char* old:{"\"inputs\"","cameraASha256","cameraBSha256","cameraBResidualPx"})CHECK(text.find(old)==std::string::npos);
+            // What the record says is what the computation did: the target's input hash is the one the new profile names, the reference's block is the parent's.
+            const auto new_profile=Tree(cand.profile_bytes);
+            const auto old_profile=Tree(profile);
+            const auto& new_inputs=At(At(new_profile,"calibration"),"inputSha256");
+            const auto& old_inputs=At(At(old_profile,"calibration"),"inputSha256");
+            CHECK(At(new_inputs,target.c_str()).string==At(originals,target.c_str()).string);
+            CHECK(At(new_inputs,reference.c_str()).string==At(old_inputs,reference.c_str()).string);
+        }
         CHECK(proposal.verification.performed && proposal.verification.passed && proposal.verification.seam_displacement_px<=proposal.verification.limit_px);
         // What the writer would do: the profile copy, then the revision; the chain reads, and the revision in force is the candidate.
         CHECK(CopyFixedCompositeProfile(active.settings,cand.profile_bytes,kHash)==cand.profile_name);

@@ -41,6 +41,12 @@ namespace a0::m2::experimental::recalibration {
 // constants (RegistrationDesign) are the caller's, as in the capture path.
 
 inline constexpr std::string_view kEstimateRecordSchema="a0.pair-recalibration-estimate.v1";
+// The roles of the two cameras in this recalibration (ADR-0045 decision 4): the mapping of the target is taken again against the
+// reference, whose block of the profile is kept. Inputs::camera_a is the reference's original and camera_b the target's. The records
+// name the cameras by these aliases; an object keyed by alias lists its keys in alias order.
+inline constexpr std::string_view kReferenceCamera="CAM-A";
+inline constexpr std::string_view kTargetCamera="CAM-B";
+static_assert(kReferenceCamera<kTargetCamera,"the records write the reference's key first, which must be the alias order");
 // What the new profile's calibration says made it. `method` stays the planar chart's (the lens and A are the chart's); the tool
 // tells the difference (docs/design/rig-profile-v2.md, notes of section 7).
 inline constexpr std::string_view kToolId="a0-pair-reanchor";

@@ -505,7 +505,9 @@ std::string EstimateRecord(const Inputs& in,const ParentFacts& facts,const WideS
     const double f=in.design.prior_sigma_factor;
     const PoseParameters prior{f*env.tilt_deg,f*env.tilt_deg,f*env.rotation_deg,f*env.position_mm,f*env.position_mm,f*env.height_percent};
     std::string s="{\"schema\":"+Quoted(std::string(kEstimateRecordSchema))+",\"pairId\":"+Quoted(in.pair_id)+",\"measuredAt\":"+Quoted(in.measured_at_utc)+
-        ",\"inputs\":{\"cameraASha256\":"+Quoted(in.original_a_sha256)+",\"cameraBSha256\":"+Quoted(in.original_b_sha256)+"}"
+        ",\"referenceCamera\":"+Quoted(std::string(kReferenceCamera))+",\"targetCamera\":"+Quoted(std::string(kTargetCamera))+
+        ",\"originalSha256\":{"+Quoted(std::string(kReferenceCamera))+":"+Quoted(in.original_a_sha256)+","+
+        Quoted(std::string(kTargetCamera))+":"+Quoted(in.original_b_sha256)+"}"
         ",\"parent\":{\"revisionSequence\":"+std::to_string(c.revision.sequence)+",\"revisionSha256\":"+Quoted(in.active_sha256)+
         ",\"profileFileSha256\":"+Quoted(c.source.profile_file_sha256)+",\"profileFingerprintSha256\":"+Quoted(profile_fingerprint)+
         ",\"profileProvenanceId\":"+Quoted(facts.provenance_id)+",\"profileToolId\":"+Quoted(facts.tool_id)+
@@ -521,7 +523,7 @@ std::string EstimateRecord(const Inputs& in,const ParentFacts& facts,const WideS
         ",\"uniqueBlocks\":"+std::to_string(d.unique_blocks)+",\"anchorBlocks\":"+std::to_string(d.anchor_blocks)+
         ",\"residualRmsPx\":"+Num(d.residual.rms)+",\"residualP95Px\":"+Num(d.residual.p95)+
         ",\"secondStart\":"+Quoted(std::string(content_registration::SecondStartCode(d.second_start)))+
-        ",\"cameraBResidualPx\":{\"rms\":"+Num(fit.rms_px)+",\"max\":"+Num(fit.max_px)+",\"points\":"+std::to_string(fit.points)+"}}}";
+        ",\"targetResidualPx\":{\"rms\":"+Num(fit.rms_px)+",\"max\":"+Num(fit.max_px)+",\"points\":"+std::to_string(fit.points)+"}}}";
     return s;
 }
 
