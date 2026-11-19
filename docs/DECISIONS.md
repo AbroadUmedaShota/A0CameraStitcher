@@ -1842,3 +1842,252 @@ ee77d69で確かめた（製品の層の`src/m3`の行は2026-11-19に同じ木�
    - 答えで変わる所: 直す作業の範囲（待つ物の表の「ログの行の頭」「試験の名前」「コードの識別子」の行）。
 7. **直さない文書の範囲**: ADRの本文（ADR-0036の題を含む）と、ファイル名に日付がある記録の文書（`DEVELOPMENT_STATUS_20261015.md`、`DUAL_LIVE_LICENSE_REVIEW_20261016.md`など）を、直す作業で書き換えずに残すか。案は、残して決定6の読み方で読む事（ADRとその時点の記録は、書いた時の言葉のまま残す方が、後から経緯を追える）。
    - 答えで変わる所: 待つ物の表の「docs」の行の範囲と件数。
+
+## ADR-0046: 開発用プレビューのライブの合成とJPEGの合成が、1つの確定した位置を共有する（#437 段2）
+
+- 状態: Proposed（#437 段2）。所有者の決定待ち。段1の前に所有者が決めた3点（Issueのコメント「設計の要点と、所有者の決定」）と、2026-11-19の所有者の指示は、下の「ADR-0046の所有者の要件と決定」に書いた。文書だけの案で、コード・試験・書式・`AGENTS.md`は変えない。段2の実装は、本ADRと下の「AGENTS.mdに足す文の案」を所有者が承認した後に始める。
+- 決定日: 未定（上の3点は、Issueのそのコメントの日）
+- 関連: #437、#417（撮影ごとの位置合わせ、報告v8）、#418（撮影の後の確認画面、手直し）、#434（撮影の1組からの校正の取り直し）、#438（ADR-0045）、#396、#403、#309（ライブの枠と撮影画像の対応S）、#304（後回しにした指摘）、ADR-0021、ADR-0036（決定1の5・10、確認点C1、不変条件4）、ADR-0037（決定1・2、不変条件1〜3・7）、ADR-0043、ADR-0045、`docs/design/fixed-composite-registration.md`（11.9・11.19・11.21・11.28）、`docs/design/fixed-composite-registration-formats.md`、`docs/WPD_DUAL_PREVIEW.md`（#437の節）
+- 背景: 条件v3（`registration.live`がある時）の開発用プレビューでは、段1（手元のmain）で、ライブの合成がCAM-Bの位置を1つだけ持ち、推定は窓で最初にライブを始めた時と「自動位置合わせ」ボタンを押した時だけ走るようになった。撮影の後は、ライブの合成をJPEGの合成が当てた写像で描く。一方でJPEGの合成は今も、撮影ごとに条件の基準の姿勢p_bから原寸で推定し、ライブの位置を受け取らない（設計11.21の決定「Cの推定はJPEGに渡さない」）。原寸の推定が決まらない撮影（繰り返し模様、模様が足りない）では、JPEGは粗の段の目安（G3）か条件の位置（G4）で作られ、ライブで確定していた位置とは別になる。この画面から手で位置を直す道も無い（条件v3の間、重なり・上下のボタンは`ui_position_request_ignored`で断る）。所有者は、手で直した分もJPEGに同じだけ効く事を求めた。ライブの映像から求めた位置や手で決めた位置をJPEGの位置に使うのは、今の決まり（下の「変わる決まり」）の変更になる。
+
+### ADR-0046の所有者の要件と決定（#437）
+
+1. 要件（Issueの本文）: 「自動マージについては頭の１回＋手動の”自動調整ボタンを押下”した時のみにしたいな。（シャッター後は自動調整が１回入る）」「勿論その映像は出力されたjpgと同じでないといけない（手動調整した分はjpg側でも同じ表示されていないといけない）」
+2. 受入の条件（Issueのコメント、所有者の指示）: ライブの合成と書き出すJPEGの合成が食い違わない事（継ぎ目の場所、手順、位置、色の補正。手で直した分はJPEGにも同じく反映する）を、設計と試験で保証する。解像度の違いで保証できない物は、大きさを数字で示す。位置や補正の値とその出どころは、ライブのログとJPEGの報告に同じ書き方で残す。一致の試験が無い変更はmainに入れない（レビューでHIGHとして扱う）。
+3. 段1の前の決定（Issueのコメント「設計の要点と、所有者の決定」）:
+   1. 手で直した後に撮った時、シャッターの後の自動は手の位置を変えない。手の位置でJPEGを作り、自動で測った位置との差を画面に出す。
+   2. 撮影の後の自動で位置が決まらない時は、ライブで確定していた位置をJPEGに使う。今の決まりの変更なので、ADRとAGENTS.mdの文の承認を実装の前に別に取る（本ADR）。
+   3. 手で直した位置は、アプリを閉じるまで覚える。次回も使う時は、保存の操作で残す（保存は段3）。
+4. 2026-11-19の指示: 手で直した位置がJPEGに同じく反映されなければ調整する意味が無いので、段2を実装する。
+
+決まっていない事は「所有者に確かめる事」に置いた。ボタンの名前、推定の途中でライブを止めた時に頼みを残すか捨てるか、2026-11-19に候補として挙がった「次の撮影の前（AFの後）の自動の1回」の3つ。
+
+### 今の作り（コードで確かめた事）
+
+2026-11-19に、手元のmain（b081023）の木をgrepとファイルの読み取りで確かめた。行番号はこのcommitの物。ビルドと試験は走らせていない（※未検証）。
+
+- 確定した位置: `src/phase0/include/a0/phase0/experimental/live_placement.hpp`の`LivePlacementMachine`。値はCAM-Bの姿勢6数と紙面3数（`RegisteredMapping`、層2なし）。ほかに出どころ（`fixed-condition`・`auto-start`・`auto-button`・`after-capture`、32〜41行）、通し番号`serial`、条件のSHA-256を持つ。手の出どころは無い。
+- 描く写像: 位置が変わる時は必ずCAM-Bの表を焼き直してから切り替える（`docs/WPD_DUAL_PREVIEW.md` 48行）。ライブの写像`LiveViewRegisteredOutputToCamera`とJPEGの写像`RegisteredDocumentOutputToCamera`の一致は、試験`SameConventionAsTheJpeg`（`tests/fixed_composite_preview_v3_tests.cpp` 252〜279行）が、紙面のある写像も含めて1e-6ライブ画素以内に縛っている。
+- 撮影へ渡る物: `StillReviewRequest`（`src/m2/include/a0/m2/experimental/still_review.hpp` 328行）に位置の欄は無い。撮影の推定の始め・事前分布・範囲の基準・G4の写像は、どれも条件の`basePose`（`src/m2/capture_registration.cpp` 1311行・1392行）。段を選ぶ`SelectGeometryLevel`（同1030〜1071行）の候補はG1〜G4だけ。
+- 撮影の後: 窓が`ApplyCaptureToLivePlacement`（`src/phase0/experimental/wpd_dual_preview_ui.hpp` 189〜198行）で、記録の段の写像をライブの位置にする。ログの2行（ライブの`C live_placement …`と撮影の側の`pair_review_placement …`）は同じ関数`LivePlacementFields`（`live_placement.hpp` 110〜116行）が書く。ただし撮影の側の行は窓が記録から写した値で、通し番号を持たない。
+- 数の書き方: ログは`LivePlacementNumber`（同104〜109行）、報告は`Num`（`capture_registration.cpp` 28〜31行）。どちらも有効数字17桁・classicのlocale・-0を0と書くが、関数が2つあり、有限でない数の扱いが違う（ログは`nan`と書き、報告は例外を投げる）。
+- 手直しの式: 条件の改訂`manual-adjustment`の`SolveManualChange`（`src/phase0/include/a0/phase0/experimental/fixed_composite_tool_v3.hpp` 127〜147行）。紙面を持たない姿勢だけの式で、継ぎ目の列の中央の行で、入れたdx・dy（出力px）になるtx・tyを解く。範囲の成分は`RegistrationComponentsFromBase`（`capture_registration.cpp` 766〜777行）。位置は|(tx, ty)|、回りは|rz|で、どちらもp_bからの差。線を超えた時だけ外。
+- 偽の本体の差し込み口（`wpd_dual_preview_ui.hpp`）: `pair_capture_backend`・`pair_settings_folder_override`・`pair_review_root_override`（910〜912行）、`live_estimator_override`・`live_design_override`（110〜111行）。これらを使う窓の試験は`preview_live_c_ui_contracts`（`--live-c-ui-smoke`）と`preview_pair_v3_ui_contracts`（`--pair-v3-ui-smoke`）で、`CMakeLists.txt` 1561行・1568行にある。手のボタンはまだ無いので、その押下の差し込みは段2で作る（既存のsmokeと同じく、試験の中だけで窓の自分のボタンへ押下を送る）。
+- 報告v8は公開のmainにある。書式の文書の1節の決まり8（`docs/design/fixed-composite-registration-formats.md` 16行）により、欄を足すならv9にして、v8の読み手を残す。
+
+### 決定（案）
+
+1. **確定した位置**: 窓は確定した位置Pを1つ持つ。Pは、CAM-A（基準のカメラ）に対するCAM-B（対象のカメラ）の姿勢6数（rx・ry・rz度、tx・ty mm、tz %）と紙面3数（h0 mm、slope_x、slope_y）の9数で、層2を含まない。ほかに出どころ、通し番号、条件のSHA-256を持つ。出どころが手の時は、手で直す前の位置の出どころと、入れた量の合計（継ぎ目でのdx・dyを出力px、回りを度）も持つ。出どころの符号に`manual`を足し、ほかの符号は段1のまま。ライブの合成はPで描き、Pを置き換えるのはCAM-Bの表の焼き直しが通った後。
+2. **自動が走るのは3つの時だけ**: 窓で最初にライブを始めた時（条件のファイルのSHA-256が変わった時も1回）、ボタンを押した時、撮影の後に原画像2枚で1回。裏の追従、変化の検出、時間で条件の位置へ戻る事、再試行はしない（段1のまま）。推定が決まらなければPはそのままで、理由を画面に出す。
+3. **手で動かす**: 動かせるのは面内の3つ（継ぎ目に沿う左右＝基線の向き、上下、光軸まわりの回り）。傾き・高さ・紙面は動かさない（設計11.19.3の`manual-adjustment`と同じ）。量は撮影の出力の画素と度で持つ（`manual-adjustment`の`entered`と同じ単位）。刻みは※案で、左右・上下が12 px（ライブの合成の約1画素）と4 px、回りが0.2°と0.05°。
+   - 手の位置は、手で直す前の位置に、入れた量の合計を1回で解いて足した物とする。押すたびに前の値へ積み上げない。式が線形でないので、積み上げると押した順で値が変わりうり、段3で保存した改訂の値ともずれる。
+   - 式は`SolveManualChange`を紙面のある写像へ広げた1つの関数にする。紙面が0の時は今の式と同じ値を返す。
+   - 推定の途中で手で動かすと、その推定の結果は捨てる。
+   - 手の押下は推定を使わないので、`registration.live`が無い条件でも受け付ける（※案）。
+4. **範囲の端で断り、丸めない**: 手で動かした後の姿勢が、条件の`registration.envelope`の内（p_bからの差。`RegistrationComponentsFromBase`の判定）にある時だけ受け付ける。超える押下は断ってPを変えず、端の値に丸めて通す事もしない。断った時は、範囲の端である事と、設置が動いた時は校正の取り直し（#434）で直す事を画面に出す。自動の推定が範囲の外のまま当てられた（`applyBeyondEnvelope`）Pからは、超えている成分を増やさない押下だけを受け付ける（※案）。
+5. **JPEGの位置の選び方**: 撮影の要求の時に、その時描いているPを値で写し、通し番号と条件のSHA-256と一緒に撮影へ渡す。撮影の推定は今までどおりp_bから原寸で行う（Pを推定の始め・事前分布・範囲の基準にしない）。段は次の表で選ぶ。
+
+| 撮影の前のPの出どころ | 原寸の推定 | JPEGの段と写像 | 撮影の後のP |
+|---|---|---|---|
+| 条件の位置（`fixed-condition`） | どれでも | 今と同じG1〜G4 | JPEGの写像（層2を除く）、`after-capture` |
+| 自動（`auto-start`・`auto-button`）、前の撮影（`after-capture`） | 確か（G1・G2の候補がある） | G1・G2 | JPEGの写像（層2を除く）、`after-capture` |
+| 同上 | 確かでない | 新しい段`confirmed`（写像はP、層2なし） | Pのまま（出どころも変えない） |
+| 手（`manual`） | どれでも | `confirmed`。原寸の推定が確かなら、その写像とPの継ぎ目での差を測って記録する | Pのまま（`manual`のまま） |
+
+決定5の補足:
+
+- Pが条件の位置とビットで同じ（姿勢がp_b、紙面が0）なら、出どころによらず表の1行目として扱う。
+- Pの条件のSHA-256が、撮影の時に読んだ条件と違えばPを使わず、表の1行目として扱い、使わなかった理由を記録する。
+- `confirmed`の写像が安い検査（継ぎ目が重なりの内、出力が覆われる。設計11.23.4）に落ちた時はG4に下げ、理由（`seam-outside-overlap-at-level`・`output-uncovered-at-level`）を残す。撮影の後のPはその時のJPEGの写像になる。手の押下にも同じ検査を当て、落ちる押下は範囲の外と同じく断る（※案）。
+- 撮影の要求の時に推定が走っていたら、その結果は捨て、描いているPを渡す。
+
+6. **窓の中だけで持つ**: Pは窓（プロセス）の中の値で、ライブを止めて再開しても、撮影の後も続く。窓を閉じると捨てる。ファイルに書くのは、Pを使った合成の記録（報告とログ）だけ。条件とprofileに書くのは人が明示して保存した時だけで、段3で`manual-adjustment`か`saved-estimate`の新しい改訂として書く。自動で保存しない。学習しない。
+7. **記録**: 報告をv9（`a0.uncalibrated-still-review.v9`）にし、Pの値・出どころ・通し番号・条件のSHA-256・手で入れた量・原寸の推定との差を残す（欄の案は「報告v9の差分（案）」）。ライブのログと撮影の側のログは、同じ関数で同じ17桁の書き方にする。撮影の側の行は、窓が写した値でなく、JPEGの作り手が書いた記録（読み直した報告）から書く。
+8. **表示と品質**: ライブの合成は目安で、「基準内」と書かない。手で直した事、ライブで決めた事は、品質の証拠にも不合格の理由にもしない。ゲートは`confirmed`の写像もほかの段と同じように測り、`assessment`の導き方は変えない。`productQualityAccepted`は常にfalse。画面と報告には、手で直した位置で作った事、ライブで決めた位置で作った事を、ゲートの結果と分けて出す。
+
+#### 報告v9の差分（案）
+
+- `schema`は`a0.uncalibrated-still-review.v9`。ほかの欄はv8と同じ名前・型・並び。v8の読み手は残し、v8の報告を今までどおり読む。
+- `fixedCompositeRegistration.confirmedPosition`（`geometryLevel`の前）: nullか`{referenceCamera, targetCamera, serial, source, baseSource, conditionSha256, pose{rxDeg, ryDeg, rzDeg, txMm, tyMm, tzPercent}, surface{h0Mm, slopeX, slopeY}, manualEntered}`。`referenceCamera`は`CAM-A`、`targetCamera`は`CAM-B`。`baseSource`は出どころが`manual`の時だけ符号で、ほかはnull。`manualEntered`は`{seamDxPx, seamDyPx, rotationDeg}`かnull。窓から位置を渡されなかった合成（校正の取り直しの見本の合成など）はnull。
+- `fixedCompositeRegistration.confirmedPositionCheck`: nullか`{used, seamDifferencePx}`。`used`は`confirmed`の段で作ったか。`seamDifferencePx`は、原寸の推定が確かな時のその写像（層2を除く）とPの、継ぎ目での差の最大（出力px）で、確かでない時はnull。測り方は1つの関数にし、画面の文に出す数と同じ値にする。
+- `geometryLevel.level`に`confirmed`を足す。読み手は、写像の姿勢と紙面が`confirmedPosition`とビットで同じで、`parallax`がnullである事を確かめる。`applied.pose`はtrue。`beyondEnvelopeApplied`（派生値）は、`confirmed`ではPの成分（p_bからの差）と紙面で見る。`camera-*`と`surface-*`の警告も、`confirmed`ではPの成分から導く（G1・G2の推定の成分と同じ導き方。※案）。
+- 警告の符号に`position-by-hand`（notice、`remedy`は`none`）と`position-from-live`（notice、`none`）を足す。成分の符号は`confirmed-position`（※案）。量の無い符号として書く。
+- 新しい欄の名前に`placement`を使わない。v8の`gate.placement`（大域的な配置の確かめ方）と、警告の`placement-unverified`・`placement-mismatch`が別の意味で使っている。コードの識別子（`LivePlacement*`）とログの行の名前（`C live_placement`）は変えない。
+
+### 保証する物としない物
+
+縮尺の数は今のコードから出す。ライブの合成の格子の比sは、ライブの枠の幅wを撮影の幅7360（`kD810SensorWidthPixels`、`src/m2/include/a0/m2/optical_planner.hpp` 9行）で割った値で（`src/phase0/include/a0/phase0/experimental/fixed_composite_preview.hpp` 320〜323行の`PlanLensAwarePreview`）、格子のピッチは出力のピッチの1/s（同222行の`MakeFixedPreviewGrid`）。したがってライブの合成の1画素は、出力の7360/w画素に当たる。D810のライブの枠の幅640（`docs/M2_SEAM_QUALITY_GATE.md`・`docs/M2_AUTO_OVERLAP.md`と同じ値）では11.5 pxで、180 dpiの出力では図面の上の約1.6 mm。
+
+| # | 保証する事 | 大きさ | 確かめ方（「一致の試験の計画」の番号） |
+|---|---|---|---|
+| 保証1 | ライブの合成が描いているP、JPEGに渡したP、JPEGが`confirmed`で当てた写像は同じ値 | 9数がビットで一致（-0と+0は同じと数える） | 1・3・4 |
+| 保証2 | 同じPから作るライブの写像は、JPEGの写像をsで縮めた物 | 1e-6ライブ画素以内 | 既存の`SameConventionAsTheJpeg`に手の位置を足す（1） |
+| 保証3 | 撮影の後、ライブの合成はJPEGと同じ写像で描く | `confirmed`では層2の違いも無い。G1では層2だけが違い、その最大を記録の値で出す（段1のまま） | 3・6 |
+| 保証4 | 手で入れた量が、ライブとJPEGに同じだけ効く | 式の上で、継ぎ目の列の中央の行の変位が入れたdx・dyと1e-6 px以内 | 5 |
+| 保証5 | 位置の値と出どころが、ライブのログとJPEGの報告で同じ書き方 | 同じ関数が書いた17桁の文字列が一致 | 4 |
+
+保証しない事:
+
+- **見た目の細かさ**: ライブの合成の1画素は出力の11.5 px。継ぎ目のずれが目で分かるのをライブで0.5画素とすると（※経験則）、ライブで合って見えてもJPEGでは約6 px（0.5 × 11.5）までずれうる（※推定）。ゲートの線（出力1 px）はライブの0.09画素で、ライブでは見えない。1 pxの精度を言えるのは原寸のゲートだけ。手の刻みの4 pxはライブの約0.35画素で、押してもライブではほとんど動いて見えない。
+- **ライブの推定の精度**: ライブの解像度で推定したPは、原寸の推定より粗い（不確かさがライブの画素で出るので、出力の画素では約11.5倍になる）。`confirmed`の段は、その粗さのままJPEGに入る。そのずれは報告とゲートが測って出す。
+- **ライブの枠と撮影画像の対応S**（#309）: 実機で測っていない（※未検証）。Sが外れていれば、ライブで推定したPにも、ライブを見て手で直したPにも、その分が入る。
+- **時刻の違い**: 推定に使うCAM-AとCAM-Bのライブの2枚は同時ではない。最後のライブの枠からシャッターまでの間に紙や台が動いた分は、Pに入らない。
+- **紙を替えた時**: Pは前の紙の紙面を持ったままで、ボタンを押すまで新しい紙には合わない（画面で押すように案内する）。
+
+### 一致の試験の計画
+
+どれもカメラを使わない。期待値は試験の側の式か別の経路の出力から作り、確かめる関数そのものを呼んで期待値を作らない。
+
+| # | 固定する事 | 置き場所（※案） | 落ちるべき変異 |
+|---|---|---|---|
+| 1 | 手の押下でPが変わり、ライブの合成のCAM-Bの表が、その写像（`RegisteredDocumentOutputToCamera`をsで縮めた物）と1e-6ライブ画素以内で一致する。`SameConventionAsTheJpeg`の写像の組に手の位置を足す | `preview_live_registration_runtime_contracts`、`preview_fixed_composite_v3_contracts` | 手の押下で焼き直さない |
+| 2 | Pが勝手に動かない: 偽の時計でフレームと時刻を流しても、頼んだ推定の結果・手の押下・撮影の結果・条件の変化のほかでは`serial`が変わらない。推定は頼んだ回数だけ走る。推定の途中の手の押下は、その推定の結果を捨てる | `preview_live_placement_contracts`（偽の推定器） | 推定の結果で手の位置を上書きする |
+| 3 | JPEGの段: 決定5の表の4行と補足の4つ。`confirmed`の写像がPとビットで同じ。手の時は、原寸の推定が確かでも写像がPのまま。Pが条件の位置の時、合成の画素のバイトがPを渡さない時と同じ。Pが条件の位置でない時も、原寸の推定の結果（`registration`）がPを渡さない時とビットで同じ（Pが推定に入らない事） | `m2_capture_registration_contracts`（既存のG3・G4の合成の場面を使う）、`still_review_condition_v3_contracts` | Pを推定の始めにする。原寸の推定で手の位置を上書きする |
+| 4 | ログと報告: 偽の撮影（`pair_capture_backend`）で撮り、ライブの行`C live_placement …`と、読み直した報告v9から書いた撮影の側の行の`serial`・`source`・基準と対象のカメラ・9数の文字列が一致する。報告のJSONの数を読み直すと、渡したPとビットで同じ | `preview_pair_v3_ui_contracts` | 数の書き方を片方だけ変える。撮影の側の行を窓の写しから書く |
+| 5 | 手の式: 紙面のあるPで、継ぎ目の列の中央の行の変位が入れたdx・dyと1e-6 px以内。紙面が0の時は今の`SolveManualChange`と同じ値。押した順を変えても同じ値。範囲のちょうど端は受け付け、越える押下は断ってPを変えない（丸めない）。超えている成分を増やす押下は断る | 新しい純粋な部品の試験（m2） | 範囲で断らない。端に丸める |
+| 6 | 画面の流れ: 開始 → 確定 → 手の押下 → 撮影 → 撮影の後もPが手のまま、文が「手で直した位置でJPEGを作りました（自動で測ると継ぎ目で最大N px違います）」の形。ボタンを押して推定が通ると手の印が消える。手のボタンが窓の幅1000・1024・1056・1400・1920で外へはみ出さず、ほかのボタンと重ならない | `preview_live_c_ui_contracts`、`preview_pair_v3_ui_contracts`、既存の`CheckButtonLayouts` | 撮影の後にPを推定の写像にする |
+| 7 | 条件のSHA-256が変わると、Pは手の位置でも条件の位置に戻り、推定を1回頼む。別の条件のPは、JPEGにもライブにも使わない | `preview_live_placement_contracts`、`m2_capture_registration_contracts` | 条件の変化でPを持ち越す |
+| 8 | 書式: v9の読み手が厳格（未知の欄・欠けた欄、`confirmed`の写像が`confirmedPosition`と違う、知らない符号を拒否）。v8の読み手が今のv8を前と同じに読み、既存の試験が試験のコードを変えずに通る。v9の文字列は`tests/registration_fixtures.hpp`の関数で作る | `m2_capture_registration_contracts`ほか、v8を読む既存の試験 | 読み手が`confirmed`の写像を確かめない |
+| 9 | 変わらない物: 条件が無い時・v1・v2のライブの合成。未校正のライブの合成のボタン300〜304の働き | `preview_fixed_c_ui_contracts`ほか既存の試験 | |
+
+### 理由
+
+1. 所有者の要件（手で直した分をJPEGに同じだけ効かせる、ライブとJPEGを食い違わせない）は、ライブとJPEGが同じ1つの値を使わなければ守れない。値を1つにすれば、一致を9数のビットの比較として試験に固定できる。
+2. 原寸の推定が確かな時はそれを使う。原寸の推定はライブの約11.5倍細かい画素で測るので（縮尺の比）、自動の位置しか無い撮影でJPEGの精度を落とさない。撮影の後はライブもその写像に移るので、撮影の後の「同じ」は保たれる（段1）。
+3. 原寸の推定が決まらない撮影で条件の位置（G4）や目安（G3）に落ちると、ライブで見ていた位置と違うJPEGができる。ライブで確定していた位置を使えば、ライブで見た物とJPEGが同じになる（所有者の決定2）。
+4. 手で直すのは、自動が決まらない場面（繰り返し模様、無地）がほとんどで、そこでは原寸の推定も決まらない事が多い（※推定）。手の位置を原寸の推定で上書きしなくても失う物は小さく、所有者が嫌った「手で直しても勝手にまた自動が効く」を避けられる（所有者の決定1）。差は数で出す。
+5. 範囲と推定の基準をいつも条件のp_bに置けば、Pが撮影やボタンのたびに変わっても基準が歩かない。これが「自動で学習しない」の守りになる。
+6. 窓の中だけで持ち、保存を人の明示にすれば、条件とprofileの改訂の決まり（ADR-0037の不変条件3、設計11.19.4の改訂の列）を変えずに済む。
+
+### 退ける案
+
+| 案 | 退ける理由 |
+|---|---|
+| 裏の追従を残す（段1の前の形） | 所有者が嫌った「手で直しても勝手にまた自動が効く」の元。静かな場面でも揺れ、推定と焼き直しがCPUを使う |
+| ライブのPをいつもJPEGに使い、原寸の推定は確かめだけにする | 自動の位置しか無い撮影でも、JPEGの継ぎ目の精度がライブの解像度まで落ちる。所有者の「シャッター後は自動調整が1回入る」とも合わない |
+| 今のまま、JPEGをp_bから独立に作る | 手で直した分がJPEGに効かない（所有者の2026-11-19の指示）。撮影の前のライブとJPEGが別の値になる |
+| 手で直した後も、原寸の推定が確かならJPEGをその推定で作り、「手の位置に戻す」ボタンを置く | 所有者の決定1 |
+| 手の値を範囲の端に丸めて通す | `AGENTS.md` 39行（`clamp an over-limit result into success`の禁止）、ADR-0037の不変条件7 |
+| 範囲の外の手の値も、警告つきで当てる（推定の`applyBeyondEnvelope`と同じ扱い） | 範囲の外の手直しの改訂は、撮影とライブの合成の読み手が使わない（設計11.29のN1、所有者の決定）。窓の中でだけ通すと、保存した時と使った時で扱いが変わる。範囲の外が要るのは設置が動いた時で、その直し方は校正の取り直し（#434） |
+| 窓を閉じる時にPを条件やprofileに書く。Pを次の推定の基準にする | 自動の学習に当たる（`AGENTS.md` 39行、ADR-0037の不変条件2・3）。所有者の決定3（残す時は保存の操作） |
+| Pを撮影の推定の始めにする | 収束は速くなる見込み（※推定）だが、ライブの値が原寸の推定に入り、Pの誤りが推定に移る。決まりの変更も広がる |
+| 層2もライブの合成に描く | ライブの解像度では層2の点が足りない。ライブの写像の作り手（`LiveDocumentHomography`）は層2を受け付けない |
+| 手の押下ごとに前の値へ足し込む | 押した順で値が変わりうる。段3で保存した改訂の値と、使った値がずれる |
+| 段2を報告v8のまま、符号を足すだけで済ます（書式の決まり8の例外） | 例外は既にある欄だけを使う変更に限る。出どころ・通し番号・手で入れた量には新しい欄が要る |
+| 新しい欄の名前を`placement`にする | v8の`gate.placement`と警告の`placement-*`が別の意味で使っている |
+| 手の量をライブの画素で持つ | ライブの枠の大きさで値の意味が変わる。`manual-adjustment`（出力px）にそのまま保存できない |
+
+### 守る不変条件
+
+1. Pが変わるのは、頼んだ推定の結果、手の押下、撮影の結果、条件のSHA-256の変化の4つだけ。時刻とフレームの内容では変わらない。
+2. ライブの合成のCAM-Bの表の写像はP。Pの置き換えは焼き直しが通った後。JPEGに渡すPは、撮影の要求の時に描いていたP（`serial`で照合する）。
+3. 推定の始め・事前分布・ゲージ・範囲の基準は、条件のp_b。Pにしない。
+4. 推定が決まらない時はPを保つ。条件の位置に戻さず、再試行しない。
+5. 手の押下は範囲の内だけ受け付ける。越える押下は断り、丸めない。
+6. Pはファイルに書かない（Pを使った合成の記録を除く）。条件とprofileへの書き込みは、人の明示の保存だけ（段3）。
+7. JPEGの画素は、確かめた原画像2枚だけから作る。Pは幾何で、画像ではない。
+8. ライブとJPEGは、同じPから、同じ作り手の写像・同じ継ぎ目の列・同じ混ぜ方（mmで同じ幅）で描く。違ってよいのは解像度とG1の層2だけで、その大きさは記録に残す。
+9. 手で直した事、ライブで決めた事を品質の証拠に数えない。ゲートは同じように測る。
+10. Pが条件の位置の時、合成の画素は今と同じバイト。条件が無い時と、v1・v2の条件の時の合成とライブの合成は変えない。
+11. 別の条件のSHA-256のPは、JPEGにもライブにも使わない。
+12. 手の位置は、手で直す前の位置に、入れた量の合計を1回で解いて足した物。
+13. ライブのログと報告は、Pを同じ関数の同じ書き方（17桁）で書き、同じ`serial`・`source`・基準と対象のカメラを書く。
+
+### 変わる決まり
+
+2026-11-19にb081023の木で行番号を取り直した。
+
+| 決まり | 今の文（要旨） | 段2で当たる所 | 本ADRでの扱い |
+|---|---|---|---|
+| ADR-0036 決定1の5（`docs/DECISIONS.md` 666行） | Cは撮影、保存の合成、書き出し、補正の推定、profileの選択の入力にしない | ライブの映像から推定したPを、JPEGの位置に使う | 開発用プレビューの条件v3に限って例外にする。合成の画像そのものは、今までどおり入力にしない。手の位置には確認点C1（651行・672行。人の操作で決めた値は当たらない）の読み方を当てる |
+| ADR-0036 決定1の10（673行）、ADR-0037 決定1・2（790行・791行）、ADR-0037 不変条件1（826行） | 写像を撮影やframeの内容で動かさない。撮影ごとの推定とライブの自動位置合わせは診断に限る | #417の原寸の推定（G1・G2）が、既にJPEGの写像を撮影ごとに変えている（設計11.14・11.16）。ADR-0037の決定6を置き換えるADRは未起票（設計11.29のU8）。本ADRは、そこにライブのPを足す | 本ADRは#417の今の作り（G1〜G4）を前提にする。U8のADRと一緒に改めるか、本ADRが先に例外を書くかは※要確認 |
+| ADR-0037 不変条件2（827行） | 撮影ごとの推定の結果を、写像・条件・profileに書き戻さない。次の撮影に持ち越さない | 撮影の後のPが、次の撮影で原寸の推定が決まらない時のJPEGの位置になる（窓の中の持ち越し） | 窓の中で持ち越すだけの例外にする。条件・profileには書かず、推定の基準にも入れない |
+| 設計11.21の決定（`docs/design/fixed-composite-registration.md` 818行）、11.9の「ライブの C」（423行）、11.28の不変条件18（1075行） | Cの推定はJPEGに渡さない | 同上 | 「ライブの確定した位置は、原寸の推定が確かでない時と手で直した時にJPEGの位置になる。推定の始め・事前分布・範囲の基準にはしない。層2はライブに当てない」に改める。11.21の追従・保つ時間・τ_bakeの記述（820行と836〜844行）は段1で使われなくなったので、同じ変更で今の形に書き直す |
+| `docs/WPD_DUAL_PREVIEW.md` 53行・56行 | JPEGの位置は変えていない。位置を合成の写像に書き戻さない | 同上 | 段2の節を足して書き直す |
+| `AGENTS.md` 39行 | 自動補正の範囲。上限を超えた結果をclampして合格にしない。rig profileを自動で学習・更新しない | 窓の中のPが、profileや条件の更新ではない事を明文にする | 下の追記の案 |
+| `AGENTS.md` 40行 | ボタンの推定は、未校正のCの平行移動の候補だけ | 条件v3の時は、ボタンが姿勢と紙面の推定を1回走らせ、その結果をライブとJPEGに使う | 下の追記の案と新しい項 |
+| `AGENTS.md` 34行（`preview-as-stitch-input`）・37行 | ライブをstitchの入力にしない。開発用のCはライブの枠をメモリの中で使う | Pはライブの枠から求めた幾何で、画素ではない | 新しい項に「幾何で、画像でない。合成は原画像2枚だけから作る」と書く。34行・37行は変えない |
+| `AGENTS.md` 41行（#334） | Cの幾何を写して記録する。ライブからJPEGへの対応は未検証の仮定 | 条件v3では、撮影へ写す物がPになる | 変えない。未検証の仮定である事は、新しい項でも言う |
+| 書式の文書の1節の決まり8（`fixed-composite-registration-formats.md` 16行） | mainに入った後の変更は新しい版にする | 報告にPの欄を足す | 決まりのとおりv9にする。決まりは変えない |
+
+変えない決まり: 設計11.19.2の表（推定の始め・事前分布・ゲージ・範囲の基準はp_b）、11.19.3の改訂の種類、ADR-0021の安全境界（自由なhomographyを推定しない、学習しない）、ADR-0036の不変条件4（frameごとに推定しない）。
+
+### AGENTS.mdに足す文の案
+
+所有者が承認した後に、別のcommitで`AGENTS.md`に入れる。本ADRのcommitでは`AGENTS.md`を変えない。
+
+40行の後に足す項:
+
+> - The owner's request in #437 (ADR-0046) narrows the automatic registration of the development composite view drawn with a fixed composite condition v3 to three events: once when Live View first starts in the window (and once when the condition file changes), once per press of its estimate button, and once on the two verified originals after a pair capture. No background, periodic or retried estimate runs, and nothing else moves the live composite. The window keeps one confirmed position of CAM-B relative to CAM-A (its pose and the paper surface, never layer 2) with its source and a change counter (`serial`); the live composite is drawn with it and is re-baked before it changes. A person may move it by bounded in-plane steps (along and across the seam and about the optical axis, in output pixels and degrees) only while the result stays inside the condition's pose envelope measured from the condition's base pose; a step past the envelope is refused, never clamped into success. A pair composite uses a trusted estimate on the originals unless the confirmed position was set by hand; when the estimate is not trusted, or the position was set by hand, it uses the confirmed position (a position that is still the condition's own keeps the existing geometry levels). After the capture the confirmed position becomes the mapping the composite used, without layer 2, while a hand-set position stays. The estimate's start, prior and envelope stay measured from the condition's base pose, never from the confirmed position. Every pair composite records the confirmed position it was given, its source and serial and its seam difference to a trusted estimate, written with the same numbers as the live log. The position lives in memory only and is discarded when the window closes; it changes a fixed composite condition only when the operator explicitly saves it as a new revision. A hand-set or Live-View-derived position is never quality evidence, and the seam gate measures it like any other mapping. It is geometry, not an image: composites are still rendered only from the two verified originals, and the Live View-to-still correspondence it depends on stays unverified (#309).
+
+39行の末尾に、空白1つの後に足す: `The #437 confirmed position of the development preview is neither a rig profile nor a fixed composite condition update.`
+
+40行の末尾に、空白1つの後に足す: `With a fixed composite condition v3 the button follows the #437 entry below instead.`
+
+「次の撮影の前（AFの後）の自動」を足す事になった時は、1文目の「three events」とその列挙を直す（所有者に確かめる事の3）。ボタンの名前が決まったら、その名前は`AGENTS.md`に書かない（画面の文字の正本はコード）。
+
+### ADR-0045との関係
+
+1. 報告v9で足す`confirmedPosition`は2台の関係を表す値なので、ADR-0045の決定4のとおり`referenceCamera`（`CAM-A`）と`targetCamera`（`CAM-B`）を付け、欄の名前にA・Bの記号を埋めない。v9は2台のままで、`inputs`はv8と同じくちょうど2つ（N台の書式は作らない。ADR-0045の退ける案のとおり）。
+2. ADR-0045の「待つ物」と「2台を決め打ちにしている場所」の表は、4台の書式を「報告v9」と書いている。本ADRが2台のv9を先に使うので、4台の報告はその次の版になる。ADR-0045の文を「報告の次の版」と読むか、ADR-0045を採用する時に直す（※要確認）。
+3. ログの`reference_camera=CAM-A target_camera=CAM-B`は、ADR-0045では待つ物（4台が確定してから`LivePlacementFields`に足す）。段2でv9と同じcommitで足すと、ログと報告の突き合わせが同じ欄で揃う。待つ物の前倒しになるので※要確認。足す時は、ライブと撮影の両方の行を書く1つの関数に足す。
+4. 継ぎ目はv8と同じ`seam.column`で、ADR-0045の決定5の読み方では縦の継ぎ目CAM-A–CAM-B。差もこの列に沿って測る。継ぎ目の新しい欄は足さない。
+5. 文の書き方: 本ADRは、合成を「ライブの合成」「JPEGの合成」と言葉で書き、カメラを`CAM-A`・`CAM-B`と書いた（ADR-0045の決定6、今やる物の4）。コード・ログ・画面の文字を引く所と、ほかのADRの文を要約した所だけ「C」のまま（`C live_placement`など）。
+
+### 段の切り分け（段2）
+
+着手の前に、本ADRと上の`AGENTS.md`の文を所有者が承認し、`AGENTS.md`を別のcommitで直す。その後、次の順にcommitを分ける。大きさは※推定。段1は、設計の時の見積り約1,000行に対し、追加2,030行・削除868行だった（2026-11-19に`git diff --shortstat 6738bd1^1 6738bd1`で数えた。12ファイル）。
+
+| # | 中身 | 触るファイル（※案） | 試験の計画の番号 | 大きさ（※推定） |
+|---|---|---|---|---|
+| 1 | 純粋な部品: 数の書き方を1つにする（報告とログ）。手の式（紙面つき）。継ぎ目での差の測り方 | m2の新しいheader（例`confirmed_position.hpp`）、`capture_registration.cpp`の`Num`、`live_placement.hpp`の`LivePlacementNumber`、`fixed_composite_tool_v3.hpp`の`SolveManualChange`（新しい式を呼ぶ。値は変えない） | 5 | 400〜700行 |
+| 2 | JPEGの側: 撮影の要求のPの欄、段`confirmed`、報告v9の書き手と読み手、警告の符号と文、v9の組み立て。書式の決まり1により1つのcommit | `still_review.hpp`、`capture_registration.hpp`・`.cpp`、`still_review_report_impl.hpp`、`uncalibrated_review_impl.hpp`、`pair_review_registration.hpp`、`fixed_composite_registration_text.hpp`、`tests/registration_fixtures.hpp`、書式の文書 | 3・7・8 | 1,500〜2,200行 |
+| 3 | 機械: 手の出どころ、手の押下、範囲の検査、撮影の結果が`confirmed`の時の扱い | `live_placement.hpp`、`live_registration_runtime.hpp` | 2・7 | 500〜900行 |
+| 4 | 窓: 手のボタン、撮影へPを渡す口、状態の文、ログの行 | 新しい`live_placement_controls_ui.hpp`（`wpd_dual_preview_ui.hpp`へは数か所の呼び出しだけ）、`live_registration_display.hpp`、`preview_button_layout.hpp`を使うボタンの組の一覧 | 1・4・6・9 | 900〜1,400行 |
+| 5 | 文書: 設計11.9・11.21・11.28、`WPD_DUAL_PREVIEW.md`の段2の節、本ADRの状態 | docsだけ | | 100〜200行 |
+
+合わせて約3,400〜5,400行（※推定）。
+
+段3に残す物:
+
+- 「この位置を保存」。Pが条件の位置に手の量だけを足した物なら`manual-adjustment`、直前の撮影がG1・G2で確かで基準内なら`saved-estimate`の改訂にする。自動の紙面を含むPは、改訂が紙面を持たないのでそのまま保存できず、画面でそう言う。
+- `saved-estimate`の元にv9の報告を読む読み手。
+- 撮影の後の原寸の継ぎ目の確認画面への入口（#418）と、手で直した位置で撮った合成の作り直し（#418の段2）。
+
+ほかの作業との重なり（2026-11-19にgitで確かめた）: 開いている#434の枝`claude/issue-434-camera-fields`が変えるのは`fixed_composite_recalibration.*`とその試験だけで（`git diff --stat main...claude/issue-434-camera-fields`）、段2の触るファイルと重ならない。#434の`tests/registration_fixtures.hpp`の変更（改訂の種類`recalibrated`）は既にmainにある。校正の取り直しの見本の合成（`src/phase0/include/a0/phase0/experimental/recalibration_job.hpp` 619〜623行）は窓のPを受け取らないので、v9では`confirmedPosition`をnullで書く。
+
+### 所有者に確かめる事
+
+| # | 確かめる事 | 選択肢 | 推し |
+|---|---|---|---|
+| 1 | ボタンの名前 | (a) 今の「自動位置合わせ」のまま。(b) 条件v3の時だけ「自動調整」にする。条件が無い時の未校正の合成のボタンは働きが違う（平行移動の候補を出す）ので「自動位置合わせ」のまま | (b)。所有者の言葉が「自動調整ボタン」で、撮影の後の文も既に「撮影の後の自動調整で…」と言っている。手のボタン（左右・上下・回り）と並んだ時に、「自動」と「手」の対で読める |
+| 2 | 推定の途中でライブを止めた時 | (a) 頼みを残す。再開の時に、その1回だけ続きを行う（段1の今の作り）。(b) 捨てる。再開の後は、押すまで位置を変えない | (a)。押した1回や開始時の1回が、結果を出さずに消えない。自動が走る時を新しく増やさない。再開の後は状態の行が「自動合成中です…」と出し、その間に手で動かせば、その推定は捨てる |
+| 3 | 次の撮影の前（AFの後）に自動を1回足すか | (a) 足さない。AFの後の状態の行で「紙を替えた時、ピントを合わせ直した時は、ボタンを押してください」と案内する。(b) 足す。両台のAFが応答した後に1回走らせ、手で直した位置の時は測るだけで動かさない。(c) 足し、手の位置も動かす | (a)。AFはカメラごとに押すので、2回走らせるか、両方のAFを待つ時間の決まりが要る（時間で動く決まりは不変条件1と合わない）。手で直した位置とぶつかる（(c)は所有者の決定1の考えと合わない）。AFの直後のライブの枠はレンズが動いて揺れ、推定が決まりにくい（※推定）。シャッターの後に原寸の推定が毎回走るので、JPEGに効くのは原寸の推定が決まらない撮影の時だけ。(b)の利点は、撮る前のライブの合成が今の紙とピントに合う事と、原寸の推定が決まらない時のJPEGの位置が新しくなる事。(b)を選ぶ時は`AGENTS.md`の文の「three events」を4つに直す |
+| 4 | 手で直す量を、条件の範囲の端で断ってよいか | (a) 断る（決定4）。(b) 範囲の外も警告つきで当てる | (a)。所有者の決定9（手直しの量に上限を置かない）は量の上限の話で、範囲の外の手直しは撮影とライブの合成が使わない（設計11.29のN1）。範囲の外が要るのは設置が動いた時で、校正の取り直し（#434）で直す |
+| 5 | 手の刻み | (a) 左右・上下が12 px（ライブの約1画素）と4 px、回りが0.2°と0.05°（決定3の案）。(b) これに1 pxを足す | (a)。12 pxはライブで1画素動いて見える。4 pxはライブの約0.35画素で、補間で継ぎ目の見え方が少し変わる程度（※推定）。1 pxはライブの0.09画素で、画面の上ではほぼ変わらないので、原寸の継ぎ目の確認画面（#418）から使えるようにしてから足す |
+
+技術の側で決める問い（※要確認）:
+
+- ADR-0037の決定6を置き換える#417のADR（設計11.29のU8）と本ADRを、まとめて出すか分けるか。
+- 範囲の外のまま当てた自動のPから、超えている成分を増やさない押下だけを受け付ける（決定4）でよいか。
+- 手の押下に安い検査（継ぎ目が重なりの内）も当てて断る（決定5の補足）でよいか。
+- `confirmedPositionCheck.seamDifferencePx`を報告の読み手が作り直すか（profileの写像が要る）、記録の値として持つだけにするか。
+- 警告の符号と成分の符号の名前（`position-by-hand`・`position-from-live`・`confirmed-position`）。
+- StillReviewがv9の報告を開いた時は、v7・v8と同じく手の再Mergeを使えなくする読み方でよいか。
+
+### 影響と改定の対象
+
+| 対象 | 扱い |
+|---|---|
+| `docs/DECISIONS.md` | 本ADRを足す（Proposed）。ほかのADRの本文は変えない |
+| コード・試験・書式・`AGENTS.md` | 本ADRのcommitでは変えない。`AGENTS.md`は承認の後に別のcommit、コード・試験・書式は段2のcommit |
+| ADR-0036 決定1の5・10、ADR-0037 決定1・2、不変条件1・2 | 本ADRが採用された時に、各ADRに「ADR-0046で改定」の追記を置く（本文は書き換えない） |
+| 設計11.9・11.21・11.28の18、`docs/WPD_DUAL_PREVIEW.md`の#437の節 | 段2の文書のcommitで書き直す |
+| `docs/design/fixed-composite-registration-formats.md` | 段2のcommit 2でv9の節を足す |
+| ADR-0045の「報告v9」の文 | 「ADR-0045との関係」の2のとおり（※要確認） |
+
+### 未決（※要確認）
+
+1. 刻みの値、手のボタンの幅とID（未校正の合成のボタン300〜304とは別の範囲。例320〜329）は※案。
+2. 実機で見る事（段2の実装の後、所有者の承認を得て行う）: Pを固定して撮り、ライブの継ぎ目のずれ（ライブの画素 × 11.5）とJPEGのゲートの最大を比べ、「ライブで合って見える時のJPEGのずれは約6 px」の見積りを確かめる。同じ撮影で、ライブの推定と原寸の推定の継ぎ目での差を見ると、Sの外れも一緒に見える。
+3. Pythonは位置の経路に入れない。解析でPythonを使う時は、ADR-0043と#429の決まり（定数の正本を1か所、共通の試験ベクトル、丸めの決め）を位置にも当て、Pythonが出した値をPや条件に直接入れない。
