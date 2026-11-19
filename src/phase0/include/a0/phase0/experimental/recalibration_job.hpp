@@ -380,13 +380,14 @@ inline std::string ReportJson(const ReportInput& in){
     const auto& o=*in.outcome;
     const auto& d=o.facts.display;
     std::ostringstream s;
-    s<<"{\"schema\":\"a0.pair-recalibration-report.v1\",\"pairId\":"<<Esc(o.pair_id)<<",\"verdict\":"<<Esc(RecalibrationVerdictCode(o.verdict))
+    s<<"{\"schema\":\"a0.pair-recalibration-report.v1\",\"pairId\":"<<Esc(o.pair_id)<<",\"referenceCamera\":"<<Esc(rc::kReferenceCamera)
+     <<",\"targetCamera\":"<<Esc(rc::kTargetCamera)<<",\"verdict\":"<<Esc(RecalibrationVerdictCode(o.verdict))
      <<",\"unverified\":"<<Bool(o.unverified())<<",\"unverifiedPolicy\":"<<Esc(in.policy)<<",\"findings\":[";
     for(std::size_t i=0;i<o.findings.size();++i){
         const auto& f=o.findings[i];
         s<<(i?",":"")<<"{\"class\":"<<Esc(FindingClassCode(f.klass))<<",\"code\":"<<Esc(f.code)<<",\"reason\":"<<Esc(f.reason)<<"}";
     }
-    s<<"],\"originals\":{\"cameraASha256\":"<<Esc(in.original_a_sha)<<",\"cameraBSha256\":"<<Esc(in.original_b_sha)<<"}"
+    s<<"],\"originalSha256\":{"<<Esc(rc::kReferenceCamera)<<":"<<Esc(in.original_a_sha)<<","<<Esc(rc::kTargetCamera)<<":"<<Esc(in.original_b_sha)<<"}"
      <<",\"parent\":{\"revisionSha256\":"<<Esc(o.parent_sha256)<<"}";
     if(o.candidate){
         const auto& c=*o.candidate;
@@ -415,7 +416,7 @@ inline std::string ReportJson(const ReportInput& in){
      <<",\"hasNew\":"<<Bool(d.has_new)<<",\"seamXPreviousMm\":"<<Num(d.seam_x_previous_mm)<<",\"seamXNewMm\":"<<(d.has_new?Num(d.seam_x_new_mm):std::string("null"))
      <<",\"widthPreviousPx\":"<<d.width_previous_px<<",\"widthNewPx\":"<<(d.has_new?std::to_string(d.width_new_px):std::string("null"))
      <<",\"rightPreviousMm\":"<<Num(d.right_previous_mm)<<",\"rightNewMm\":"<<(d.has_new?Num(d.right_new_mm):std::string("null"))
-     <<",\"hasEdgeDistance\":"<<Bool(d.has_edge_distance)<<",\"edgeShareA\":"<<Num(d.edge_share_a)<<",\"edgeShareB\":"<<Num(d.edge_share_b)<<"}";
+     <<",\"hasEdgeDistance\":"<<Bool(d.has_edge_distance)<<",\"edgeShare\":{"<<Esc(rc::kReferenceCamera)<<":"<<Num(d.edge_share_a)<<","<<Esc(rc::kTargetCamera)<<":"<<Num(d.edge_share_b)<<"}}";
     s<<"}";
     return s.str();
 }
@@ -735,7 +736,8 @@ struct RecalibrationConfirmResult {
     if(!outcome.staging_folder.empty()){
         try{
             std::ostringstream s;
-            s<<"{\"schema\":\"a0.pair-recalibration-confirmation.v1\",\"pairId\":"<<Esc(outcome.pair_id)<<",\"sequence\":"<<result.sequence
+            s<<"{\"schema\":\"a0.pair-recalibration-confirmation.v1\",\"pairId\":"<<Esc(outcome.pair_id)<<",\"referenceCamera\":"<<Esc(rc::kReferenceCamera)<<",\"targetCamera\":"<<Esc(rc::kTargetCamera)
+             <<",\"sequence\":"<<result.sequence
              <<",\"revisionSha256\":"<<Esc(result.revision_sha256)<<",\"parentSha256\":"<<Esc(*parent)<<",\"verdict\":"<<Esc(RecalibrationVerdictCode(outcome.verdict))
              <<",\"unverified\":"<<Bool(result.unverified)<<",\"acknowledged\":"<<Bool(options.acknowledge_unverified)<<"}\n";
             WriteNew(outcome.staging_folder/"confirmation.json",s.str());

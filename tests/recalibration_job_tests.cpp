@@ -240,6 +240,37 @@ bool Plain(const std::string& text) {
         if (!bad.empty() && Has(text, bad)) return false;
     return true;
 }
+// The same check for the text of a record. A record names the cameras by their aliases, as values and as keys, so an alias that is a whole
+// quoted string is not a leak there. Only that is taken out: an alias inside a longer string (a path, a file name) stays and is refused as
+// before, as are the places, the paths and the file name of an original.
+bool PlainRecord(const std::string& text) {
+    std::string rest = text;
+    for (const std::string alias : {"CAM-A", "CAM-B"}) {
+        const std::string quoted = "\"" + alias + "\"";
+        for (auto at = rest.find(quoted); at != std::string::npos; at = rest.find(quoted, at + 1)) rest.replace(at, quoted.size(), quoted.size(), '~');
+    }
+    return Plain(rest);
+}
+void PlainRecordSelfTest() {
+    CHECK(PlainRecord(R"({"referenceCamera":"CAM-A","targetCamera":"CAM-B","originalSha256":{"CAM-A":"1","CAM-B":"2"}})"));
+    CHECK(!Plain(R"({"targetCamera":"CAM-B"})"));   // the check of a screen line or a log line is the same as it was
+    CHECK(!PlainRecord(R"({"x":"sample-originals/CAM-A/x"})"));
+    CHECK(!PlainRecord(R"({"x":"/CAM-B/"})"));
+    CHECK(!PlainRecord(R"({"x":"CAM-B\\original.jpg"})"));
+    CHECK(!PlainRecord(R"({"x":"original.jpg"})"));
+    CHECK(!PlainRecord(R"({"x":"C:\\a\\CAM-B\\original.jpg"})"));
+    CHECK(!PlainRecord(R"({"x":"C:\\temp"})"));
+    CHECK(!PlainRecord(R"({"x":"/Users/someone"})"));
+    CHECK(!PlainRecord(R"({"a":"CAM-A","b":"CAM-A-2"})"));
+    CHECK(!PlainRecord(R"({"a":"CAM-A","b":"CAM-B/x"})"));
+    CHECK(!PlainRecord("{\"x\":\"" + root.generic_string() + "/a\"}"));
+}
+// The roles of a record: the reference and the target camera are named by their aliases, after the pair.
+void CameraFields(const std::string& text, const json::JsonValue& record) {
+    CHECK(At(record, "referenceCamera").string == "CAM-A" && At(record, "targetCamera").string == "CAM-B");
+    CHECK(Has(text, "\"referenceCamera\":\"CAM-A\",\"targetCamera\":\"CAM-B\","));
+    CHECK(Has(text, "\"pairId\":\"pair-0042\",") && text.find("\"pairId\"") < text.find("\"referenceCamera\""));
+}
 bool AllPlain(const std::vector<std::string>& lines) {
     for (const auto& l : lines) if (!Plain(l)) return false;
     return true;
@@ -588,6 +619,8 @@ void JobRefusals(const Pair& pair) {
         sibling.staging_folder = settings.parent_path() / (settings.filename().string() + "-record");
         const auto s = RunRecalibrationJob(sibling);
         CHECK(!HasCode(s, "staging-in-settings") && HasCode(s, "no-overlap") && fs::exists(sibling.staging_folder / "recalibration-report.json"));
+        // A computation that refused leaves no candidate, and the report still names the two cameras.
+        { const auto text = ReadAll(sibling.staging_folder / "recalibration-report.json"); CameraFields(text, Tree(text)); CHECK(PlainRecord(text)); }
     }
     {   // No condition v3 in the settings: refused before the staging folder is made.
         const auto empty = NewFolder("settings-empty");
@@ -606,6 +639,11 @@ void JobRefusals(const Pair& pair) {
         r.sha_a = std::string(64, 'a');
         const auto o = RunRecalibrationJob(r);
         CHECK(!o.ready && HasCode(o, "hash-mismatch") && fs::exists(r.staging_folder / "recalibration-report.json") && !fs::exists(r.staging_folder / "review"));
+        // The job stopped before it had the second original's hash: the report still names the two cameras, and the value that is not known is empty.
+        const auto text = ReadAll(r.staging_folder / "recalibration-report.json");
+        const auto report = Tree(text);
+        CameraFields(text, report);
+        CHECK(PlainRecord(text) && At(At(report, "originalSha256"), "CAM-A").string == std::string(64, 'a') && At(At(report, "originalSha256"), "CAM-B").string.empty());
     }
     {   // A file that is no JPEG, and a JPEG of the wrong size.
         const auto dir = NewFolder("bad-originals");
@@ -829,9 +867,24 @@ void OutsideEnvelope(const Pair& pair) {
 }
 
 // ---- 3. A whole job with a sample, and the confirmation ----
-void Reports(const RecalibrationJobOutcome& o, const fs::path& staging, const std::string& verdict, const std::string& policy) {
+void Reports(const RecalibrationJobOutcome& o, const fs::path& staging, const std::string& verdict, const std::string& policy, const Pair& pair) {
     const auto report = Tree(ReadAll(staging / "recalibration-report.json"));
     CHECK(At(report, "schema").string == "a0.pair-recalibration-report.v1" && At(report, "pairId").string == "pair-0042");
+    {
+        const auto text = ReadAll(staging / "recalibration-report.json");
+        CameraFields(text, report);
+        // The hashes of the two originals, keyed by alias, in the alias order.
+        const auto& originals = At(report, "originalSha256");
+        CHECK(originals.kind == json::JsonKind::object && originals.object.size() == 2);
+        CHECK(At(originals, "CAM-A").string == HashOf(ReadAll(pair.frames.a)) && At(originals, "CAM-B").string == HashOf(ReadAll(pair.frames.b)));
+        CHECK(Has(text, "\"originalSha256\":{\"CAM-A\":\"" + HashOf(ReadAll(pair.frames.a)) + "\",\"CAM-B\":\"" + HashOf(ReadAll(pair.frames.b)) + "\"}"));
+        // The distances of the seam to the photographs' edges, keyed by alias; no field names a camera by a letter.
+        const auto& share = At(At(report, "display"), "edgeShare");
+        CHECK(share.kind == json::JsonKind::object && share.object.size() == 2);
+        CHECK(std::abs(std::stod(At(share, "CAM-A").string) - o.facts.display.edge_share_a) < 1e-6 && std::abs(std::stod(At(share, "CAM-B").string) - o.facts.display.edge_share_b) < 1e-6);
+        CHECK(Has(text, "\"edgeShare\":{\"CAM-A\":") && Has(text, ",\"CAM-B\":"));
+        for (const char* old : {"\"originals\"", "cameraASha256", "cameraBSha256", "edgeShareA", "edgeShareB"}) CHECK(!Has(text, old));
+    }
     CHECK(At(report, "verdict").string == verdict && At(report, "unverifiedPolicy").string == policy);
     CHECK(At(report, "unverified").boolean == (verdict == "usable-unverified"));
     CHECK(At(report, "findings").array.size() == o.findings.size());
@@ -841,7 +894,7 @@ void Reports(const RecalibrationJobOutcome& o, const fs::path& staging, const st
     if (o.candidate) CHECK(At(At(report, "candidate"), "revisionSha256").string == o.candidate->sha256);
     // The report holds codes and numbers: no path, no machine identifier, no sentence.
     const auto text = ReadAll(staging / "recalibration-report.json");
-    CHECK(Plain(text) && !Has(text, "使えません") && !Has(text, "未確認"));
+    CHECK(PlainRecord(text) && !Has(text, "使えません") && !Has(text, "未確認"));
 }
 
 void WholeJob(const Pair& pair) {
@@ -902,7 +955,7 @@ void WholeJob(const Pair& pair) {
             CHECK(saved.fixed_composite_registration->profile_file_sha256 == o.candidate->condition.source.profile_file_sha256);
         }
     }
-    Reports(o, s, "usable-unverified", "confirm-with-warning");
+    Reports(o, s, "usable-unverified", "confirm-with-warning", pair);
 
     // ---- The confirmation ----
     const auto fresh = [&](const std::string& name) { const auto copy = root / name; CopyFolder(settings, copy); return copy; };
@@ -938,7 +991,10 @@ void WholeJob(const Pair& pair) {
         // The mark of an unchecked calibration is beside the report.
         const auto mark = Tree(ReadAll(request.staging_folder / "confirmation.json"));
         CHECK(At(mark, "schema").string == "a0.pair-recalibration-confirmation.v1" && At(mark, "unverified").boolean && At(mark, "acknowledged").boolean &&
-            At(mark, "verdict").string == "usable-unverified" && At(mark, "revisionSha256").string == r.revision_sha256 && Plain(ReadAll(request.staging_folder / "confirmation.json")));
+            At(mark, "verdict").string == "usable-unverified" && At(mark, "revisionSha256").string == r.revision_sha256 && PlainRecord(ReadAll(request.staging_folder / "confirmation.json")));
+        // It names the two cameras, and it stays far below what the reader of the mark takes (4 KiB).
+        CameraFields(ReadAll(request.staging_folder / "confirmation.json"), mark);
+        CHECK(ReadAll(request.staging_folder / "confirmation.json").size() < 1024);
         // The same outcome a second time: the revision in force is no longer its parent. Refused, nothing written.
         const auto again_before = Snapshot(confirmed);
         const auto again = ConfirmRecalibration(o, confirmed, kHash, {true});
@@ -1032,7 +1088,7 @@ void RefusePolicy(const Pair& pair) {
     CHECK(o.screen_lines.front() == "この校正は使えません" && HasLine(o.screen_lines, "確かめられませんでした") && HasLine(o.screen_lines, "継ぎ目のずれ:"));
     const auto r = ConfirmRecalibration(o, settings, kHash, {true});
     CHECK(!r.written && r.reason == "not-usable" && Snapshot(settings) == before);
-    Reports(o, request.staging_folder, "unusable", "refuse-to-confirm");
+    Reports(o, request.staging_folder, "unusable", "refuse-to-confirm", pair);
 }
 
 // A check on the new profile that could not be made: the computation lets the candidate go, the job makes it again from the pose; the
@@ -1047,7 +1103,7 @@ void UncheckedProfile(const Pair& pair) {
     CHECK(fs::exists(request.staging_folder / "sample-originals" / "CAM-A" / "original.jpg") && fs::exists(request.staging_folder / "sample-originals" / "CAM-B" / "original.jpg"));
     CHECK(Snapshot(settings) == before && AllPlain(o.screen_lines) && AllPlain(o.log_lines));
     CHECK(o.candidate && o.candidate->condition.revision.sequence == 2 && o.facts.display.has_motion);
-    Reports(o, request.staging_folder, "usable-unverified", "confirm-with-warning");
+    Reports(o, request.staging_folder, "usable-unverified", "confirm-with-warning", pair);
     // It confirms like any other unchecked calibration, with the acknowledgement.
     const auto copy = root / "settings-unchecked-copy";
     CopyFolder(settings, copy);
@@ -1226,6 +1282,7 @@ int main(int argc, char** argv) {
         fs::create_directories(root);
         const auto started = std::chrono::steady_clock::now();
         const auto lap = [&](const char* name) { std::cerr << name << " done at " << Since(started) << " s\n"; };
+        PlainRecordSelfTest(); lap("check of a record's text");
         Decisions(); lap("decisions");
         const auto pair = MakePair("pair");
         lap("frames");
