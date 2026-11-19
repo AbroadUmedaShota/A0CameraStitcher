@@ -675,10 +675,8 @@ void HandStepWithdrawsTheEstimate(){
 // found comes back too.
 void HandSumComesBackToZero(){
     Toy toy;
-    // From the condition's own position.
+    // From the condition's own position (an estimate that came out at it).
     {
-        auto machine=Started();
-        { const auto job=machine.BeginJob();machine.Accept(*job,Usable(kBase));machine.Committed(); }
         auto from=Placed(kBase);
         const auto condition=from.Placement();
         const auto serial=from.Serial();
@@ -964,13 +962,34 @@ void ConditionChangeDropsTheHandPosition(){
 // hand position as it is.
 void HandPositionDoesNotDrift(){
     Toy toy;
-    auto machine=ByHand(toy,Pose{0.3,-0.1,0.5,2.0,-1.0,0.2},Counts(3,-1,4));
+    // P by hand, with a job of the button that the press overtook (it ran when the press came, and its result has not come back).
+    auto machine=Placed(Pose{0.3,-0.1,0.5,2.0,-1.0,0.2});
+    CHECK(machine.RequestEstimate(LiveEstimateAsk::button)==LiveAskResult::accepted);
+    const auto old_job=machine.BeginJob();
+    CHECK(old_job.has_value());
+    CHECK(machine.HandStep(Counts(3,-1,4),kReady,toy.Fn()).outcome==LiveHandOutcome::accepted);
+    machine.Committed();
+    CHECK(machine.Source()==LivePlacementSource::manual);
+    const ex::RegisteredMapping elsewhere{Pose{0.9,0.1,-0.4,3.0,1.0,0.5},{},std::nullopt};
     const auto serial=machine.Serial(),wanted=machine.WantedSerial();
     const auto before=machine.View();
+    bool refused=old_job.has_value();   // every call below that is to be refused is refused
     for(int i=0;i<100000;++i){
         (void)machine.BeginJob();
         (void)machine.View();
+        // The result of the overtaken job (the first one clears the job that was in flight; the rest are not the machine's), and its release.
+        if(old_job){
+            refused=refused && machine.Accept(*old_job,Usable(elsewhere.pose))==LivePlacementMachine::AcceptKind::discarded_stale;
+            machine.Release(*old_job);
+        }
+        // Results of a capture that do not apply: another condition, and a level that a hand position cannot have.
+        refused=refused && !machine.ApplyCapture(elsewhere,"G1",kOtherSha) && !machine.ApplyCapture(elsewhere,"G2",kSha);
         if(i%1000==0){
+            // The button and a press while a pair capture holds P (both refused), then the capture ends with no JPEG.
+            refused=refused && machine.BeginCapture(true).admission==LiveCaptureAdmission::accepted;
+            refused=refused && machine.RequestEstimate(LiveEstimateAsk::button)==LiveAskResult::capturing;
+            refused=refused && machine.HandStep(Counts(1),kReady,toy.Fn()).outcome==LiveHandOutcome::refused_capturing;
+            machine.EndCapture();
             machine.BeginSession(kSha,kBase,true);
             (void)machine.HandStep(Counts(1),LiveHandContext{false,true},toy.Fn());     // stopped
             (void)machine.HandStep(Counts(1),LiveHandContext{true,false},toy.Fn());     // not drawn
@@ -983,6 +1002,79 @@ void HandPositionDoesNotDrift(){
     }
     CHECK(machine.Serial()==serial && machine.WantedSerial()==wanted && Unchanged(machine,before,wanted) && machine.View().hand_base && Same(*machine.View().hand_base,*before.hand_base));
     CHECK(machine.Counters().jobs==before.counters.jobs && toy.calls==1);
+    CHECK(refused && machine.Counters().discarded_stale==before.counters.discarded_stale+100000);
+}
+
+// 26. An estimate's result that comes while a press is checked loses to the press (ADR-0046: a hand move made meanwhile withdraws the estimate):
+// the press is accepted, the result that waited to be drawn is dropped, and the position that waits is the hand's. Only a change of P itself, or
+// of the hand position that waits, makes the press stale.
+void HandStepWinsOverAnEstimateThatComesDuringItsCheck(){
+    Toy toy;
+    const auto race=[&](LivePlacementMachine& machine,const char* what){
+        const auto job=machine.BeginJob();
+        Check(job.has_value(),what);
+        const auto base=machine.Placement();
+        const auto prepared=machine.PrepareHandStep(Counts(3),kReady);
+        Check(prepared.outcome==LiveHandOutcome::accepted,what);
+        // The estimate ends while the press is checked: its position waits to be drawn.
+        Check(machine.Accept(*job,Usable(Pose{0.9,0,0,0,0,0}))==LivePlacementMachine::AcceptKind::pending_draw && machine.HasPending(),what);
+        const auto result=machine.CommitHandStep(prepared.proposal,EvaluateLiveHandCheck(toy.Fn(),prepared.proposal));
+        Check(result.outcome==LiveHandOutcome::accepted && result.withdrew_estimate,what);
+        Check(Same(machine.Wanted(),Toy::Solved(base,Counts(3))) && machine.View().hand_wanted==Counts(3) && machine.Activity()==LivePlacementActivity::idle,what);
+        machine.Committed();
+        const auto view=machine.View();
+        Check(view.source==LivePlacementSource::manual && Same(view.mapping,Toy::Solved(base,Counts(3))) && view.counters.hand_withdrawn_estimates==1,what);
+        Check(!machine.BeginJob() && view.outcome==LivePlacementOutcomeKind::none,what);
+    };
+    // The estimate of the first session.
+    {
+        auto machine=Started();
+        const auto placed=machine.Counters().placed;
+        race(machine,"the first session's estimate loses to a press made while it ran");
+        CHECK(machine.Counters().placed==placed && machine.View().base_source==LivePlacementSource::fixed_condition);
+    }
+    // The button's estimate.
+    {
+        auto machine=Placed(Pose{0.3,-0.1,0.5,2.0,-1.0,0.2});
+        CHECK(machine.RequestEstimate(LiveEstimateAsk::button)==LiveAskResult::accepted);
+        race(machine,"the button's estimate loses to a press made while it ran");
+        CHECK(machine.View().base_source==LivePlacementSource::auto_start);
+    }
+    // A press on a hand position that waits, while the button's estimate ran: the sum of both presses, from the same base.
+    {
+        auto machine=ByHand(toy,Pose{0.3,-0.1,0.5,2.0,-1.0,0.2},Counts(3));
+        const auto hand_base=*machine.View().hand_base;
+        CHECK(machine.HandStep(Counts(1),kReady,toy.Fn()).outcome==LiveHandOutcome::accepted);   // waits to be drawn
+        CHECK(machine.RequestEstimate(LiveEstimateAsk::button)==LiveAskResult::accepted);
+        const auto job=machine.BeginJob();
+        const auto prepared=machine.PrepareHandStep(Counts(1),kReady);
+        CHECK(machine.Accept(*job,Usable(Pose{0.9,0,0,0,0,0}))==LivePlacementMachine::AcceptKind::pending_draw);   // replaces the hand position that waited
+        const auto result=machine.CommitHandStep(prepared.proposal,EvaluateLiveHandCheck(toy.Fn(),prepared.proposal));
+        CHECK(result.outcome==LiveHandOutcome::accepted && result.withdrew_estimate && result.total==Counts(5));
+        CHECK(Same(machine.Wanted(),Toy::Solved(hand_base,Counts(5))));
+    }
+    // P itself changed while the press was checked (the estimate was drawn): the press is stale and P is the estimate.
+    {
+        auto machine=Placed(Pose{0.3,-0.1,0.5,2.0,-1.0,0.2});
+        CHECK(machine.RequestEstimate(LiveEstimateAsk::button)==LiveAskResult::accepted);
+        const auto job=machine.BeginJob();
+        const auto prepared=machine.PrepareHandStep(Counts(3),kReady);
+        machine.Accept(*job,Usable(Pose{0.9,0,0,0,0,0}));
+        machine.Committed();
+        const auto drawn=machine.View();
+        const auto result=machine.CommitHandStep(prepared.proposal,EvaluateLiveHandCheck(toy.Fn(),prepared.proposal));
+        CHECK(result.outcome==LiveHandOutcome::refused_stale && !machine.HasPending() && Same(machine.Placement(),drawn.mapping) && machine.Source()==LivePlacementSource::auto_button);
+    }
+    // The hand position that waited was dropped while the press was checked (its bake failed): the sum the press built on is gone, so it is stale.
+    {
+        auto machine=ByHand(toy,Pose{0.3,-0.1,0.5,2.0,-1.0,0.2},Counts(3));
+        CHECK(machine.HandStep(Counts(1),kReady,toy.Fn()).outcome==LiveHandOutcome::accepted);
+        const auto prepared=machine.PrepareHandStep(Counts(1),kReady);
+        CHECK(prepared.proposal.total==Counts(5));
+        machine.DrawFailed("bake-failed");
+        const auto result=machine.CommitHandStep(prepared.proposal,EvaluateLiveHandCheck(toy.Fn(),prepared.proposal));
+        CHECK(result.outcome==LiveHandOutcome::refused_stale && !machine.HasPending() && machine.View().hand_entered==Counts(3));
+    }
 }
 }
 
@@ -1014,6 +1106,7 @@ int main(){
         CaptureResultKeepsP();
         ConditionChangeDropsTheHandPosition();
         HandPositionDoesNotDrift();
+        HandStepWinsOverAnEstimateThatComesDuringItsCheck();
     }catch(const std::exception& e){++failures;std::cerr<<"unexpected exception: "<<e.what()<<'\n';}
     std::cout<<checks<<" checks, "<<failures<<" failures\n";
     return failures?1:0;

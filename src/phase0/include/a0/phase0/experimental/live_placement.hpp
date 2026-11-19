@@ -105,7 +105,7 @@ enum class LiveHandOutcome {
     refused_cover,            // the result's mapping fails the cheap cover check
     refused_unsolvable,       // the sum could not be turned into a pose
     refused_error,            // the check itself failed (detail has what it said)
-    refused_stale,            // P or what waits changed while the check ran; press again
+    refused_stale,            // P, or the hand position that waits, changed while the check ran; press again
 };
 [[nodiscard]] inline std::string_view LiveHandOutcomeCode(LiveHandOutcome outcome){
     switch(outcome){
@@ -152,7 +152,9 @@ struct LiveHandProposal {
     bool zero{false};                                    // the sum is 0: the position goes back to `base`, nothing to check
     bool base_beyond_envelope{false};                    // what was said of `base` (an estimate that was applied beyond a range), kept to say it again when the position goes back
     std::vector<std::string> base_exceeded;
-    std::uint64_t revision{},wanted_serial{},serial{};
+    // What the press was made against: the machine's revision, the counter of the hand position that waits (hand_serial) and P's serial.
+    // An estimate's result that comes while the check runs is none of these: the press withdraws it.
+    std::uint64_t revision{},hand_serial{},serial{};
 };
 struct LiveHandPrepared {
     LiveHandOutcome outcome{LiveHandOutcome::refused_not_configured};
@@ -432,7 +434,7 @@ public:
         pending_.reset();
         ++wanted_serial_;
         if(estimate)Fail({std::move(reason)});
-        else ++counters_.hand_draw_failed;
+        else{++counters_.hand_draw_failed;++hand_serial_;}   // a press that was made against the hand position that waited is stale
     }
 
     // ---- Hand steps (#437 stage 2) ----
@@ -445,12 +447,14 @@ public:
     //    refused press changes nothing and rounds nothing.
     //  - A press that comes before the one before it was drawn is accepted and replaces the position that waits: the sum is the sum of both.
     //  - An accepted press withdraws the estimate that was asked for (not begun, running, or waiting to be drawn): its result is dropped,
-    //    and nothing runs until the button is pressed again.
+    //    and nothing runs until the button is pressed again. This holds for an estimate whose result came while the press was checked:
+    //    the press still wins, and the result that waits to be drawn is dropped (only a change of P or of the hand position that waits
+    //    makes the press stale).
     //  - A sum that comes back to exactly 0 is not a step: P goes back to what it was before the first press, source included, and no hand
     //    mark stays, whatever that position was (an estimate that was outside the envelope included). A result that is the condition's own
     //    position (bit for bit) is also not by hand: the source is fixed-condition and no hand mark stays.
     // The three calls are one: HandStep. They are apart so that a caller that guards the machine with a lock does not hold it while the check
-    // runs (the check allocates a full-size frame). CommitHandStep refuses (refused_stale) a proposal that something overtook.
+    // runs (the check scans the full-size output). CommitHandStep refuses (refused_stale) a proposal whose P or hand position that waits changed.
     [[nodiscard]] LiveHandPrepared PrepareHandStep(const a0::m2::experimental::HandCounts& delta,const LiveHandContext& context){
         LiveHandPrepared prepared;
         const auto refuse=[&](LiveHandOutcome outcome){++counters_.hand_refused;prepared.outcome=outcome;return prepared;};
@@ -475,7 +479,7 @@ public:
         try{proposal.total=a0::m2::experimental::AddHandCounts(before,delta);}
         catch(const std::out_of_range&){return refuse(LiveHandOutcome::refused_range);}
         proposal.zero=proposal.total.IsZero();
-        proposal.revision=revision_;proposal.wanted_serial=wanted_serial_;proposal.serial=serial_;
+        proposal.revision=revision_;proposal.hand_serial=hand_serial_;proposal.serial=serial_;
         prepared.outcome=LiveHandOutcome::accepted;
         return prepared;
     }
@@ -484,7 +488,9 @@ public:
         const auto refuse=[&](LiveHandOutcome outcome){++counters_.hand_refused;result.outcome=outcome;return result;};
         if(!configured_)return refuse(LiveHandOutcome::refused_not_configured);
         if(capturing_)return refuse(LiveHandOutcome::refused_capturing);
-        if(proposal.revision!=revision_ || proposal.wanted_serial!=wanted_serial_ || proposal.serial!=serial_)return refuse(LiveHandOutcome::refused_stale);
+        // Stale when what the press built on changed: P (serial), the hand position that waits (hand_serial), or anything that moved the revision
+        // (another press, a capture, a new condition). An estimate's result that came meanwhile and waits to be drawn is not: it is withdrawn below.
+        if(proposal.revision!=revision_ || proposal.hand_serial!=hand_serial_ || proposal.serial!=serial_)return refuse(LiveHandOutcome::refused_stale);
         a0::m2::experimental::RegisteredMapping mapping{proposal.base.pose,proposal.base.surface,std::nullopt};
         if(!proposal.zero){
             switch(check.status){
@@ -502,7 +508,7 @@ public:
         result.withdrew_estimate=in_flight_ || activity_!=LivePlacementActivity::idle || (pending_ && pending_->kind==PendingKind::estimate);
         if(result.withdrew_estimate)++counters_.hand_withdrawn_estimates;
         ++counters_.hand_accepted;
-        ++revision_;++wanted_serial_;                      // a running estimate's result is stale; a position that waited is replaced
+        ++revision_;++wanted_serial_;++hand_serial_;       // a running estimate's result is stale; a position that waited is replaced
         activity_=LivePlacementActivity::idle;ask_.reset();
         outcome_=LivePlacementOutcomeKind::none;outcome_ask_.reset();failure_.clear();
         const bool from_hand=source_==LivePlacementSource::manual;
@@ -699,6 +705,9 @@ private:
     std::optional<LiveEstimateAsk> outcome_ask_;
     std::vector<std::string> failure_;
     std::uint64_t revision_{0},serial_{0},wanted_serial_{0},job_counter_{0},in_flight_id_{0};
+    // Moves when a hand position starts to wait, is replaced or is dropped without being drawn (a press, a bake that failed). The other ways a
+    // hand position that waits goes (a capture, a capture's result, a new condition) move revision_, and its drawing moves serial_.
+    std::uint64_t hand_serial_{0};
     bool in_flight_{false};
     LivePlacementCounters counters_;
 };

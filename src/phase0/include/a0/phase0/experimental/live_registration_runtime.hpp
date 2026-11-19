@@ -495,8 +495,9 @@ public:
     [[nodiscard]] int WorkersRunning() const {return workers_running_.load();}
 
     // One pass of the worker: the estimate when one is asked for, then the bake when P is to be replaced or has not been drawn, then the
-    // status. `stop` is the worker's stop: the job carries it to the estimator, and after it answers true nothing is baked. A job that
-    // was stopped, or that had no frames, did not estimate anything: it is asked for again (not counted as an estimate that decided nothing).
+    // status. `stop` is the worker's stop: the job carries it to the estimator, and after it answers true nothing is checked or baked. A job
+    // that was stopped (by the estimator's word, or by a stop that came while it ran), or that had no frames, did not estimate anything: it is
+    // asked for again (not counted as an estimate that decided nothing).
     LivePassResult RunPass(const LiveFrameSource& frames,const LiveEstimator& estimator,const std::function<bool()>& stop={}){
         if(!estimator)throw std::invalid_argument("live runtime: no estimator");
         LivePassResult result;
@@ -550,7 +551,10 @@ public:
                     outcome.reasons.emplace_back("estimator-exception");
                     outcome.detail="an exception of an unknown kind";
                 }
-                const bool interrupted=std::find(outcome.reasons.begin(),outcome.reasons.end(),std::string(kLiveEstimateStoppedReason))!=outcome.reasons.end();
+                // A job that the estimator says was stopped, or that ends after the worker was stopped, did not estimate anything for this session: it is
+                // asked for again (ADR-0046 decision 2: a stop keeps the request, and the next start continues it once), and its position is not checked.
+                const bool interrupted=std::find(outcome.reasons.begin(),outcome.reasons.end(),std::string(kLiveEstimateStoppedReason))!=outcome.reasons.end() ||
+                    (stop && stop());
                 // The position of an estimate that decided one passes the same cheap check as a hand step before it is drawn; one that fails it is
                 // not decided (P stays), as a position that the JPEG could not be made with would show on the screen what the JPEG cannot have.
                 if(!interrupted && outcome.usable && config_.mapping_check)CheckEstimatedPosition(outcome);

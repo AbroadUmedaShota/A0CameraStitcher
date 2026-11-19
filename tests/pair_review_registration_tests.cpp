@@ -149,7 +149,7 @@ void SentencesAndMachine() {
         p.source = source;
         p.serial = 0;
         p.condition_sha256 = position_sha;
-        if (source == m2e::ConfirmedPositionSource::manual) { p.base_source = m2e::ConfirmedPositionSource::auto_button; p.manual_entered = m2e::HandCounts{3, 0, 0}; }
+        if (source == m2e::ConfirmedPositionSource::manual) { p.base_source = m2e::ConfirmedPositionSource::auto_start; p.manual_entered = m2e::HandCounts{3, 0, 0}; }
         r.registration.confirmed_position = p;
         r.registration.confirmed_check = m2e::ConfirmedPositionCheck{used, std::nullopt};
         r.registration.level.level = level;
@@ -158,7 +158,8 @@ void SentencesAndMachine() {
         return r;
     };
     const auto estimate = m2e::RegisteredMapping{{0.15, -0.05, 0.1, 0.9, -0.25, 0.1}, {}, std::nullopt};
-    // A machine that holds an automatic position, or the same position moved by hand (the check is the test's own arithmetic).
+    // A machine that holds an automatic position (the first session's estimate: auto-start, as the records below say), or the same position moved
+    // by hand from it (the check is the test's own arithmetic).
     const LiveHandChecker check = [](const m2e::RegisteredMapping& hand_base, const m2e::HandCounts& total) {
         LiveHandCheck out;
         out.status = LiveHandCheck::Status::accepted;
@@ -188,7 +189,7 @@ void SentencesAndMachine() {
     {
         auto machine = machine_at(false);
         const auto before = machine.View();
-        const auto r = record(m2e::ConfirmedPositionSource::auto_button, m2e::GeometryLevel::confirmed, true, machine.Placement(), sha, {}, machine.Placement());
+        const auto r = record(m2e::ConfirmedPositionSource::auto_start, m2e::GeometryLevel::confirmed, true, machine.Placement(), sha, {}, machine.Placement());
         CHECK(Contains(ConfirmedPositionText(r), "ライブで決めた位置で作りました"));
         CHECK(apply(machine, r) && LivePlacementSameMapping(machine.Placement(), before.mapping) && machine.Source() == LivePlacementSource::auto_start && machine.Serial() == before.serial);
     }
@@ -212,7 +213,7 @@ void SentencesAndMachine() {
     // The live position was refused as well: the JPEG has the condition's position and the live view goes to it.
     {
         auto machine = machine_at(false);
-        const auto r = record(m2e::ConfirmedPositionSource::auto_button, m2e::GeometryLevel::g4, false, machine.Placement(), sha, {"output-uncovered-at-level", "output-uncovered-at-level", "output-uncovered-at-level"}, condition);
+        const auto r = record(m2e::ConfirmedPositionSource::auto_start, m2e::GeometryLevel::g4, false, machine.Placement(), sha, {"output-uncovered-at-level", "output-uncovered-at-level", "output-uncovered-at-level"}, condition);
         CHECK(Contains(ConfirmedPositionText(r), "ライブも条件の位置にしました"));
         CHECK(apply(machine, r) && LivePlacementSameMapping(machine.Placement(), condition) && machine.Source() == LivePlacementSource::after_capture);
     }
