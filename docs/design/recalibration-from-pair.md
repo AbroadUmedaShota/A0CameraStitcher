@@ -90,9 +90,23 @@ p_b に大きな値を入れずに profile を作り直す理由: p_b は「校�
 
 ## 6. 記録
 
-- 推定の記録 `a0.pair-recalibration-estimate.v1`（`Proposal::estimate_record_text`）: 撮影の組の識別と原画像の SHA-256、親の改訂・profile の SHA-256 と fingerprint と `provenanceId` と `toolId`（`reanchoredBefore` は親がすでに取り直した物か）、R1 の結果、R2 の結果（姿勢・各成分の標準偏差・事前分布の標準偏差・最後の当てはめの条件数・点と inlier の数・B の画素での残差）。パスを持たない。改訂の `reportSha256` はこの記録の SHA-256
+- 推定の記録 `a0.pair-recalibration-estimate.v1`（`Proposal::estimate_record_text`）: 撮影の組の識別（`pairId`・`measuredAt`）、基準と対象のカメラ、組の 2 枚の原画像の SHA-256、親の改訂・profile の SHA-256 と fingerprint と `provenanceId` と `toolId`（`reanchoredBefore` は親がすでに取り直した物か）、R1 の結果、R2 の結果（姿勢・各成分の標準偏差・事前分布の標準偏差・最後の当てはめの条件数・点と inlier の数・対象のカメラの画素での残差 `estimate.targetResidualPx`）。パスを持たない。改訂の `reportSha256` はこの記録の SHA-256
 - 新しい profile の `provenanceId` は `pair-reanchor-` ＋ この記録の SHA-256 の先頭 16 桁
 - 確かめの結果、表示の数は `Proposal` に持つだけで記録のハッシュには入れない（記録を指す profile と循環しないため）。呼び手の校正の報告に載せる
+
+### カメラを書く欄
+
+記録 3 種（推定の記録、校正の報告 `a0.pair-recalibration-report.v1`、確定の記録 `a0.pair-recalibration-confirmation.v1`）は、同じ形でカメラを書く（ADR-0045 の決定 4）。
+
+- `referenceCamera`（基準のカメラ。この校正で動かさない側）と `targetCamera`（対象のカメラ。写像を取り直す側）を、`pairId` の直後（推定の記録は `measuredAt` の直後）に書く。値は alias で、この校正では `CAM-A` と `CAM-B`。値は `fixed_composite_recalibration.hpp` の定数 `kReferenceCamera`・`kTargetCamera` からだけ書き、書き手に alias を直書きしない
+- カメラごとの値は alias を鍵にしたオブジェクトで、鍵は alias の並び（基準が先）。推定の記録と校正の報告の `originalSha256`（組の 2 枚の原画像の SHA-256。原画像を読む前に止まった時は、読めなかった側が空の文字列）、校正の報告の `display.edgeShare`（継ぎ目から基準の右端・対象の左端までの距離の、写真の幅に対する割合）
+- 対象のカメラだけの値は名前を役で始める（`estimate.targetResidualPx`）。欄の名前に A・B の記号を埋めない
+- 基準の姿勢に対する対象の姿勢など、2 台の関係を表す値（`wideSearch`・`estimate.pose`・`display.motion*` など）は、役の欄のとおり基準 `CAM-A` に対する対象 `CAM-B` の値
+- 記録の文字列は位置合わせの値（B の写像・出力のラスタ・継ぎ目の列・基準の姿勢）を作る計算に入らない。入るのは SHA-256 だけ（`reportSha256` と `provenanceId`）。記録の書き方を変えると、新しく作る校正のハッシュの値は変わるが、ライブの合成にも保存する JPEG の合成にも影響しない
+
+### 版の決まり
+
+3 種の記録の版は v1 のままで、公開した後に欄の名前・型・意味を変える時は新しい版（v2）にする。確定の記録の読み手（`RecalibrationRecordedAsUnchecked`）は、その時も v1 を読み続ける（起動し直した後の「未確認の校正」の印のため）。公開する前に書かれた記録（option を ON にした開発のビルドで書いた物）は、欄を足す・名前を改める前の形があっても、古い形を読む仕組みを持たない。条件 v3・報告 v8 の決まり（`fixed-composite-registration-formats.md` の 1 節の決まり 8）はこの 3 種には及ばない。
 
 ## 7. 書き込む順（呼び手の仕事）
 

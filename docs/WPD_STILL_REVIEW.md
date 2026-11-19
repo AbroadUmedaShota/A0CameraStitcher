@@ -910,7 +910,7 @@ A0CameraStitcher.StillReview --recalibrate-from-pair --camera-a <JPEG> --camera-
 
 引数の誤りは 2。続く `finding class=… code=…` の行が理由で、`class` は `no-candidate`（位置が決まらず、何も作れなかった）、`rejected`（作って確かめたら合っていなかった）、`unverified`（確かめられなかった）のどれか。`gate state=… maximum_px=… limit_px=… measured_row_share=…` は見本の継ぎ目のずれ（GΩ）で、測れたかどうかとずれの値が出る。ゲートが `fail` でも原因が `unmeasurable`（測れなかった）なら `unverified`、ずれを測って基準を超えた時（`lift`・`pose`・`displacement`）は `rejected`。`screen …` の行は画面に出す文と同じ。
 
-staging には `estimate-record.json`・`candidate-profile.json`・`candidate-revision.json`（確定したら書かれる物そのもの）、`review/`（見本の合成と v8 の報告）、`seam-crops.png`（継ぎ目の上・中・下の原寸）、`recalibration-report.json`（`a0.pair-recalibration-report.v1`: 判定、理由の符号、ゲートの結果、表示の数、各ハッシュ。パスと文は入らない）が並ぶ。確定した時は `confirmation.json`（`a0.pair-recalibration-confirmation.v1`）が加わり、未確認のまま確定したかどうかが残る。条件 v3 の書式に未確認の印を置く場所は無く、変えていない。
+staging には `estimate-record.json`・`candidate-profile.json`・`candidate-revision.json`（確定したら書かれる物そのもの）、`review/`（見本の合成と v8 の報告）、`seam-crops.png`（継ぎ目の上・中・下の原寸）、`recalibration-report.json`（`a0.pair-recalibration-report.v1`: 判定、理由の符号、基準と対象のカメラ、ゲートの結果、表示の数、各ハッシュ。パスと文は入らない）が並ぶ。確定した時は `confirmation.json`（`a0.pair-recalibration-confirmation.v1`）が加わり、未確認のまま確定したかどうかが残る。3 種の記録（`estimate-record.json`・`recalibration-report.json`・`confirmation.json`）は、基準と対象のカメラを `referenceCamera`・`targetCamera`（値は alias）で書き、カメラごとの値（原画像の SHA-256 `originalSha256`、継ぎ目から写真の端までの割合 `display.edgeShare`）は alias を鍵にしたオブジェクトで書く。版は v1 のままで、公開した後に形を変える時は v2 にする（`docs/design/recalibration-from-pair.md` の 6 節）。条件 v3 の書式に未確認の印を置く場所は無く、変えていない。
 
 ### 確定と前の校正に戻す道
 
