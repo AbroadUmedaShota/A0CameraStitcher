@@ -1,6 +1,7 @@
 // Contract of the pure button layout of the development preview (#437 stage 0). No window, no camera.
 #include "a0/phase0/experimental/preview_button_layout.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <initializer_list>
 #include <string>
@@ -94,6 +95,22 @@ int main(){
         auto items=LowerButtonItems();items.insert(items.begin()+kLowerSeam+1,LayoutButton{100});
         const auto added=FlowButtons(items,12,1385,52,36);
         Check(added.boxes[kLowerSeam+1].x==1245+140+10 || added.boxes[kLowerSeam+1].row==1,"an added button follows the seam button or wraps");
+    }
+    // The rows under the title of C: a short text keeps the places the rows had before they were measured; a longer text takes room and pushes the rest down.
+    {
+        const auto plain=PlanLowerRows(0,0,false),short_registered=PlanLowerRows(10,10,true);
+        Check(plain.picture_top==140 && plain.note_height==kLowerNoteMinHeight,"no rows: the picture starts at 140");
+        Check(short_registered.state_top==140 && short_registered.orientation_top==163 && short_registered.picture_top==186 && short_registered.state_height==21,"a registered C: 140, 163, 186");
+        Check(short_registered.picture_top-plain.picture_top==46,"the two rows take 46");
+        const auto long_note=PlanLowerRows(50,10,true);
+        Check(long_note.note_height==50 && long_note.state_top==long_note.note_top+50+kLowerRowGap && long_note.picture_top==short_registered.picture_top+(50-kLowerNoteMinHeight),"a note of three lines pushes the rows down by what it needs");
+        const auto long_state=PlanLowerRows(10,63,true);
+        Check(long_state.state_height==63 && long_state.orientation_top==long_state.state_top+63+kLowerRowGap && long_state.picture_top==short_registered.picture_top+(63-kLowerStateMinHeight),"a state row of three lines pushes the rest down");
+        for(const int note:{0,15,28,29,45,90})for(const int state:{0,10,21,22,70}){
+            const auto plan=PlanLowerRows(note,state,true);
+            Check(plan.note_top+plan.note_height+kLowerRowGap<=plan.state_top && plan.state_top+plan.state_height+kLowerRowGap<=plan.orientation_top &&
+                plan.orientation_top+plan.orientation_height+kLowerRowGap<=plan.picture_top,"the rows never overlap: note "+std::to_string(note)+" state "+std::to_string(state));
+        }
     }
     std::printf("preview_button_layout_checks=%u failures=%u\n",checks,failures);
     return failures?1:0;

@@ -94,6 +94,40 @@ inline std::vector<LayoutButton> LowerButtonItems(){
     return items;
 }
 
+// ---- The rows under the title of C ----
+// Under the title stand the note (a few words that wrap), for a registered C the state row (it wraps too) and the row of the cameras'
+// direction, then the picture. The room of the note and of the state row is what their text needs at the width of the window, never less
+// than the room they had when they were drawn in fixed boxes: a note of three lines used to be cut at the second line and a state row longer
+// than the window used to be cut with dots. Pure arithmetic; the heights of the texts come from the caller (it measures them with the font
+// it draws with). All y are from the middle of the client area, lower_shift not included.
+inline constexpr int kLowerNoteTop=110;
+inline constexpr int kLowerNoteMinHeight=28;
+inline constexpr int kLowerStateMinHeight=21;
+inline constexpr int kLowerOrientationHeight=21;
+inline constexpr int kLowerRowGap=2;
+inline constexpr int kLowerPictureTop=kLowerNoteTop+kLowerNoteMinHeight+kLowerRowGap;   // 140: where the picture of a C without rows begins
+inline constexpr int kLowerPictureBottomMargin=15;                                       // the picture ends this far above the bottom of the client area
+struct LowerRowsPlan {
+    int note_top{kLowerNoteTop},note_height{kLowerNoteMinHeight};
+    int state_top{0},state_height{0};              // 0 when the C has no state row
+    int orientation_top{0},orientation_height{0};
+    int picture_top{kLowerPictureTop};
+};
+// `note_text_height` and `state_text_height`: the height that the wrapped text needs (0 for no text). `registered_rows`: the C of a condition v3
+// has the state row and the direction row between the note and the picture.
+inline LowerRowsPlan PlanLowerRows(int note_text_height,int state_text_height,bool registered_rows){
+    LowerRowsPlan plan;
+    plan.note_height=std::max(kLowerNoteMinHeight,note_text_height);
+    plan.picture_top=plan.note_top+plan.note_height+kLowerRowGap;
+    if(!registered_rows)return plan;
+    plan.state_top=plan.picture_top;
+    plan.state_height=std::max(kLowerStateMinHeight,state_text_height);
+    plan.orientation_top=plan.state_top+plan.state_height+kLowerRowGap;
+    plan.orientation_height=kLowerOrientationHeight;
+    plan.picture_top=plan.orientation_top+plan.orientation_height+kLowerRowGap;
+    return plan;
+}
+
 struct PreviewButtonPlan {
     std::array<std::vector<LayoutBox>,2> pane;   // per pane, y from the top of the client area
     std::vector<LayoutBox> lower;                // y from the middle of the client area

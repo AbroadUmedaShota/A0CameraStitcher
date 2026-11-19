@@ -779,20 +779,41 @@ void RequestSettingsRead(){
 }
 // The two rows above the picture of a registered C (#417 LC): what C is drawn with, and the direction of the two cameras so that they
 // can be adjusted before the shot (B is the value against A now; A is the value at calibration). Both sentences come from
-// live_registration_display.hpp. Without a runtime (its setup failed) C is the fixed mapping and the rows say so.
-inline constexpr int kLiveRowsHeight=46;
-void DrawLiveRows(HDC dc,const RECT& client){
+// live_registration_display.hpp. Without a runtime (its setup failed) C is the fixed mapping and the rows say so. The state row wraps (a
+// hand step's sentence, or a refusal in front of it, is longer than one line of a narrow window) and the rows under it move down by what it
+// needs (preview_button_layout.hpp, PlanLowerRows).
+inline constexpr int kLiveRowsHeight=kLowerOrientationHeight+kLowerStateMinHeight+2*kLowerRowGap;   // what the two rows took from the picture when they did not wrap
+struct LiveRowsTexts {std::wstring state,orientation;};
+LiveRowsTexts CurrentLiveRowsTexts(){
     std::string state,orientation;
     if(live_runtime){const auto status=live_runtime->Status();state=status.state_text;orientation=status.orientation_line;}
     else{state=LiveRegistrationStartFailedText();orientation=LiveOrientationRowText(LiveOrientationTextsOf(std::nullopt,std::nullopt));}
-    const auto wide_state=WidenUtf8(state),wide_orientation=WidenUtf8(orientation);
-    const int shift=PreviewLowerShift(client.right);
-    RECT state_rect{12,client.bottom/2+140+shift,client.right-12,client.bottom/2+161+shift};
-    RECT orientation_rect{12,client.bottom/2+163+shift,client.right-12,client.bottom/2+184+shift};
-    DrawTextW(dc,wide_state.c_str(),-1,&state_rect,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
+    return {WidenUtf8(state),WidenUtf8(orientation)};
+}
+// The height that `text` needs when it wraps at `width` with the font of `dc` (0 for no text).
+int WrappedTextHeight(HDC dc,const std::wstring& text,int width){
+    if(text.empty() || width<=0)return 0;
+    RECT calc{0,0,width,0};
+    DrawTextW(dc,text.c_str(),-1,&calc,DT_LEFT|DT_WORDBREAK|DT_NOPREFIX|DT_CALCRECT);
+    return static_cast<int>(calc.bottom-calc.top);
+}
+// Where the note, the state row, the direction row and the picture of C stand for these texts at the width of `client` (from the middle of
+// the client area, lower_shift not included). Paint and the layout checks both call this.
+LowerRowsPlan LowerRowsOf(HDC dc,const RECT& client,const std::wstring& note,const std::wstring& state,bool registered_rows){
+    const int width=static_cast<int>(client.right)-24;
+    return PlanLowerRows(WrappedTextHeight(dc,note,width),registered_rows?WrappedTextHeight(dc,state,width):0,registered_rows);
+}
+// The rows of the last paint (the UI thread paints and reads it): the smokes find the picture of C by it.
+LowerRowsPlan last_lower_rows;
+int LastPictureTop(const RECT& client){return static_cast<int>(client.bottom)/2+PreviewLowerShift(static_cast<int>(client.right))+last_lower_rows.picture_top;}
+void DrawLiveRows(HDC dc,const RECT& client,const LowerRowsPlan& rows,const LiveRowsTexts& texts){
+    const int shift=PreviewLowerShift(client.right),middle=client.bottom/2+shift;
+    RECT state_rect{12,middle+rows.state_top,client.right-12,middle+rows.state_top+rows.state_height};
+    RECT orientation_rect{12,middle+rows.orientation_top,client.right-12,middle+rows.orientation_top+rows.orientation_height};
+    DrawTextW(dc,texts.state.c_str(),-1,&state_rect,DT_LEFT|DT_WORDBREAK|DT_NOPREFIX);
     // The direction is what the person adjusts by: a warmer colour than the notes.
     SetTextColor(dc,RGB(255,224,160));
-    DrawTextW(dc,wide_orientation.c_str(),-1,&orientation_rect,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
+    DrawTextW(dc,texts.orientation.c_str(),-1,&orientation_rect,DT_LEFT|DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
     SetTextColor(dc,RGB(240,240,240));
 }
 // The status text above the row of buttons in the lower half. It ends above the first row of buttons (kLowerStatusBottom <= kLowerButtonsTop).
@@ -874,12 +895,18 @@ std::array<std::uint64_t,6> Paint(HDC dc,RECT client){
         status=std::wstring(kUncalibratedPreviewNotice)+L" / "+merged.alignment_status;
     }
     const int shift=PreviewLowerShift(client.right);
+    // The room of the note and of the state row is what their text needs at this width, so that neither is cut and neither covers the row under it.
+    const bool show_rows=live_rows && !stopping;
+    LiveRowsTexts rows_texts;
+    if(show_rows)rows_texts=CurrentLiveRowsTexts();
+    const auto rows=LowerRowsOf(dc,client,status,rows_texts.state,show_rows);
+    last_lower_rows=rows;
     TextOutW(dc,12,client.bottom/2+88+shift,title.c_str(),static_cast<int>(title.size()));
-    RECT status_line{12,client.bottom/2+110+shift,client.right-12,client.bottom/2+138+shift};
+    RECT status_line{12,client.bottom/2+shift+rows.note_top,client.right-12,client.bottom/2+shift+rows.note_top+rows.note_height};
     DrawTextW(dc,status.c_str(),-1,&status_line,DT_LEFT|DT_WORDBREAK|DT_NOPREFIX);
-    // The picture of C starts lower by the two rows, only for a registered C; every other C keeps its place.
-    const int picture_top=client.bottom/2+140+shift+(live_rows?kLiveRowsHeight:0),picture_height=client.bottom/2-155-shift-(live_rows?kLiveRowsHeight:0);
-    if(live_rows && !stopping)DrawLiveRows(dc,client);
+    // The picture of C starts lower by the rows that are drawn above it; every other C keeps its place.
+    const int picture_top=client.bottom/2+shift+rows.picture_top,picture_height=client.bottom-kLowerPictureBottomMargin-picture_top;
+    if(show_rows)DrawLiveRows(dc,client,rows,rows_texts);
     if(!stopping && merged.rendered_revision==merged.revision && !merged.pixels.bytes.empty() && PreviewPairFresh(Clock::now(),merged.source_a,merged.source_b)){
         if(DrawPixels(dc,merged.pixels,12,picture_top,client.right-24,picture_height)){
             drawn[2]=merged.frames;
@@ -1792,8 +1819,39 @@ bool CheckButtonLayoutAt(int width,int height,const std::function<void(bool)>& c
     }
     check(boxes.size()==slots.size());
     check(bad_inside==0);check(bad_overlap==0);check(bad_click==0);check(bad_picture==0);check(bad_text==0);check(bad_status==0);
+    // The rows under the title of C keep clear of each other whatever their text needs at this width (#437): the note of a registered C with the
+    // long profile name of a real rig, and a state row of three sentences, are measured with the font that Paint draws with.
+    unsigned bad_rows{};
+    {
+        HDC measure=CreateCompatibleDC(nullptr);
+        FixedPreviewPlan note_plan;note_plan.lens_aware=true;note_plan.profile_id="example-profile-with-a-long-name-for-wrapping";note_plan.seam_shift=3;
+        // the note of a registered C is this one with the sentences of the registered C added (the plan of a registered C needs a whole profile to make)
+        const std::wstring note=FixedPreviewNote(note_plan)+L" / 固定の合成条件 v3 の写像（基準の姿勢を含む、未承認） / Cは目安です / 映像からの合わせ込みは条件で無効です";
+        std::wstring state;for(int i=0;i<3;++i)state+=L"位置を決められませんでした（理由: 模様が足りません）。前の位置のままです。模様のある所で押してください。";
+        const int text_width=client.right-24;
+        const int note_need=WrappedTextHeight(measure,note,text_width),state_need=WrappedTextHeight(measure,state,text_width);
+        for(const bool registered:{false,true}){
+            const auto rows=LowerRowsOf(measure,client,note,state,registered);
+            // nothing is cut: each box has the room its text needs, and the next one starts below it
+            if(rows.note_height<note_need || (registered && rows.state_height<state_need))++bad_rows;
+            if(registered){
+                if(rows.note_top+rows.note_height>rows.state_top || rows.state_top+rows.state_height>rows.orientation_top ||
+                    rows.orientation_top+rows.orientation_height>rows.picture_top)++bad_rows;
+            }else if(rows.note_top+rows.note_height>rows.picture_top)++bad_rows;
+            // the picture stays inside the window, below every row
+            if(middle+lower_shift+rows.picture_top>=client.bottom-kLowerPictureBottomMargin)++bad_rows;
+        }
+        // a short text keeps the places the rows always had
+        const auto short_registered=LowerRowsOf(measure,client,L"短い",L"短い",true),short_plain=LowerRowsOf(measure,client,L"短い",L"",false);
+        if(short_registered.state_top!=kLowerPictureTop || short_registered.orientation_top!=kLowerPictureTop+kLowerStateMinHeight+kLowerRowGap ||
+            short_registered.picture_top!=kLowerPictureTop+kLiveRowsHeight || short_plain.picture_top!=kLowerPictureTop)++bad_rows;
+        // the sample is long enough to need more than the old box in a narrow window: the check would fail if the box did not grow
+        if(client.right<=1056 && (note_need<=kLowerNoteMinHeight || LowerRowsOf(measure,client,note,state,true).note_height!=note_need))++bad_rows;
+        if(measure)DeleteDC(measure);else ++bad_rows;
+    }
+    check(bad_rows==0);
     Log("button_layout_ui width="+std::to_string(width)+" height="+std::to_string(height)+" client="+std::to_string(client.right)+"x"+std::to_string(client.bottom)+" buttons="+std::to_string(boxes.size())+" top_shift="+std::to_string(top_shift)+" lower_shift="+std::to_string(lower_shift)+
-        " outside="+std::to_string(bad_inside)+" overlapping="+std::to_string(bad_overlap)+" unreachable="+std::to_string(bad_click)+" on_picture="+std::to_string(bad_picture)+" on_text="+std::to_string(bad_text)+" on_status="+std::to_string(bad_status));
+        " outside="+std::to_string(bad_inside)+" overlapping="+std::to_string(bad_overlap)+" unreachable="+std::to_string(bad_click)+" on_picture="+std::to_string(bad_picture)+" on_text="+std::to_string(bad_text)+" on_status="+std::to_string(bad_status)+" rows="+std::to_string(bad_rows));
     wchar_t shot_folder[MAX_PATH]{};const DWORD shot_length=GetEnvironmentVariableW(L"A0_LAYOUT_SHOT_DIR",shot_folder,MAX_PATH);
     if(const wchar_t* folder=shot_folder; shot_length>0 && shot_length<MAX_PATH){
         // Paint on synthetic gradient frames and print the real buttons on top of it.
@@ -1835,6 +1893,7 @@ bool CheckButtonLayoutAt(int width,int height,const std::function<void(bool)>& c
 // Called at the end of a window smoke: the width a window can really have on a narrow screen (about 1000 in the client area) and a wide one.
 void CheckButtonLayouts(const std::function<void(bool)>& check){
     for(const int width:{1000,1024,1056,1400,1920})if(!CheckButtonLayoutAt(width,1800,check))check(false);
+    if(!CheckButtonLayoutAt(1280,1440,check))check(false);   // a tall window of another width, in which the note under the title used to wrap over the state row
 }
 #include "wpd_dual_preview_af_smoke.hpp"
 #if defined(A0_ENABLE_WPD_RECALIBRATION)
@@ -2220,7 +2279,7 @@ int RunFixedCUiSmoke(){
         capture_pending.reset();return admitted;
     };
     const auto rearm=[&]{stopping=false;capture_stop_requested=false;capture_pending.reset();};
-    const auto picture_rect=[&]{std::lock_guard lock(merged.mutex);return FitPixels(merged.pixels,12,client.bottom/2+140+PreviewLowerShift(client.right),client.right-24,client.bottom/2-155-PreviewLowerShift(client.right));};
+    const auto picture_rect=[&]{std::lock_guard lock(merged.mutex);return FitPixels(merged.pixels,12,LastPictureTop(client),client.right-24,client.bottom-kLowerPictureBottomMargin-LastPictureTop(client));};
 
     // 1. A condition that applies: C is drawn with it, the seam line is over the picture, and no position request moves C.
     fixed_source={};fixed_source.loaded=m2::LoadedFixedCompositeCondition{condition(mount_orientation),std::string(64,'b')};
@@ -2323,7 +2382,7 @@ int RunFixedCUiSmoke(){
     }
     paint();
     {
-        PixelRect lower{12,client.bottom/2+140+PreviewLowerShift(client.right),client.right-24,client.bottom/2-155-PreviewLowerShift(client.right)};
+        PixelRect lower{12,LastPictureTop(client),client.right-24,client.bottom-kLowerPictureBottomMargin-LastPictureTop(client)};
         check(pink(lower)==0);
         std::uint64_t revision{};{std::lock_guard lock(merged.mutex);revision=merged.revision;}
         press(300);press(304);
@@ -2504,10 +2563,14 @@ int RunLiveCUiSmoke(){
     const auto picture_ready=[&]{std::lock_guard lock(merged.mutex);return merged.decided && merged.mode==PreviewCMode::fixed_composite && merged.frames>=3 && !merged.pixels.bytes.empty();};
     // The picture of a registered C starts below the two rows.
     const auto picture_rect=[&]{std::lock_guard lock(merged.mutex);
-        return FitPixels(merged.pixels,12,client.bottom/2+140+PreviewLowerShift(client.right)+kLiveRowsHeight,client.right-24,client.bottom/2-155-PreviewLowerShift(client.right)-kLiveRowsHeight);};
+        return FitPixels(merged.pixels,12,LastPictureTop(client),client.right-24,client.bottom-kLowerPictureBottomMargin-LastPictureTop(client));};
     const auto pink=[&](const PixelRect& rect){unsigned count{};
         for(int y=rect.top;y<rect.top+rect.height;++y)for(int x=rect.left;x<rect.left+rect.width;++x)if(GetPixel(dc,x,y)==kSeamLineColor)++count;return count;};
     const auto lit=[&](int top,int bottom){unsigned count{};for(int y=top;y<bottom;++y)for(int x=12;x<900;++x)if(GetPixel(dc,x,y)!=RGB(0,0,0))++count;return count;};
+    // The state row and the direction row of the last paint both have text.
+    const auto lit_rows=[&]{const int middle=client.bottom/2+PreviewLowerShift(client.right);
+        return lit(middle+last_lower_rows.state_top,middle+last_lower_rows.state_top+last_lower_rows.state_height)>100 &&
+            lit(middle+last_lower_rows.orientation_top,middle+last_lower_rows.orientation_top+last_lower_rows.orientation_height)>100;};
     // fresh: a window that was just opened (nothing is carried from a session before); otherwise the runtime of the session before is
     // still there, as it is when StartPreview begins the next session.
     const auto start=[&](bool live,bool scripted,bool fresh=true,const std::string& sha=std::string(64,'1')){
@@ -2552,8 +2615,8 @@ int RunLiveCUiSmoke(){
         check(rect.width>0 && rect.height>0);
         const auto pink_count=pink(rect);
         check(pink_count+2>=static_cast<unsigned>(rect.height) && pink_count<=static_cast<unsigned>(rect.height));
-        check(rect.top>=client.bottom/2+140+PreviewLowerShift(client.right)+kLiveRowsHeight);
-        check(lit(client.bottom/2+140+PreviewLowerShift(client.right),client.bottom/2+161+PreviewLowerShift(client.right))>100 && lit(client.bottom/2+163+PreviewLowerShift(client.right),client.bottom/2+184+PreviewLowerShift(client.right))>100); // both rows have text
+        check(rect.top>=client.bottom/2+kLowerPictureTop+PreviewLowerShift(client.right)+kLiveRowsHeight);
+        check(lit_rows()); // both rows have text
     }
     {
         // Nothing is estimated again by itself: the one estimate of the start was the only job.
@@ -2768,7 +2831,7 @@ int RunLiveCUiSmoke(){
         const auto status=live_runtime->Status();
         check(!status.live_enabled && contains(status.state_text,"無効") && contains(status.orientation.b_short,"測れていません") && contains(status.orientation.a_short,"A（校正時）: "));
         check(script->calls==0 && live_runtime->CurrentPlan()==nullptr);
-        check(lit(client.bottom/2+140+PreviewLowerShift(client.right),client.bottom/2+161+PreviewLowerShift(client.right))>100 && lit(client.bottom/2+163+PreviewLowerShift(client.right),client.bottom/2+184+PreviewLowerShift(client.right))>100);
+        check(lit_rows());
         check(pink(picture_rect())>0);
     }
     {
@@ -2795,7 +2858,7 @@ int RunLiveCUiSmoke(){
     {
         const auto plan=drawn_plan();
         check(plan.live==nullptr && plan.lens_aware);
-        const PixelRect rect = [&]{std::lock_guard lock(merged.mutex);return FitPixels(merged.pixels,12,client.bottom/2+140+PreviewLowerShift(client.right),client.right-24,client.bottom/2-155-PreviewLowerShift(client.right));}();
+        const PixelRect rect = [&]{std::lock_guard lock(merged.mutex);return FitPixels(merged.pixels,12,LastPictureTop(client),client.right-24,client.bottom-kLowerPictureBottomMargin-LastPictureTop(client));}();
         const auto pink_count=pink(rect);
         check(rect.width>0 && pink_count+2>=static_cast<unsigned>(rect.height) && pink_count<=static_cast<unsigned>(rect.height));
     }
