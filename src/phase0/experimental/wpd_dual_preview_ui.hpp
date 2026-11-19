@@ -186,7 +186,7 @@ void PrepareLiveRuntime(){
         Log(std::string("C live_registration_session setup_failed=1 detail=")+error.what());
     }
 }
-// The button "自動位置合わせ" with a condition v3 (#437): one estimate is asked for, and the state row says so. False when there is no live
+// The button "自動調整" (the estimate button, named so with a condition v3; #437): one estimate is asked for, and the state row says so. False when there is no live
 // estimate to ask for (no runtime, or the condition has no registration.live): the request is ignored like any other position request.
 // A request while an estimate is asked for or running is taken as given: the state row already says "合成中".
 bool AskLiveEstimate(){
@@ -3241,7 +3241,7 @@ int RunLiveCUiSmoke(){
         check(wait_for(hand_settled));
         status=live_runtime->Status();
         check(status.placement.source==LivePlacementSource::fixed_condition && !status.placement.hand_entered && !status.placement.base_source && status.placement.hand_returned &&
-            contains(status.state_text,"手で動かした量が 0 に戻ったので、手で直す前の位置に戻しました。撮影の後の自動調整で位置が変わります"));
+            contains(status.state_text,"手で動かした量が 0 に戻ったので、手で直す前の位置に戻しました。撮影の後の自動調整で位置が変わることがあります"));
         // a step that the cover check refuses (a very long way) is refused with its sentence and the position stays: the amount is added until the real check says no
         click_hand(kPreviewHandStep);
         check(!hand_fine);

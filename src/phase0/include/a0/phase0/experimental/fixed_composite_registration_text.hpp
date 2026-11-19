@@ -532,7 +532,7 @@ inline HeightMm HeightInMm(const ex::RegistrationWarning& w, const RegistrationT
         std::string names;
         for (const auto& entry : kComponents)
             if (Has(warning.interpretations, entry.first)) names += (names.empty() ? "" : "、") + std::string(entry.second);
-        return "撮影した画像から測った B の位置が、許される範囲より大きく動いています" + (names.empty() ? std::string{} : "（" + names + "）") +
+        return "撮影した画像から測った B の位置か紙の面が、許される範囲より大きく動いています" + (names.empty() ? std::string{} : "（" + names + "）") +
             "。設置が動いたかもしれません。この JPEG はライブの画面で決めていた位置で作り、測った位置は当てていません。校正の取り直しが要るかもしれません";
     }
     }

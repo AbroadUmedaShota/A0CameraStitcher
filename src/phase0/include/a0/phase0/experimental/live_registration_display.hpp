@@ -402,7 +402,7 @@ inline std::string Body(const LivePlacementView& view, bool bake_failed) {
     if (view.capture && view.capture->level == kLiveCaptureConfirmedLevel)
         return "ライブで決めていた位置で JPEG を作りました（撮影の後の自動調整では位置を決められませんでした）。ライブの位置は変えていません" + hint;
     if (view.hand_returned)
-        return "手で動かした量が 0 に戻ったので、手で直す前の位置に戻しました。撮影の後の自動調整で位置が変わります" + hint;
+        return "手で動かした量が 0 に戻ったので、手で直す前の位置に戻しました。撮影の後の自動調整で位置が変わることがあります" + hint;
     if (!view.live_enabled && view.source == LivePlacementSource::fixed_condition) return "Cは固定の写像で描いています（映像からの合わせ込みは条件で無効です）";
     if (view.outcome == LivePlacementOutcomeKind::placed) {
         const bool button = view.outcome_ask && *view.outcome_ask == LiveEstimateAsk::button;

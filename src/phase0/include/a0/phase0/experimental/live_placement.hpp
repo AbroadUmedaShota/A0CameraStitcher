@@ -17,7 +17,7 @@
 #include <vector>
 
 namespace a0::phase0::experimental {
-// The position of camera B that the live C is drawn with (#437 stage 1; docs/design/fixed-composite-registration.md 11.32). It replaces
+// The position of camera B that the live C is drawn with (#437 stages 1 and 2; ADR-0046, docs/WPD_DUAL_PREVIEW.md, docs/design/fixed-composite-registration.md 11.21). It replaces
 // the tracker (live_registration_tracker.hpp) as the thing that decides what C is drawn with: C is drawn with ONE confirmed position P,
 // and P changes only when
 //  - an estimate that was asked for ends with a position that can be drawn (an estimate is asked for twice: when a session begins with a
@@ -87,6 +87,7 @@ struct LivePlacementCaptureNote {
 };
 
 struct LivePlacementCounters {
+    // jobs: the jobs that BeginJob began; a job that was asked for again when a session began with the same condition counts again.
     std::uint64_t asked{},refused{},jobs{},placed{},not_decided{},released{},discarded_stale{};
     std::uint64_t hand_accepted{},hand_refused{},hand_withdrawn_estimates{},hand_draw_failed{},captures_begun{};
 };

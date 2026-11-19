@@ -656,9 +656,9 @@ int main() {
         const auto beyond = RegistrationWarningText(beyond_warning, none);
         CheckText(by_hand, "手で直した位置で作りました", "position-by-hand");
         CheckText(from_live, "ライブで決めた位置で作りました（撮影の後の自動調整では位置を決められませんでした）", "position-from-live");
-        CheckText(beyond, "撮影した画像から測った B の位置が、許される範囲より大きく動いています（位置、回り）。設置が動いたかもしれません。この JPEG はライブの画面で決めていた位置で作り、測った位置は当てていません。校正の取り直しが要るかもしれません", "estimate-beyond-envelope");
+        CheckText(beyond, "撮影した画像から測った B の位置か紙の面が、許される範囲より大きく動いています（位置、回り）。設置が動いたかもしれません。この JPEG はライブの画面で決めていた位置で作り、測った位置は当てていません。校正の取り直しが要るかもしれません", "estimate-beyond-envelope");
         beyond_warning.interpretations = {"camera-height", "surface-height", "surface-tilt"};
-        CheckText(RegistrationWarningText(beyond_warning, none), "撮影した画像から測った B の位置が、許される範囲より大きく動いています（高さ、紙の高さ、紙の傾き）。設置が動いたかもしれません。この JPEG はライブの画面で決めていた位置で作り、測った位置は当てていません。校正の取り直しが要るかもしれません", "estimate-beyond-envelope with the paper");
+        CheckText(RegistrationWarningText(beyond_warning, none), "撮影した画像から測った B の位置か紙の面が、許される範囲より大きく動いています（高さ、紙の高さ、紙の傾き）。設置が動いたかもしれません。この JPEG はライブの画面で決めていた位置で作り、測った位置は当てていません。校正の取り直しが要るかもしれません", "estimate-beyond-envelope with the paper");
         beyond_warning.interpretations = {"camera-position", "camera-rotation"};
         for (const auto& text : {by_hand, from_live, beyond}) CheckSentence(text, "a sentence of v9");
         Check(by_hand != from_live && from_live != beyond && by_hand != beyond, "distinct sentences of v9");

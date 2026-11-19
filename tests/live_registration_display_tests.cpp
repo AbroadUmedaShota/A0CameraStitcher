@@ -529,7 +529,7 @@ void HandTexts(){
     // Back to what it was before the hand steps (the sum came back to 0): said once, with what happens at the next shot.
     view.source=LivePlacementSource::auto_button;view.base_source.reset();view.hand_entered.reset();view.hand_returned=true;
     text=LivePlacementStateText(view);
-    CHECK(Contains(text,"手で動かした量が 0 に戻ったので、手で直す前の位置に戻しました。撮影の後の自動調整で位置が変わります") && one_line(text));
+    CHECK(Contains(text,"手で動かした量が 0 に戻ったので、手で直す前の位置に戻しました。撮影の後の自動調整で位置が変わることがあります") && one_line(text));
     view.hand_returned=false;
     // A shot that used the position as it was (level confirmed) while the position is an estimate's.
     view.outcome=LivePlacementOutcomeKind::placed;view.outcome_ask=LiveEstimateAsk::button;
@@ -650,7 +650,7 @@ void StateTextFollowsMachine(){
         press(machine,LiveHandButton::down,true);
         const auto view=machine.View();const auto text=text_of(machine);
         CHECK(view.hand_returned && !view.hand_entered && view.source==before.source && LivePlacementSameMapping(view.mapping,before.mapping));
-        CHECK(Contains(text,"手で動かした量が 0 に戻ったので、手で直す前の位置に戻しました。撮影の後の自動調整で位置が変わります") && !Contains(text,"手で直しました") &&
+        CHECK(Contains(text,"手で動かした量が 0 に戻ったので、手で直す前の位置に戻しました。撮影の後の自動調整で位置が変わることがあります") && !Contains(text,"手で直しました") &&
             !Contains(text,"Cは条件の位置で描いています") && one_line(text));
     }
     // A shot that used an estimate's position as it was (level confirmed): the position and its source stay, and the row does not say "moved".
