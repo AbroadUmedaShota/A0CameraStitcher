@@ -6,7 +6,7 @@
 // coarse step (12 px, 0.2 degrees) and the fine one (4 px, 0.05 degrees). They exist only for a condition v3 (a live runtime); then the four
 // position buttons of the uncalibrated C stand aside and the button of the automatic estimate is "自動調整".
 //
-// A press never runs the check on the window's thread: the check of a full-size position takes a moment and allocates a frame. One check
+// A press never runs the check on the window's thread: the check of a full-size position scans the full-size output and takes a moment. One check
 // runs at a time on a thread of its own, holding no lock. A press that comes while it runs is not dropped: its counts are added to the
 // ones that wait, and when the check ends, the sum is checked once (so a burst of presses moves by as many steps as were pressed and costs one
 // check more). A check that refuses takes what waited with it, and the position stays as it was. A capture that is requested while a check
@@ -47,9 +47,10 @@ std::atomic<int> cover_gate_inside{0},cover_gate_peak{0},cover_gate_entered{0},c
 std::function<void()> cover_gate_hold;
 
 // ---- The checks that the runtime is given (the same ones that a capture makes) ----------------------------------------------------------
-// The cover check of a full-size position takes a second or two and holds one thread, and a burst of them would starve the Live view: the checks of a
-// hand press and of an estimate's position go through one gate, one at a time. `scan_threads` is the number of threads that the scan of a check may use;
-// the check functions take none yet (they scan with one), so it only marks where a count is passed once they do.
+// The cover check of a full-size position scans the whole output, and a burst of them would starve the Live view: the checks of a hand press and of an
+// estimate's position go through one gate, one at a time. `scan_threads` is the number of threads the scan of a check uses; the answer does not depend on
+// it. Four: the scan of a full-size position is long on one thread, and threads past the cores of a four-core machine add CPU time for little. The Live
+// threads (two cameras and the loop of C) run beside it while it scans.
 std::mutex cover_check_gate;
 // One check inside the gate, counted while it holds it.
 struct CoverGateEntry {
@@ -64,18 +65,17 @@ struct CoverGateEntry {
     CoverGateEntry(const CoverGateEntry&)=delete;
     CoverGateEntry& operator=(const CoverGateEntry&)=delete;
 };
-inline constexpr unsigned kWindowCheckScanThreads=1;
+inline constexpr unsigned kWindowCheckScanThreads=4;
 LiveHandChecker MakeWindowHandChecker(const a0::m2::experimental::LoadedFixedCompositeConditionV3& loaded,unsigned scan_threads=kWindowCheckScanThreads){
-    (void)scan_threads;
     namespace m2x=a0::m2::experimental;
     const auto parameters=std::make_shared<const a0::m2::render::DocumentRenderParameters>(loaded.profile.parameters);
     const auto seam_column=loaded.condition.seam.column;
     const auto base_pose=loaded.condition.base_pose;
     const auto envelope=loaded.condition.registration.envelope;
-    return [parameters,seam_column,base_pose,envelope](const m2x::RegisteredMapping& hand_base,const m2x::HandCounts& total){
+    return [parameters,seam_column,base_pose,envelope,scan_threads](const m2x::RegisteredMapping& hand_base,const m2x::HandCounts& total){
         m2x::HandStepInput input;
         input.parameters=parameters.get();input.seam_column=seam_column;input.base_pose=base_pose;input.envelope=envelope;
-        input.hand_base=hand_base;input.total=total;
+        input.hand_base=hand_base;input.total=total;input.threads=scan_threads;
         const CoverGateEntry gate;
         const auto verdict=m2x::CheckHandStep(input);
         LiveHandCheck check;
@@ -95,13 +95,12 @@ LiveHandChecker MakeWindowHandChecker(const a0::m2::experimental::LoadedFixedCom
 }
 // The check that an estimate's position passes before it is drawn: the cover check of a capture (profile, seam column, the design's blend width).
 LiveMappingChecker MakeWindowMappingChecker(const a0::m2::experimental::LoadedFixedCompositeConditionV3& loaded,unsigned scan_threads=kWindowCheckScanThreads){
-    (void)scan_threads;
     namespace m2x=a0::m2::experimental;
     const auto parameters=std::make_shared<const a0::m2::render::DocumentRenderParameters>(loaded.profile.parameters);
     const auto seam_column=loaded.condition.seam.column;
-    return [parameters,seam_column](const m2x::RegisteredMapping& mapping){
+    return [parameters,seam_column,scan_threads](const m2x::RegisteredMapping& mapping){
         const CoverGateEntry gate;
-        const auto cover=m2x::CheckRegisteredMappingCover(*parameters,mapping,seam_column,m2x::kSeamBlendDesign);
+        const auto cover=m2x::CheckRegisteredMappingCover(*parameters,mapping,seam_column,m2x::kSeamBlendDesign,scan_threads);
         std::vector<std::string> failed;
         if(!cover.seam_covered)failed.emplace_back(kLivePositionSeamOutsideOverlapReason);
         if(!cover.output_covered)failed.emplace_back(kLivePositionOutputUncoveredReason);

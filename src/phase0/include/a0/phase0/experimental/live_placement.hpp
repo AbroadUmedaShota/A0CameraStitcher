@@ -135,7 +135,7 @@ struct LiveHandCheck {
 };
 // The check: the position before the first hand press (no layer 2) and the sum of the counts entered since (never 0: a sum of 0 is not
 // checked, it goes back to hand_base). It solves the sum, measures the pose against the envelope and covers the result. It is called with
-// no lock held (a cover check allocates a full-size frame), and it may throw.
+// no lock held (a cover check scans the full-size output), and it may throw.
 using LiveHandChecker=std::function<LiveHandCheck(const a0::m2::experimental::RegisteredMapping& hand_base,const a0::m2::experimental::HandCounts& total)>;
 
 // What the machine cannot know and the caller says: the window's Live is running, and the picture on the screen was drawn with a table
