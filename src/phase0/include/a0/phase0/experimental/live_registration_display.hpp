@@ -373,7 +373,7 @@ inline std::string Amount(double value, const char* positive, const char* negati
     if (view.capture && view.capture->level == kLiveCaptureConfirmedLevel)
         text += "手で直した位置で JPEG を作りました。ライブは手で直した位置のままです";
     else if (view.capture && view.capture->level == "G4")
-        text += "手で直した位置では安い検査に通らないため、JPEG は条件の位置で作りました。ライブは手で直した位置のままです";
+        text += "手で直した位置では継ぎ目が重なりの外に出るか出力の端が覆われないため、JPEG は条件の位置で作りました。ライブは手で直した位置のままです";
     else
         text += "この位置で撮影します";
     if (view.live_enabled) text += "。自動で測り直すには「自動調整」を押してください（手で直した位置は置き換わります）";
@@ -391,6 +391,7 @@ inline std::string Body(const LivePlacementView& view, bool bake_failed) {
     if (view.activity != LivePlacementActivity::idle) return "自動合成中です…";
     if (view.hand_wanted && !bake_failed) return "手で直した位置を描いています…";
     if (bake_failed) return view.source == LivePlacementSource::after_capture ? "撮影JPEGの位置ではCを描けませんでした。直前に描けた位置のまま表示しています"
+                          : view.source == LivePlacementSource::manual      ? "手で直した位置ではCを描けませんでした。直前に描けた位置のまま表示しています"
                                                                               : "推定した位置ではCを描けませんでした。直前に描けた位置のまま表示しています";
     if (view.outcome == LivePlacementOutcomeKind::not_decided)
         return "位置を決められませんでした（理由: " + LiveEstimateReasonText(view.last_failure) + "）。前の位置のままです（出どころ: " + LivePlacementSourceText(view.source) +
@@ -418,9 +419,10 @@ inline std::string Body(const LivePlacementView& view, bool bake_failed) {
 }
 [[nodiscard]] inline std::string LivePlacementStateText(const LivePlacementView& view, bool bake_failed = false) {
     std::string text = live_state_detail::Body(view, bake_failed);
-    // A condition that changed after a hand step: the hand-set position is gone and one estimate is asked for (said in front of the rest).
+    // A condition that changed after a hand step: the hand-set position is gone and, when the condition has a live estimate, one estimate is asked
+    // for (said in front of the rest).
     if (view.hand_discarded_by_condition)
-        text = "固定の合成条件が変わったので、手で直した位置を捨て、新しい条件の位置に戻しました。自動調整を 1 回行います。" + text;
+        text = std::string("固定の合成条件が変わったので、手で直した位置を捨て、新しい条件の位置に戻しました。") + (view.live_enabled ? "自動調整を 1 回行います。" : "") + text;
     return text;
 }
 

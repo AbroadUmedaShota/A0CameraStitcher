@@ -503,7 +503,7 @@ void HandTexts(){
     CHECK(Contains(text,"手で直した位置で JPEG を作りました。ライブは手で直した位置のままです") && !Contains(text,"移しました") && !Contains(text,"この位置で撮影します") && one_line(text));
     view.capture->level="G4";
     text=LivePlacementStateText(view);
-    CHECK(Contains(text,"手で直した位置では安い検査に通らないため、JPEG は条件の位置で作りました。ライブは手で直した位置のままです") && !Contains(text,"ライブのCもその位置へ移しました") && one_line(text));
+    CHECK(Contains(text,"手で直した位置では継ぎ目が重なりの外に出るか出力の端が覆われないため、JPEG は条件の位置で作りました。ライブは手で直した位置のままです") && !Contains(text,"ライブのCもその位置へ移しました") && one_line(text));
     view.capture.reset();
     // Without the registration.live the way back through an estimate is not named.
     view.live_enabled=false;
@@ -519,7 +519,8 @@ void HandTexts(){
     view.capturing=true;
     CHECK(Contains(LivePlacementStateText(view),"撮影中は位置を動かせません") && one_line(LivePlacementStateText(view)));
     view.capturing=false;
-    CHECK(Contains(LivePlacementStateText(view,true),"推定した位置ではCを描けませんでした"));
+    // A hand-set position whose table could not be baked says it is the hand-set one, not an estimate.
+    CHECK(Contains(LivePlacementStateText(view,true),"手で直した位置ではCを描けませんでした") && !Contains(LivePlacementStateText(view,true),"推定した位置"));
     // A hand position after an estimate that decided nothing says where the position came from.
     view.outcome=LivePlacementOutcomeKind::not_decided;view.last_failure={"repeating-only"};
     text=LivePlacementStateText(view);
@@ -548,6 +549,11 @@ void HandTexts(){
     CHECK(text.find("固定の合成条件が変わったので、手で直した位置を捨て、新しい条件の位置に戻しました。自動調整を 1 回行います。")==0 && one_line(text));
     view.activity=LivePlacementActivity::requested;view.ask=LiveEstimateAsk::condition_changed;
     CHECK(Contains(LivePlacementStateText(view),"自動調整を 1 回行います。自動合成中です…"));
+    // Without a live estimate in the condition nothing is estimated, so no estimate is promised.
+    view.live_enabled=false;view.activity=LivePlacementActivity::idle;view.ask.reset();
+    text=LivePlacementStateText(view);
+    CHECK(text.find("固定の合成条件が変わったので、手で直した位置を捨て、新しい条件の位置に戻しました。")==0 && !Contains(text,"自動調整を 1 回行います") && one_line(text));
+    view.live_enabled=true;
     // A layer 2 that is too small to read as a number is said without one; the screen that is not drawn with the position yet says so.
     {
         LivePlacementView shot_view;shot_view.live_enabled=true;shot_view.source=LivePlacementSource::after_capture;
@@ -618,7 +624,7 @@ void StateTextFollowsMachine(){
         CHECK(second.grant && machine.ApplyCapture(condition_mapping,"G4",sha,std::nullopt,second.grant->serial));
         view=machine.View();text=text_of(machine);
         CHECK(view.source==LivePlacementSource::manual && view.capture && view.capture->level=="G4");
-        CHECK(Contains(text,"手で直した位置では安い検査に通らないため、JPEG は条件の位置で作りました。ライブは手で直した位置のままです") && !Contains(text,"ライブのCもその位置へ移しました") && one_line(text));
+        CHECK(Contains(text,"手で直した位置では継ぎ目が重なりの外に出るか出力の端が覆われないため、JPEG は条件の位置で作りました。ライブは手で直した位置のままです") && !Contains(text,"ライブのCもその位置へ移しました") && one_line(text));
         // a condition that changed: the hand-set position is dropped and one estimate is asked for, and the row says both
         machine.BeginSession(other,base,true);
         view=machine.View();text=text_of(machine);
@@ -677,14 +683,24 @@ void StateTextFollowsMachine(){
         auto machine=started();
         const auto result=machine.HandStep(LiveHandCountsOf(LiveHandButton::right,false),LiveHandContext{true,true},checker);
         CHECK(result.outcome==LiveHandOutcome::accepted && machine.View().hand_wanted);
-        CHECK(Contains(text_of(machine),"自動合成中です…") || Contains(text_of(machine),"手で直した位置を描いています…"));
+        CHECK(Contains(text_of(machine),"手で直した位置を描いています…") && !Contains(text_of(machine),"自動合成中です…"));   // the press withdrew the estimate
         machine.Committed();
         CHECK(!machine.View().hand_wanted && machine.View().source==LivePlacementSource::manual);
     }
 }
 
+// The codes of where a position came from: the live log's and the report's are the same words, for every source (the window gives the report the
+// live code read back as the report's source).
+void SourceCodes(){
+    for(const auto source:{LivePlacementSource::fixed_condition,LivePlacementSource::auto_start,LivePlacementSource::auto_button,LivePlacementSource::after_capture,LivePlacementSource::manual}){
+        const auto parsed=ex::ParseConfirmedPositionSource(LivePlacementSourceCode(source));
+        CHECK(parsed.has_value() && ex::ConfirmedPositionSourceCode(*parsed)==LivePlacementSourceCode(source));
+    }
+}
+
 int main(){
     try{
+        SourceCodes();
         Tilt();
         Turn();
         Mounting();

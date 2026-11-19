@@ -15,8 +15,10 @@ inline constexpr int kHandButtonFirstId=320;   // 320 left, 321 right, 322 up, 3
 inline constexpr int kHandStepButtonId=kHandButtonFirstId+6;
 std::array<HWND,kPreviewHandButtonCount> hand_buttons{};
 bool hand_fine=false;   // the step switch: false is the coarse step
-// What the last press or capture said that the state row keeps saying until something replaces it (UTF-8).
+// What the last press or capture said that the state row keeps saying until something replaces it (UTF-8). A notice that the screen is not drawn
+// with the position yet goes once it is (live_notice_until_drawn); every notice goes when a session begins.
 std::string live_notice;
+bool live_notice_until_drawn=false;
 // A check in flight and what waits behind it. Only the UI thread touches these; the thread of the check returns its result by the future.
 std::future<LiveHandResult> hand_future;
 std::shared_ptr<LiveRegistrationRuntime> hand_runtime;     // the runtime that the check runs on (kept alive until its result is taken)
@@ -39,12 +41,29 @@ std::optional<a0::m2::experimental::ConfirmedPosition> pending_confirmed;   // w
 LiveHandChecker live_hand_check_override;
 LiveMappingChecker live_mapping_check_override;
 std::atomic<int> hand_checks_running{0},hand_checks_peak{0},hand_checks_total{0};
+// What passes the gate of the checks (below): how many are inside it now and at most, how many went in and how many wait at it. A smoke may hold a
+// check inside the gate (cover_gate_hold) to see that the other one waits.
+std::atomic<int> cover_gate_inside{0},cover_gate_peak{0},cover_gate_entered{0},cover_gate_waiting{0};
+std::function<void()> cover_gate_hold;
 
 // ---- The checks that the runtime is given (the same ones that a capture makes) ----------------------------------------------------------
 // The cover check of a full-size position takes a second or two and holds one thread, and a burst of them would starve the Live view: the checks of a
 // hand press and of an estimate's position go through one gate, one at a time. `scan_threads` is the number of threads that the scan of a check may use;
 // the check functions take none yet (they scan with one), so it only marks where a count is passed once they do.
 std::mutex cover_check_gate;
+// One check inside the gate, counted while it holds it.
+struct CoverGateEntry {
+    std::unique_lock<std::mutex> lock;
+    CoverGateEntry(){
+        ++cover_gate_waiting;lock=std::unique_lock<std::mutex>(cover_check_gate);--cover_gate_waiting;
+        const int now=++cover_gate_inside;++cover_gate_entered;
+        int peak=cover_gate_peak.load();while(peak<now && !cover_gate_peak.compare_exchange_weak(peak,now)){}
+        if(cover_gate_hold)cover_gate_hold();
+    }
+    ~CoverGateEntry(){--cover_gate_inside;}
+    CoverGateEntry(const CoverGateEntry&)=delete;
+    CoverGateEntry& operator=(const CoverGateEntry&)=delete;
+};
 inline constexpr unsigned kWindowCheckScanThreads=1;
 LiveHandChecker MakeWindowHandChecker(const a0::m2::experimental::LoadedFixedCompositeConditionV3& loaded,unsigned scan_threads=kWindowCheckScanThreads){
     (void)scan_threads;
@@ -57,7 +76,7 @@ LiveHandChecker MakeWindowHandChecker(const a0::m2::experimental::LoadedFixedCom
         m2x::HandStepInput input;
         input.parameters=parameters.get();input.seam_column=seam_column;input.base_pose=base_pose;input.envelope=envelope;
         input.hand_base=hand_base;input.total=total;
-        std::lock_guard gate(cover_check_gate);
+        const CoverGateEntry gate;
         const auto verdict=m2x::CheckHandStep(input);
         LiveHandCheck check;
         check.mapping=verdict.mapping;
@@ -81,7 +100,7 @@ LiveMappingChecker MakeWindowMappingChecker(const a0::m2::experimental::LoadedFi
     const auto parameters=std::make_shared<const a0::m2::render::DocumentRenderParameters>(loaded.profile.parameters);
     const auto seam_column=loaded.condition.seam.column;
     return [parameters,seam_column](const m2x::RegisteredMapping& mapping){
-        std::lock_guard gate(cover_check_gate);
+        const CoverGateEntry gate;
         const auto cover=m2x::CheckRegisteredMappingCover(*parameters,mapping,seam_column,m2x::kSeamBlendDesign);
         std::vector<std::string> failed;
         if(!cover.seam_covered)failed.emplace_back(kLivePositionSeamOutsideOverlapReason);
@@ -106,7 +125,7 @@ std::optional<bool> layout_force_hand;
 bool HandControlsInLayout(){return layout_force_hand?*layout_force_hand:live_runtime!=nullptr;}
 void RefreshHandLayout();   // lays the buttons out again after the runtime came or went (defined with the layout)
 bool merge_buttons_hidden_for_hand=false;
-void SetLiveNotice(const std::string& text){live_notice=text;}
+void SetLiveNotice(const std::string& text,bool until_drawn=false){live_notice=text;live_notice_until_drawn=until_drawn && !text.empty();}
 bool LiveHandBusy(){return hand_future.valid() || hand_run_waits;}
 // The live pixel in the JPEG's pixels (the grid's pitch over the raster's pitch), from the plan that C is drawn with; 0 when there is none.
 double LivePixelInOutputPx(const std::shared_ptr<const FixedPreviewPlan>& plan){
@@ -124,7 +143,7 @@ void StartLiveHand(const a0::m2::experimental::HandCounts& delta){
         try{return runtime->HandStep(delta,drawn,running);}
         catch(const std::exception& error){
             LiveHandResult failed;failed.outcome=LiveHandOutcome::refused_error;failed.detail=error.what();
-            Log(std::string("C live_hand_step result=error detail=")+RedactPaths(error.what())+" quality_accepted=0");
+            Log(std::string("C live_hand_step result=error detail=")+LiveLogSafeText(RedactPaths(error.what()))+" quality_accepted=0");
             return failed;
         }
     });
@@ -152,12 +171,14 @@ void PressLiveHand(LiveHandButton button){
 // The result of the check that ran (the UI thread, from the timer and before the capture's own steps). An accepted press with a sum that waited
 // starts the next check; a refused one takes the waiting sum with it.
 void AdvanceLiveHand(){
+    // A notice that the screen was not drawn with the position goes once it is.
+    if(live_notice_until_drawn && live_runtime && live_runtime->DrawnWithPlacement(DrawnPlanSnapshot()))SetLiveNotice({});
     // A run that waits starts when the position that the run before it accepted has been drawn (nothing waits to be drawn any more).
     if(!hand_future.valid() && hand_run_waits){
         if(!live_runtime || closing || stopping || live_runtime->Status().placement.capturing){
             // the position of the run before will not be drawn now (Live stopped, a capture holds it): what waited is not checked
             if(hand_queued_presses)SetLiveNotice(LiveHandQueueDroppedText(hand_queued_presses));
-            hand_run_waits=false;hand_queued={};hand_queued_presses=0;return;
+            hand_run_waits=false;hand_queued={};hand_queued_presses=0;hand_capture_dropped=false;hand_stale_retries=0;return;
         }
         // Drawn: the machine has taken the position (nothing waits) and the picture on the screen was drawn with its table (the check of the next run is
         // made against that picture).
@@ -172,7 +193,7 @@ void AdvanceLiveHand(){
             auto text=LiveHandRefusalText(not_drawn,false,status.bake_failed);
             const auto queue=LiveHandQueueDroppedText(hand_queued_presses);
             if(!queue.empty())text+=" "+queue;
-            SetLiveNotice(text);
+            SetLiveNotice(text,!status.bake_failed);
             hand_run_waits=false;hand_queued={};hand_queued_presses=0;
         }
         return;
@@ -203,7 +224,7 @@ void AdvanceLiveHand(){
         auto text=LiveHandRefusalText(result,beyond,bake_failed);
         const auto queue=LiveHandQueueDroppedText(waiting);
         if(!queue.empty())text+=" "+queue;
-        SetLiveNotice(text);
+        SetLiveNotice(text,result.outcome==LiveHandOutcome::refused_not_drawn && !bake_failed);
     }
     hand_queued={};hand_queued_presses=0;
 }
@@ -212,17 +233,24 @@ void AdvanceLiveHand(){
 void DrainLiveHand(){
     hand_queued={};hand_queued_presses=0;hand_run_waits=false;
     if(hand_future.valid()){hand_future.wait();AdvanceLiveHand();}
+    hand_capture_dropped=false;hand_stale_retries=0;   // nothing of a press is carried into the next session
 }
 
 // ---- The capture ----------------------------------------------------------------------------------------------------------------------
+// The report's word for where a position came from: the same code as the live log's (a code that the report does not know is a mistake of the build).
+a0::m2::experimental::ConfirmedPositionSource ConfirmedSourceOf(LivePlacementSource source){
+    const auto parsed=a0::m2::experimental::ParseConfirmedPositionSource(LivePlacementSourceCode(source));
+    if(!parsed)throw std::logic_error("a position source that the report does not know");
+    return *parsed;
+}
 a0::m2::experimental::ConfirmedPosition ConfirmedPositionOfGrant(const LivePlacementGrant& grant){
     namespace m2x=a0::m2::experimental;
     m2x::ConfirmedPosition position;
     position.mapping=grant.mapping;
-    position.source=*m2x::ParseConfirmedPositionSource(LivePlacementSourceCode(grant.source));
+    position.source=ConfirmedSourceOf(grant.source);
     position.serial=grant.serial;
     position.condition_sha256=grant.condition_sha256;
-    if(grant.base_source)position.base_source=m2x::ParseConfirmedPositionSource(LivePlacementSourceCode(*grant.base_source));
+    if(grant.base_source)position.base_source=ConfirmedSourceOf(*grant.base_source);
     position.manual_entered=grant.hand_entered;
     return position;
 }
@@ -236,16 +264,20 @@ void EndLiveCaptureHold(){
 // False when the screen is not drawn with the position yet: nothing was changed and the sentence says what to do.
 bool BeginLiveCapture(const std::shared_ptr<const FixedPreviewPlan>& drawn){
     if(!live_runtime)return true;
+    const bool hand_waited=live_runtime->Status().placement.hand_wanted.has_value();   // a press was accepted and waits to be drawn
     const auto begin=live_runtime->BeginCapture(drawn);
     if(begin.admission!=LiveCaptureAdmission::accepted){
-        const auto text=LiveCaptureRefusalText(begin.admission,live_runtime->Status().bake_failed);
-        capture_status=WidenUtf8(text);SetLiveNotice(text);
+        const bool bake_failed=live_runtime->Status().bake_failed;
+        const auto text=LiveCaptureRefusalText(begin.admission,bake_failed);
+        capture_status=WidenUtf8(text);SetLiveNotice(text,begin.admission==LiveCaptureAdmission::not_drawn && !bake_failed);
         return false;
     }
     live_capture_held=true;
     pending_confirmed=ConfirmedPositionOfGrant(*begin.grant);
-    if(LiveHandBusy() || hand_queued_presses){
-        hand_capture_dropped=true;hand_queued={};hand_queued_presses=0;
+    if(LiveHandBusy() || hand_queued_presses || (begin.dropped_pending && hand_waited)){
+        // Only a check that still runs has a result to come; a run that waited to be drawn, or a press that waited, is simply dropped.
+        hand_capture_dropped=hand_future.valid();
+        hand_queued={};hand_queued_presses=0;hand_run_waits=false;hand_stale_retries=0;
         SetLiveNotice(LiveHandDroppedByCaptureText());
     }else SetLiveNotice({});
     return true;
