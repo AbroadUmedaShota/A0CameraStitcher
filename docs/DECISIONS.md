@@ -1589,18 +1589,24 @@ T3の確定の前の条件（所有者の承認に入れる）: (1) 計画はCAM
 
 ## ADR-0045: 4台（2×2）の配置に備えて、カメラの名前・位置・継ぎ目と、基準と対象のカメラの欄の呼び方を先に決める（文書だけ）
 
-- 状態: Proposed（#438）。所有者の決定待ち。文書だけの案で、コード・書式・試験は変えない。
-- 決定日: 未定
+- 状態: Proposed（#438）。2026-11-18に所有者が、3台目・4台目のカメラの名前、合成の新しい呼び名、その呼び名に直す時期の3点を決めた（下の「ADR-0045の所有者の決定」）。ほかの点は決定待ち。文書だけの案で、コード・書式・試験は変えない。
+- 決定日: 未定（上の3点は2026-11-18）
 - 関連: #438、#434（撮影の1組からの校正の取り直しと、その記録3種）、#429（継ぎ目の色の計画）、#437（ライブのCの位置P）、ADR-0030、ADR-0031、ADR-0034（rig profile 2.0.0）、ADR-0036（表示専用の合成C）、ADR-0037（縦一直線の継ぎ目）、ADR-0038・ADR-0041（設定の書き込み）、ADR-0043（色の計画）、ADR-0044（不変条件6）、`docs/design/rig-profile-v2.md`、`docs/design/fixed-composite-registration-formats.md`、`docs/design/recalibration-from-pair.md`
 - 背景: 今はD810を2台、左右に並べて使っている（CAM-Aが左、CAM-Bが右。吊り下げで、合成の前に両方の画像を180°回す）。上段に2台・下段に2台の2×2、合わせて4台の配置が前提になる可能性が高い。まだ確定ではない。確定してから書式を直すと、公開済みの書式の版上げと、ライブのCとJPEGのCの一致の試験の書き直しが要る。確定の前に位置合わせや画面を4台用に作り変えると、使わないかもしれない作りを抱える。そこで呼び方だけを先に決め、これから足す書式・記録の欄を、4台になっても名前を変えずに済む形にする。
 
 ### ADR-0045の所有者の決定（#438）
 
-所有者の決定待ち。選んでいただく点は、決定1の名前の案（表の案1〜4）と、下の「所有者に確かめる事」。
+2026-11-18に、所有者が次の3点を決めた。
+
+1. 3台目・4台目のカメラの名前は`CAM-C`・`CAM-D`とする（決定1の表の案2）。今の2台は`CAM-A`・`CAM-B`のまま。
+2. 合成（今「C」と呼んでいる、ライブの合成の画面と、保存する合成の画像）の新しい呼び名は「M」（MergeのM）とする。
+3. 合成の呼び名を実際に直す作業（画面の題と見出し、その文字を見る試験、docs）は、4台が確定してから行う。それまでは今の「C」のまま。
+
+この3点を、決定1と決定6、守る不変条件6、今やる物の4、待つ物に入れた。ほかの点（下の「所有者に確かめる事」の表）は決定待ちで、状態はProposedのまま。
 
 ### 今の呼び方（コードで確かめた事）
 
-2026-11-18に、手元のmain（ee77d69）の木をgrepとファイルの読み取りで確かめた。行番号はこのcommitの物。
+2026-11-18に、手元のmain（ee77d69）の木をgrepとファイルの読み取りで確かめた。行番号はこのcommitの物。「C」と「M」の数は、ee77d69に本ADRを足しただけの2f93cccの木で数え直した（コード・試験・ほかの文書はee77d69と同じ）。
 
 - カメラの名前はalias `CAM-A`・`CAM-B`。本体とaliasの対応は照合のファイル（`IdentityMap`）に置き、リポジトリには本体の識別子を書かない。
 - 書式の中でカメラを書く形が4つ混ざっている。
@@ -1611,26 +1617,45 @@ T3の確定の前の条件（所有者の承認に入れる）: (1) 計画はCAM
 - 左右は文書の座標（x右・y下、profileの`conventions.documentPlane`）で、取付の向きを当てた後の向き。吊り下げでは画像の左右が部屋と逆に写るので、`rotated-180`では両方の画像を180°回してからAを左、Bを右に並べる（`docs/WPD_PREVIEW_MERGE.md`の#361の節）。取付の向き（条件v3の`mountOrientation`）はリグ全体で1つの値で、片側だけの回転は対象外。
 - 基準と対象: 条件v3の`basePose`、報告v8の`registration.pose`、ライブの位置P（`live_placement.hpp`）、#434の推定の記録の`estimate.pose`は、どれもCAM-Aに対するCAM-Bの姿勢で、どちらのカメラかを書く欄が無い。色もAを基準にBへ倍率を掛ける（`seam_blend.hpp`の#415の注、ADR-0043）。
 - 継ぎ目: 条件v3と報告v8の`seam`は出力の列（`column`）1つで、CAM-AとCAM-Bの間の縦の継ぎ目1本を暗に指す。色の計画v1の結び目は、継ぎ目に沿った位置`yMm`。
-- 「C」: ライブの合成と保存の合成を「C」と呼んでいる。ADR-0036の題（表示専用の合成C）、画面の題「A/B Live + C（…）」（`preview_window_title.hpp`）、見出し「C 仮Merge（未校正）」（`preview_merge.hpp`）、書式の文書の「LC＝ライブの C の担当」「C の px」、ログの`live_c_*`。docsでは14のファイルが「ライブのC」「合成C」「Cの画素」などの形でCを合成の意味に使う（grepで数えた）。一方で文の中のカメラは、単独の「A」「B」で書いている（「Bの姿勢」）。
+- 「C」: ライブの合成と保存の合成を「C」と呼んでいる。ADR-0036の題（表示専用の合成C）、画面の題「A/B Live + C（…）」（`preview_window_title.hpp`）、見出し「C 仮Merge（未校正）」（`preview_merge.hpp`）、書式の文書の「LC＝ライブの C の担当」「C の px」、開発用プレビューのログの行の頭の「C 」（`C live_placement serial=…`など）、試験の名前`preview_fixed_c_ui_contracts`・`preview_live_c_ui_contracts`とそのsmokeの出力の鍵`fixed_c_ui_*`・`live_c_ui_*`。docsでは`docs/`の24のファイルと`AGENTS.md`が「ライブのC」「合成C」「Cの画素」などの形でCを合成の意味に使う（一覧と数え方は「待つ物」の「合成の呼び名をCからMに直す範囲」）。一方で文の中のカメラは、単独の「A」「B」で書いている（「Bの姿勢」）。
+- `CAM-C`は今、試験で「受け付けないalias」の例に使っている（docsを除き11ファイル18行。`tests/phase0_tests.cpp`、`tests/dual_bound_live_view_tests.cpp`、`tests/fixtures/calibration-session/negative-cases.json`、`scripts/Test-RigProfileV2Schema.ps1`など。`git grep -c CAM-C`）。docsでは本ADRだけが`CAM-C`を書く。
+- 単独の「C」には合成のほかの意味もある。ADR-0038の段C、回復コマンドC（`docs/design/dual-preview-topology-diag.md`、`docs/DUAL_LIVE_WORKER_POC.md`、`docs/MACHINE_OPERATION.md`）、確認点・案の記号（「確認点 A・B・C」「案C」）、式の中のC（`docs/M2_CALIBRATION_LENS.md`の費用C）。
+
+### 「M」の今の使われ方（grepで確かめた事）
+
+2026-11-18に2f93cccの木で、単独の「M」と、「M」に数字や記号が続く形を探した（コードは文字列の中、文書は`` ` ``の外の文。数は本ADRの行を除く）。合成をMと呼ぶ所有者の決定は変えない。直す作業の時に書き分けが要る所として書く。
+
+| 今の「M」の意味 | 場所 | 合成のMとの関係 |
+|---|---|---|
+| 露出モードのM（マニュアル露出。`0x500E`の値1） | 画面の文字: `d810_settings.hpp` 251（設定の表の値「M」）、`d810_settings_write_screen.hpp`の6行（109・115・210・230・393・683。「CAM-A が M（マニュアル露出）ではありません」「本体を M に」など）、`wpd_settings_write_ui.hpp` 1729・1734（「本体を M に」「M（読むだけ）」）。試験: testsの5ファイル34行（`d810_settings_write_tests.cpp` 19行、`hardware_camera_agent_tests.cpp` 9行と`phase0_tests.cpp` 3行は撮影モードの値「M」、`d810_settings_choice_tests.cpp` 2行、`d810_settings_tests.cpp` 1行）。文書: ADR-0038・ADR-0041（「AがMモード」「AがM」「Mだけ書く」）、`WPD_DUAL_PREVIEW.md`、`CALIBRATION_CAPTURE_PROCEDURE.md`、`PILOT_CAPTURE_PROCEDURE.md`、`D810_PC_CONTROL_CAPABILITIES.md`、`CURRENT_STATUS.md`、引き継ぎの文書（`docs/HANDOFF_*.md`の1つ）、`AGENTS.md`（`exposure mode (M only)`）、`third_party/PTP_PROTOCOL_REFERENCES.md` | 一番近い。設定の書き込みの表（ADR-0038・0041）は開発用プレビューの同じ窓に出て、出ている間は合成の欄の場所を使う（`wpd_dual_preview_ui.hpp` 1777〜1782の`in_place_of_c`の注）。直した後は、同じ窓の同じ場所に、合成の「M」と露出モードの「M」が入れ替わりで出る |
+| フォーカスモードとレンズの切り替えのM（マニュアルフォーカス） | `PILOT_CAPTURE_PROCEDURE.md` 79・83、`OPERATOR_GUIDE.md` 109・110（「M（マニュアル）にする」）、ADR-0044の本文（「セレクターをMにすれば撮れる」）、`WPD_PREVIEW_FOCUS.md` 31・64（「露出をMのまま」「本体がMの時」） | 手順書と文書の文。画面の文字には無い |
+| 画像サイズのM（D810のL・M・S） | `tests/pc_direct_capture_tests.cpp` 388（「M(5520*3680)」を拒む試験）。製品はLだけ（`dual_hardware_camera_agent.cpp` 270） | 試験の値だけ |
+| 計画の段とモジュールの名前（Mと数字） | 段M0〜M4（`docs/ROADMAP.md`）、M7（`CI_COST_PROFILE.md`）、ディレクトリ`src/m2`・`src/m3`・`tests/m3`、名前空間`a0::m2`、`A0CameraStitcher.M3.slnx`、文書`docs/M2_*.md`・`docs/M3_*.md`の35ファイル、設計の実測の項目M1（`design/fixed-composite-registration.md`の11.12節）。文書の中の「M」と数字の形は34ファイルで約155か所（M3 55、M2 52、M1 28、M4 13、M0 5、M7 2） | 数字が続くので、単独のMとは字面が違う。「M2」「M3」が合成の2つ目・3つ目に見えるおそれは残る（※推定） |
+| 指摘と確認の番号 M-1〜M-8 | ADR-0038の設計レビューの指摘の番号（`DECISIONS.md` 20行）、コードの注（`d810_settings_write.hpp` 2行、`wpd_settings_write.hpp` 2行、`wpd_settings_write_ui.hpp` 1行）、`tests/m3`の3ファイル26行、`design/dual-preview-topology-diag.md`の手動確認M-1 | ハイフンと数字が付く。合成のMに番号を付ける時は、この形を使わない |
+| 作業の大きさの目安 S・M・L | `M2_SEAM_QUALITY_GATE.md`（「G3 評価経路への接続（M）」など12か所）、`M2_AUTO_OVERLAP.md` 7か所、`design/fixed-composite-registration.md`と`design/fixed-composite-lens.md`の表の大きさの列 | 見出しの末尾の「（M）」が、合成の事に見えるおそれがある（※推定） |
+| 文と式の変数のM | `WPD_DUAL_PREVIEW.md` 54（「最大 M px」）・169（「違う M」）、`DUAL_LIVE_WORKER_POC.md` 171〜196と`CURRENT_STATUS.md` 115（余裕の時間M。D = W + M）、`worker_preview_dispatcher_tests.cpp`の試験の文3行 | 文の中に単独のMとして出る |
+| Mergeの語 | 画面の「両台撮影 → 仮Merge保存」（`preview_window_title.hpp` 81）と見出し「C 仮Merge（未校正）」、`PRODUCT_REQUIREMENTS.md` 49（「映像をMergeする（C）」）、文書の「未校正 Merge」「画像Merge」 | 取り違えではない。MがMergeのMである事と合う |
 
 ### 決定（案）
 
-1. **カメラの名前**: 名前はaliasで、付けた順の記号とする。位置（上下・左右）も役（基準・対象）も名前に入れない。位置はrig profileに、役は記録の欄に書く。今の2台は`CAM-A`・`CAM-B`のまま変えない。3台目・4台目は「C」を使わず`CAM-D`・`CAM-E`とする（下の表の案1。推奨）。文の中では`CAM-D`か「カメラD」と書き、単独の「C」はこれまでどおり合成だけを指す。画面の「CAM-A（左）」の括弧の位置は名前の一部でなく、profileの位置から出す表示とする（今は`wpd_dual_preview_ui.hpp`の719・820行に直書き）。
+決定1の3台目・4台目の名前と合成の呼び名、決定6の直す時期（4台が確定してから）は、所有者が2026-11-18に決めた。決定6の書き方と読み方、ほかの決定は案。
+
+1. **カメラの名前**: 名前はaliasで、付けた順の記号とする。位置（上下・左右）も役（基準・対象）も名前に入れない。位置はrig profileに、役は記録の欄に書く。今の2台は`CAM-A`・`CAM-B`のまま変えない。3台目・4台目は`CAM-C`・`CAM-D`とする（下の表の案2。所有者が2026-11-18に選んだ）。合成の呼び名は「C」から「M」（MergeのM）に改める。直す作業は4台が確定してから行い、それまでとその後の書き方・読み方は決定6による。文の中の3台目・4台目は、単独の「C」「D」で書かず、`CAM-C`・`CAM-D`か「カメラC」「カメラD」と書く。画面の「CAM-A（左）」の括弧の位置は名前の一部でなく、profileの位置から出す表示とする（今は`wpd_dual_preview_ui.hpp`の719・820行に直書き）。
 
 | 案 | 3台目・4台目 | 合成の呼び名 | 良い所 | 困る所 |
 |---|---|---|---|---|
-| 1（推奨） | `CAM-D`・`CAM-E` | Cのまま | 今の画面・ログ・文書のCが全部そのまま正しい。過去の文書を読む時に、Cがカメラか合成かを迷わない | Cが抜けて見えるので、理由をprofileの文書と画面の説明に1行書く。DがD810のDと並ぶ（`CAM-`を付けて書けば分かれる） |
-| 2 | `CAM-C`・`CAM-D` | 合成の呼び名を変える（例「合成」「M」） | 記号が続いて自然 | 画面の題と見出し、その文字を見る試験、ADR-0036の題、docsのCを直す。直さない過去の文書ではCが合成のままなので、読むたびにどちらかを確かめる |
-| 3 | `CAM-C`・`CAM-D` | Cのまま。カメラは必ず`CAM-C`と書く | 直す物が無い | 今の文は単独のA・Bでカメラを指すので、「Cの姿勢」「Cの画素」がどちらを指すかが書き手の注意に頼る。ログの`live_c_*`とカメラCの欄が並ぶ |
+| 1 | `CAM-D`・`CAM-E` | Cのまま | 今の画面・ログ・文書のCが全部そのまま正しい。過去の文書を読む時に、Cがカメラか合成かを迷わない（前の版の案は、この理由で案1を推していた） | Cが抜けて見えるので、理由をprofileの文書と画面の説明に1行書く。DがD810のDと並ぶ（`CAM-`を付けて書けば分かれる） |
+| 2（所有者が選んだ案。2026-11-18） | `CAM-C`・`CAM-D` | 「M」（MergeのM）に改める。直すのは4台が確定してから | 記号が続いて自然。Mは画面の「仮Merge保存」の語と合う | 画面の題と見出し、その文字を見る試験、docsのCを直す（範囲は「待つ物」の表）。ADRの本文など直さない文書ではCが合成のままなので、決定6の読み方で読む。Mは露出モードのM（開発用プレビューの同じ窓の設定の表に出る）、作業の大きさの目安「（M）」、段とモジュールの名前（M2・M3）にも使っている（「「M」の今の使われ方」）。試験の11ファイル18行が`CAM-C`を「受け付けないalias」の例に使っているので、4台で`CAM-C`を受け付ける時に替える |
+| 3 | `CAM-C`・`CAM-D` | Cのまま。カメラは必ず`CAM-C`と書く | 直す物が無い | 今の文は単独のA・Bでカメラを指すので、「Cの姿勢」「Cの画素」がどちらを指すかが書き手の注意に頼る。ログの行の頭の「C 」とカメラCの欄が並ぶ |
 | 4 | 番号（`CAM-1`〜`CAM-4`） | Cのまま | 位置を番号で話す時に数が合う | 今のCAM-A・CAM-Bと同じ本体に2つの名前が付く。番号が位置の番号に見え、カメラを付け替えると番号と位置がずれる |
 
-2. **位置の呼び方**: 位置はカメラの段（上段・下段）とカメラの列（左・右）の組で呼び、4つを「上段・左」「上段・右」「下段・左」「下段・右」とする（短くは左上・右上・左下・右下）。数で書く時は(カメラの段, カメラの列)の組で、上・左から1で数える（左上が(1, 1)）。番号1つで呼ぶ時は左上から1・2、左下から3・4とし、これは表示の呼び名でカメラの名前ではない。上下左右は文書の座標（x右・y下）で、取付の向きを当てた後、つまり合成（C）の画面とJPEGで見た向きとする。部屋で見た向きと、カメラの画像のままの向きでは呼ばない。「段」「列」だけで書かず「カメラの段」「カメラの列」と書く（「段」はADR-0044の段P・段1や推定の段G1〜G4に、「列」は継ぎ目の列（出力の画素の列）に使っている）。
+2. **位置の呼び方**: 位置はカメラの段（上段・下段）とカメラの列（左・右）の組で呼び、4つを「上段・左」「上段・右」「下段・左」「下段・右」とする（短くは左上・右上・左下・右下）。数で書く時は(カメラの段, カメラの列)の組で、上・左から1で数える（左上が(1, 1)）。番号1つで呼ぶ時は左上から1・2、左下から3・4とし、これは表示の呼び名でカメラの名前ではない。上下左右は文書の座標（x右・y下）で、取付の向きを当てた後、つまり合成の画面とJPEGで見た向きとする。部屋で見た向きと、カメラの画像のままの向きでは呼ばない。「段」「列」だけで書かず「カメラの段」「カメラの列」と書く（「段」はADR-0044の段P・段1や推定の段G1〜G4に、「列」は継ぎ目の列（出力の画素の列）に使っている）。
    - 名前と位置の対応はrig profileにだけ書く。照合のファイル（本体とalias）には位置を書かない。画面・ログ・報告の位置の表示はprofileから引く。
    - 記録に書く形（案。profile 3.0.0で決める）: `cameras.<alias>.position`に`{"cameraRow": 1, "cameraColumn": 2}`。`row`・`column`だけの名前は出力の画素の行と列（`seam.column`・`rowsPx`）に、`grid`は層2の格子に使っているので避ける。
    - 下段の取付の向きは未定とする。上段と下段で向きが違えば、リグ全体で1つの`mountOrientation`では書けず、カメラごとの向きが要る。置き場所（profileのカメラごとか、条件か）はprofile 3.0.0で決める。
    - 今の2台は、カメラの段が1つ・列が2つの場合として読む（決定5）。
 
-3. **継ぎ目の呼び方**: 隣り合う2台の間の継ぎ目を、その2台の組で呼ぶ。縦の継ぎ目（上下に走る線で、左右の2台を分ける）は左のカメラ、右のカメラの順に、横の継ぎ目（左右に走る線で、上下の2台を分ける）は上のカメラ、下のカメラの順に書く。文では「縦の継ぎ目CAM-A–CAM-B」「横の継ぎ目CAM-A–CAM-D」（後者は例。どのカメラがどこに入るかは未定）。
+3. **継ぎ目の呼び方**: 隣り合う2台の間の継ぎ目を、その2台の組で呼ぶ。縦の継ぎ目（上下に走る線で、左右の2台を分ける）は左のカメラ、右のカメラの順に、横の継ぎ目（左右に走る線で、上下の2台を分ける）は上のカメラ、下のカメラの順に書く。文では「縦の継ぎ目CAM-A–CAM-B」「横の継ぎ目CAM-A–CAM-C」（後者は例。どのカメラがどこに入るかは未定）。
    - 記録の欄（案）: `{"direction": "vertical", "cameras": ["CAM-A", "CAM-B"]}`。`direction`は`vertical`か`horizontal`、`cameras`は2つのaliasを上の順で。
    - 2×2では継ぎ目が4区間になる。上段の縦の継ぎ目（左上–右上）、下段の縦の継ぎ目（左下–右下）、左側の横の継ぎ目（左上–左下）、右側の横の継ぎ目（右上–右下）。
    - 4台が集まる所は「継ぎ目の交点」と呼ぶ。欄（案）は`{"cameras": [左上, 右上, 左下, 右下]}`（それぞれalias）。上段と下段の縦の継ぎ目が同じ出力の列に並ぶか（1本の直線か）はADR-0037を4台へ広げる時の決定で、ここでは決めない。並ばない時は交点が1点にならず、横の継ぎ目の上で3台が集まる点が2つできる。
@@ -1655,6 +1680,16 @@ T3の確定の前の条件（所有者の承認に入れる）: (1) 計画はCAM
 | #434の記録の`cameraASha256`・`cameraBSha256`・`cameraBResidualPx` | CAM-A・CAM-Bの値。基準CAM-A、対象CAM-B |
 | 色の計画v1 `globalGainBgr`・`knots[].yMm`、`capture-original-a`・`capture-original-b` | 基準CAM-A、対象CAM-B、縦の継ぎ目CAM-A–CAM-Bに沿った位置 |
 
+6. **合成の呼び名の移行（CからMへ）**: 直す作業（「待つ物」の「合成の呼び名をCからMに直す作業」）の前と後で、次のように書き、読む。直す時期は所有者の決定3（4台が確定してから）。
+   - 前も後も: 単独の「C」はカメラを指さない。カメラは必ず`CAM-C`（文では「カメラC」）と書く。4台目も`CAM-D`か「カメラD」と書く。
+   - 直す作業が済むまで: 単独の「C」は今までどおり合成を指す（画面の題「A/B Live + C（…）」、見出し「C 仮Merge（未校正）」、ログの行の頭の「C 」、文書の「ライブのC」）。新しく書く文書でも、合成を「C」と書いてよい。文では「合成」「ライブの合成」「保存の合成」と言葉で書く方を勧める（直す前にも後にも正しく読め、直す時の行が増えない）。「M」は、本ADRの決定の説明を除き、まだ合成の名前に使わない（同じ物に2つの名前を並べない）。
+   - 直した後: 合成は「M」。単独の「C」を合成の意味で新しく書かない（ログの行の頭の印・試験の名前・コードの識別子は未決の6による）。Mにはほかの意味があるので（「「M」の今の使われ方」）、次の書き分けを案とする（※要確認、未決の5）。
+     - 文では合成である事が分かる語を前に付ける（「合成M」「ライブのM」「保存のM」）。語の付かない単独の「M」で合成を指さない。
+     - 露出モードは「Mモード」か「露出モードM」と書き、文の中の「AがM」の形を新しく書かない。フォーカスは「フォーカスのM」と書く。設定の表の値の「M」は、列の見出し（「露出モード」）が付くのでそのままでよい。
+     - 画面の合成の欄の見出しは「M」1字で始めず、「合成M」のように語を付ける（設定の書き込みの表が同じ場所に出るため）。
+     - 作業の大きさの目安は「規模M」と書くか、小・中・大で書く。段とモジュールの名前（M2・M3）と指摘の番号（M-1）は数字が付くのでそのまま。
+   - 直す前に書かれた文書（過去のADR、日付つきの記録の文書、Issueとcommitの文、直す前に書かれたログ）: 単独の「C」は合成と読む。単独の「C」がカメラを指す事は前も後も無いので、文書がいつ書かれたかを確かめずに読める。直す前の文書の単独の「M」は合成を指さない（露出モード、大きさの目安など）。上の書き分けを採れば、語の付かない単独の「M」は、いつ書かれた文書でも合成を指さない。
+
 ### 理由
 
 - 名前に位置を入れると、カメラを付け替えた時や取付の向きを変えた時に、照合のファイル（本体とalias）と過去の記録の名前が合わなくなる。位置をprofileに置けば、付け替えはprofileの改訂で済む。
@@ -1662,6 +1697,8 @@ T3の確定の前の条件（所有者の承認に入れる）: (1) 計画はCAM
 - 継ぎ目を2台の組で呼べば、継ぎ目の場所はprofileの位置から決まり、継ぎ目の番号と場所の対応表が要らない。
 - 欄の無い記録を2台の既定として読む決まりを先に置けば、今の書式を版上げせずに読み続けられる。
 - 呼び方だけなら、4台が来なくても失う物が無い。版上げと作り変えは4台が確定してからにする。
+- 移行（決定6）は「単独の「C」はカメラに使わない」の1つを軸にした。こうすれば単独の「C」は、いつ書かれた文書でも合成と読める。Issueとcommitの文と直す前に書かれたログは直せず、過去のADRも書き換えない案（未決の7）なので、読み方を書かれた時期で変えない形にした。直す時期で読み分ける形（ある日より前の文書のCは合成、後はカメラ）は、文書ごとに日付を確かめる手間が残り、日付の無い文やログの断片では決められないので採らない。
+- 合成の呼び名を直すのを4台の確定まで待つのは、所有者の決定3による。4台が来なければ`CAM-C`は使われず、合成のCとぶつからないので、待つ間に失う物は無い。
 
 ### 守る不変条件
 
@@ -1670,12 +1707,15 @@ T3の確定の前の条件（所有者の承認に入れる）: (1) 計画はCAM
 3. 上下左右は文書の座標で、取付の向きを当てた後の向き。
 4. 2台の関係を表す値には、基準と対象のカメラを欄で書く。欄の無い今の書式は決定5の既定で読む。
 5. ライブのログとJPEGの報告は、同じカメラ・同じ継ぎ目に同じ語と同じaliasを使う。
-6. 単独の「C」は合成だけを指す（案1の時。案2を選ぶ時はこの項を改める）。
+6. 単独の「C」はカメラを指さない。3台目・4台目は`CAM-C`・`CAM-D`（文では「カメラC」「カメラD」）と書く。単独の「C」は、合成の呼び名を直す前は合成の呼び名で、直した後は新しく書かない（直す前の文書の単独の「C」は合成と読む。ログの行の頭の印・試験の名前・コードの識別子は未決の6による）。合成の呼び名「M」は、本ADRの決定の説明を除き、直す作業が済むまで、画面・ログ・新しい文書の合成の名前に使わない（決定6）。
 
 ### 退ける案
 
 | 案 | 退ける理由 |
 |---|---|
+| 3台目・4台目を`CAM-D`・`CAM-E`にして、合成をCのまま残す（決定1の表の案1。前の版の案で推していた） | 所有者が案2を選んだ（2026-11-18）。推していた理由は、今の画面・ログ・文書のCを直さずに済み、過去の文書を読む時にCがカメラか合成かを迷わない事。案2では、後者を決定6の読み方で補う |
+| 合成をCのまま残し、カメラは必ず`CAM-C`と書く（案3）、番号で呼ぶ（案4） | 所有者が案2を選んだ（2026-11-18）。案3は単独の「C」がどちらを指すかが書き手の注意に頼る。案4は同じ本体に名前が2つ付く |
+| 移行で、単独の「C」の読み方を直した日の前と後で分ける（前は合成、後はカメラC） | 文書ごとに日付を確かめる手間が残り、日付の無い文やログの断片では決められない。決定6は、単独の「C」をカメラに使わない事で、読み方を1つにした |
 | 名前に位置を入れる（`CAM-TL`など） | 付け替えや取付の向きの変更のたびに、照合と記録の名前が変わる |
 | 今すぐN台の書式を作る（profile 3.0.0、条件v4・報告v9） | 4台が来なければ、版と読み手と一致の試験が増えるだけになる |
 | 継ぎ目を番号で呼ぶ（継ぎ目1、継ぎ目2） | 番号と場所の対応表が別に要り、配置が変わると番号の意味が変わる |
@@ -1685,7 +1725,7 @@ T3の確定の前の条件（所有者の承認に入れる）: (1) 計画はCAM
 
 ### 2台を決め打ちにしている場所
 
-ee77d69で確かめた。直すのは4台が確定した後（下の「待つ物」）。
+ee77d69で確かめた（製品の層の`src/m3`の行は2026-11-19に同じ木で確かめた）。直すのは4台が確定した後（下の「待つ物」）。
 
 | 場所 | 2台の決め打ち | 4台で要る物 |
 |---|---|---|
@@ -1706,31 +1746,51 @@ ee77d69で確かめた。直すのは4台が確定した後（下の「待つ物
 | `src/phase0/include/a0/phase0/experimental/recalibration_job.hpp` 389 | 校正の報告の`originals`が`cameraASha256`・`cameraBSha256` | 決定4の形 |
 | `src/m2/still_review_report_impl.hpp` 533〜535、680 | 報告の`inputs`がちょうど2つで、順にCAM-A・CAM-B | 報告v9でN個 |
 | `python/a0seam/record.py` 35 | 色の計画v1の`bindings`の符号がA・Bの原画像（`capture-original-a`・`capture-original-b`）。結び目は縦の継ぎ目に沿った`yMm` | 継ぎ目と基準・対象の欄 |
+| `src/m3/Foundation/DualCamera/DualCameraProductModel.cs` 92、98、132〜134 | 製品のrig profile（`DualCameraRigProfile`、`SchemaVersion` 1.1.0）の`CameraAliases`の既定が`CAM-A`・`CAM-B`で、`Validate`が数2とこの並びちょうどを求める。`Layout`は「A左・B右」と「A上・B下」の2つ、姿勢は`CameraBToCameraA`の1つ | aliasの表、カメラの段と列の並び、対ごとの姿勢 |
+| `src/m3/Foundation/DualCamera/RigProfileV2.cs` 10〜15、150、152〜153、277、385〜387 | rig profile 2.0.0の.NETの読み手。`cameraOrder`の2つの符号と、`cameras`と対の欄（`Pair`）の鍵がちょうど`CAM-A`・`CAM-B`で、値は`RigPairV2<T>`の`CameraA`・`CameraB`に入る。指紋の正規形（`Canonical`）の鍵の順も`CAM-A`・`CAM-B` | profile 3.0.0。C++の読み手（`src/m2/rig_profile_v2.cpp`）と同じ版で直す |
+| `src/m3/Foundation/Hardware/HardwareCameraAgentProtocol.cs` 1255、1640〜1642 | 撮影のprofileのaliasも、カメラのaliasも、受け付けるのは`CAM-A`か`CAM-B`だけ | aliasの表 |
+| 製品のmode`DualCamera`（`src/m3/Foundation/Transactions/SimulatedTransactionModel.cs` 12〜16の`CameraOperatingMode`）と名前空間`A0CameraStitcher.M3.Foundation.DualCamera`（`src/m3`の9ファイルが宣言） | modeと名前空間の名前が2台を指す。mode`DualCamera`はCAM-A → CAM-Bの順に2台で撮って合成する（ADR-0023） | 4台をどのmodeで撮るか（ADR-0023の改訂）。名前を変えるかはその時に決める |
 | `?"CAM-A…":"CAM-B…"`の形の直書き全体 | srcの16ファイル33行、testsの8ファイル19行（grepで数えた） | aliasの表を引く1か所 |
+| `src/m3`の`"CAM-A"`・`"CAM-B"`の直書き全体 | 31ファイル117行（`git grep -l -E '"CAM-[AB]"' -- src/m3`と`git grep -c`で数えた。XAMLの画面の文字を含む） | aliasの表を引く1か所 |
 | `AGENTS.md` 6・34・42行 | 範囲が「Nikon D810 x2」。登録したA/Bの照合。撮影の1取引がA、Bの2台で、WPDのsessionが2つ | 所有者の決定で範囲を改める |
-| ADR-0030（不変条件のCAM-A→CAM-B）、ADR-0031（左右二画面）、ADR-0037（縦一直線の継ぎ目）、ADR-0038（AからBへ写す）、ADR-0041（Bを先に、Aを最後に書く）、ADR-0043（Aを基準にBの色を合わせる）、ADR-0044 不変条件6（WPDのsessionは2つまで） | 2台を前提にした決定 | 4台が確定した時に改訂する |
+| ADR-0023（製品のmode`DualCamera`はCAM-A → CAM-Bの順の2台）、ADR-0030（不変条件のCAM-A→CAM-B）、ADR-0031（左右二画面）、ADR-0037（縦一直線の継ぎ目）、ADR-0038（AからBへ写す）、ADR-0041（Bを先に、Aを最後に書く）、ADR-0043（Aを基準にBの色を合わせる）、ADR-0044 不変条件6（WPDのsessionは2つまで） | 2台を前提にした決定 | 4台が確定した時に改訂する |
 
 ### 今やる物と待つ物
 
 今やる物（4台が来なくても損が出ない物。どれも本ADRが採用された後に、それぞれのIssueで行う）:
 
 1. 新しいコードと書式に、`i==0?"CAM-A":"CAM-B"`の形、欄の名前や符号に記号を埋める形、名前に位置を添えた直書きの文字列を増やさない。今ある物は直さない。
-2. #434の記録3種（推定の記録`a0.pair-recalibration-estimate.v1`、校正の報告`a0.pair-recalibration-report.v1`、確定の記録`a0.pair-recalibration-confirmation.v1`。公開のmainにはまだ無い）に`referenceCamera`・`targetCamera`を足す。案として、`inputs`・`originals`をaliasを鍵にしたオブジェクトに、`cameraBResidualPx`を`targetResidualPx`に改める。版を上げずにできるかは未決の1。
+2. #434の記録3種（推定の記録`a0.pair-recalibration-estimate.v1`、校正の報告`a0.pair-recalibration-report.v1`、確定の記録`a0.pair-recalibration-confirmation.v1`。2026-11-18の時点で公開のmainには無く、本ADRと同じpushで公開される）に`referenceCamera`・`targetCamera`を足す。案として、`inputs`・`originals`をaliasを鍵にしたオブジェクトに、`cameraBResidualPx`を`targetResidualPx`に改める。版を上げずにできるかは未決の1。
 3. #429の色の計画（`a0.seam-color-plan.v1`）に、継ぎ目（`direction`と2台のalias）と`referenceCamera`・`targetCamera`を入れる。v1は公開のmainにある（`python/a0seam`）。計画を読むC++の読み手と書式の文書はまだ無い（ADR-0043の未決）ので、読み手を作る前に足すのが一番安い。`bindings`の`capture-original-a`・`capture-original-b`は今の意味のまま残す。v1に足すかv2にするかは未決の2。
-4. 新しく書く文書では、単独の「C」を合成にだけ使い、カメラの位置は決定2の向きで書く。
+4. 新しく書く文書では、3台目・4台目のカメラを単独の記号で書かず、`CAM-C`・`CAM-D`か「カメラC」「カメラD」と書く。合成は、直す作業が済むまで今の「C」のままで、文では「合成」「ライブの合成」「保存の合成」と言葉で書く方を勧める（画面やログの文字を引く時は「C」）。「M」は、直す作業が済むまで合成の名前に使わない（決定6）。カメラの位置は決定2の向きで書く。
 
 待つ物（4台が確定してから、別のIssueで）:
 
-- rig profile 3.0.0（N台の`cameras`、`position`、カメラごとの取付の向き、`cameraOrder`の置き換え）。
+- rig profile 3.0.0（N台の`cameras`、`position`、カメラごとの取付の向き、`cameraOrder`の置き換え）。profileの読み手はC++（`src/m2/rig_profile_v2.cpp`）と.NET（`src/m3/Foundation/DualCamera/RigProfileV2.cs`）の2つあるので、3.0.0でも2つが食い違わない事を試験で固定する（2.0.0では両方の試験が`tests/fixtures/rig-profile-v2`の同じ正規形とSHA-256を読む）。
 - 条件v4・報告v9（継ぎ目ごとの位置、基準と対象の欄、交点）。
 - 推定器の輪で閉じる解き方。今はCAM-Aを中心にCAM-Bだけを動かす星形で、2×2では対角の2台が交点の近くでしか重ならない（※推定）ので、星形のままでは対角のカメラを測りにくい。
 - 継ぎ目のゲートと合成の、横の継ぎ目と交点（ADR-0037の縦一直線を4台へ）。
 - ライブのCの位置PのN台化と、色合わせを4台で閉じる形（ADR-0043の基準はA）。
 - 撮影の順と180秒の配分、WPDのsessionの数（ADR-0044の不変条件6）、ADR-0030の不変条件のCAM-A→CAM-B。
-- 照合のファイルの4台化。
+- 照合のファイルの4台化。受け付けるaliasに`CAM-C`・`CAM-D`を足す時、試験の11ファイル18行が「受け付けないalias」の例に使っている`CAM-C`を、範囲の外の名前（例`CAM-Z`。※案）に替える。
 - 画面の2×2化（ADR-0031の左右二画面）。
 - 設定の書き込みの4台化（ADR-0038の写す元と先、ADR-0041の書く順）。
 - ログに`reference_camera`・`target_camera`を足す事。足す時は、ライブとJPEGの両方の行を書く1つの関数（`LivePlacementFields`）に足す。
+- 合成の呼び名をCからMに直す作業（所有者の決定3。4台が確定してから）。直す範囲は下の表。書き方と読み方は決定6。
+
+#### 合成の呼び名をCからMに直す範囲
+
+2026-11-18に2f93cccの木をgrepで数えた。コードは文字列の中の単独の「C」（`C:\`、`C++`、`C#`、`CAM-C`を除く）を、日本語を含む文字列、ログの行の頭の「C 」、そのほかに分け、別の意味の行（`content_registration_tests.cpp`の「C below the minimum」の変数C、`render_tests.cpp`の「C runtime」、`calibration_observation_session_tests.cpp`のチャートの点の名前など）を除いた。文書は`` ` ``の外の単独の「C」の行を数え、ファイルごとに中を見て合成の意味があるかを分けた。数は直す時に数え直す。
+
+| 種類 | 場所と件数 | 決まり（版上げ）との関係 |
+|---|---|---|
+| 画面の文字 | srcの7ファイル49行。`live_registration_display.hpp` 19行（「Cは条件の位置で描いています」など）、`fixed_composite_preview.hpp` 16行（「C 固定の合成条件 v3（…）」など）、`wpd_dual_preview_ui.hpp` 8行（「ライブCに戻す」など。うち2行はsmokeの確認）、`wpd_recalibration_ui.hpp` 2行、`fixed_composite_tool_v3.hpp` 2行、`preview_merge.hpp` 1行（見出し「C 仮Merge（未校正）」）、`preview_window_title.hpp` 1行（題「A/B Live + C（…）」） | 所有者の決定3の範囲。書式ではない |
+| その文字を見る試験 | testsの6ファイル27行（`live_registration_display_tests.cpp` 14、`live_registration_runtime_tests.cpp` 7、`fixed_composite_preview_tests.cpp` 2、`fixed_composite_tool_v3_tests.cpp` 2、`fixed_composite_preview_v2_tests.cpp` 1、`preview_merge_tests.cpp` 1）と、上のsmokeの2行。窓の題のsmoke（`wpd_dual_preview_ui.hpp` 2338・2356）は`PreviewTitleFrame`を通して比べるので、題の文字は1か所で変わる | 所有者の決定3の範囲 |
+| docs | `docs/`の24ファイル: `DECISIONS.md`、`WPD_PREVIEW_MERGE.md`、`WPD_STILL_REVIEW.md`、`WPD_DUAL_PREVIEW.md`、`WPD_PREVIEW_FOCUS.md`、`WPD_LIVE_VIEW_CODEC.md`、`WPD_LIVE_VIEW_TRANSFER.md`、`M2_AUTO_OVERLAP.md`、`M2_SEAM_QUALITY_GATE.md`、`M2_EVALUATION_RENDER_CONDITIONS.md`、`M2_DRAFT_STITCH_EVAL.md`、`M2_REVIEW_EVAL_INTEGRATION.md`、`M2_SAVED_EVALUATION_CONDITIONS.md`、`PRODUCT_REQUIREMENTS.md`、`OPERATOR_UI_SPEC.md`、`CALIBRATION_CAPTURE_PROCEDURE.md`、`CURRENT_STATUS.md`、`DEVELOPMENT_STATUS_20261015.md`、`DUAL_LIVE_LICENSE_REVIEW_20261016.md`、`design/fixed-composite.md`、`design/fixed-composite-lens.md`、`design/fixed-composite-registration.md`、`design/fixed-composite-registration-formats.md`、`design/recalibration-from-pair.md`。ほかに`AGENTS.md`の6行（29・37・40・41・50・55。英文の「live C」「A/B/C」）。候補の行は24ファイルで約490行（本ADRの行を含む）で、段C・確認点C・案C・式の中のCなど別の意味の行を含むので、直す時に1行ずつ見る。合成でないCだけのファイル: `design/dual-preview-topology-diag.md`・`DUAL_LIVE_WORKER_POC.md`・`MACHINE_OPERATION.md`（回復コマンドC）、`M2_CALIBRATION_LENS.md`（費用C）、`D810_PC_CONTROL_CAPABILITIES.md`（段C）、`TEST_READINESS_2026-08-26.md`（区分C） | 所有者の決定3の範囲。ADRの本文と日付つきの記録の文書を書き換えるかは未決の7。`AGENTS.md`は、2台の範囲（6・34・42行）を改める時に合わせて直す |
+| ログの行の頭の「C 」 | 書く所: srcの2ファイル22行（`wpd_dual_preview_ui.hpp` 17、`live_registration_runtime.hpp` 5。`C live_placement`、`C composite mode=`、`C auto_overlap_v2`など）。読む試験: testsの2ファイル11行（`live_registration_runtime_tests.cpp` 10、`live_registration_estimator_tests.cpp` 1）とsmokeの1行（`wpd_dual_preview_ui.hpp` 2686）。文書の引用: `WPD_PREVIEW_MERGE.md` 3行、`WPD_DUAL_PREVIEW.md` 2行。ログの鍵（`live_placement`など）にはCが無い | このログには版の決まりが無い（`docs/design/fixed-composite-registration-formats.md`の1節の決まり8が名指すのは条件v3と報告v8）。ライブとJPEGを突き合わせる欄（`LivePlacementFields`が書く部分）に印は入らず、JPEGの側の行`pair_review_placement`には印が無いので、印を変えても突き合わせる欄は変わらない（印を含めて比べる試験の行は直す）。変えるか据え置くかは未決の6 |
+| 試験の名前、smokeの鍵、起動の引数 | ctestの名前`preview_fixed_c_ui_contracts`・`preview_live_c_ui_contracts`（`CMakeLists.txt` 1557〜1562の4行）、起動の引数`--fixed-c-ui-smoke`・`--live-c-ui-smoke`（`wpd_dual_preview_main.cpp` 1019・1020）、smokeの出力の鍵`fixed_c_ui_synthetic`・`fixed_c_ui_failed_check`・`fixed_c_ui_checks`と`live_c_ui_*`の同じ3つ（`wpd_dual_preview_ui.hpp`）。文書の引用は`WPD_DUAL_PREVIEW.md` 58・317、`WPD_PREVIEW_MERGE.md` 94 | 書式ではない。CIの`ctest -R`の絞り込み（`.github/workflows/software-ci.yml`）にこの名前は無い。変えるかは未決の6 |
+| コードの識別子と注 | `PreviewCMode`（srcの3ファイル33行、testsの3ファイル27行）、`RunFixedCUiSmoke`・`RunLiveCUiSmoke`（`wpd_dual_preview_ui.hpp` 2143・2383）、`in_place_of_c`（`wpd_dual_preview_ui.hpp` 3行）、smokeの中の変数`in_c`・`c_has`。注（`//`の行）では、src・testsの37ファイル約300行に単独の「C」がある（別の意味を含む） | 書式ではない。変えるかは未決の6 |
+| 書式（schema）と記録の欄 | `docs/schemas`の25ファイルと、記録を書くコードのJSONの欄の名前に、合成の意味のCは無い（0件）。書式の文書`docs/design/fixed-composite-registration-formats.md`の説明の語（「LC＝ライブの C の担当」の札3か所、`registration.live.limits`の単位「C の px」）だけがある。製品の画面（`src/m3`）とpythonの文字列にも合成のCは無い | 欄の名前を変えないので、直す作業で書式の版は上がらない。説明の語を直すのは文書の直し。欄の名前を変える事になった時は、条件v3・報告v8は同じ文書の1節の決まり8（mainに入った後の変更は新しい版）、rig profileは版（ADR-0034の2.0.0の次）、#434の記録3種は未決の1による |
 
 ### 製品の条件との関係
 
@@ -1740,7 +1800,9 @@ ee77d69で確かめた。直すのは4台が確定した後（下の「待つ物
 
 | 確かめる事 | 答えで変わる所 |
 |---|---|
-| 3台目・4台目の名前（決定1の案1〜4） | 決定1、不変条件6、今やる物の4 |
+| 3台目・4台目の名前（決定1の案1〜4） | 決定済み（2026-11-18、案2）。`CAM-C`・`CAM-D`、合成の呼び名はM、直すのは4台が確定してから。決定1・決定6、不変条件6、今やる物の4、待つ物に入れた |
+| 合成のMと露出モードのMなどの書き分け（決定6の案。文の「合成M」「Mモード」、画面の見出しの「合成M」） | 直す作業の画面の見出しと、文書の書き方（未決の5） |
+| #434の記録に基準・対象のカメラの欄を足すのを、手元のmainを公開する前にするか | 今やる物の2を版上げなしでできるか（未決の1） |
 | 位置を番号1つで呼ぶ時の並び（左上から1・2、左下から3・4でよいか）と、それが合成の画面で見た並びか、部屋で見た並びか | 決定2の番号の対応 |
 | 今の2台（CAM-A・CAM-B）が上段・下段のどちらに入るか | profileでの2台の位置（名前は変わらない） |
 | 下段の取付の向き（上段と同じく吊り下げで180°回すか、別の向きか） | カメラごとの向きの欄が要るか（profile 3.0.0） |
@@ -1754,17 +1816,29 @@ ee77d69で確かめた。直すのは4台が確定した後（下の「待つ物
 
 | 対象 | 扱い |
 |---|---|
-| `docs/DECISIONS.md` | 本ADRを足す（Proposed）。ほかのADRの本文は変えない |
+| `docs/DECISIONS.md` | 本ADRを足す（Proposed）。2026-11-18の所有者の決定を入れた。ほかのADRの本文は変えない |
 | コード・試験・書式・`AGENTS.md` | 変えない |
 | #434の記録3種、色の計画 | 採用された後に、今やる物の2・3として別のcommitで変える |
-| ADR-0030・0031・0037・0038・0041・0043・0044、`AGENTS.md`の6・34・42行 | 4台が確定した時に改訂の対象になる。今は変えない |
+| ADR-0023・0030・0031・0037・0038・0041・0043・0044、`AGENTS.md`の6・34・42行 | 4台が確定した時に改訂の対象になる。今は変えない |
+| 合成のC（画面の文字、その文字を見る試験、docs、ログの行の頭の「C 」、試験の名前、コードの識別子） | 4台が確定した後、待つ物の「合成の呼び名をCからMに直す作業」で変える。今は変えない。範囲は待つ物の表 |
+| ADR-0036の題（表示専用の合成C）など、Cを合成の意味で使うADRの本文 | 変えず、決定6の読み方で読む（※要確認。未決の7） |
+| 試験の`CAM-C`（受け付けないaliasの例。11ファイル18行） | 4台で`CAM-C`を受け付ける時に、範囲の外の名前に替える |
 
 ### 未決（※要確認）
 
 1. **書式の決まりの「main」**: `docs/design/fixed-composite-registration-formats.md`の1節の決まり8は「main に入った後の変更は新しい版（v4・v9）にし、古い読み手を残す」、同じ文書の状態の節は「v3 と v8 は main に入るまで凍結しない」と書く。
    - 読める事: 決まりが名指すのは条件v3と報告v8。#434の記録3種はこの文書の表に無く、記録を説明する`docs/design/recalibration-from-pair.md`の6節と`docs/WPD_STILL_REVIEW.md`にも版の決まりは無い。条件v3と報告v8は公開のmainにもあるので、mainをどちらに読んでも凍結済み。3種のうち推定の記録と校正の報告には製品の読み手が無く（試験だけが読む）、確定の記録は`wpd_recalibration_ui.hpp`の`RecalibrationRecordedAsUnchecked`が`schema`・`revisionSha256`・`unverified`の3つだけを読むので、欄を足しても今の読み手は読める。推定の記録のSHA-256は条件v3の`reportSha256`とprofileの`provenanceId`に入るので、欄を足すと、これから作る記録のSHA-256の値が変わる（既にある記録は変わらない）。
-   - 読めない事: 「main」が公開のmainだけか、pushしていない手元のmainも含むか（2026-11-18に`git rev-list --count origin/main..main`で99。手元のmainは公開のmainより99 commit先）。決まり8が条件v3・報告v8以外の記録にも及ぶか。
+   - 読めない事: 決まり8の「main」は、手元のmainに統合した時点を指すか、公開した時点を指すか。決まり8が条件v3・報告v8以外の記録にも及ぶか。pushの後は、記録3種がどちらの読み方でもmainに入っているので、残る問いは「決まり8が条件v3・報告v8以外の記録に及ぶか」の1つになる。
    - 答えで変わる所: 今やる物の2を、v1のまま欄を足してできるか、v2にするか。
 2. 色の計画v1に欄を足す時の扱い。v1は公開のmainにあり、書式の文書と読み手がまだ無い。v1のまま足すかv2にするかは、計画の書式の文書を書く時に決める。
 3. 2×2の対角の2台がどれだけ重なるか（交点の近くだけか）と、星形のまま測れる範囲（※推定。配置と重なりの幅が決まってから確かめる）。
 4. 位置の欄の名前（`cameraRow`・`cameraColumn`）と、カメラごとの取付の向きの置き場所は、profile 3.0.0で決める。
+5. **「M」の書き分け**: 決定6の案（文では「合成M」「ライブのM」「保存のM」、露出モードは「Mモード」「露出モードM」、画面の合成の欄の見出しは「合成M」、作業の大きさは「規模M」）でよいか。合成をMと呼ぶ所有者の決定は変えず、書き方だけを決める。
+   - 読める事: 露出モードのMは、開発用プレビューの同じ窓の設定の表に出て、その表は合成の欄の場所を使う（「「M」の今の使われ方」）。直した後に見出しを「M」1字にすると、同じ場所に意味の違う「M」が入れ替わりで出る。
+   - 答えで変わる所: 直す作業の画面の見出しと文書の書き方、決定6の書き分け。
+6. **ログの行の頭の「C 」、試験の名前、コードの識別子**: 直す作業で「M」に変えるか、据え置くか。
+   - 読める事: 開発用プレビューのログには版の決まりが無く、書式（schema）と記録の欄の名前には合成のCが無い（待つ物の表）。ライブとJPEGを突き合わせる欄には印が入らない。
+   - 据え置く時は、ログの「C 」を合成の印として決定6の読み方で読み、画面と文書だけがMになる。変える時は、ログを読む試験と、ログの行を引く文書（`WPD_PREVIEW_MERGE.md`・`WPD_DUAL_PREVIEW.md`）を同じcommitで直し、古いログの「C 」は合成と読む。
+   - 答えで変わる所: 直す作業の範囲（待つ物の表の「ログの行の頭」「試験の名前」「コードの識別子」の行）。
+7. **直さない文書の範囲**: ADRの本文（ADR-0036の題を含む）と、ファイル名に日付がある記録の文書（`DEVELOPMENT_STATUS_20261015.md`、`DUAL_LIVE_LICENSE_REVIEW_20261016.md`など）を、直す作業で書き換えずに残すか。案は、残して決定6の読み方で読む事（ADRとその時点の記録は、書いた時の言葉のまま残す方が、後から経緯を追える）。
+   - 答えで変わる所: 待つ物の表の「docs」の行の範囲と件数。
