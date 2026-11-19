@@ -154,7 +154,10 @@ inline constexpr std::string_view kLiveEstimateRefusedReason="estimate-refused";
 // replaced by a note otherwise.
 [[nodiscard]] inline std::string LiveLogSafeText(std::string_view text){
     if(text.find('\\')!=std::string_view::npos || text.find('/')!=std::string_view::npos || text.size()>200)return "(message withheld: it may hold a path)";
-    return std::string(text);
+    // One line of the log is one line: a control character (a line break above all) becomes a space.
+    std::string safe(text);
+    for(auto& c:safe)if(static_cast<unsigned char>(c)<0x20 || static_cast<unsigned char>(c)==0x7f)c=' ';
+    return safe;
 }
 
 // What the estimate was made with and what it measured, for one log line (numbers and codes only).

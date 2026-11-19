@@ -194,7 +194,7 @@ void NotConnected(){
     status=rig.runtime->Status();
     CHECK(status.placement.outcome==LivePlacementOutcomeKind::not_decided && status.placement.activity==LivePlacementActivity::idle);
     CHECK(Contains(status.state_text,"位置を決められませんでした") && Contains(status.state_text,"未接続") && Contains(status.state_text,"条件の位置"));
-    CHECK(Contains(status.state_text,"自動位置合わせ"));
+    CHECK(Contains(status.state_text,"「自動調整」") && !Contains(status.state_text,"自動位置合わせ"));
     CHECK(Contains(status.orientation.b_short,"B: 向きを測れていません"));
     CHECK(Contains(status.orientation.a_short,"A（校正時）: 回転なし") || Contains(status.orientation.a_short,"A（校正時）: 右回りに") || Contains(status.orientation.a_short,"A（校正時）: 左回りに"));
     CHECK(Contains(status.orientation_line,"Aに対する今の値") && Contains(status.orientation_line,"A（校正時）") && Contains(status.orientation_line,"B: 向きを測れていません"));
@@ -492,7 +492,7 @@ void Disabled(){
     CHECK(!shot.job_ran && shot.rebaked && rig.runtime->CurrentPlan() && SameNine(rig.runtime->CurrentPlan()->live->baked,jpeg));
     CHECK(Contains(rig.runtime->Status().state_text,"撮影の後の自動調整で位置を確定しました（G2）") && rig.jobs.empty());
     // The button is refused for this condition, so the sentence does not tell the person to press it.
-    CHECK(!Contains(rig.runtime->Status().state_text,"自動位置合わせ"));
+    CHECK(!Contains(rig.runtime->Status().state_text,"「自動調整」"));
 }
 
 // A new plan for another frame size drops the baked plan; P stays and is baked into the new plan, and no estimate is asked for.
@@ -589,7 +589,7 @@ void AfterCapture(){
         CHECK(Contains(status.state_text,"撮影の後の自動調整で位置を確定しました（G1）。撮影の前のライブの位置から継ぎ目で最大 "+moved.str()+" px（JPEGの画素）動かしました。今のライブのCはJPEGと同じ位置です"));
     }
     CHECK(!Contains(status.state_text,"違います") && !Contains(status.state_text,"ライブの位置と継ぎ目"));
-    CHECK(Contains(status.state_text,"JPEGの局所の補正（最大 0.5 px）はライブのCには出ません") && Contains(status.state_text,"自動位置合わせ"));
+    CHECK(Contains(status.state_text,"JPEGの局所の補正（最大 0.5 px）はライブのCには出ません") && Contains(status.state_text,"「自動調整」"));
     CHECK(status.placement.capture && status.placement.capture->layer_two_dropped && status.placement.capture->layer_two_max_px && *status.placement.capture->layer_two_max_px==0.5);
     // Not drawn yet: until the next pass the plan is the one before, and nothing is asked for.
     CHECK(rig.runtime->CurrentPlan()==before_plan && rig.jobs.size()==1);
@@ -1105,8 +1105,18 @@ void Rejects(){
 }
 }
 
+// One line of the log is one line: a control character becomes a space, a message that may hold a path is withheld, and a plain message is kept.
+void LogSafeText(){
+    CHECK(LiveLogSafeText("a\nb\r\tc")=="a b  c");
+    CHECK(LiveLogSafeText(std::string("x\x01y\x7fz",5))=="x y z");
+    CHECK(LiveLogSafeText("no pixel was drawn")=="no pixel was drawn");
+    CHECK(LiveLogSafeText("C:\\folder\nfile")=="(message withheld: it may hold a path)");
+    CHECK(LiveLogSafeText(std::string(201,'a'))=="(message withheld: it may hold a path)");
+}
+
 int main(){
     try{
+        LogSafeText();
         Design();
         RigIsUsable();
         NotConnected();

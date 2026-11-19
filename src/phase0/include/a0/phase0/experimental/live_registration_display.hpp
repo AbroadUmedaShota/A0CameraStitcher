@@ -202,7 +202,8 @@ inline constexpr std::string_view kLiveEstimatorUnavailableReason = "live-estima
 // The layer 2 that the JPEG has and the live C does not draw: its largest shift when the record gave one (output px, the JPEG's pixels).
 [[nodiscard]] inline std::string LivePlacementLayerTwoText(const LivePlacementCaptureNote& note) {
     if (!note.layer_two_dropped) return {};
-    if (!note.layer_two_max_px || !std::isfinite(*note.layer_two_max_px)) return "局所の補正はライブのCには出ません";
+    // A shift too small to read as a number ("最大 0.0 px") is not given as one.
+    if (!note.layer_two_max_px || !std::isfinite(*note.layer_two_max_px) || *note.layer_two_max_px < 0.05) return "局所の補正はライブのCには出ません";
     std::ostringstream s;
     s.imbue(std::locale::classic());
     s << "JPEGの局所の補正（最大 " << std::fixed << std::setprecision(1) << *note.layer_two_max_px << " px）はライブのCには出ません";
@@ -215,6 +216,9 @@ inline constexpr std::string_view kLiveEstimatorUnavailableReason = "live-estima
     const auto moved = LivePlacementMovedText(note.difference_px);
     const auto layer_two = LivePlacementLayerTwoText(note);
     std::string text;
+    // The JPEG was made with the position as it was (the capture's own estimate decided nothing, or the position was set by hand): the live C
+    // did not move to anything.
+    if (note.level == kLiveCaptureConfirmedLevel) return "ライブで決めていた位置で JPEG を作りました（撮影の後の自動調整では位置を決められませんでした）。ライブの位置は変えていません";
     if (note.level == "G1" || note.level == "G2") {
         text = "撮影の後の自動調整で位置を確定しました（" + note.level + "）";
         if (!moved.empty()) text += "。" + moved;
@@ -227,19 +231,177 @@ inline constexpr std::string_view kLiveEstimatorUnavailableReason = "live-estima
     return text;
 }
 
+// ---- Hand steps (#437 stage 2) ------------------------------------------------------------------------------------------------------
+// What a press of a hand button does, as a person sees it on C: the picture of B moves right or left, down or up, or turns clockwise or
+// counter-clockwise (the arrows of the buttons say the same). The counts of the machine (HandCounts) are the displacement that the manual
+// adjustment of the condition enters; what a positive count does to B's picture on C (the constants below: -1 is to the left, up and
+// counter-clockwise) is turned into the buttons' and the sentences' directions once, here, and nowhere else. A smoke draws B's picture
+// before and after each button and holds the constants to what is seen.
+enum class LiveHandButton { left, right, up, down, turn_counter_clockwise, turn_clockwise };
+inline constexpr int kLiveHandSeamDxScreenSign = -1;     // screen right = sign * counts along the seam
+inline constexpr int kLiveHandSeamDyScreenSign = -1;     // screen down = sign * counts across it
+inline constexpr int kLiveHandRotationScreenSign = -1;   // screen clockwise = sign * counts about the axis
+// The counts of one press: 12 px and 4 px along and across the seam, 0.2 and 0.05 degrees about the axis (`fine` picks the small step).
+[[nodiscard]] inline a0::m2::experimental::HandCounts LiveHandCountsOf(LiveHandButton button, bool fine) {
+    namespace ex = a0::m2::experimental;
+    const std::int32_t seam = fine ? ex::kHandFineSeamCounts : ex::kHandCoarseSeamCounts;
+    const std::int32_t turn = fine ? ex::kHandFineRotationCounts : ex::kHandCoarseRotationCounts;
+    switch (button) {
+    case LiveHandButton::right: return {seam * kLiveHandSeamDxScreenSign, 0, 0};
+    case LiveHandButton::left: return {-seam * kLiveHandSeamDxScreenSign, 0, 0};
+    case LiveHandButton::down: return {0, seam * kLiveHandSeamDyScreenSign, 0};
+    case LiveHandButton::up: return {0, -seam * kLiveHandSeamDyScreenSign, 0};
+    case LiveHandButton::turn_clockwise: return {0, 0, turn * kLiveHandRotationScreenSign};
+    case LiveHandButton::turn_counter_clockwise: return {0, 0, -turn * kLiveHandRotationScreenSign};
+    }
+    return {};
+}
+// The amounts entered so far as the picture of B moves on C: to the right, downward, clockwise. Pixels are the JPEG's, degrees are degrees.
+struct LiveHandScreenMove { double right_px{}, down_px{}, clockwise_deg{}; };
+[[nodiscard]] inline LiveHandScreenMove LiveHandScreenMoveOf(const a0::m2::experimental::HandCounts& counts) {
+    const auto values = a0::m2::experimental::HandValuesOf(counts);
+    return {values.seam_dx_px * kLiveHandSeamDxScreenSign, values.seam_dy_px * kLiveHandSeamDyScreenSign, values.rotation_deg * kLiveHandRotationScreenSign};
+}
+namespace live_hand_detail {
+inline std::string Fixed(double value, int digits) {
+    std::ostringstream s;
+    s.imbue(std::locale::classic());
+    s << std::fixed << std::setprecision(digits) << value;
+    return s.str();
+}
+inline std::string Amount(double value, const char* positive, const char* negative, const char* unit, int digits) {
+    if (value == 0.0) return std::string("0 ") + unit;
+    return std::string(value > 0 ? positive : negative) + " " + Fixed(std::abs(value), digits) + " " + unit;
+}
+}
+// "左右 右へ 12 px・上下 上へ 4 px・回り 時計回りに 0.05°": the sum of the amounts, a zero as 0.
+[[nodiscard]] inline std::string LiveHandMovesText(const a0::m2::experimental::HandCounts& counts) {
+    using namespace live_hand_detail;
+    const auto move = LiveHandScreenMoveOf(counts);
+    return "左右 " + Amount(move.right_px, "右へ", "左へ", "px", 0) + "・上下 " + Amount(move.down_px, "下へ", "上へ", "px", 0) + "・回り " +
+        (move.clockwise_deg == 0.0 ? std::string("0°") : std::string(move.clockwise_deg > 0 ? "時計回りに " : "反時計回りに ") + Fixed(std::abs(move.clockwise_deg), 2) + "°");
+}
+// One live pixel of C is this many pixels of the JPEG (the grid's pitch over the raster's pitch); the hand steps are counted in the JPEG's.
+[[nodiscard]] inline std::string LiveHandScaleText(double live_pixel_in_output_px) {
+    if (!std::isfinite(live_pixel_in_output_px) || !(live_pixel_in_output_px > 0)) return {};
+    return "ライブの 1 画素は撮影の約 " + live_hand_detail::Fixed(live_pixel_in_output_px, 1) +
+        " 画素に当たります。細かく合わせる時は、撮影してから「拡大確認・再Merge」で見てください";
+}
+// Why a press changed nothing, in words that say what to do next. `placement_beyond_envelope`: P itself is outside the pose envelope (an
+// estimate was applied beyond it), so a step that leaves it outside is refused for that reason. `bake_failed`: the last bake of P failed.
+// An accepted press has no refusal text (empty).
+[[nodiscard]] inline std::string LiveHandRefusalText(const LiveHandResult& result, bool placement_beyond_envelope = false, bool bake_failed = false) {
+    const std::string kept = "位置は変えていません";
+    switch (result.outcome) {
+    case LiveHandOutcome::accepted: return {};
+    case LiveHandOutcome::refused_not_configured: return "ライブが始まっていないので、位置を動かせません";
+    case LiveHandOutcome::refused_capturing: return "撮影中は位置を動かせません。撮影が終わると動かせます";
+    case LiveHandOutcome::refused_stopped: return "ライブを止めている間は位置を動かせません。「ライブ再開」を押してから動かしてください";
+    case LiveHandOutcome::refused_not_drawn:
+        return bake_failed ? "ライブの合成がまだ確定した位置で描けていないので、位置を動かせません。「自動調整」を押すか、ライブを止めて再開してください"
+                           : "位置を画面に描いている途中です。描き終わるまで少し待ってから押してください";
+    case LiveHandOutcome::refused_zero: return "動かす量が 0 です。" + kept;
+    case LiveHandOutcome::refused_range: return "これ以上は動かせません（入れた量が大きすぎます）。" + kept;
+    case LiveHandOutcome::refused_envelope: {
+        const std::string components = LiveExceededComponentsText(result.exceeded);
+        if (placement_beyond_envelope)
+            return "今の位置は範囲の外で、この押し方では範囲の内に入りません。範囲の外の位置を直すのは「自動調整」か校正の取り直しです。" + kept;
+        return "範囲の端です。これ以上は動かせません" + (components.empty() ? std::string() : "（超える項目: " + components + "）") +
+            "。設置が動いた時は、校正の取り直しが要ります。" + kept;
+    }
+    case LiveHandOutcome::refused_cover:
+        if (!result.seam_covered) return "この位置では継ぎ目が重なりの外に出るため、動かせません。" + kept;
+        if (!result.output_covered) return "この位置では出力の端が覆われないため、動かせません。" + kept;
+        return "この位置では合成が成り立たないため、動かせません。" + kept;
+    case LiveHandOutcome::refused_unsolvable: return "この量では位置を計算できないため、動かせません。向きや刻みを変えて試してください。" + kept;
+    case LiveHandOutcome::refused_error: return "位置の確かめでエラーが起きたため、動かせません（詳細はログ）。" + kept;
+    case LiveHandOutcome::refused_stale: return "押している間に位置が変わったので、反映しませんでした。もう一度押してください";
+    }
+    return {};
+}
+// The state row while a hand press is being checked (the check of a full-size position takes a moment), and what the presses that came
+// meanwhile are going to do.
+[[nodiscard]] inline std::string LiveHandBusyText(unsigned queued_presses) {
+    std::string text = "押したことを受け付けました。位置を確かめています…";
+    if (queued_presses) text += "（続けて押した " + std::to_string(queued_presses) + " 回分は、確かめが終わってからまとめて入れます）";
+    return text;
+}
+// A check refused the press: what was waiting behind it goes too, and the position stays as it was.
+[[nodiscard]] inline std::string LiveHandQueueDroppedText(unsigned queued_presses) {
+    return queued_presses ? "続けて押した " + std::to_string(queued_presses) + " 回分も入れていません" : std::string();
+}
+[[nodiscard]] inline std::string LiveHandDroppedByCaptureText() {
+    return "撮影を頼んだので、確かめの途中だった手の押下は捨てました。位置は撮影の前のままです";
+}
+[[nodiscard]] inline std::string LiveHandWithdrewEstimateText() {
+    return "自動調整の途中だったので、その結果は使いません。手で直した位置を優先します";
+}
+[[nodiscard]] inline std::string LiveHandBecameConditionText() {
+    return "手で動かした結果が条件の位置に戻ったので、手で直した印は消えます";
+}
+// The button of the automatic estimate while a capture holds the position.
+[[nodiscard]] inline std::string LiveEstimateRefusedText(LiveAskResult result) {
+    switch (result) {
+    case LiveAskResult::accepted: return {};
+    case LiveAskResult::busy: return "自動合成中です…";
+    case LiveAskResult::disabled: return "この固定の合成条件では、映像からの自動調整は無効です";
+    case LiveAskResult::capturing: return "撮影中は「自動調整」を押せません。撮影が終わってから押してください";
+    }
+    return {};
+}
+// A pair capture that was not started because the position is not drawn yet (or no session began), and what to do.
+[[nodiscard]] inline std::string LiveCaptureRefusalText(LiveCaptureAdmission admission, bool bake_failed = false) {
+    switch (admission) {
+    case LiveCaptureAdmission::accepted: return {};
+    case LiveCaptureAdmission::not_configured: return "ライブが始まっていないので、両台撮影を始められません";
+    case LiveCaptureAdmission::already_capturing: return "前の撮影の結果を待っています。終わるまで、もう一度押さないでください";
+    case LiveCaptureAdmission::not_drawn:
+        return bake_failed ? "ライブの合成がまだ確定した位置で描けていないので、撮影できません。「自動調整」を押すか、ライブを止めて再開してください"
+                           : "ライブの合成がまだ確定した位置で描けていないので、撮影できません。少し待ってからもう一度押してください";
+    }
+    return {};
+}
+
+// The screen is still drawn with the condition's table (a session just began, or a shot just ended) and the table of the position is not baked yet.
+[[nodiscard]] inline std::string LiveNotDrawnYetText() {
+    return "ライブの合成は、まだ確定した位置で描けていません。描き終わるまで、撮影と手の操作は少し待ってください";
+}
+
+// What the state row says of a position that a person set by hand: the amounts, what the shot did with it, and the way back to an estimate.
+[[nodiscard]] inline std::string LiveManualStateText(const LivePlacementView& view) {
+    std::string text = "手で直しました（Bの絵の動き " + (view.hand_entered ? LiveHandMovesText(*view.hand_entered) : std::string("合計は不明")) + "、撮影の画素。合計）。";
+    if (view.capture && view.capture->level == kLiveCaptureConfirmedLevel)
+        text += "手で直した位置で JPEG を作りました。ライブは手で直した位置のままです";
+    else if (view.capture && view.capture->level == "G4")
+        text += "手で直した位置では安い検査に通らないため、JPEG は条件の位置で作りました。ライブは手で直した位置のままです";
+    else
+        text += "この位置で撮影します";
+    if (view.live_enabled) text += "。自動で測り直すには「自動調整」を押してください（手で直した位置は置き換わります）";
+    return text;
+}
+
 // One sentence about what the live C is drawn with, and what the last estimate came to. The picture is a guide: no sentence calls it within a
 // criterion, and none says that a composite cannot be saved. `bake_failed`: the position in force could not be drawn (the table of B could not
 // be made for it), so C keeps the last mapping that could.
-[[nodiscard]] inline std::string LivePlacementStateText(const LivePlacementView& view, bool bake_failed = false) {
+namespace live_state_detail {
+inline std::string Body(const LivePlacementView& view, bool bake_failed) {
     // The button is refused when the condition has no registration.live, so it is named only when it works.
-    const std::string hint = view.live_enabled ? "。紙を替えた時は「自動位置合わせ」を押してください" : std::string();
+    const std::string hint = view.live_enabled ? "。紙を替えた時は「自動調整」を押してください" : std::string();
+    if (view.capturing) return "撮影中は位置を動かせません。撮影が終わると動かせます";
     if (view.activity != LivePlacementActivity::idle) return "自動合成中です…";
+    if (view.hand_wanted && !bake_failed) return "手で直した位置を描いています…";
     if (bake_failed) return view.source == LivePlacementSource::after_capture ? "撮影JPEGの位置ではCを描けませんでした。直前に描けた位置のまま表示しています"
                                                                               : "推定した位置ではCを描けませんでした。直前に描けた位置のまま表示しています";
     if (view.outcome == LivePlacementOutcomeKind::not_decided)
         return "位置を決められませんでした（理由: " + LiveEstimateReasonText(view.last_failure) + "）。前の位置のままです（出どころ: " + LivePlacementSourceText(view.source) +
-            "）。模様のある所で「自動位置合わせ」を押してください";
+            "）。模様のある所で「自動調整」を押してください";
+    if (view.source == LivePlacementSource::manual) return LiveManualStateText(view);
     if (view.source == LivePlacementSource::after_capture && view.capture) return LivePlacementCaptureText(*view.capture) + hint;
+    // A shot that used the position as it was (level confirmed) leaves the position and its source; the shot is still said.
+    if (view.capture && view.capture->level == kLiveCaptureConfirmedLevel)
+        return "ライブで決めていた位置で JPEG を作りました（撮影の後の自動調整では位置を決められませんでした）。ライブの位置は変えていません" + hint;
+    if (view.hand_returned)
+        return "手で動かした量が 0 に戻ったので、手で直す前の位置に戻しました。撮影の後の自動調整で位置が変わります" + hint;
     if (!view.live_enabled && view.source == LivePlacementSource::fixed_condition) return "Cは固定の写像で描いています（映像からの合わせ込みは条件で無効です）";
     if (view.outcome == LivePlacementOutcomeKind::placed) {
         const bool button = view.outcome_ask && *view.outcome_ask == LiveEstimateAsk::button;
@@ -252,6 +414,14 @@ inline constexpr std::string_view kLiveEstimatorUnavailableReason = "live-estima
     }
     if (view.source == LivePlacementSource::after_capture) return "Cは撮影の後の位置で描いています" + hint;
     return "Cは条件の位置で描いています" + hint;
+}
+}
+[[nodiscard]] inline std::string LivePlacementStateText(const LivePlacementView& view, bool bake_failed = false) {
+    std::string text = live_state_detail::Body(view, bake_failed);
+    // A condition that changed after a hand step: the hand-set position is gone and one estimate is asked for (said in front of the rest).
+    if (view.hand_discarded_by_condition)
+        text = "固定の合成条件が変わったので、手で直した位置を捨て、新しい条件の位置に戻しました。自動調整を 1 回行います。" + text;
+    return text;
 }
 
 // The state row when the registration of the live C could not be set up for the session (C is the condition's fixed mapping).
