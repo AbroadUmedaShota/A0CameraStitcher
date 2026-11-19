@@ -327,22 +327,21 @@ void SeamAndWhole(){
     Rig rig;
     if(!Usable(rig)){Check(false,"plan");return;}
     const ex::RegisteredMapping zero{},leaning{Pose{0.3,-0.3,0,0,0,0.3},{},std::nullopt},shifted{Pose{0,0,0,0.5,0,0},{},std::nullopt};
-    const double seam=LiveSeamMappingDifferencePx(rig.plan,zero,leaning,kLiveSeamDifferenceRows),whole=LiveMappingDifferencePx(rig.plan,zero,leaning,9);
-    std::cerr<<"info a lean of B (0.3 degrees each way): "<<seam<<" px at the seam, "<<whole<<" px over C\n";
-    CHECK(seam>0 && whole>seam);
-    // A shift of the baseline is the same at the seam as anywhere, to within the lattice.
-    CHECK(LiveSeamMappingDifferencePx(rig.plan,zero,zero,kLiveSeamDifferenceRows)==0 && LiveSeamMappingDifferencePx(rig.plan,leaning,leaning,5)==0);
-    CHECK(LiveSeamMappingDifferencePx(rig.plan,zero,shifted,kLiveSeamDifferenceRows)>0);
-    CHECK(LiveSeamMappingDifferencePx(rig.plan,zero,leaning,kLiveSeamDifferenceRows)==LiveSeamMappingDifferencePx(rig.plan,leaning,zero,kLiveSeamDifferenceRows));
-    REJECT(LiveSeamMappingDifferencePx(rig.plan,zero,leaning,1));
-    REJECT(LiveSeamMappingDifferencePx(FixedPreviewPlan{},zero,leaning,kLiveSeamDifferenceRows));
-    REJECT(LiveSeamMappingDifferencePx(rig.plan,zero,ex::RegisteredMapping{Pose{std::numeric_limits<double>::quiet_NaN(),0,0,0,0,0},{},std::nullopt},kLiveSeamDifferenceRows));
-    // The same distance in the JPEG's pixels: C's pixels times C's pitch over the raster's.
-    const double output=LiveSeamMappingDifferenceOutputPx(rig.plan,zero,leaning,kLiveSeamDifferenceRows);
+    // The one measure of the seam (SeamDifferencePx), in the JPEG's pixels; the whole of C is in C's pixels.
+    const double seam=LiveSeamMappingDifferenceOutputPx(rig.plan,zero,leaning),whole=LiveMappingDifferencePx(rig.plan,zero,leaning,9);
     const double ratio=rig.plan.grid.pitch_mm/(25.4/rig.plan.live->raster.dpi);
-    CHECK(ratio>1 && std::abs(output-seam*ratio)<=1e-9*std::max(1.0,output));
-    CHECK(LiveSeamMappingDifferenceOutputPx(rig.plan,zero,zero,kLiveSeamDifferenceRows)==0);
-    REJECT(LiveSeamMappingDifferenceOutputPx(FixedPreviewPlan{},zero,leaning,kLiveSeamDifferenceRows));
+    std::cerr<<"info a lean of B (0.3 degrees each way): "<<seam<<" px (the JPEG's) at the seam, "<<whole<<" px (C's) over C\n";
+    CHECK(ratio>1 && seam>0 && whole*ratio>seam);
+    CHECK(LiveSeamMappingDifferenceOutputPx(rig.plan,zero,zero)==0 && LiveSeamMappingDifferenceOutputPx(rig.plan,leaning,leaning)==0);
+    CHECK(LiveSeamMappingDifferenceOutputPx(rig.plan,zero,shifted)>0);
+    CHECK(LiveSeamMappingDifferenceOutputPx(rig.plan,zero,leaning)==LiveSeamMappingDifferenceOutputPx(rig.plan,leaning,zero));
+    // The number is the one function's, not another lattice's: the same call on the context's own pieces.
+    {
+        const auto& c=*rig.plan.live;
+        CHECK(seam==ex::SeamDifferencePx(c.model_b,c.centre_a,c.origin_mm,ex::content_registration::FrameOfRaster(c.raster),zero,leaning,c.seam_column,c.raster.height_pixels));
+    }
+    REJECT(LiveSeamMappingDifferenceOutputPx(FixedPreviewPlan{},zero,leaning));
+    REJECT(LiveSeamMappingDifferenceOutputPx(rig.plan,zero,ex::RegisteredMapping{Pose{std::numeric_limits<double>::quiet_NaN(),0,0,0,0,0},{},std::nullopt}));
 }
 
 // An estimate that decides nothing: P and the plan stay, the sentence says why, nothing is asked for again, and the next press is a new try.
@@ -570,10 +569,10 @@ void AfterCapture(){
     // The sentence: the level, how far the live C moved from where it was before the shot along the seam (in the JPEG's pixels), that the live C
     // is now at the JPEG's position, and layer 2 with its largest shift (what the live C does not show).
     const ex::RegisteredMapping jpeg_without_layer_two{jpeg.pose,jpeg.surface,std::nullopt};
-    const double distance=LiveSeamMappingDifferenceOutputPx(rig.plan,ex::RegisteredMapping{live_pose,{},std::nullopt},jpeg_without_layer_two,kLiveSeamDifferenceRows);
+    const double distance=LiveSeamMappingDifferenceOutputPx(rig.plan,ex::RegisteredMapping{live_pose,{},std::nullopt},jpeg_without_layer_two);
     CHECK(status.placement.capture && status.placement.capture->difference_px && *status.placement.capture->difference_px==distance && distance>0);
     // The live C against the JPEG's position after the shot: no distance (the number in the sentence is not that one).
-    CHECK(LiveSeamMappingDifferenceOutputPx(rig.plan,status.placement.mapping,jpeg_without_layer_two,kLiveSeamDifferenceRows)==0);
+    CHECK(LiveSeamMappingDifferenceOutputPx(rig.plan,status.placement.mapping,jpeg_without_layer_two)==0);
     {
         std::ostringstream moved;moved.imbue(std::locale::classic());moved<<std::fixed<<std::setprecision(1)<<distance;
         CHECK(Contains(status.state_text,"撮影の後の自動調整で位置を確定しました（G1）。撮影の前のライブの位置から継ぎ目で最大 "+moved.str()+" px（JPEGの画素）動かしました。今のライブのCはJPEGと同じ位置です"));
@@ -617,7 +616,7 @@ void AfterCapture(){
     // function.
     CHECK(rig.Lines("C live_placement_after_capture ")==1 && Contains(rig.LogText(),"level=G1") && Contains(rig.LogText(),"before_source=auto-start") &&
         Contains(rig.LogText(),LivePlacementFields(ex::RegisteredMapping{live_pose,{},std::nullopt},"before_")) &&
-        Contains(rig.LogText(),LivePlacementLayerTwoFields(true,0.5)+" seam_difference_px=") && Contains(rig.LogText(),"layer_two_dropped=1 layer_two_max_px=0.5 "));
+        Contains(rig.LogText(),LivePlacementLayerTwoFields(true,0.5)+" seam_difference_px="+LivePlacementNumber(distance)+" ") && Contains(rig.LogText(),"layer_two_dropped=1 layer_two_max_px=0.5 "));
     const std::string expected="C live_placement serial="+std::to_string(live.placement.serial+1)+" source=after-capture "+LivePlacementFields(ex::RegisteredMapping{jpeg.pose,jpeg.surface,std::nullopt})+
         " condition_sha256="+kSha+" drawn=1";
     CHECK(Contains(rig.LogText(),expected));

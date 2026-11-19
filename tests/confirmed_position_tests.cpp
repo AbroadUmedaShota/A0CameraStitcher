@@ -356,15 +356,21 @@ void SeamDifference(const Rig& rig){
     const m2::RegisteredMapping a{{0.2,-0.1,0.3,0.8,-0.6,0.5},{3.0,0.004,-0.002},std::nullopt};
     const auto same=m2::SeamDifferencePx(g.model_b,g.centre_a,g.origin,g.frame,a,a,g.seam,g.height);
     CHECK(same==0.0);
-    // Another route: the displacements of B against A that the library's RegisteredDisplacement gives for each mapping, subtracted, on rows 0, 32, ...
-    const auto other_route=[&](const m2::RegisteredMapping& x,const m2::RegisteredMapping& y,std::uint32_t height){
+    // Another route: the displacements of B against A that the library's RegisteredDisplacement gives for each mapping, subtracted, on rows 0, 32, ... and the last row.
+    const auto rows_route=[&](const m2::RegisteredMapping& x,const m2::RegisteredMapping& y,const std::vector<std::uint32_t>& rows){
         double worst=0;
-        for(std::uint32_t row=0;row<height;row+=32){
+        for(const auto row:rows){
             const auto dx=cr::RegisteredDisplacement(g.model_b,g.frame,g.centre_a,g.origin,x.pose,x.surface,g.seam,row);
             const auto dy=cr::RegisteredDisplacement(g.model_b,g.frame,g.centre_a,g.origin,y.pose,y.surface,g.seam,row);
             worst=std::max(worst,std::hypot(dx.x-dy.x,dx.y-dy.y));
         }
         return worst;
+    };
+    const auto other_route=[&](const m2::RegisteredMapping& x,const m2::RegisteredMapping& y,std::uint32_t height){
+        std::vector<std::uint32_t> rows;
+        for(std::uint32_t row=0;row<height;row+=32)rows.push_back(row);
+        if((height-1)%32!=0)rows.push_back(height-1);
+        return rows_route(x,y,rows);
     };
     const std::array<m2::RegisteredMapping,4> others{{
         {{0.2,-0.1,0.3,0.8,-0.6,0.5},{3.0,0.004,-0.002},std::nullopt},   // the same position
@@ -385,10 +391,17 @@ void SeamDifference(const Rig& rig){
         const auto d=m2::SeamDifferencePx(g.model_b,g.centre_a,g.origin,g.frame,a,moved,g.seam,g.height);
         CHECK(d>11.0 && d<13.0);
     }
-    // Only rows 0, 32, ... count, and only below the height.
-    for(const std::uint32_t height:{1u,32u,33u,64u,65u}){
+    // Rows 0, 32, ... below the height count, and the last row too (the end of the seam is always a sample, even when it is not on a multiple of 32).
+    for(const std::uint32_t height:{1u,2u,31u,32u,33u,40u,64u,65u,g.height}){
         const auto got=m2::SeamDifferencePx(g.model_b,g.centre_a,g.origin,g.frame,a,others[2],g.seam,height);
         CHECK(std::abs(got-other_route(a,others[2],height))<1e-9*std::max(1.0,got));
+    }
+    // The last row is a sample of its own: a height whose last row is not on a multiple of 32 is measured at that row as well.
+    {
+        const std::uint32_t height=g.height%32==1?g.height+1:g.height;   // a height with (height - 1) % 32 != 0
+        const auto got=m2::SeamDifferencePx(g.model_b,g.centre_a,g.origin,g.frame,a,others[2],g.seam,height);
+        const auto at_last=rows_route(a,others[2],{height-1});
+        CHECK((height-1)%32!=0 && got>=at_last-1e-9*std::max(1.0,at_last));
     }
     REJECT(m2::SeamDifferencePx(g.model_b,g.centre_a,g.origin,g.frame,a,others[1],g.seam,0));
     m2::RegisteredMapping with_layer_two=others[1];with_layer_two.parallax=m2::ParallaxProfile{};

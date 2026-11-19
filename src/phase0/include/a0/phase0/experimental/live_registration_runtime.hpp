@@ -299,47 +299,17 @@ using LivePlanSource=std::function<std::shared_ptr<const FixedPreviewPlan>()>;
     };
 }
 
-// The largest distance, in C pixels, between where `a` and `b` put the same pixel of the seam in the document: a lattice of rows
-// down C's grid by the seam column and the columns a blend width either side of it (the pixels that C's blend can show), where camera B
-// shows the sample. LiveMappingDifferencePx measures the same thing over all of C, and there the directions that the seam does not
-// constrain count as much as the ones it does. +infinity where a mapping cannot place a sample or B shows none of the lattice.
-// Throws what LiveDocumentHomography throws.
-[[nodiscard]] inline double LiveSeamMappingDifferencePx(const FixedPreviewPlan& plan,const a0::m2::experimental::RegisteredMapping& a,
-    const a0::m2::experimental::RegisteredMapping& b,unsigned rows){
-    if(!plan.live || !plan.live->table_b)throw std::invalid_argument("no registered plan");
-    if(rows<2)throw std::invalid_argument("at least 2 rows");
-    const auto& context=*plan.live;
-    const auto ha=LiveDocumentHomography(context,a),hb=LiveDocumentHomography(context,b);
-    const auto& grid=context.grid;
-    const std::int64_t seam=plan.view.seam_column,reach=std::max<std::int64_t>(1,plan.settings.width_pixels);
-    double largest=0;
-    bool any=false;
-    for(unsigned j=0;j<rows;++j){
-        const auto y=static_cast<std::uint32_t>(std::llround(static_cast<double>(j)*static_cast<double>(grid.height-1)/static_cast<double>(rows-1)));
-        for(const std::int64_t offset:{-reach,std::int64_t{0},reach}){
-            const std::int64_t column=seam+offset;
-            if(column<0 || column>=static_cast<std::int64_t>(grid.width))continue;
-            const auto x=static_cast<std::uint32_t>(column);
-            if(std::isnan((*context.table_b)[static_cast<size_t>(y)*grid.width+x].x))continue;
-            const a0::m2::render::Point document{grid.left_mm+(x+.5)*grid.pitch_mm,grid.top_mm+(y+.5)*grid.pitch_mm};
-            a0::m2::render::Point pa=document,pb=document;
-            if((ha && !a0::m2::render::TryTransform(*ha,document,pa)) || (hb && !a0::m2::render::TryTransform(*hb,document,pb)))
-                return std::numeric_limits<double>::infinity();
-            largest=std::max(largest,std::hypot(pa.x-pb.x,pa.y-pb.y)/grid.pitch_mm);
-            any=true;
-        }
-    }
-    return any?largest:std::numeric_limits<double>::infinity();
-}
-inline constexpr unsigned kLiveSeamDifferenceRows=17;
-
-// The same distance in pixels of the JPEG's raster (the condition's), which is what a person reads: C's pixels times C's pitch over the
-// raster's pitch. +infinity where the mapping cannot place a sample. Throws what LiveSeamMappingDifferencePx throws.
+// The largest distance, in pixels of the JPEG's raster (the condition's), between where `a` and `b` put the same pixel of the seam in the
+// document, as SeamDifferencePx (confirmed_position.hpp) measures it: the one measure that the screen's sentence after a shot, the log's
+// seam_difference_px and the report's seamDifferencePx all use. Neither mapping may carry layer 2. LiveMappingDifferencePx measures the same
+// thing over all of C, and there the directions that the seam does not constrain count as much as the ones it does.
+// Throws std::invalid_argument without a registered plan, for a mapping with layer 2, and where a mapping cannot place a sample.
 [[nodiscard]] inline double LiveSeamMappingDifferenceOutputPx(const FixedPreviewPlan& plan,const a0::m2::experimental::RegisteredMapping& a,
-    const a0::m2::experimental::RegisteredMapping& b,unsigned rows){
-    const double in_c=LiveSeamMappingDifferencePx(plan,a,b,rows);
+    const a0::m2::experimental::RegisteredMapping& b){
     if(!plan.live || !plan.live->raster.dpi)throw std::invalid_argument("no registered plan");
-    return in_c*plan.live->grid.pitch_mm/(25.4/static_cast<double>(plan.live->raster.dpi));
+    const auto& context=*plan.live;
+    return a0::m2::experimental::SeamDifferencePx(context.model_b,context.centre_a,context.origin_mm,a0::m2::experimental::content_registration::FrameOfRaster(context.raster),
+        a,b,context.seam_column,context.raster.height_pixels);
 }
 
 // ---- What the window shows ------------------------------------------------------------------------------------------------------
@@ -637,7 +607,7 @@ private:
         std::ostringstream line;line.imbue(std::locale::classic());
         line<<"C live_placement_after_capture serial="<<machine_.Serial()<<" level="<<note->level<<" before_source="<<LivePlacementSourceCode(note->before_source)
             <<' '<<LivePlacementFields(note->before,"before_")<<' '<<LivePlacementLayerTwoFields(note->layer_two_dropped,note->layer_two_max_px);
-        if(note->difference_px)line<<" seam_difference_px="<<*note->difference_px;
+        if(note->difference_px)line<<" seam_difference_px="<<LivePlacementNumber(*note->difference_px);
         line<<" quality_accepted=0";
         return line.str();
     }
@@ -645,7 +615,7 @@ private:
     void MeasureCaptureLocked(){
         if(!machine_.CaptureDifferencePending() || !base_ || !base_->live)return;
         try{
-            const double pixels=LiveSeamMappingDifferenceOutputPx(*base_,machine_.Capture()->before,machine_.Placement(),kLiveSeamDifferenceRows);
+            const double pixels=LiveSeamMappingDifferenceOutputPx(*base_,machine_.Capture()->before,machine_.Placement());
             machine_.SetCaptureDifference(pixels);
         }catch(const std::exception&){}   // not measured: the sentence leaves the number out
     }

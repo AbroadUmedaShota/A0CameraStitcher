@@ -141,8 +141,9 @@ inline cr::PoseParameters Added(const cr::PoseParameters& a,const cr::PoseParame
 
 // ---- The difference between two positions at the seam ----
 // The one measure of how far two positions of camera B are apart at the seam: for the output samples of the seam column on rows 0, 32,
-// 64, ... (the estimator's rows), the distance between the document points that the two mappings give for the same sample, in output
-// pixels; the largest of them. The screen's sentence and the report's `seamDifferencePx` are both made from this function. Neither
+// 64, ... (the estimator's rows) and on the last row (a difference grows towards the ends of the seam, so the end is always a sample),
+// the distance between the document points that the two mappings give for the same sample, in output pixels; the largest of them. The
+// screen's sentence after a shot, the live log's seam_difference_px and the report's `seamDifferencePx` are all made from this function. Neither
 // mapping may carry layer 2 (std::invalid_argument). origin_mm is content_registration::SurfaceOriginMm of the raster and the seam column.
 [[nodiscard]] inline double SeamDifferencePx(const content_registration::PoseModel& model_b,const content_registration::CameraCentre& centre_a,
     render::Point origin_mm,const content_registration::PlaneFrame& frame,const RegisteredMapping& a,const RegisteredMapping& b,
@@ -157,13 +158,15 @@ inline cr::PoseParameters Added(const cr::PoseParameters& a,const cr::PoseParame
         return render::Point{(g[0]*px+g[1]*py+g[2])/w,(g[3]*px+g[4]*py+g[5])/w};
     };
     double worst=0;
-    for(std::uint32_t row=0;row<height;row+=32){
+    const auto measure=[&](std::uint32_t row){
         const double px=frame.left_mm+(static_cast<double>(seam_column)+0.5)*frame.pitch_mm,py=frame.top_mm+(static_cast<double>(row)+0.5)*frame.pitch_mm;
         const auto pa=apply(ha,px,py),pb=apply(hb,px,py);
         const double distance=std::hypot(pa.x-pb.x,pa.y-pb.y)/frame.pitch_mm;
         if(!std::isfinite(distance))throw std::invalid_argument("the difference at the seam is not finite");
         worst=std::max(worst,distance);
-    }
+    };
+    for(std::uint32_t row=0;row<height;row+=32)measure(row);
+    if((height-1)%32!=0)measure(height-1);
     return worst;
 }
 }
