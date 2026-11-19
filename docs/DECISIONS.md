@@ -1845,7 +1845,7 @@ ee77d69で確かめた（製品の層の`src/m3`の行は2026-11-19に同じ木�
 
 ## ADR-0046: 開発用プレビューのライブの合成とJPEGの合成が、1つの確定した位置を共有する（#437 段2）
 
-- 状態: Accepted（2026-11-19、#437 段2）。所有者が本ADRの決まりの変更と、下の「AGENTS.mdに足す文の案」を承認し、ボタンの名前、推定の途中でライブを止めた時の扱い、手の刻みを決めた（下の「ADR-0046の所有者の要件と決定」の5）。段1の前に所有者が決めた3点（Issueのコメント「設計の要点と、所有者の決定」）と、2026-11-19の所有者の指示も、同じ節に書いた。本ADRの変更は文書だけで、コード・試験・書式は変えない。`AGENTS.md`には、承認された文を別のcommitで入れる。段2の実装は、その後に「段の切り分け」の順で行う。所有者に聞いていない事と技術の側の問いは、※案・※要確認のまま残した（「所有者に確かめる事」）。
+- 状態: Accepted（2026-11-19、#437 段2）。所有者が本ADRの決まりの変更と、下の「AGENTS.mdに入れた文」を承認し、ボタンの名前、推定の途中でライブを止めた時の扱い、手の刻みを決めた（下の「ADR-0046の所有者の要件と決定」の5）。段1の前に所有者が決めた3点（Issueのコメント「設計の要点と、所有者の決定」）と、2026-11-19の所有者の指示も、同じ節に書いた。本ADRの変更は文書だけで、コード・試験・書式は変えない。`AGENTS.md`には、承認された文を別のcommitで入れた。段2の実装は、「段の切り分け」の順で行う。所有者に聞いていない事と技術の側の問いは、※案・※要確認のまま残した（「所有者に確かめる事」）。
 - 決定日: 2026-11-19（所有者の承認。段1の前の3点は、Issueのそのコメントの日）
 - 関連: #437、#417（撮影ごとの位置合わせ、報告v8）、#418（撮影の後の確認画面、手直し）、#434（撮影の1組からの校正の取り直し）、#438（ADR-0045）、#396、#403、#309（ライブの枠と撮影画像の対応S）、#304（後回しにした指摘）、ADR-0021、ADR-0036（決定1の5・10、確認点C1、不変条件4）、ADR-0037（決定1・2、不変条件1〜3・7）、ADR-0043、ADR-0045、`docs/design/fixed-composite-registration.md`（11.9・11.19・11.21・11.28）、`docs/design/fixed-composite-registration-formats.md`、`docs/WPD_DUAL_PREVIEW.md`（#437の節）
 - 背景: 条件v3（`registration.live`がある時）の開発用プレビューでは、段1（手元のmain）で、ライブの合成がCAM-Bの位置を1つだけ持ち、推定は窓で最初にライブを始めた時と「自動位置合わせ」ボタンを押した時だけ走るようになった。撮影の後は、ライブの合成をJPEGの合成が当てた写像で描く。一方でJPEGの合成は今も、撮影ごとに条件の基準の姿勢p_bから原寸で推定し、ライブの位置を受け取らない（設計11.21の決定「Cの推定はJPEGに渡さない」）。原寸の推定が決まらない撮影（繰り返し模様、模様が足りない）では、JPEGは粗の段の目安（G3）か条件の位置（G4）で作られ、ライブで確定していた位置とは別になる。この画面から手で位置を直す道も無い（条件v3の間、重なり・上下のボタンは`ui_position_request_ignored`で断る）。所有者は、手で直した分もJPEGに同じだけ効く事を求めた。ライブの映像から求めた位置や手で決めた位置をJPEGの位置に使うのは、今の決まり（下の「変わる決まり」）の変更になる。
@@ -1860,7 +1860,7 @@ ee77d69で確かめた（製品の層の`src/m3`の行は2026-11-19に同じ木�
    3. 手で直した位置は、アプリを閉じるまで覚える。次回も使う時は、保存の操作で残す（保存は段3）。
 4. 2026-11-19の指示: 手で直した位置がJPEGに同じく反映されなければ調整する意味が無いので、段2を実装する。
 5. 2026-11-19の決定（本ADRへの回答）:
-   1. 決まりの変更（本ADR）を承認する。`AGENTS.md`に足す文（新しい項1つと、2つの行の末尾への追記。下の「AGENTS.mdに足す文の案」）も承認する。
+   1. 決まりの変更（本ADR）を承認する。`AGENTS.md`に足す文（新しい項1つと、2つの行の末尾への追記。下の「AGENTS.mdに入れた文」）も承認する。
    2. ボタンの名前: 固定の合成条件v3がある時は「自動調整」にする。条件が無い時の未校正の合成のボタンは「自動位置合わせ」のまま（「所有者に確かめる事」の1の(b)）。
    3. 推定の途中でライブを止めた時: 頼みを残し、再開の時にその1回だけ続きを行う（同2の(a)。段1の今の作りのまま）。
    4. 手の刻み: 左右・上下は12 pxと4 px、回りは0.2°と0.05°（同5の(a)）。1 pxは、原寸の継ぎ目の確認画面（#418）ができてから足す。
@@ -2009,25 +2009,25 @@ ee77d69で確かめた（製品の層の`src/m3`の行は2026-11-19に同じ木�
 | ADR-0037 不変条件2（827行） | 撮影ごとの推定の結果を、写像・条件・profileに書き戻さない。次の撮影に持ち越さない | 撮影の後のPが、次の撮影で原寸の推定が決まらない時のJPEGの位置になる（窓の中の持ち越し） | 窓の中で持ち越すだけの例外にする。条件・profileには書かず、推定の基準にも入れない |
 | 設計11.21の決定（`docs/design/fixed-composite-registration.md` 818行）、11.9の「ライブの C」（423行）、11.28の不変条件18（1075行） | Cの推定はJPEGに渡さない | 同上 | 「ライブの確定した位置は、原寸の推定が確かでない時と手で直した時にJPEGの位置になる。推定の始め・事前分布・範囲の基準にはしない。層2はライブに当てない」に改める。11.21の追従・保つ時間・τ_bakeの記述（820行と836〜844行）は段1で使われなくなったので、同じ変更で今の形に書き直す |
 | `docs/WPD_DUAL_PREVIEW.md` 53行・56行 | JPEGの位置は変えていない。位置を合成の写像に書き戻さない | 同上 | 段2の節を足して書き直す |
-| `AGENTS.md` 39行 | 自動補正の範囲。上限を超えた結果をclampして合格にしない。rig profileを自動で学習・更新しない | 窓の中のPが、profileや条件の更新ではない事を明文にする | 下の追記の案 |
-| `AGENTS.md` 40行 | ボタンの推定は、未校正のCの平行移動の候補だけ | 条件v3の時は、ボタンが姿勢と紙面の推定を1回走らせ、その結果をライブとJPEGに使う | 下の追記の案と新しい項 |
+| `AGENTS.md` 39行 | 自動補正の範囲。上限を超えた結果をclampして合格にしない。rig profileを自動で学習・更新しない | 窓の中のPが、profileや条件の更新ではない事を明文にする | 末尾に1文を足した（下の「AGENTS.mdに入れた文」） |
+| `AGENTS.md` 40行 | ボタンの推定は、未校正のCの平行移動の候補だけ | 条件v3の時は、ボタンが姿勢と紙面の推定を1回走らせ、その結果をライブとJPEGに使う | 末尾に1文を足し、後に新しい項を入れた（下の「AGENTS.mdに入れた文」） |
 | `AGENTS.md` 34行（`preview-as-stitch-input`）・37行 | ライブをstitchの入力にしない。開発用のCはライブの枠をメモリの中で使う | Pはライブの枠から求めた幾何で、画素ではない | 新しい項に「幾何で、画像でない。合成は原画像2枚だけから作る」と書く。34行・37行は変えない |
 | `AGENTS.md` 41行（入れる前の行番号。#334の項） | Cの幾何を写して記録する。ライブからJPEGへの対応は未検証の仮定 | 条件v3では、撮影へ写す物がPになる | 変えない。未検証の仮定である事は、新しい項でも言う |
 | 書式の文書の1節の決まり8（`fixed-composite-registration-formats.md` 16行） | mainに入った後の変更は新しい版にする | 報告にPの欄を足す | 決まりのとおりv9にする。決まりは変えない |
 
 変えない決まり: 設計11.19.2の表（推定の始め・事前分布・ゲージ・範囲の基準はp_b）、11.19.3の改訂の種類、ADR-0021の安全境界（自由なhomographyを推定しない、学習しない）、ADR-0036の不変条件4（frameごとに推定しない）。
 
-### AGENTS.mdに足す文の案
+### AGENTS.mdに入れた文
 
-所有者が承認した後に、別のcommitで`AGENTS.md`に入れる。本ADRのcommitでは`AGENTS.md`を変えない。
+2026-11-19に所有者が承認し、`AGENTS.md`に入れた文。本ADRに決定を書き入れたcommitとは別のcommitで入れ、`AGENTS.md`のほかの行は変えていない。文は、本節の引用をファイルから取り出してそのまま入れた（入れた後の39〜41行を本節の文と`cmp`で比べ、バイトで一致した。2026-11-19）。行番号は入れる前の`AGENTS.md`（b081023の木）の物で、入れた後は新しい項が41行になる。
 
-40行（入れる前の行番号。以下同じ）の後に足す項:
+40行（入れる前の行番号。以下同じ）の後に足した項:
 
 > - The owner's request in #437 (ADR-0046) narrows the automatic registration of the development composite view drawn with a fixed composite condition v3 to three events: once when Live View first starts in the window (and once when the condition file changes), once per press of its estimate button, and once on the two verified originals after a pair capture. No background, periodic or retried estimate runs, and nothing else moves the live composite. The window keeps one confirmed position of CAM-B relative to CAM-A (its pose and the paper surface, never layer 2) with its source and a change counter (`serial`); the live composite is drawn with it and is re-baked before it changes. A person may move it by bounded in-plane steps (along and across the seam and about the optical axis, in output pixels and degrees) only while the result stays inside the condition's pose envelope measured from the condition's base pose; a step past the envelope is refused, never clamped into success. A pair composite uses a trusted estimate on the originals unless the confirmed position was set by hand; when the estimate is not trusted, or the position was set by hand, it uses the confirmed position (a position that is still the condition's own keeps the existing geometry levels). After the capture the confirmed position becomes the mapping the composite used, without layer 2, while a hand-set position stays. The estimate's start, prior and envelope stay measured from the condition's base pose, never from the confirmed position. Every pair composite records the confirmed position it was given, its source and serial and its seam difference to a trusted estimate, written with the same numbers as the live log. The position lives in memory only and is discarded when the window closes; it changes a fixed composite condition only when the operator explicitly saves it as a new revision. A hand-set or Live-View-derived position is never quality evidence, and the seam gate measures it like any other mapping. It is geometry, not an image: composites are still rendered only from the two verified originals, and the Live View-to-still correspondence it depends on stays unverified (#309).
 
-39行の末尾に、空白1つの後に足す: `The #437 confirmed position of the development preview is neither a rig profile nor a fixed composite condition update.`
+39行の末尾に、空白1つの後に足した: `The #437 confirmed position of the development preview is neither a rig profile nor a fixed composite condition update.`
 
-40行の末尾に、空白1つの後に足す: `With a fixed composite condition v3 the button follows the #437 entry below instead.`
+40行の末尾に、空白1つの後に足した: `With a fixed composite condition v3 the button follows the #437 entry below instead.`
 
 「次の撮影の前（AFの後）の自動」は所有者に聞いておらず、文は3つの時だけのまま。所有者が足すと決めた時は、本ADRを改め、1文目の「three events」とその列挙を直す（所有者に確かめる事の3）。ボタンの名前（条件v3の時は「自動調整」。所有者の決定）は`AGENTS.md`に書かない（画面の文字の正本はコード）。
 
@@ -2041,7 +2041,7 @@ ee77d69で確かめた（製品の層の`src/m3`の行は2026-11-19に同じ木�
 
 ### 段の切り分け（段2）
 
-着手の前の承認は済んだ。本ADRと上の`AGENTS.md`の文は、2026-11-19に所有者が承認した。`AGENTS.md`には、承認された文を、本ADRに決定を書き入れたcommitとは別のcommitで入れる。段2の実装は、その後に次の順にcommitを分けて行う。大きさは※推定。段1は、設計の時の見積り約1,000行に対し、追加2,030行・削除868行だった（2026-11-19に`git diff --shortstat 6738bd1^1 6738bd1`で数えた。12ファイル）。
+着手の前の承認は済んだ。本ADRと上の`AGENTS.md`の文は、2026-11-19に所有者が承認した。`AGENTS.md`には、承認された文を、本ADRに決定を書き入れたcommitとは別のcommitで入れた。段2の実装は、次の順にcommitを分けて行う。大きさは※推定。段1は、設計の時の見積り約1,000行に対し、追加2,030行・削除868行だった（2026-11-19に`git diff --shortstat 6738bd1^1 6738bd1`で数えた。12ファイル）。
 
 | # | 中身 | 触るファイル（※案） | 試験の計画の番号 | 大きさ（※推定） |
 |---|---|---|---|---|
@@ -2088,7 +2088,7 @@ ee77d69で確かめた（製品の層の`src/m3`の行は2026-11-19に同じ木�
 |---|---|
 | `docs/DECISIONS.md` | 本ADRを足した（Proposed）。2026-11-19に所有者の決定を書き入れ、Acceptedにした。ほかのADRの本文は変えない |
 | コード・試験・書式 | 本ADRのcommitでは変えない。段2のcommitで変える |
-| `AGENTS.md` | 本ADRのcommitでは変えない。承認された文を、別のcommitで入れる（「AGENTS.mdに足す文の案」） |
+| `AGENTS.md` | 本ADRのcommitでは変えない。承認された文を、別のcommitで入れた（「AGENTS.mdに入れた文」）。ほかの行は変えていない |
 | ADR-0036 決定1の5・10、ADR-0037 決定1・2、不変条件1・2 | 本ADRが採用されたので、各ADRに「ADR-0046で改定」の追記を置く（本文は書き換えない）。追記はまだ置いていない（※未反映）。段2の文書のcommit（「段の切り分け」の5）で置く（※案） |
 | 設計11.9・11.21・11.28の18、`docs/WPD_DUAL_PREVIEW.md`の#437の節 | 段2の文書のcommitで書き直す |
 | `docs/design/fixed-composite-registration-formats.md` | 段2のcommit 2でv9の節を足す |
