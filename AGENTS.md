@@ -70,5 +70,6 @@ Chat summaries are source material, not current specification. Unresolved busine
 - Every hardware claim needs a repeatable test record.
 - Record camera identity using redacted aliases in committed fixtures.
 - Every push to this public repository must first pass the local leak check: run `scripts/Test-ReplayFixtureLeak.ps1` on the operator PC before pushing (see `tests/fixtures/hardware-replay/README.md`). Exit 2 means it could not verify; do not push.
+- Only the owner may loosen that check. Do not pass `-MissingLocalList Warn` unless the owner allowed it for that push, and do not edit `DefaultMissingLocalList` or `EmptyLocalListAction` at the top of the script on your own judgement.
 - Phase 0 completion requires the evidence listed in `docs/PHASE0_TEST_PLAN.md`.
 - A human must approve the transport decision before integrated MVP implementation starts.
