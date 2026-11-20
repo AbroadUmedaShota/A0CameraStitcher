@@ -146,6 +146,16 @@ cr::PoseParameters PoseForShift(const render::CameraProjection& camera_b, double
     return cr::PoseParameters{0, 0, 0, b, 0, 0};
 }
 
+// The counts of an estimate whose fine stage stopped for want of points (too-few-points) on its first measurement, with nothing counted by
+// the coarse stage and no vote (R = 0): the counts on which that reason alone is a lack of marks.
+cr::EvidenceCounts StoppedFirstNothingCounted() {
+    cr::EvidenceCounts e;
+    e.rival_anchor_support = 0;
+    e.outer_iterations = 1;
+    return e;
+}
+constexpr std::uint32_t kNotCarried = std::numeric_limits<std::uint32_t>::max();   // the value EvidenceCounts starts a count with
+
 // ---- The stand-in for the computation ----
 enum class Fake { ready, check_not_trusted, check_doubtful, check_failed, check_out_of_range, displacement, no_overlap, band_uncovered, range_collapsed, tilt, throws, throws_memory, outside_sheet };
 constexpr const char* kRecord = "{\"schema\":\"test-record\"}";
@@ -218,6 +228,7 @@ RecalibrationComputation FakeComputation(Fake mode, std::vector<std::string>* st
             // What the computation does when the estimator on the new profile cannot be trusted: no candidate, one refusal.
             p.candidate.reset(); p.ready = false; p.refusals = {rc::Refusal::reestimate_not_verified};
             p.verification.state = cr::RegistrationState::undetermined; p.verification.passed = false; p.verification.reasons = {"too-few-points"};
+            p.verification.evidence = StoppedFirstNothingCounted();
             break;
         case Fake::check_doubtful:
             // Undetermined for want of marks AND for a sign that the placement does not fit: not "too few marks" alone.
@@ -360,6 +371,7 @@ void Decisions() {
         p.verification.performed = true;
         p.verification.state = row.check;
         p.verification.reasons = {"too-few-points"};
+        p.verification.evidence = StoppedFirstNothingCounted();
         const auto f = ClassifyProposal(p, kLimits);
         CHECK(f.size() == 1 && f[0].klass == row.klass && f[0].code == std::string(rc::RefusalCode(row.refusal)));
     }
@@ -387,6 +399,7 @@ void Decisions() {
             rc::Proposal alone;
             alone.refusals = {refusal};
             alone.verification.performed = true; alone.verification.state = cr::RegistrationState::undetermined; alone.verification.reasons = {"too-few-points"};
+            alone.verification.evidence = StoppedFirstNothingCounted();
             alone.has_pose = true; alone.estimate_record_text = kRecord;
             CHECK(!OnlyUnverifiedCheck(alone, kLimits));
             auto beside = alone;
@@ -412,14 +425,16 @@ void Decisions() {
         q.refusals = {rc::Refusal::reestimate_not_verified};
         q.verification.state = cr::RegistrationState::undetermined;
         q.verification.reasons = {"too-few-points"};
+        q.verification.evidence = StoppedFirstNothingCounted();
         CHECK(ClassifyProposal(q, kLimits).front().reason == "too-few-points");
     }
     // The check on the new profile when it is undetermined: told by ALL of its reasons (the table of the ruling, one function in m2).
     {
         // u, c, a, ca, r: the block counts (unique, consistent, anchors, consistent anchors) and the vote's rival anchors that tell the two
         // sources of unique-blocks apart. r not given is "not carried" (the value EvidenceCounts starts with), which is a doubt.
+        // outer: the outer iteration in which the fine stage stopped, read for too-few-points only; not given is "not carried" too.
         struct Case {const char* name; std::vector<std::string> reasons; std::uint32_t inliers, points; FindingClass klass; const char* code; const char* reason;
-            std::uint32_t u{}, c{}, a{}, ca{}, r{std::numeric_limits<std::uint32_t>::max()};};
+            std::uint32_t u{}, c{}, a{}, ca{}, r{std::numeric_limits<std::uint32_t>::max()}, outer{kNotCarried};};
         const Case cases[] = {
             {"one reason of the family", {"unique-blocks"}, 0, 0, FindingClass::unverified, "reestimate-not-verified", "unique-blocks", 6, 6, 1, 1, 0},
             {"unique-blocks, the coarse stage stopped on the number of blocks", {"unique-blocks"}, 0, 0, FindingClass::unverified, "reestimate-not-verified", "unique-blocks", 2, 0, 1, 0, 0},
@@ -429,14 +444,17 @@ void Decisions() {
             {"unique-blocks, more than half of the blocks disagree", {"unique-blocks"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "unique-blocks", 8, 3, 8, 3, 0},
             {"unique-blocks, the only anchor was dropped", {"unique-blocks"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "unique-blocks", 6, 5, 1, 0, 0},
             {"unique-blocks, no counts carried", {"unique-blocks"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "unique-blocks"},
-            {"every reason of the family", {"coarse-no-unique-blocks", "repeating-only", "too-few-points", "prediction-uncertain", "too-dark"}, 0, 0, FindingClass::unverified, "reestimate-not-verified", "coarse-no-unique-blocks"},
-            {"too-few-points, nothing counted (a follow-up estimate or a record without counts)", {"too-few-points"}, 0, 0, FindingClass::unverified, "reestimate-not-verified", "too-few-points"},
-            {"too-few-points, the blocks that were counted agree", {"too-few-points"}, 0, 0, FindingClass::unverified, "reestimate-not-verified", "too-few-points", 8, 8, 8, 8, 0},
-            {"too-few-points, the counts V2 fails on the anchors alone", {"too-few-points"}, 0, 0, FindingClass::unverified, "reestimate-not-verified", "too-few-points", 6, 6, 1, 1, 0},
-            {"too-few-points, more than half of the blocks disagree", {"too-few-points"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "too-few-points", 8, 3, 8, 3, 0},
-            {"too-few-points, an anchor pointed to another place", {"too-few-points"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "too-few-points", 6, 6, 2, 2, 1},
-            {"too-few-points, the rival was not carried", {"too-few-points"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "too-few-points", 6, 6, 2, 2},
-            {"too-few-points, an anchor was dropped", {"too-few-points"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "too-few-points", 6, 5, 2, 1, 0},
+            {"every reason of the family", {"coarse-no-unique-blocks", "repeating-only", "too-few-points", "prediction-uncertain", "too-dark"}, 0, 0, FindingClass::unverified, "reestimate-not-verified", "coarse-no-unique-blocks", 0, 0, 0, 0, 0, 1},
+            {"too-few-points, nothing counted and no vote", {"too-few-points"}, 0, 0, FindingClass::unverified, "reestimate-not-verified", "too-few-points", 0, 0, 0, 0, 0, 1},
+            {"too-few-points, nothing counted and the rival not carried (counts that were not carried)", {"too-few-points"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "too-few-points", 0, 0, 0, 0, kNotCarried, 1},
+            {"too-few-points, the blocks that were counted agree", {"too-few-points"}, 0, 0, FindingClass::unverified, "reestimate-not-verified", "too-few-points", 8, 8, 8, 8, 0, 1},
+            {"too-few-points, the blocks that were counted agree, stopped on the second measurement", {"too-few-points"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "too-few-points", 8, 8, 8, 8, 0, 2},
+            {"too-few-points, the blocks that were counted agree, the outer iteration not carried", {"too-few-points"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "too-few-points", 8, 8, 8, 8, 0},
+            {"too-few-points, the counts V2 fails on the anchors alone", {"too-few-points"}, 0, 0, FindingClass::unverified, "reestimate-not-verified", "too-few-points", 6, 6, 1, 1, 0, 1},
+            {"too-few-points, more than half of the blocks disagree", {"too-few-points"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "too-few-points", 8, 3, 8, 3, 0, 1},
+            {"too-few-points, an anchor pointed to another place", {"too-few-points"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "too-few-points", 6, 6, 2, 2, 1, 1},
+            {"too-few-points, the rival was not carried", {"too-few-points"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "too-few-points", 6, 6, 2, 2, kNotCarried, 1},
+            {"too-few-points, an anchor was dropped", {"too-few-points"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "too-few-points", 6, 5, 2, 1, 0, 1},
             {"a shortage and a doubt", {"unique-blocks", "residual-shape"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "residual-shape", 6, 6, 1, 1, 0},
             {"a doubt first", {"residual-shape", "unique-blocks"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "residual-shape", 6, 6, 1, 1, 0},
             {"a code nobody knows", {"a-code-nobody-knows"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "a-code-nobody-knows"},
@@ -463,7 +481,7 @@ void Decisions() {
             p.verification.reasons = c.reasons; p.verification.inliers = c.inliers; p.verification.points = c.points;
             const auto evidence = [&] {
                 cr::EvidenceCounts e;
-                e.inliers = c.inliers; e.points = c.points; e.unique_blocks = c.u; e.consistent_blocks = c.c; e.anchor_blocks = c.a; e.consistent_anchor_blocks = c.ca; e.rival_anchor_support = c.r;
+                e.inliers = c.inliers; e.points = c.points; e.unique_blocks = c.u; e.consistent_blocks = c.c; e.anchor_blocks = c.a; e.consistent_anchor_blocks = c.ca; e.rival_anchor_support = c.r; e.outer_iterations = c.outer;
                 return e;
             }();
             p.verification.evidence = evidence;
@@ -494,6 +512,7 @@ void Decisions() {
         rc::Proposal p;
         p.refusals = {rc::Refusal::reestimate_not_verified};
         p.verification.performed = true; p.verification.state = cr::RegistrationState::undetermined; p.verification.reasons = {"too-few-points"};
+        p.verification.evidence = StoppedFirstNothingCounted();
         p.has_pose = true; p.estimate_record_text = kRecord;
         CHECK(OnlyUnverifiedCheck(p, kLimits));
         auto no_pose = p; no_pose.has_pose = false;
@@ -568,6 +587,26 @@ void Decisions() {
         CHECK(Is(f, FindingClass::rejected, "sample-estimate-doubtful") && f[0].reason == "unique-blocks");
         f = one([&](auto& t) { few_anchors(t); t.gate = gate::GateState::fail; });   // a failure beside a doubt stays a failure
         CHECK(f.size() == 2 && f[1].klass == FindingClass::rejected && f[1].code == "gate-fail");
+        // too-few-points on the sample's estimate, told by the same counts: the blocks that were counted agree and the fine stage stopped on
+        // its first measurement (a shortage); more than half of the blocks disagree, or the stop came on the second measurement (a doubt).
+        const auto stopped = [](std::uint32_t u, std::uint32_t c, std::uint32_t a, std::uint32_t ca, std::uint32_t outer) {
+            return [=](auto& t) {
+                t.estimate = cr::RegistrationState::undetermined; t.estimate_reasons = {"too-few-points"};
+                t.estimate_evidence.unique_blocks = u; t.estimate_evidence.consistent_blocks = c;
+                t.estimate_evidence.anchor_blocks = a; t.estimate_evidence.consistent_anchor_blocks = ca;
+                t.estimate_evidence.rival_anchor_support = 0; t.estimate_evidence.outer_iterations = outer;
+            };
+        };
+        f = one(stopped(8, 3, 8, 3, 1));
+        CHECK(Is(f, FindingClass::rejected, "sample-estimate-doubtful") && f[0].reason == "too-few-points");
+        f = one(stopped(8, 8, 8, 8, 1));
+        CHECK(Is(f, FindingClass::unverified, "sample-estimate-undetermined") && f[0].reason == "too-few-points");
+        f = one(stopped(8, 8, 8, 8, 2));
+        CHECK(Is(f, FindingClass::rejected, "sample-estimate-doubtful") && f[0].reason == "too-few-points");
+        // The sample's counts that were never copied (EvidenceCounts as it starts): too-few-points is a doubt, so a lost copy falls to the
+        // safe side.
+        f = one([](auto& t) { t.estimate = cr::RegistrationState::undetermined; t.estimate_reasons = {"too-few-points"}; t.estimate_evidence = cr::EvidenceCounts{}; });
+        CHECK(Is(f, FindingClass::rejected, "sample-estimate-doubtful") && f[0].reason == "too-few-points");
         f = one([](auto& t) { t.composed = false; t.threw = true; });
         CHECK(f.size() == 1 && f[0].code == "sample-failed" && f[0].klass == FindingClass::rejected);
         f = one([](auto& t) { t.composed = false; t.skip = m2e::FixedCompositeSkip::seam_outside_overlap; });

@@ -243,7 +243,8 @@ struct Verification {
     // The counted points of the last fit and the inliers among them (the estimate's diagnostics). What
     // content_registration::AssessEvidenceShortage needs, with the reasons, to tell "too few marks" from "does not fit". 0 when no fit ran.
     std::uint32_t inliers{},points{};
-    // The same two counts and the block counts (all 0 when no fit ran), as AssessEvidenceShortage reads them.
+    // The same two counts and the other counts AssessEvidenceShortage reads, copied from the estimate's diagnostics. When no estimate
+    // ran they keep the defaults of EvidenceCounts, which mean "not carried" and are read as a doubt.
     content_registration::EvidenceCounts evidence;
     content_registration::PoseParameters pose;       // p-hat' (pose 0 is a perfect profile)
     content_registration::SurfacePlane surface;
