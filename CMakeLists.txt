@@ -487,6 +487,32 @@ else()
     target_compile_options(a0_m2_confirmed_position PRIVATE -Wall -Wextra -Wpedantic -ffp-contract=off)
 endif()
 
+# Tilt of a camera against a flat square-grid sheet (#440 stage 2, docs/design/grid-sheet-tilt.md): a measurement for a person to read. Pure
+# computation: no camera, file, clock, OpenCV or Win32. It calls content_registration::OrientationOf (one definition of tilt and direction) and
+# is never called by the registration, the composite, the confirmed position or the capture: the assertion below fails the configure step when
+# any of those libraries reaches it.
+add_library(a0_m2_grid_sheet_tilt
+    src/m2/grid_sheet_tilt.cpp
+    src/m2/grid_sheet_tilt_lattice.cpp
+    src/m2/grid_sheet_tilt_ridge.cpp
+)
+target_include_directories(a0_m2_grid_sheet_tilt PUBLIC src/m2/include PRIVATE src/m2)
+target_link_libraries(a0_m2_grid_sheet_tilt PUBLIC a0_m2_content_registration a0_m2_render)
+a0_defer_to_end_of_configure(a0_assert_no_link_dependency a0_m2_grid_sheet_tilt)
+foreach(a0_grid_sheet_tilt_forbidden_user
+        a0_m2_content_registration a0_m2_registration_pose a0_m2_registration_gate a0_m2_registration_probe a0_m2_capture_registration
+        a0_m2_parallax_correction a0_m2_fast_seam_measurer a0_m2_fixed_composite a0_m2_fixed_composite_v2 a0_m2_fixed_composite_maps
+        a0_m2_fixed_composite_recalibration a0_m2_confirmed_position a0_m2_offline_stitcher a0_m2_seam_gate a0_m2_seam_blend a0_m2_render)
+    if(TARGET ${a0_grid_sheet_tilt_forbidden_user})
+        a0_defer_to_end_of_configure(a0_assert_no_link_dependency ${a0_grid_sheet_tilt_forbidden_user} FORBIDDEN_LIBRARIES a0_m2_grid_sheet_tilt)
+    endif()
+endforeach()
+if(MSVC)
+    target_compile_options(a0_m2_grid_sheet_tilt PRIVATE /W4 /permissive- /EHsc /fp:precise /utf-8)
+else()
+    target_compile_options(a0_m2_grid_sheet_tilt PRIVATE -Wall -Wextra -Wpedantic -ffp-contract=off)
+endif()
+
 # Development-only probe of #417 (P0): reads a saved pair and a fixed composite condition v2, measures the
 # B-minus-A displacement field over the overlap band and fits registration models to it. Never part of the
 # product; it composes nothing and uses no camera.
