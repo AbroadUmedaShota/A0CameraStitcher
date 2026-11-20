@@ -2120,6 +2120,17 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME m2_content_registration_contracts COMMAND m2_content_registration_contracts)
     set_tests_properties(m2_content_registration_contracts PROPERTIES TIMEOUT 1800)
+    # Tilt against a flat square-grid sheet (#440 stage 2): the stages and the result on pictures drawn from known poses, and the cases that must
+    # be refused. Camera and file free; the test sources draw their own pictures and read nothing.
+    add_executable(m2_grid_sheet_tilt_contracts tests/grid_sheet_tilt_tests.cpp)
+    target_include_directories(m2_grid_sheet_tilt_contracts PRIVATE src/m2)
+    target_link_libraries(m2_grid_sheet_tilt_contracts PRIVATE a0_m2_grid_sheet_tilt a0_m2_content_registration a0_m2_render)
+    a0_defer_to_end_of_configure(a0_assert_no_link_dependency m2_grid_sheet_tilt_contracts)
+    if(MSVC)
+        target_compile_options(m2_grid_sheet_tilt_contracts PRIVATE /W4 /permissive- /EHsc /fp:precise /utf-8)
+    endif()
+    add_test(NAME m2_grid_sheet_tilt_contracts COMMAND m2_grid_sheet_tilt_contracts)
+    set_tests_properties(m2_grid_sheet_tilt_contracts PROPERTIES TIMEOUT 1800)
     # The lanes of #417 after the contracts commit (docs/design/fixed-composite-registration.md 11.12, 11.27). Each test source is
     # an empty stub that returns 77 (Skipped) until the lane that owns it writes the tests; the lane edits only its own source file
     # and, if it needs another library, its own target_link_libraries line below. tests/parallax_scene_tests.cpp is registered by
