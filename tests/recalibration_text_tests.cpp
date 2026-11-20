@@ -1,5 +1,5 @@
 // The words of the recalibration of camera B from one pair (#434 lane B; src/phase0/include/a0/phase0/experimental/recalibration_text.hpp):
-// the guide, the names of the stages, the sentence for every reason (the twelve refusals of the computation and the codes of the job), the lines
+// the guide, the names of the stages, the sentence for every reason (the fourteen refusals of the computation and the codes of the job), the lines
 // of the result screen with their numbers and directions, the verdict lines (checked, unchecked, not usable) and what is said after the decision.
 // No camera, no file, no window. Every number below is a value of this test.
 #include "a0/phase0/experimental/recalibration_text.hpp"
@@ -93,9 +93,9 @@ void Stages() {
     CHECK(RecalibrationStageName(RecalibrationStage::wide_search) == "大まかな探索" && RecalibrationStageName(RecalibrationStage::fine_fit) == "細かい合わせ");
 }
 
-// Every one of the twelve refusals of the computation and every code of the job has its own sentence and a way to put it right.
+// Every one of the fourteen refusals of the computation and every code of the job has its own sentence and a way to put it right.
 void Sentences() {
-    const rc::Refusal all[] = {rc::Refusal::no_overlap, rc::Refusal::estimate_failed, rc::Refusal::estimate_not_verified, rc::Refusal::tilt_exceeded,
+    const rc::Refusal all[] = {rc::Refusal::no_overlap, rc::Refusal::band_uncovered, rc::Refusal::range_collapsed, rc::Refusal::estimate_failed, rc::Refusal::estimate_not_verified, rc::Refusal::tilt_exceeded,
         rc::Refusal::height_exceeded, rc::Refusal::profile_invalid, rc::Refusal::raster_too_large, rc::Refusal::raster_outside_sheet,
         rc::Refusal::creation_check_failed, rc::Refusal::reestimate_not_verified, rc::Refusal::reestimate_displacement, rc::Refusal::stopped};
     std::set<std::string> distinct;
@@ -107,7 +107,7 @@ void Sentences() {
         }
         distinct.insert(RecalibrationFindingSentence({FindingClass::rejected, std::string(rc::RefusalCode(r)), {}}).reason);
     }
-    CHECK(distinct.size() == 12);   // twelve codes, twelve different sentences (the unchecked variant of reestimate-not-verified is a thirteenth)
+    CHECK(distinct.size() == 14);   // fourteen codes, fourteen different sentences (the unchecked variant of reestimate-not-verified is a fifteenth)
     const char* lane[] = {"no-v3-condition", "staging-exists", "staging-in-settings", "live-not-stopped", "decode-failed", "hash-mismatch", "size-mismatch", "profile-unreadable", "out-of-memory", "job-failed",
         "gate-undetermined", "gate-nothing-measured", "gate-content-unmeasured", "gate-dx-unmeasured", "gate-placement-unverified", "gate-not-run", "gate-fail",
         "gate-unconfirmed-content", "gate-one-sided-content", "gate-transition-outside-band", "gate-unknown", "reestimate-doubtful",
@@ -128,6 +128,54 @@ void Sentences() {
     CHECK(Has(reason("too-few-points").reason, "点が足りません") && Has(reason("no-overlap").reason, "重なり"));
     CHECK(reason("coarse-no-unique-blocks").reason != reason("unique-blocks").reason);
     CHECK(reason("unique-blocks").reason != reason("residual-shape").reason && reason("anything-else").reason != reason("unique-blocks").reason);
+    // `no-overlap` of the computation is the wide search's alone; its reasons give different sentences where the person's next move differs, and
+    // it is not the sentence of the estimator's reason of the same name.
+    {
+        const auto sentence = [](const char* r) { return RecalibrationFindingSentence({FindingClass::no_candidate, "no-overlap", r}); };
+        const auto plain_overlap = sentence("");
+        CHECK(Has(plain_overlap.reason, "重なっている所が見つかりません") && Has(plain_overlap.remedy, "文字や線がある紙") && Has(plain_overlap.remedy, "広げすぎた時"));
+        for (const char* r : {"no-tiles", "insufficient-tiles", "outside-image", "no-correspondence", "a-reason-nobody-knows"}) CHECK(sentence(r).reason == plain_overlap.reason && sentence(r).remedy == plain_overlap.remedy);
+        CHECK(Has(sentence("tied-starts").reason, "1 つに決まりません") && Has(sentence("tied-starts").remedy, "繰り返しの少ない"));
+        CHECK(Has(sentence("fit-failed").reason, "当てはめが成り立ちませんでした") && Has(sentence("fit-failed").remedy, "技術担当"));
+        CHECK(Has(sentence("prior-rejected").reason, "見当を作れませんでした") && Has(sentence("prior-rejected").remedy, "技術担当"));
+        std::set<std::string> reasons;
+        for (const char* r : {"", "tied-starts", "fit-failed", "prior-rejected"}) reasons.insert(sentence(r).reason);
+        CHECK(reasons.size() == 4);
+        // The words of the old sentence ("the interval is too wide") are not said for what is not the wide search's: its own code is not borrowed.
+        CHECK(!Has(plain_overlap.reason, "左右の重なり") && sentence("a-reason-nobody-knows").reason == plain_overlap.reason);
+        CHECK(RecalibrationFindingSentence({FindingClass::no_candidate, "no-overlap", "tied-starts"}).reason !=
+            RecalibrationFindingSentence({FindingClass::no_candidate, "estimate-not-verified", "no-overlap"}).reason);
+        for (const char* r : {"", "tied-starts", "fit-failed", "prior-rejected"}) CHECK(Plain(sentence(r).reason) && Plain(sentence(r).remedy) && !Has(sentence(r).reason, "no-overlap") && !Has(sentence(r).reason, r[0] ? r : "-"));
+    }
+    // The target camera does not see the rows of the raster: which edge, or all of them, or no common column. Each is its own sentence and
+    // says what to do; none is the sentence of an overlap that was not found.
+    {
+        const auto sentence = [](const char* r) { return RecalibrationFindingSentence({FindingClass::no_candidate, "band-uncovered", r}); };
+        const char* all_reasons[] = {"bottom", "top", "top-and-bottom", "all-rows", "no-common-column"};
+        std::set<std::string> reasons;
+        for (const char* r : all_reasons) {
+            CHECK(!sentence(r).reason.empty() && !sentence(r).remedy.empty() && Plain(sentence(r).reason) && Plain(sentence(r).remedy));
+            CHECK(!Has(sentence(r).reason, "band-uncovered") && !Has(sentence(r).reason, r) && !Has(sentence(r).reason, "重なっている所が見つかりません") && !Has(sentence(r).reason, "左右の重なり"));
+            reasons.insert(sentence(r).reason);
+        }
+        CHECK(reasons.size() == 5);
+        CHECK(Has(sentence("bottom").reason, "上下にずれて") && Has(sentence("bottom").reason, "下の端を B が写していません"));
+        CHECK(Has(sentence("top").reason, "上下にずれて") && Has(sentence("top").reason, "上の端を B が写していません"));
+        CHECK(Has(sentence("top-and-bottom").reason, "上と下の端を B が写していません"));
+        for (const char* r : {"bottom", "top", "top-and-bottom"}) CHECK(Has(sentence(r).remedy, "上下の位置を元に近づけて") && Has(sentence(r).remedy, "「位置の変化」の行"));
+        CHECK(Has(sentence("all-rows").reason, "どの行にも B が写っていません") && Has(sentence("all-rows").remedy, "位置を元に近づけて"));
+        CHECK(Has(sentence("no-common-column").reason, "回っていて") && Has(sentence("no-common-column").remedy, "回りを元に近づけて"));
+        // A reason that this table does not know is still a sentence about the rows, with a way to put it right.
+        const auto other = sentence("a-reason-nobody-knows");
+        CHECK(!other.reason.empty() && !other.remedy.empty() && !Has(other.reason, "nobody") && !reasons.count(other.reason));
+        // The raster that has no width.
+        const auto collapsed = RecalibrationFindingSentence({FindingClass::no_candidate, "range-collapsed", "no-width"});
+        CHECK(Has(collapsed.reason, "幅が無くなります") && Has(collapsed.remedy, "位置を元に近づけて") && Has(collapsed.remedy, "技術担当") && Plain(collapsed.reason) && Plain(collapsed.remedy));
+        CHECK(RecalibrationFindingSentence({FindingClass::no_candidate, "range-collapsed", {}}).reason == collapsed.reason);
+        // The sentence of a check that refused is not about the interval alone (a move up or down gives it too) and does not say which.
+        const auto check = RecalibrationFindingSentence({FindingClass::rejected, "creation-check-failed", {}});
+        CHECK(Has(check.reason, "位置の変化が大きく") && Has(check.remedy, "間隔や上下の位置") && Has(check.remedy, "「位置の変化」の行") && !Has(check.reason, "間隔が広すぎ") && !Has(check.remedy, "間隔を少し狭めて"));
+    }
     // Checked and wrong, and could not be checked, are told apart.
     const auto wrong = RecalibrationFindingSentence({FindingClass::rejected, "reestimate-not-verified", {}});
     const auto unchecked = RecalibrationFindingSentence({FindingClass::unverified, "reestimate-not-verified", {}});
@@ -288,6 +336,88 @@ void ResultLines() {
         CHECK(HasLine(l, "A に対する B の位置の変化") && HasLine(l, "継ぎ目のずれ: 基準内"));   // what is known is still shown
         const auto screen = RecalibrationScreenLines(RecalibrationVerdict::unusable, {{FindingClass::rejected, "raster-outside-sheet", {}}}, f);
         CHECK(HasLine(screen, "用紙の外に出ます") && !HasLine(screen, "継ぎ目の位置") && !HasLine(screen, "合成の画像の大きさ"));
+    }
+    // A refusal after the wide search: its pose is a guide, said as one, in the place of the line that the fine stage's pose would have. When
+    // the fine stage has its own pose the line is the usual one and the guide is not repeated.
+    {
+        auto f = facts;
+        f.display.has_motion = false;
+        f.display.has_new = false;
+        f.display.has_start_motion = true;
+        f.display.start_motion.camera_motion_mm = {-25.0, -17.0};
+        f.display.start_motion.rotation_clockwise_deg = -1.2;
+        const auto l = RecalibrationResultLines(f);
+        CHECK(HasLine(l, "大まかな探索で見た、A に対する B の位置の変化（目安。傾きと高さは測っていません）: 図面の左へ約 25 mm、上下は上へ約 17 mm、回り 約 1.2°（画面で見て反時計回り）"));
+        CHECK(!HasLine(l, "求められませんでした") && !HasLine(l, "傾き 約") && !HasLine(l, "高さ +"));
+        for (const auto& line : l) CHECK(Plain(line));
+        auto with_pose = f;
+        with_pose.display.has_motion = true;
+        const auto m = RecalibrationResultLines(with_pose);
+        CHECK(HasLine(m, "A に対する B の位置の変化: 図面の右へ約 42 mm") && !HasLine(m, "大まかな探索で見た"));
+        // Not moved at all, and a turn that is too small to say.
+        f.display.start_motion.camera_motion_mm = {0.0, 0.0};
+        f.display.start_motion.rotation_clockwise_deg = 0.0;
+        CHECK(HasLine(RecalibrationResultLines(f), "（目安。傾きと高さは測っていません）: 位置はほとんど変わっていません") && !HasLine(RecalibrationResultLines(f), "回り"));
+        // No guide, no motion: the old line, as before.
+        f.display.has_start_motion = false;
+        CHECK(HasLine(RecalibrationResultLines(f), "A に対する B の位置: 求められませんでした"));
+    }
+    // The rows that B does not see: the edge and the amount, in the raster's own pixel pitch; no line when nothing is missing.
+    {
+        auto f = facts;
+        CHECK(!HasLine(RecalibrationResultLines(f), "B が写っていない所"));
+        auto& s = f.display.target_cover_shortfall;
+        s.present = true; s.rows_bottom = 26; s.bottom_mm = 2.6;
+        CHECK(HasLine(RecalibrationResultLines(f), "B が写っていない所: 合成の範囲の下の端から約 2.6 mm"));
+        s.rows_top = 37; s.top_mm = 3.7;
+        CHECK(HasLine(RecalibrationResultLines(f), "B が写っていない所: 合成の範囲の上の端から約 3.7 mm、下の端から約 2.6 mm"));
+        s.rows_bottom = 0; s.bottom_mm = 0;
+        CHECK(HasLine(RecalibrationResultLines(f), "B が写っていない所: 合成の範囲の上の端から約 3.7 mm") && !HasLine(RecalibrationResultLines(f), "下の端から"));
+        s.all_rows = true; s.rows_top = s.rows_bottom = 1600; s.top_mm = s.bottom_mm = 160;
+        CHECK(HasLine(RecalibrationResultLines(f), "B が写っていない所: 合成の範囲のすべての行"));
+        s.all_rows = false; s.rows_top = s.rows_bottom = 0; s.top_mm = s.bottom_mm = 0;   // no column in common: no rows to count
+        CHECK(!HasLine(RecalibrationResultLines(f), "B が写っていない所"));
+        s.present = false;
+        for (const auto& line : RecalibrationResultLines(f)) CHECK(Plain(line));
+    }
+    // The raster's height and edges, when the raster follows the cover up or down: the amount that is not in the composite any more is said.
+    {
+        auto f = facts;
+        f.display.top_previous_mm = 100.0; f.display.bottom_previous_mm = 260.0; f.display.top_new_mm = 100.0; f.display.bottom_new_mm = 260.0;
+        CHECK(HasLine(RecalibrationResultLines(f), "合成の画像の大きさ: 幅 1800 → 2220 画素（右の端が約 42 mm 広がります）、高さは同じ") && !HasLine(RecalibrationResultLines(f), "合成に入りません"));
+        f.display.height_new_px = 1473; f.display.bottom_new_mm = 242.0;
+        CHECK(HasLine(RecalibrationResultLines(f), "高さ 1600 → 1473 画素（下の端が約 18 mm 上へ移り、図面の下の約 18 mm は合成に入りません）"));
+        f.display.top_new_mm = 106.0;
+        CHECK(HasLine(RecalibrationResultLines(f), "高さ 1600 → 1473 画素（上の端が約 6 mm 下へ移り、図面の上の約 6 mm は合成に入りません、下の端が約 18 mm 上へ移り、図面の下の約 18 mm は合成に入りません）"));
+        f.display.height_new_px = 1700; f.display.top_new_mm = 90.0; f.display.bottom_new_mm = 265.0;
+        const auto grown = RecalibrationResultLines(f);
+        CHECK(HasLine(grown, "高さ 1600 → 1700 画素（上の端が約 10 mm 上へ広がります、下の端が約 5 mm 下へ広がります）") && !HasLine(grown, "合成に入りません"));
+        for (const auto& line : grown) CHECK(Plain(line));
+        // A refusal before the plan was whole shows no raster line, edges or not.
+        f.display.has_new = false;
+        CHECK(!HasLine(RecalibrationResultLines(f), "高さ 1600") && !HasLine(RecalibrationResultLines(f), "合成の画像の大きさ"));
+    }
+    // The tilt or the height over its line, beside an estimate that did not hold: the estimate's reason (a sheet that is not flat) is a symptom, and the
+    // line says what comes first. Without the tilt the estimate's own sentence stays.
+    {
+        const RecalibrationFinding estimate{FindingClass::no_candidate, "estimate-not-verified", "residual-shape"};
+        for (const char* over : {"tilt-exceeded", "height-exceeded"}) {
+            const RecalibrationFinding pose{FindingClass::rejected, over, {}};
+            for (const auto& findings : {std::vector<RecalibrationFinding>{pose, estimate}, std::vector<RecalibrationFinding>{estimate, pose}}) {
+                const auto screen = RecalibrationFindingLines(findings);
+                CHECK(screen.size() == 2);
+                const auto& said = screen[findings.front().code == "estimate-not-verified" ? 0 : 1];
+                CHECK(Has(said, "カメラの向きか高さの変化が許容を超えているため、細かい合わせも確かな値になりませんでした") && Has(said, "チャートでの校正") && !Has(said, "浮いている") && !Has(said, "机に直に"));
+                CHECK(Has(screen[findings.front().code == "estimate-not-verified" ? 1 : 0], "チャートでの校正が要ります"));   // the tilt's own line is untouched
+                CHECK(Plain(screen[0]) && Plain(screen[1]));
+            }
+        }
+        const auto alone = RecalibrationFindingLines({estimate});
+        CHECK(alone.size() == 1 && Has(alone.front(), "紙が浮いているか") && Has(alone.front(), "机に直に平らに置いて撮り直してください"));
+        // The estimate of another kind of refusal is not changed either.
+        CHECK(RecalibrationFindingLines({{FindingClass::rejected, "tilt-exceeded", {}}, {FindingClass::rejected, "creation-check-failed", {}}}).size() == 2);
+        // The sentence of the finding itself does not depend on its neighbours (the screen's lines do).
+        CHECK(Has(RecalibrationFindingSentence(estimate).reason, "浮いている"));
     }
     // The gate in each of its states: what it measured is always beside the verdict.
     {

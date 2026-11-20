@@ -119,11 +119,35 @@ double Value(const RowMargins& m,Kind k){return k==Kind::seam_left?m.seam_left:k
 // of the seam margins (a) and not of (b), which is made at pi = 0 (design 11.23.2).
 constexpr int kAxes=9;
 struct Ranges {double position_mm{},tilt_deg{},rotation_deg{},height_percent{},surface_height_mm{},surface_slope{};bool surface{};};
-struct Offset {double tx{},ty{},rx{},ry{},rz{},tz{},h0{},gx{},gy{};};
+using Offset=CreationOffsetV3;
 PoseParameters Moved(const PoseParameters& base,const Offset& o){
     return {base.rx_deg+o.rx,base.ry_deg+o.ry,base.rz_deg+o.rz,base.tx_mm+o.tx,base.ty_mm+o.ty,base.tz_percent+o.tz};
 }
 SurfacePlane SurfaceOf(const Offset& o){SurfacePlane s;s.h0_mm=o.h0;s.slope_x=o.gx;s.slope_y=o.gy;return s;}
+Ranges RangesOf(const FixedCompositeConditionV3& c){
+    Ranges ranges{c.registration.envelope.position_mm,c.registration.envelope.tilt_deg,c.registration.envelope.rotation_deg,c.registration.envelope.height_percent};
+    if(c.registration.surface_envelope){
+        ranges.surface=true;ranges.surface_height_mm=c.registration.surface_envelope->height_mm;
+        ranges.surface_slope=std::tan(c.registration.surface_envelope->tilt_deg*std::numbers::pi/180);
+    }
+    return ranges;
+}
+// The offset of one end of one axis of the range: the end of the axis at which a row without cover is named in a refusal.
+Offset AxisOffset(const Ranges& ranges,int axis,double sign){
+    Offset o;
+    switch(axis){
+    case 0:o.tx=sign*ranges.position_mm;break;
+    case 1:o.ty=sign*ranges.position_mm;break;
+    case 2:o.rx=sign*ranges.tilt_deg;break;
+    case 3:o.ry=sign*ranges.tilt_deg;break;
+    case 4:o.rz=sign*ranges.rotation_deg;break;
+    case 5:o.tz=sign*ranges.height_percent;break;
+    case 6:o.h0=sign*ranges.surface_height_mm;break;
+    case 7:o.gx=sign*ranges.surface_slope;break;
+    default:o.gy=sign*ranges.surface_slope;break;
+    }
+    return o;
+}
 struct Lines {
     std::vector<RowMargins> centre;
     // For each row and kind: the signed half-differences (m(+r) - m(-r)) / 2 along each axis (a disc counts as two axes).
@@ -236,11 +260,7 @@ std::uint32_t CountUncoveredEdge(const MappedFixedSeamInput& input){
 struct Counters {std::uint32_t blocks=0,enumerated_blocks=0;std::uint32_t rows_verified=0;};
 
 void CheckPoseRange(const Context& ctx,const FixedCompositeConditionV3& c,double lift_cap_px,CreationCheckDetailsV3* details){
-    Ranges ranges{c.registration.envelope.position_mm,c.registration.envelope.tilt_deg,c.registration.envelope.rotation_deg,c.registration.envelope.height_percent};
-    if(c.registration.surface_envelope){
-        ranges.surface=true;ranges.surface_height_mm=c.registration.surface_envelope->height_mm;
-        ranges.surface_slope=std::tan(c.registration.surface_envelope->tilt_deg*std::numbers::pi/180);
-    }
+    const Ranges ranges=RangesOf(c);
     const PoseParameters base=c.base_pose;
     const std::uint32_t h=ctx.height;
     Lines lines;
@@ -248,27 +268,12 @@ void CheckPoseRange(const Context& ctx,const FixedCompositeConditionV3& c,double
     for(std::uint32_t y=0;y<h;++y)
         if(!lines.centre[y].ok)Reject("row "+std::to_string(y)+": the seam column is not covered by both cameras at the base pose");
     lines.half_difference.assign(h,{});
-    const auto axis_offset=[&](int axis,double sign){
-        Offset o;
-        switch(axis){
-        case 0:o.tx=sign*ranges.position_mm;break;
-        case 1:o.ty=sign*ranges.position_mm;break;
-        case 2:o.rx=sign*ranges.tilt_deg;break;
-        case 3:o.ry=sign*ranges.tilt_deg;break;
-        case 4:o.rz=sign*ranges.rotation_deg;break;
-        case 5:o.tz=sign*ranges.height_percent;break;
-        case 6:o.h0=sign*ranges.surface_height_mm;break;
-        case 7:o.gx=sign*ranges.surface_slope;break;
-        default:o.gy=sign*ranges.surface_slope;break;
-        }
-        return o;
-    };
     constexpr const char* kAxisName[kAxes]{"the x position","the y position","the x tilt","the y tilt","the rotation","the height","the paper height","the paper slope in x","the paper slope in y"};
     constexpr const char* kAxisUnit[kAxes]{" mm"," mm"," deg"," deg"," deg"," %"," mm",""," (slope = tan of the tilt)"};
     const std::array<double,kAxes> axis_end{ranges.position_mm,ranges.position_mm,ranges.tilt_deg,ranges.tilt_deg,ranges.rotation_deg,ranges.height_percent,
         ranges.surface_height_mm,ranges.surface_slope,ranges.surface_slope};
     for(int axis=0;axis<(ranges.surface?kAxes:6);++axis){
-        const auto up=axis_offset(axis,+1),down=axis_offset(axis,-1);
+        const auto up=AxisOffset(ranges,axis,+1),down=AxisOffset(ranges,axis,-1);
         const auto plus=MarginsOfRows(ctx,Moved(base,up),SurfaceOf(up)),minus=MarginsOfRows(ctx,Moved(base,down),SurfaceOf(down));
         for(std::uint32_t y=0;y<h;++y){
             // A row that has no cover at the seam at the end of one axis is a failure of the range itself: that point is inside it.
@@ -332,6 +337,18 @@ void CheckPoseRange(const Context& ctx,const FixedCompositeConditionV3& c,double
 FixedCompositeCreationCheckV3 MakeFixedCompositeCreationCheckV3(CreationCheckDetailsV3* details){
     return MakeFixedCompositeCreationCheckV3(details,CreationCheckOptionsV3{});
 }
+
+std::vector<CreationOffsetV3> CreationRangeVerticesV3(const FixedCompositeConditionV3& c,bool with_surface){
+    return Vertices(RangesOf(c),with_surface);
+}
+std::vector<CreationOffsetV3> CreationRangeAxisEndsV3(const FixedCompositeConditionV3& c){
+    const auto ranges=RangesOf(c);
+    std::vector<CreationOffsetV3> ends;
+    for(int axis=0;axis<(ranges.surface?kAxes:6);++axis){ends.push_back(AxisOffset(ranges,axis,+1));ends.push_back(AxisOffset(ranges,axis,-1));}
+    return ends;
+}
+content_registration::PoseParameters CreationOffsetPoseV3(const content_registration::PoseParameters& base,const CreationOffsetV3& offset){return Moved(base,offset);}
+SurfacePlane CreationOffsetSurfaceV3(const CreationOffsetV3& offset){return SurfaceOf(offset);}
 
 FixedCompositeCreationCheckV3 MakeFixedCompositeCreationCheckV3(CreationCheckDetailsV3* details,const CreationCheckOptionsV3& options){
     return [details,options](const FixedCompositeConditionV3& c,const FixedCompositeProfileBinding& binding){

@@ -70,7 +70,8 @@ enum class RecalibrationStage {read_condition,decode,wide_search,fine_fit,bake,c
 }
 
 // ---- What was found, and how it counts ----
-//  no_candidate  nothing could be proposed (no overlap, no position that holds, a stop, a file that cannot be read)
+//  no_candidate  nothing could be proposed (no overlap, a raster that the target camera does not cover, no position that holds, a stop,
+//                a file that cannot be read)
 //  rejected      a calibration was made and then checked, and the check says it does not fit (or the check itself refused it)
 //  unverified    a calibration was made and the check could not be made (the marks were too few to measure). Only this class can be
 //                confirmed, with a warning, and only when the policy allows it.
@@ -153,12 +154,30 @@ struct RecalibrationSentence {std::string reason,remedy;};
     if(c=="out-of-memory")return {"メモリが足りませんでした","他のアプリを閉じてから、撮り直してください。前の校正のままです"};
     if(c=="job-failed")return {"校正の計算が途中で失敗しました","撮り直してください。続く時は技術担当へ知らせてください。前の校正のままです"};
     // The computation's refusals.
-    if(c=="no-overlap")return {"左右の重なりが見つかりません","継ぎ目のあたりに文字や線がある紙を置いて撮り直してください。カメラの間が広すぎて重なりが無い事もあります"};
+    // `no-overlap` is the wide search's alone: it did not find the overlap of the two photographs. The reason is the wide search's.
+    if(c=="no-overlap"){
+        if(r=="tied-starts")return {"重なりの位置の候補が 2 つあり、1 つに決まりません","繰り返しの少ない、文字や図形の多い紙で撮り直してください"};
+        if(r=="fit-failed")return {"重なりは見つかりましたが、位置の当てはめが成り立ちませんでした","紙を替えて撮り直してください。続く時は技術担当へ知らせてください"};
+        if(r=="prior-rejected")return {"今の校正から、重なりの見当を作れませんでした","技術担当へ知らせてください"};
+        return {"2 台の写真に、重なっている所が見つかりません","継ぎ目のあたりに文字や線がある紙を置いて撮り直してください。カメラの間隔を広げすぎた時にも起きます"};
+    }
+    // The overlap was found, but the raster that is made from it has rows that the target camera does not see. The numbers are in the lines
+    // of the result (the place of B against A, and the rows that are missing).
+    if(c=="band-uncovered"){
+        const std::string remedy="カメラの上下の位置を元に近づけて撮り直してください（ずれた向きと量は「位置の変化」の行にあります）";
+        if(r=="bottom")return {"A に対する B の位置が上下にずれて、合成の範囲の下の端を B が写していません",remedy};
+        if(r=="top")return {"A に対する B の位置が上下にずれて、合成の範囲の上の端を B が写していません",remedy};
+        if(r=="top-and-bottom")return {"A に対する B の位置が上下にずれて、合成の範囲の上と下の端を B が写していません",remedy};
+        if(r=="all-rows")return {"A に対する B の位置が大きく変わり、合成の範囲のどの行にも B が写っていません","カメラの位置を元に近づけて撮り直してください"};
+        if(r=="no-common-column")return {"B が回っていて、上から下まで両方のカメラに写る縦の帯が取れません","カメラの回りを元に近づけて撮り直してください"};
+        return {"合成の範囲の一部を B が写していません","カメラの位置を元に近づけて撮り直してください"};
+    }
+    if(c=="range-collapsed")return {"A に対する B の位置が大きく変わり、合成の範囲の幅が無くなります","カメラの位置を元に近づけて撮り直してください。続く時は技術担当へ知らせてください"};
     if(c=="estimate-failed")return {"位置の計算が成り立ちませんでした","紙を替えて撮り直してください"};
     if(c=="estimate-not-verified")return RecalibrationEstimateReasonSentence(r);
     if(c=="tilt-exceeded")return {"カメラの向きが変わったようです（傾きが許容を超えています）","チャートでの校正が要ります。技術担当へ知らせてください"};
     if(c=="height-exceeded")return {"カメラの高さ、ピント、ズームのどれかが変わったようです","チャートでの校正が要ります。高さとピントリングとズームは触らないでください"};
-    if(c=="creation-check-failed")return {"カメラの間隔が広すぎて、撮るたびの自動の合わせ込みの範囲では継ぎ目を保てません","間隔を少し狭めてください"};
+    if(c=="creation-check-failed")return {"カメラの位置の変化が大きく、撮るたびの自動の合わせ込みの範囲では継ぎ目を保てません","カメラの間隔や上下の位置を元に近づけてください（向きと量は「位置の変化」の行にあります）"};
     if(c=="raster-too-large")return {"合成の画像が大きすぎます","間隔を少し狭めてください"};
     if(c=="raster-outside-sheet")return {"合成の範囲が、校正が想定する用紙の外に出ます","間隔を少し狭めてください"};
     if(c=="profile-invalid")return {"新しい校正を組み立てられませんでした","撮り直してください。続く時は技術担当へ知らせてください"};
@@ -230,6 +249,13 @@ inline std::string Signed(double value,Unit unit){
     return std::string(value<0?"-":"+")+text;
 }
 
+// Left-right and up-down are told apart: the person compares each with the way the cameras were moved.
+inline std::string DirectionText(double right_mm,double down_mm){
+    std::string text=Present(right_mm)?"図面の"+std::string(right_mm>0?"右":"左")+"へ"+Approx(right_mm,Unit::mm):std::string("左右はほぼ同じ");
+    text+="、";
+    text+=Present(down_mm)?"上下は"+std::string(down_mm>0?"下":"上")+"へ"+Approx(down_mm,Unit::mm):std::string("上下はほぼ同じ");
+    return text;
+}
 // B's place against A, as the drawing shows it.
 inline std::string MotionLine(const a0::m2::experimental::recalibration::Display& d){
     if(!d.has_motion)return "A に対する B の位置: 求められませんでした";
@@ -237,17 +263,33 @@ inline std::string MotionLine(const a0::m2::experimental::recalibration::Display
     std::string text="A に対する B の位置の変化: ";
     if(!Present(d.pose.position_mm) && !Present(m.x) && !Present(m.y)){
         text+="位置はほとんど変わっていません";
-    }else{
-        // Left-right and up-down are told apart: the person compares each with the way the cameras were moved.
-        text+=Present(m.x)?"図面の"+std::string(m.x>0?"右":"左")+"へ"+Approx(m.x,Unit::mm):std::string("左右はほぼ同じ");
-        text+="、";
-        text+=Present(m.y)?"上下は"+std::string(m.y>0?"下":"上")+"へ"+Approx(m.y,Unit::mm):std::string("上下はほぼ同じ");
-    }
+    }else text+=DirectionText(m.x,m.y);
     const double turn=d.motion.rotation_clockwise_deg;
     if(std::isfinite(turn) && std::abs(turn)>=0.05)text+="、回り "+Approx(turn,Unit::deg)+"（画面で見て"+registration_text_detail::ClockwiseWord(turn)+"）";
     if(std::isfinite(d.pose.tilt_deg) && d.pose.tilt_deg>=0.05)text+="、傾き "+Approx(d.pose.tilt_deg,Unit::deg);
     if(std::isfinite(d.pose.height_percent) && std::abs(d.pose.height_percent)>=0.005)text+="、高さ "+Signed(d.pose.height_percent,Unit::percent);
     return text;
+}
+// Where the wide search saw B against A. The fine stage did not give a pose (it did not run, or it was not sure), so this is what there
+// is to show; the wide search does not measure the tilt or the height, and the line says so.
+inline std::string StartMotionLine(const a0::m2::experimental::recalibration::Display& d){
+    if(!d.has_start_motion)return {};
+    const auto& m=d.start_motion.camera_motion_mm;
+    std::string text="大まかな探索で見た、A に対する B の位置の変化（目安。傾きと高さは測っていません）: ";
+    text+=Present(m.x) || Present(m.y)?DirectionText(m.x,m.y):std::string("位置はほとんど変わっていません");
+    const double turn=d.start_motion.rotation_clockwise_deg;
+    if(std::isfinite(turn) && std::abs(turn)>=0.05)text+="、回り "+Approx(turn,Unit::deg)+"（画面で見て"+registration_text_detail::ClockwiseWord(turn)+"）";
+    return text;
+}
+// The rows of the raster in which B is not seen (the screen's sentence names the edge; this gives the amount).
+inline std::string ShortfallLine(const a0::m2::experimental::recalibration::Display& d){
+    const auto& f=d.target_cover_shortfall;
+    if(!f.present)return {};
+    if(f.all_rows)return "B が写っていない所: 合成の範囲のすべての行";
+    std::string parts;
+    if(f.rows_top>0)parts+="上の端から"+Approx(f.top_mm,Unit::mm);
+    if(f.rows_bottom>0)parts+=std::string(parts.empty()?"":"、")+"下の端から"+Approx(f.bottom_mm,Unit::mm);
+    return parts.empty()?std::string{}:"B が写っていない所: 合成の範囲の"+parts;
 }
 inline std::string SeamLine(const a0::m2::experimental::recalibration::Display& d){
     if(!d.has_new)return {};   // the new side is not whole (a refusal before the plan was made): there is no new seam to speak of
@@ -261,7 +303,16 @@ inline std::string RasterLine(const a0::m2::experimental::recalibration::Display
     const double grown=d.right_new_mm-d.right_previous_mm;
     std::string text="合成の画像の大きさ: 幅 "+std::to_string(d.width_previous_px)+" → "+std::to_string(d.width_new_px)+" 画素";
     if(Present(grown))text+="（右の端が"+Approx(grown,Unit::mm)+(grown>0?" 広がります":" 狭まります")+"）";
-    text+=d.height_previous_px==d.height_new_px?"、高さは同じ":"、高さ "+std::to_string(d.height_previous_px)+" → "+std::to_string(d.height_new_px)+" 画素";
+    // The top and the bottom of the raster move when it follows the cover of the target camera up or down: what is left of the drawing
+    // outside the raster is said in mm, because it is not in the composite any more.
+    const double top=d.top_new_mm-d.top_previous_mm,bottom=d.bottom_new_mm-d.bottom_previous_mm;
+    if(d.height_previous_px==d.height_new_px && !Present(top) && !Present(bottom))return text+"、高さは同じ";
+    text+="、高さ "+std::to_string(d.height_previous_px)+" → "+std::to_string(d.height_new_px)+" 画素";
+    std::string moved;
+    const auto say=[&](const std::string& part){moved+=(moved.empty()?"":"、")+part;};
+    if(Present(top))say(top>0?"上の端が"+Approx(top,Unit::mm)+" 下へ移り、図面の上の"+Approx(top,Unit::mm)+" は合成に入りません":"上の端が"+Approx(top,Unit::mm)+" 上へ広がります");
+    if(Present(bottom))say(bottom<0?"下の端が"+Approx(bottom,Unit::mm)+" 上へ移り、図面の下の"+Approx(bottom,Unit::mm)+" は合成に入りません":"下の端が"+Approx(bottom,Unit::mm)+" 下へ広がります");
+    if(!moved.empty())text+="（"+moved+"）";
     return text;
 }
 inline std::string GateLine(const RecalibrationGateFacts& g){
@@ -299,7 +350,8 @@ inline std::string GateLine(const RecalibrationGateFacts& g){
     // The hand adjustment in force was beyond the range (the reader says "roll back, or calibrate again"; this is the second): the changes
     // below are counted from the profile's own placement, not from that adjustment.
     if(d.previous_outside_envelope)add("前の手直しは範囲の外だったため、校正の位置からの変化を出します");
-    add(MotionLine(d));
+    add(d.has_motion || !d.has_start_motion?MotionLine(d):StartMotionLine(d));
+    add(ShortfallLine(d));
     if(d.has_overlap)add("重なりの幅: いちばん狭い行で"+Approx(d.narrowest_overlap_mm,Unit::mm));
     add(SeamLine(d));
     add(RasterLine(d));
@@ -323,9 +375,14 @@ inline std::string GateLine(const RecalibrationGateFacts& g){
     return {};
 }
 [[nodiscard]] inline std::vector<std::string> RecalibrationFindingLines(const std::vector<RecalibrationFinding>& findings){
+    // When the tilt or the height is over its line, the estimator's own reason (a sheet that is not flat, say) is a symptom of that, and
+    // a better sheet would not help: the line says what comes first instead of sending the person to the paper.
+    const bool pose_over_line=std::any_of(findings.begin(),findings.end(),[](const RecalibrationFinding& f){return f.code=="tilt-exceeded" || f.code=="height-exceeded";});
     std::vector<std::string> lines;
     for(const auto& finding:findings){
-        const auto sentence=RecalibrationFindingSentence(finding);
+        auto sentence=RecalibrationFindingSentence(finding);
+        if(pose_over_line && finding.code=="estimate-not-verified")
+            sentence={"カメラの向きか高さの変化が許容を超えているため、細かい合わせも確かな値になりませんでした","この変化への対処（チャートでの校正）を先にしてください"};
         lines.push_back(sentence.reason+"。"+sentence.remedy);
     }
     return lines;

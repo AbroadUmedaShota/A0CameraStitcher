@@ -120,6 +120,27 @@ LoadedFixedCompositeConditionV3 MakeV3(const LoadedFixedCompositeConditionV2& v2
     return LoadedFixedCompositeConditionV3{v3,std::string(64,'d'),v2.profile};
 }
 
+// The condition of a recalibration of a camera that moved up or down (#439): the rows that camera B no longer sees are given up at the top and
+// at the bottom, so the top edge and the height are not the parent's, and camera B's matrix is the pose's, baked into the profile. The
+// numbers are this test's.
+// `bottom_um` is the new bottom edge: 135050 gives a height of exactly 290 rows of the pixel pitch; 135013 is not a whole number of rows, so the
+// last row of the JPEG's grid is cut by the bottom edge (the height is the ceiling, as a recalibration's raster has it).
+enum class Shortened {none,whole_rows,part_row};
+LoadedFixedCompositeConditionV3 MakeShortenedV3(const LoadedFixedCompositeConditionV2& v2,Shortened how){
+    auto v3=MakeV3(v2,Pose{},true);
+    const auto& old=v3.condition.raster;
+    // A top edge that is not a whole row of the parent's grid (106.05 mm of the 100 mm).
+    const std::int64_t top=106050,bottom=how==Shortened::part_row?135013:135050;
+    const auto height=static_cast<std::uint32_t>(((bottom-top)*static_cast<std::int64_t>(old.dpi)+25399)/25400);
+    const render::OutputRaster shorter(render::DocumentRegionUm{old.region_um.left,top,old.region_um.right,bottom},old.dpi,old.width_pixels,height);
+    render::ValidateOutputRaster(shorter);
+    auto camera_b=v3.profile.parameters.camera_b;
+    camera_b.document_to_image=content_registration::PoseModel(camera_b).CameraHomography(Pose{0.1,-0.05,0.2,3.0,-4.5,0.3});
+    v3.condition.raster=shorter;
+    v3.profile.parameters=render::DocumentRenderParameters(shorter,v3.profile.parameters.camera_a,camera_b,v3.profile.parameters.layout,v3.profile.parameters.resampling);
+    return v3;
+}
+
 bool SamePoint(const render::Point& a,const render::Point& b){return a.x==b.x && a.y==b.y;}
 // The two mappings give the same answer, bit for bit, at every pixel of the grid (including where there is none).
 bool SameTables(const FixedPreviewPlan& a,const FixedPreviewPlan& b,bool camera_a,bool camera_b){
@@ -217,12 +238,16 @@ void BasePose(const char* label,const LoadedFixedCompositeConditionV2& v2,MountO
 }
 
 // The mapping at the scale of the capture is S1's: the same function for the same pixel, bit for bit.
-void SameAsTheMaker(const LoadedFixedCompositeConditionV2& v2){
-    const auto v3=MakeV3(v2,Pose{},true);
+void SameAsTheMaker(const LoadedFixedCompositeConditionV2& v2,Shortened shortened=Shortened::none){
+    const auto v3=shortened!=Shortened::none?MakeShortenedV3(v2,shortened):MakeV3(v2,Pose{},true);
+    if(shortened!=Shortened::none)CHECK(v3.condition.raster.region_um.top!=v2.condition.raster.region_um.top && v3.condition.raster.height_pixels!=v2.condition.raster.height_pixels);
     const auto& profile=v3.profile.parameters;
     const auto& raster=v3.condition.raster;
     const auto grid=MakeFixedPreviewGrid(raster,1.0);
-    CHECK(grid.pitch_mm==25.4/raster.dpi && grid.width==raster.width_pixels && grid.height==raster.height_pixels);
+    // The grid counts whole samples (the floor) and the JPEG's raster the ceiling: with a bottom edge inside a row the grid has one row
+    // fewer, the part of a row below its last sample being drawn in the JPEG only (the same for every condition, before and after #439).
+    const std::uint32_t rows=shortened==Shortened::part_row?raster.height_pixels-1:raster.height_pixels;
+    CHECK(grid.pitch_mm==25.4/raster.dpi && grid.width==raster.width_pixels && grid.height==rows);
     const RegisteredMapping fixed{Pose{},{},std::nullopt};
     const LiveRegistrationContext context(profile,raster,v3.condition.seam.column,grid,1.0,1.0,7360,4912,false,fixed);
     const content_registration::PoseModel model(profile.camera_b);
@@ -249,8 +274,10 @@ void SameAsTheMaker(const LoadedFixedCompositeConditionV2& v2){
 
 // At the scale of the live view, C's pixel (x,y) is the JPEG's output at the same point of the drawing: the S1 maker called at the
 // fractional output coordinate, scaled by s. That fixes the convention (centres at +0.5, raw*s, the turn) against the maker's.
-void SameConventionAsTheJpeg(const char* label,const LoadedFixedCompositeConditionV2& v2,MountOrientation orientation){
-    const auto v3=MakeV3(v2,Pose{},true);
+void SameConventionAsTheJpeg(const char* label,const LoadedFixedCompositeConditionV2& v2,MountOrientation orientation,Shortened shortened=Shortened::none){
+    const auto v3=shortened!=Shortened::none?MakeShortenedV3(v2,shortened):MakeV3(v2,Pose{},true);
+    if(shortened!=Shortened::none)CHECK(v3.condition.raster.region_um.top!=v2.condition.raster.region_um.top && v3.condition.raster.height_pixels!=v2.condition.raster.height_pixels);
+    if(shortened==Shortened::part_row)CHECK((v3.condition.raster.region_um.bottom-v3.condition.raster.region_um.top)%100!=0);
     const auto& profile=v3.profile.parameters;
     const auto& raster=v3.condition.raster;
     const content_registration::PoseModel model(profile.camera_b);
@@ -261,22 +288,30 @@ void SameConventionAsTheJpeg(const char* label,const LoadedFixedCompositeConditi
         const auto plan=PlanFixedPreviewV3(v3,orientation,view.first,view.second);
         Check(!plan.skip && plan.live,label);
         if(plan.skip || !plan.live)continue;
-        const double s=plan.scale_x,pitch_jpeg=25.4/raster.dpi;
+        // The drawing's point of C's pixel is worked out from the condition's raster (its edges and DPI) and the view's scale, not from the
+        // grid that the plan made: a grid that is off the raster by any amount is a failure here.
+        const double s=plan.scale_x,pitch_jpeg=25.4/raster.dpi,pitch_live=pitch_jpeg/s;
+        const double left_mm=raster.region_um.left/1000.0,top_mm=raster.region_um.top/1000.0;
         for(const auto& mapping:mappings){
             const auto mine=LiveViewRegisteredOutputToCamera(*plan.live,mapping);
             const auto jpeg=RegisteredDocumentOutputToCamera(raster,profile.camera_a,profile.camera_b,model,mapping,v3.condition.seam.column);
-            double worst=0;int n=0;
-            for(std::uint32_t y=0;y<plan.output_height;y+=3)for(std::uint32_t x=0;x<plan.output_width;x+=3){
+            // On the shortened rasters the live grid is small: every point of it is compared, and none may be passed over (a point that one of
+            // the two cannot map is a failure there, not a point left out).
+            const std::uint32_t stride=shortened!=Shortened::none?1:3;
+            double worst=0;int n=0,picked=0;
+            for(std::uint32_t y=0;y<plan.output_height;y+=stride)for(std::uint32_t x=0;x<plan.output_width;x+=stride){
+                ++picked;
                 // The same document point in the JPEG's output coordinates.
-                const render::Point at{(plan.grid.left_mm+(x+.5)*plan.grid.pitch_mm-raster.region_um.left/1000.0)/pitch_jpeg-.5,
-                    (plan.grid.top_mm+(y+.5)*plan.grid.pitch_mm-raster.region_um.top/1000.0)/pitch_jpeg-.5};
+                const render::Point drawing{left_mm+(x+.5)*pitch_live,top_mm+(y+.5)*pitch_live};
+                const render::Point at{(drawing.x-left_mm)/pitch_jpeg-.5,(drawing.y-top_mm)/pitch_jpeg-.5};
                 render::Point raw{},live{};
                 if(!jpeg(at,raw) || !mine({double(x),double(y)},live))continue;
                 render::Point want{raw.x*s,raw.y*plan.scale_y};
                 if(orientation==MountOrientation::rotated_180)want={(view.first-1.0)-want.x,(view.second-1.0)-want.y};
                 worst=std::max(worst,std::hypot(want.x-live.x,want.y-live.y));++n;
             }
-            Check(n>100 && worst<1e-6,label);
+            if(shortened!=Shortened::none)Check(n==picked && picked==static_cast<int>(plan.output_width*plan.output_height) && picked>0 && worst<1e-6,label);
+            else Check(n>100 && worst<1e-6,label);
         }
     }
 }
@@ -680,6 +715,14 @@ int main(int argc,char* argv[]){
                 SameAsTheMaker(n);
                 SameConventionAsTheJpeg("SameConventionAsTheJpeg normal",n,MountOrientation::normal);
                 SameConventionAsTheJpeg("SameConventionAsTheJpeg rotated-180",t,MountOrientation::rotated_180);
+                // The same two, on the condition that a recalibration makes when the rows at the top and the bottom are given up.
+                SameAsTheMaker(n,Shortened::whole_rows);
+                SameConventionAsTheJpeg("SameConventionAsTheJpeg shortened normal",n,MountOrientation::normal,Shortened::whole_rows);
+                SameConventionAsTheJpeg("SameConventionAsTheJpeg shortened rotated-180",t,MountOrientation::rotated_180,Shortened::whole_rows);
+                // A bottom edge inside a row of the JPEG's grid.
+                SameAsTheMaker(n,Shortened::part_row);
+                SameConventionAsTheJpeg("SameConventionAsTheJpeg part-row normal",n,MountOrientation::normal,Shortened::part_row);
+                SameConventionAsTheJpeg("SameConventionAsTheJpeg part-row rotated-180",t,MountOrientation::rotated_180,Shortened::part_row);
                 Rebake("Rebake normal",n,MountOrientation::normal);
                 Rebake("Rebake rotated-180",t,MountOrientation::rotated_180);
                 Difference(n);

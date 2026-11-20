@@ -11,6 +11,7 @@
 #include <array>
 #include <charconv>
 #include <cmath>
+#include <cstdlib>
 #include <iomanip>
 #include <limits>
 #include <locale>
@@ -203,13 +204,62 @@ void ValidateInputs(const Inputs& in,bool images){
 bool Stopped(const Inputs& in){return in.control.stop && in.control.stop();}
 void Announce(const Inputs& in,Stage stage){if(in.progress)in.progress(stage);}
 
-void Refuse(Proposal& p,Refusal reason,const std::string& detail){
+// `sub_reason` is the lower-level code of the refusal (Proposal::refusal_reason); the first one given for a refusal stays.
+void Refuse(Proposal& p,Refusal reason,const std::string& detail,const std::string& sub_reason={}){
     if(std::find(p.refusals.begin(),p.refusals.end(),reason)==p.refusals.end())p.refusals.push_back(reason);
     if(!detail.empty())p.detail+=(p.detail.empty()?"":"; ")+detail;
+    if(!sub_reason.empty())p.refusal_reason.emplace(reason,sub_reason);
+}
+
+// ---- The rows that the target camera does not see (Refusal::band_uncovered) ----
+// Whether both cameras have a sample somewhere on the row: the coarse scan of every 8th column and then every column that
+// MappedFixedSeamBand makes to find the run of a row, with the coverage rule of Covered. It never throws (a mapping that cannot be
+// evaluated is a column that is not covered).
+bool RowHasBothCameras(const render::OutputToCamera& a,const render::OutputToCamera& b,std::uint32_t width,std::uint32_t row){
+    const double y=static_cast<double>(row);
+    for(std::uint32_t x=0;x<width;x+=8)if(Covered(b,x,y) && Covered(a,x,y))return true;
+    for(std::uint32_t x=0;x<width;++x)if(x%8!=0 && Covered(b,x,y) && Covered(a,x,y))return true;
+    return false;
+}
+// The rows at the top and at the bottom of the raster in which the cameras do not both have a sample, counted inwards from each edge up
+// to the first row that has one. The distance of a row is the raster's pixel pitch.
+Display::TargetCoverShortfall UncoveredRows(const render::OutputToCamera& a,const render::OutputToCamera& b,const render::OutputRaster& raster,bool at_estimate){
+    Display::TargetCoverShortfall s;
+    s.present=true;s.at_estimate=at_estimate;
+    const std::uint32_t height=raster.height_pixels,width=raster.width_pixels;
+    std::uint32_t top=0;
+    while(top<height && !RowHasBothCameras(a,b,width,top))++top;
+    if(top==height){s.all_rows=true;s.rows_top=s.rows_bottom=height;}
+    else{
+        std::uint32_t bottom=0;
+        while(!RowHasBothCameras(a,b,width,height-1-bottom))++bottom;   // row `top` has them, so this ends
+        s.rows_top=top;s.rows_bottom=bottom;
+    }
+    const double pitch=25.4/raster.dpi;
+    s.top_mm=static_cast<double>(s.rows_top)*pitch;s.bottom_mm=static_cast<double>(s.rows_bottom)*pitch;
+    return s;
+}
+// No row of the raster has a sample of the target camera: nothing needs to be scanned.
+Display::TargetCoverShortfall AllRowsUncovered(const render::OutputRaster& raster,bool at_estimate){
+    Display::TargetCoverShortfall s;
+    s.present=true;s.at_estimate=at_estimate;s.all_rows=true;
+    s.rows_top=s.rows_bottom=raster.height_pixels;
+    const double mm=static_cast<double>(raster.height_pixels)*(25.4/raster.dpi);
+    s.top_mm=s.bottom_mm=mm;
+    return s;
+}
+// The lower-level reason of a band that cannot be taken: which edge of the raster the target camera misses, or, when every row has both
+// cameras, that no column is common to all rows.
+std::string BandReasonOf(const Display::TargetCoverShortfall& s){
+    if(s.all_rows)return "all-rows";
+    if(s.rows_top>0 && s.rows_bottom>0)return "top-and-bottom";
+    if(s.rows_top>0)return "top";
+    if(s.rows_bottom>0)return "bottom";
+    return "no-common-column";
 }
 
 render::OutputRaster RasterWithWidth(const render::OutputRaster& old,std::int64_t width){
-    if(width<1)throw RecalibrationRefused(Refusal::no_overlap,"the new raster would have no width");
+    if(width<1)throw RecalibrationRefused(Refusal::range_collapsed,"the new raster would have no width","no-width");
     if(width>static_cast<std::int64_t>(render::kMaximumImageDimension))
         throw RecalibrationRefused(Refusal::raster_too_large,"the new raster is wider than the render limit");
     // The largest extent (micrometres) whose ceiling at this DPI is `width` pixels.
@@ -225,6 +275,8 @@ render::OutputRaster RasterWithWidth(const render::OutputRaster& old,std::int64_
 std::string_view RefusalCode(Refusal refusal){
     switch(refusal){
     case Refusal::no_overlap:return "no-overlap";
+    case Refusal::band_uncovered:return "band-uncovered";
+    case Refusal::range_collapsed:return "range-collapsed";
     case Refusal::estimate_failed:return "estimate-failed";
     case Refusal::estimate_not_verified:return "estimate-not-verified";
     case Refusal::tilt_exceeded:return "tilt-exceeded";
@@ -476,23 +528,366 @@ ProfileFit FitInCameraPixels(const content_registration::RegistrationResult& est
 }
 
 // ===== The raster ============================================================================================================
-render::OutputRaster ProposeRaster(const FixedCompositeConditionV3& active,const FixedCompositeProfileBinding& parent,const PoseParameters& p_hat,RasterPlacement placement){
+namespace {
+// ---- The rows that camera B keeps seeing (RasterPlacement::follow_camera_b) ----
+// The outermost covered integer from `inside` (a covered one) towards `direction`, within [low,high], taking the covered positions around
+// `inside` to be one run: the step doubles until a position is not covered, then the integers in between are bisected.
+template<class Covers>
+long long OutermostCovered(const Covers& covers,long long inside,int direction,long long low,long long high){
+    long long good=inside,step=1;
+    for(;;){
+        long long x=good+direction*step;
+        if(x<low)x=low;else if(x>high)x=high;
+        if(x==good)return good;
+        if(covers(x)){good=x;step*=2;continue;}
+        long long bad=x;
+        while(std::llabs(bad-good)>1){
+            const long long middle=good+(bad-good)/2;
+            (covers(middle)?good:bad)=middle;
+        }
+        return good;
+    }
+}
+struct RowSpan {long long first{},last{};};   // rows first..last, both included
+
+// On each row of the raster, the run [first,end) of columns that A and B both cover: the one that holds the first covered column found
+// (the previous row's column, then every 8th from the left), walked to both ends. A row on which none is found is not `ok`.
+struct OverlapRuns {std::vector<bool> ok;std::vector<long long> first,end;};
+OverlapRuns OverlapOfRows(const render::OutputToCamera& a,const render::OutputToCamera& b,std::uint32_t width,std::uint32_t height){
+    constexpr long long kSeedStep=8;
+    OverlapRuns runs;runs.ok.assign(height,false);runs.first.assign(height,0);runs.end.assign(height,0);
+    const long long last_column=static_cast<long long>(width)-1;
+    long long hint=-1;
+    for(std::uint32_t y=0;y<height;++y){
+        const double row=static_cast<double>(y);
+        const auto both=[&](long long x){return Covered(b,static_cast<double>(x),row) && Covered(a,static_cast<double>(x),row);};
+        long long seed=-1;
+        if(hint>=0 && hint<=last_column && both(hint))seed=hint;
+        for(long long x=0;x<=last_column && seed<0;x+=kSeedStep)if(both(x))seed=x;
+        if(seed<0)continue;
+        hint=seed;
+        runs.first[y]=OutermostCovered(both,seed,-1,0,last_column);
+        runs.end[y]=OutermostCovered(both,seed,+1,0,last_column)+1;
+        runs.ok[y]=true;
+    }
+    return runs;
+}
+
+// The rows of `span` in which camera B covers `column` at every offset of the range around `pose`: for each offset, the run of rows around
+// the middle row of the raster (the covered rows of a column are one run), and the rows common to all of them. nullopt when an offset
+// does not cover the column at the middle row. Throws std::invalid_argument when a mapping cannot be made (a paper surface that is not
+// below both cameras).
+std::optional<RowSpan> RowsCoveredOverRange(const render::OutputRaster& raster,const render::CameraProjection& camera_a,const render::CameraProjection& camera_b,
+    const PoseModel& model_b,const PoseParameters& pose,const std::vector<CreationOffsetV3>& offsets,std::uint32_t seam_column,double column,RowSpan span){
+    const long long middle=(static_cast<long long>(raster.height_pixels)-1)/2;
+    for(const auto& offset:offsets){
+        RegisteredMapping mapping;
+        mapping.pose=CreationOffsetPoseV3(pose,offset);mapping.surface=CreationOffsetSurfaceV3(offset);
+        const auto map=RegisteredDocumentOutputToCamera(raster,camera_a,camera_b,model_b,mapping,seam_column);
+        const auto covers=[&](long long y){return Covered(map,column,static_cast<double>(y));};
+        if(middle<span.first || middle>span.last || !covers(middle))return std::nullopt;
+        span.first=OutermostCovered(covers,middle,-1,span.first,middle);
+        span.last=OutermostCovered(covers,middle,+1,middle,span.last);
+    }
+    return span;
+}
+
+// Whether, on every row of the raster, A covers the seam column and half the blend width beyond it and B covers the seam column, at the
+// base pose and at the two ends of every axis of the range: what the creation check refuses by name when it does not hold.
+bool SeamColumnCovered(const render::OutputRaster& raster,const render::CameraProjection& camera_a,const render::CameraProjection& camera_b,const PoseModel& model_b,
+    const std::vector<CreationOffsetV3>& offsets,std::uint32_t seam_column,double half){
+    const auto map_a=render::DocumentOutputToCamera(raster,camera_a);
+    for(const auto& offset:offsets){
+        RegisteredMapping mapping;
+        mapping.pose=CreationOffsetPoseV3(PoseParameters{},offset);mapping.surface=CreationOffsetSurfaceV3(offset);
+        const auto map_b=RegisteredDocumentOutputToCamera(raster,camera_a,camera_b,model_b,mapping,seam_column);
+        for(std::uint32_t y=0;y<raster.height_pixels;++y){
+            const double row=static_cast<double>(y),seam=static_cast<double>(seam_column);
+            if(!(Covered(map_b,seam,row) && Covered(map_a,seam,row) && Covered(map_a,seam+half,row)))return false;
+        }
+    }
+    return true;
+}
+
+// The cap on the paper lift in output pixels that the creation check holds the seam columns against (0 without layer 2).
+double LiftCapPx(const FixedCompositeConditionV3& active,const FixedCompositeProfileBinding& parent,const render::DocumentRenderParameters& moved){
+    if(!active.registration.parallax)return 0.0;
+    auto condition=active;condition.base_pose=PoseParameters{};
+    auto binding=parent;binding.parameters=moved;
+    const auto cap=active.registration.parallax->max_lift_mm*BaselineGeometryOfCondition(condition,binding).k_px_per_mm;
+    if(!std::isfinite(cap))throw std::invalid_argument("the lift cap is not finite");
+    return cap;
+}
+
+// ---- The right edge over the rows that are kept, by B's sides alone ----
+// The same doubling and bisection as EdgeSearch, over a predicate: the edge of the covered run that holds x0, in `direction`, or `limit`.
+template<class Covers>
+double EdgeOfRun(const Covers& covers,double x0,double direction,double limit){
+    double inside=x0,outside=x0,step=1;
+    for(;;){
+        const double x=x0+direction*step;
+        if((direction<0 && x<limit) || (direction>0 && x>limit))return limit;
+        if(!covers(x)){outside=x;break;}
+        inside=x;step*=2;
+    }
+    for(int i=0;i<kBisections;++i){
+        const double mid=(inside+outside)/2;
+        if(covers(mid))inside=mid;else outside=mid;
+    }
+    return inside;
+}
+// Whether the point is between the two sides of the camera's sensor that run across the rows of the drawing: the stored x only (the
+// stored y is not looked at). With the two mountings of the rig (normal and a half turn) the stored x runs along the drawing's x, so the
+// run of a row under this rule ends at B's left and right sides, never where B's upper or lower side crosses the row. A mounting whose
+// stored x runs along the drawing's y (a camera turned a quarter) would need the other side; RightSidesHold refuses to use it then.
+bool CoveredAcross(const render::OutputToCamera& map,double x,double y){
+    Point raw{};
+    try{if(!map({x,y},raw))return false;}
+    catch(const std::invalid_argument&){return false;}
+    if(!std::isfinite(raw.x) || !std::isfinite(raw.y))return false;
+    return raw.x>=0.0 && raw.x<static_cast<double>(kD810SensorWidthPixels);
+}
+// The right end of B's run on a row by its sides alone. The run is looked for from the position that RunOfRow starts from (a position B
+// covers by the whole rule), so that on a row whose run ends at B's right side the end is RunOfRow's, to the bit; on a row that B does
+// not cover at all, from the first position between its sides.
+std::optional<double> RightSideOfRow(const render::OutputToCamera& map,double y){
+    auto start=FindCovered(map,y,0.0);
+    for(double x=0;!start && x<kScanLimitPx;x+=kScanStepPx)if(CoveredAcross(map,x,y))start=x;
+    if(!start)return std::nullopt;
+    return EdgeOfRun([&](double x){return CoveredAcross(map,x,y);},*start,+1,kScanLimitPx);
+}
+
+// ---- How many rows the move of B allows to give up (the owner's decision: the height shrinks by what B moved up or down, no more) ----
+// The upper and the lower end, in rows of the raster (fractional), of the run of rows in which the camera covers `column`, from the middle row
+// outwards and up to one raster height beyond the raster on each side (the rows given up cannot be more than the raster's height, so what lies
+// further does not change the answer; it is not a line). nullopt when the middle row is not covered.
+struct ColumnEnds {double top{},bottom{};};
+std::optional<ColumnEnds> EndsOnColumn(const render::OutputToCamera& map,double column,std::uint32_t height){
+    const double middle=static_cast<double>((static_cast<long long>(height)-1)/2);
+    const auto covers=[&](double y){return Covered(map,column,y);};
+    if(!covers(middle))return std::nullopt;
+    const double h=static_cast<double>(height);
+    return ColumnEnds{EdgeOfRun(covers,middle,-1,-h),EdgeOfRun(covers,middle,+1,h-1.0+h)};
+}
+// The rows that may be given up at the top and at the bottom: how far B's upper and lower ends on the seam column moved between the parent
+// (its placement, its seam column) and `pose` (the leftmost column the new seam can take, `seam_column`), at the pose itself and not at the
+// vertices of the range around it, in whole rows rounded down. A turn of B moves its ends on the seam column too; that is counted as a move up
+// or down. nullopt when an end cannot be found: then nothing is given up.
+struct RowsAllowed {long long top{},bottom{};};
+std::optional<RowsAllowed> RowsAllowedByTheMove(const FixedCompositeConditionV3& active,const FixedCompositeProfileBinding& parent,const PoseParameters& pose,
+    double seam_column){
+    const auto& old=active.raster;
+    const PoseModel model_b(parent.parameters.camera_b);
+    const auto before=EndsOnColumn(PoseCorrectedDocumentOutputToCamera(old,parent.parameters.camera_b,model_b,ReferencePose(active)),static_cast<double>(active.seam.column),
+        old.height_pixels);
+    const auto after=EndsOnColumn(PoseCorrectedDocumentOutputToCamera(old,parent.parameters.camera_b,model_b,pose),seam_column,old.height_pixels);
+    if(!before || !after)return std::nullopt;
+    const auto rows=[](double moved){return static_cast<long long>(std::floor(std::max(0.0,moved)));};
+    return RowsAllowed{rows(after->top-before->top),rows(before->bottom-after->bottom)};
+}
+
+// The rows of the raster to keep when camera B has moved by `pose`, and how far the right edge then moves (pixels). nullopt when no row is
+// to be given up: the raster that the right edge alone gives stands (the check's own conditions hold on it, or B did not move up or down
+// at the seam, or the rows cannot be chosen); the caller then goes on with it and the later steps decide.
+//
+// The rows are first those that the creation check will hold, as far as its range reaches: the rows in which B covers the columns that the
+// seam and half the blend width (and the lift cap) can reach, at every vertex of the check's range around the new profile, and, when A does
+// not cover the new raster's last column on every one of them, the rows in which B covers that column at every vertex without the paper
+// surface. The vertices reach further than the check holds B (the check holds the disc, the vertices are the octagon around it, and it
+// counts them only where its linear prediction fails), so these rows can be fewer than the check needs: the rows given up are then brought
+// back to what B's move allows (RowsAllowedByTheMove). The check decides last.
+//
+// `ends` is the raster that the right edge alone gives, when it has a width: gate 1 looks at it. The rows are chosen on the raster in force,
+// whose columns do not depend on how far B's right edge has moved. The seam column of the new raster lies between `low` and `high`: the
+// middle of the band of the rows that have an overlap, taken over all of them (it cannot be further left) and over the rows that keep B at
+// the column on its left (it cannot be further right).
+struct RowsKept {RowSpan rows;std::int64_t right_move{};};
+std::optional<RowsKept> RowsBKeeps(const FixedCompositeConditionV3& active,const FixedCompositeProfileBinding& parent,const PoseParameters& pose,
+    const std::optional<render::OutputRaster>& ends,SeamPlacement seam_placement){
+    const auto& old=active.raster;
+    const std::uint32_t height=old.height_pixels,width=old.width_pixels;
+    const long long last_row=static_cast<long long>(height)-1;
+    const auto& camera_a=parent.parameters.camera_a;
+    auto moved_b=parent.parameters.camera_b;
+    moved_b.document_to_image=PoseModel(parent.parameters.camera_b).CameraHomography(pose);
+    const PoseModel model_moved(moved_b);
+    const double half=static_cast<double>((kSeamBlendDesign.width_pixels+1)/2-1);
+    const auto clamp_column=[&](long long column){return static_cast<std::uint32_t>(std::clamp<long long>(column,0,static_cast<long long>(width)-1));};
+    const bool keep_seam=seam_placement==SeamPlacement::keep_previous;
+    const auto cap=LiftCapPx(active,parent,render::DocumentRenderParameters(ends?*ends:old,camera_a,moved_b,parent.parameters.layout,parent.parameters.resampling));
+
+    // Gate 1: when the check's own named conditions hold on the raster that the right edge alone gives, nothing is given up. Its seam column
+    // is the one the candidate and the check take (the middle of the band, or the previous column); without a band on every row the gate is
+    // passed over (the check, which takes the band at the base pose, would refuse that raster).
+    if(ends){
+        std::optional<std::uint32_t> column;
+        if(keep_seam)column=active.seam.column;
+        else{
+            try{column=FixedCompositeProvisionalSeamColumn(render::DocumentRenderParameters(*ends,camera_a,moved_b,parent.parameters.layout,parent.parameters.resampling));}
+            catch(const std::invalid_argument&){column.reset();}
+        }
+        auto points=CreationRangeAxisEndsV3(active);
+        points.insert(points.begin(),CreationOffsetV3{});
+        if(column && *column<ends->width_pixels && SeamColumnCovered(*ends,camera_a,moved_b,model_moved,points,*column,half))return std::nullopt;
+    }
+
+    // The overlap of A and B on every row of the raster in force: the smallest of the run's ends over the rows that have one.
+    const auto runs=OverlapOfRows(render::DocumentOutputToCamera(old,camera_a),render::DocumentOutputToCamera(old,moved_b),width,height);
+    bool any_row=false;
+    long long smallest_first=std::numeric_limits<long long>::max(),smallest_end=std::numeric_limits<long long>::max();
+    for(std::uint32_t y=0;y<height;++y){
+        if(!runs.ok[y])continue;
+        any_row=true;
+        smallest_first=std::min(smallest_first,runs.first[y]);smallest_end=std::min(smallest_end,runs.end[y]);
+    }
+    if(!any_row)return std::nullopt;
+    const auto vertices=CreationRangeVerticesV3(active,true);
+    const long long low=keep_seam?static_cast<long long>(active.seam.column):(smallest_first+smallest_end)/2;
+    const double column_left=static_cast<double>(low)-half-cap;
+
+    auto rows=RowsCoveredOverRange(old,camera_a,moved_b,model_moved,PoseParameters{},vertices,clamp_column(low),column_left,RowSpan{0,last_row});
+    if(!rows)return std::nullopt;
+    // The rows that have an overlap, around the middle row (a row without one cannot be in a raster that has a band).
+    {
+        const long long middle=last_row/2;
+        if(!runs.ok[static_cast<std::size_t>(middle)])return std::nullopt;
+        long long first=middle,last=middle;
+        while(first>rows->first && runs.ok[static_cast<std::size_t>(first-1)])--first;
+        while(last<rows->last && runs.ok[static_cast<std::size_t>(last+1)])++last;
+        rows=RowSpan{first,last};
+    }
+    long long high=low;
+    if(!keep_seam){
+        long long largest_first_kept=0,largest_end_kept=0;
+        for(long long y=rows->first;y<=rows->last;++y){
+            largest_first_kept=std::max(largest_first_kept,runs.first[static_cast<std::size_t>(y)]);
+            largest_end_kept=std::max(largest_end_kept,runs.end[static_cast<std::size_t>(y)]);
+        }
+        high=(largest_first_kept+largest_end_kept)/2;
+    }
+    const double column_right=static_cast<double>(high)+half+cap;
+    rows=RowsCoveredOverRange(old,camera_a,moved_b,model_moved,PoseParameters{},vertices,clamp_column(high),column_right,*rows);
+    if(!rows)return std::nullopt;
+
+    // The right edge follows B's right side over the rows that are kept, by B's sides alone: where B's turned upper or lower side crosses a row
+    // it does not decide the row's right edge. That this rule finds B's right side is made sure on the middle row at the parent's placement,
+    // where the run of the whole cover ends at B's right side; when it does not (a mounting whose stored x is not the drawing's x), nothing is
+    // given up.
+    const PoseModel model_b(parent.parameters.camera_b);
+    const auto map_before=PoseCorrectedDocumentOutputToCamera(old,parent.parameters.camera_b,model_b,ReferencePose(active));
+    const auto map_after=PoseCorrectedDocumentOutputToCamera(old,parent.parameters.camera_b,model_b,pose);
+    {
+        const double middle=static_cast<double>(last_row/2);
+        const auto whole=RunOfRow(map_before,middle);
+        const auto side=RightSideOfRow(map_before,middle);
+        if(!whole || !side || whole->right!=*side)return std::nullopt;
+    }
+    std::vector<double> side_before(height,std::numeric_limits<double>::quiet_NaN()),side_after=side_before;
+    const auto right_move=[&](const RowSpan& span)->std::optional<std::int64_t>{
+        double smallest_before=std::numeric_limits<double>::infinity(),smallest_after=smallest_before;
+        for(long long y=span.first;y<=span.last;++y){
+            const auto k=static_cast<std::size_t>(y);
+            if(std::isnan(side_before[k]))side_before[k]=RightSideOfRow(map_before,static_cast<double>(y)).value_or(std::numeric_limits<double>::infinity());
+            if(std::isnan(side_after[k]))side_after[k]=RightSideOfRow(map_after,static_cast<double>(y)).value_or(std::numeric_limits<double>::infinity());
+            smallest_before=std::min(smallest_before,side_before[k]);smallest_after=std::min(smallest_after,side_after[k]);
+        }
+        if(!std::isfinite(smallest_before) || !std::isfinite(smallest_after))return std::nullopt;
+        return static_cast<std::int64_t>(std::llround(smallest_after-smallest_before));
+    };
+
+    // The check's other condition: the last column of the new raster is covered by A or by B over the range of poses (the paper surface is not
+    // part of it). A does not move; when A does not cover that column on every row that is kept, B has to, on the rows that are kept. The last
+    // column is the new raster's, from the right edge over these rows; it is not looked for again after the rows are narrowed by it (once: a
+    // raster on which this still fails is the check's to refuse).
+    {
+        const auto first_move=right_move(*rows);
+        if(!first_move)return std::nullopt;
+        const double last_column=static_cast<double>(static_cast<std::int64_t>(width)+*first_move)-1.0;
+        const auto map_a=render::DocumentOutputToCamera(old,camera_a);
+        bool a_covers_all=true;
+        for(long long y=rows->first;y<=rows->last && a_covers_all;++y)a_covers_all=Covered(map_a,last_column,static_cast<double>(y));
+        // When B does not cover that column even on the middle row at every vertex (the right edge is near B's right side, and the vertices
+        // reach further than the check holds B), no row can be chosen by it: the rows are left as they are and the check decides.
+        if(!a_covers_all){
+            if(const auto by_last=RowsCoveredOverRange(old,camera_a,moved_b,model_moved,PoseParameters{},CreationRangeVerticesV3(active,false),clamp_column(high),last_column,*rows))
+                rows=by_last;
+        }
+    }
+
+    // No more is given up than B's move allows: the rows are brought back outwards to that.
+    const auto allowed=RowsAllowedByTheMove(active,parent,pose,static_cast<double>(low));
+    if(!allowed)return std::nullopt;
+    const RowSpan kept{std::min(rows->first,allowed->top),std::max(rows->last,last_row-allowed->bottom)};
+    if(kept.first==0 && kept.last==last_row)return std::nullopt;
+    const auto move=right_move(kept);
+    if(!move)return std::nullopt;
+    return RowsKept{kept,*move};
+}
+
+// The raster of the active one with only the rows first..last: the top edge moves down and the bottom edge up to a whole micrometre
+// that is not outside the rows (the ceiling of the top, the floor of the bottom), and the height is the exact ceiling of the new extent.
+render::OutputRaster RasterOfRows(const render::OutputRaster& old,const RowSpan& rows){
+    const std::int64_t dpi=old.dpi;
+    const auto& r=old.region_um;
+    const std::int64_t top=r.top+(rows.first*25400+dpi-1)/dpi;
+    const std::int64_t bottom=std::min(r.bottom,r.top+((rows.last+1)*25400)/dpi);
+    if(!(bottom>top))throw RecalibrationRefused(Refusal::band_uncovered,"no row of the raster is left to camera B","all-rows");
+    const auto height=static_cast<std::uint32_t>(((bottom-top)*dpi+25399)/25400);
+    render::OutputRaster out(render::DocumentRegionUm{r.left,top,r.right,bottom},old.dpi,old.width_pixels,height);
+    try{render::ValidateOutputRaster(out);}
+    catch(const std::invalid_argument& e){throw RecalibrationRefused(Refusal::raster_too_large,e.what());}
+    return out;
+}
+}
+
+render::OutputRaster ProposeRaster(const FixedCompositeConditionV3& active,const FixedCompositeProfileBinding& parent,const PoseParameters& p_hat,RasterPlacement placement,
+    SeamPlacement seam){
     const auto& old=active.raster;
     if(placement==RasterPlacement::keep)return old;
     const PoseModel model_b(parent.parameters.camera_b);
     const auto map_old=PoseCorrectedDocumentOutputToCamera(old,parent.parameters.camera_b,model_b,ReferencePose(active));
     const auto map_new=PoseCorrectedDocumentOutputToCamera(old,parent.parameters.camera_b,model_b,p_hat);
-    // The right edge of B's cover on each row; the smallest over the rows is what the raster's right edge follows.
+    // The right edge of B's cover on each row; the smallest over the rows is what the raster's right edge follows. Where B's sides alone can
+    // be told (RightSideOfRow agrees with the whole cover on the middle row at the parent's placement), the right edge follows B's right side,
+    // so that a turned upper or lower side of B crossing a row does not narrow the raster; on a row whose cover ends at B's right side the
+    // two are the same number, so a raster that B's sides end on every row (a move along the baseline) is what it was, to the bit.
     double smallest_old=std::numeric_limits<double>::infinity(),smallest_new=smallest_old;
+    double side_old=smallest_old,side_new=smallest_old;
+    const double middle=static_cast<double>((static_cast<long long>(old.height_pixels)-1)/2);
+    const auto whole_middle=RunOfRow(map_old,middle);
+    const auto side_middle=RightSideOfRow(map_old,middle);
+    const bool by_sides=whole_middle && side_middle && whole_middle->right==*side_middle;
     for(std::uint32_t y=0;y<old.height_pixels;++y){
-        if(const auto run=RunOfRow(map_old,static_cast<double>(y)))smallest_old=std::min(smallest_old,run->right);
-        if(const auto run=RunOfRow(map_new,static_cast<double>(y)))smallest_new=std::min(smallest_new,run->right);
+        const double row=static_cast<double>(y);
+        if(const auto run=RunOfRow(map_old,row))smallest_old=std::min(smallest_old,run->right);
+        if(const auto run=RunOfRow(map_new,row))smallest_new=std::min(smallest_new,run->right);
+        if(by_sides){
+            if(const auto side=RightSideOfRow(map_old,row))side_old=std::min(side_old,*side);
+            if(const auto side=RightSideOfRow(map_new,row))side_new=std::min(side_new,*side);
+        }
     }
     if(!std::isfinite(smallest_old))Reject("camera B covers no row of the active raster at the active base pose");
-    if(!std::isfinite(smallest_new))throw RecalibrationRefused(Refusal::no_overlap,"camera B covers no row of the raster at the estimated pose");
-    const auto delta=static_cast<std::int64_t>(std::llround(smallest_new-smallest_old));
-    if(delta==0)return old;
-    return RasterWithWidth(old,static_cast<std::int64_t>(old.width_pixels)+delta);
+    if(!std::isfinite(smallest_new))throw RecalibrationRefused(Refusal::band_uncovered,"camera B covers no row of the raster at the estimated pose","all-rows");
+    const bool sides_found=by_sides && std::isfinite(side_old) && std::isfinite(side_new);
+    const auto delta=static_cast<std::int64_t>(std::llround(sides_found?side_new-side_old:smallest_new-smallest_old));
+    // The raster that follows the right edge alone; it is refused (a width that is gone or over the limit) after the rows have been looked at.
+    std::optional<render::OutputRaster> by_width;
+    std::optional<RecalibrationRefused> refused;
+    try{by_width=delta==0?old:RasterWithWidth(old,static_cast<std::int64_t>(old.width_pixels)+delta);}
+    catch(const RecalibrationRefused& e){refused=e;}
+
+    // The rows that B no longer sees at the top or the bottom are given up, as far as B's move allows; the right edge then follows B's right
+    // side over the rows that are kept.
+    std::optional<RowsKept> kept;
+    try{kept=RowsBKeeps(active,parent,p_hat,by_width,seam);}
+    catch(const std::invalid_argument&){kept.reset();}   // a mapping that cannot be made on the way: nothing is given up
+    if(kept){
+        const auto shorter=RasterOfRows(old,kept->rows);
+        if(kept->right_move==0)return shorter;
+        return RasterWithWidth(shorter,static_cast<std::int64_t>(shorter.width_pixels)+kept->right_move);
+    }
+    if(refused)throw *refused;
+    return *by_width;
 }
 
 // ===== The estimate's record =================================================================================================
@@ -553,6 +948,18 @@ void FillPrevious(Display& display,const FixedCompositeConditionV3& active){
     display.seam_x_previous_mm=left+(static_cast<double>(active.seam.column)+0.5)*pitch;
     display.width_previous_px=r.width_pixels;display.height_previous_px=r.height_pixels;
     display.right_previous_mm=static_cast<double>(r.region_um.right)/1000.0;
+    display.top_previous_mm=static_cast<double>(r.region_um.top)/1000.0;display.bottom_previous_mm=static_cast<double>(r.region_um.bottom)/1000.0;
+}
+// Where the wide search saw B against A, as the drawing shows it. It is a hint for the screen and the report: when the frame cannot be
+// worked out the hint is left out and the refusal stands.
+void FillStartMotion(Display& display,const Inputs& in,const FixedCompositeProfileBinding& parent,const PoseParameters& p0){
+    const auto& active=in.active;
+    try{
+        display.start_motion=content_registration::OutputFrameOf(parent.parameters.camera_a,parent.parameters.camera_b,active.raster,active.seam.column,
+            ReferencePose(active),p0,content_registration::SurfacePlane{});
+        display.has_start_motion=true;
+        display.previous_outside_envelope=BasePoseOutsideEnvelope(active);
+    }catch(const std::invalid_argument&){display.has_start_motion=false;}
 }
 void FillNew(Display& display,const Plan& plan){
     const auto& r=plan.raster;
@@ -561,6 +968,7 @@ void FillNew(Display& display,const Plan& plan){
     display.seam_x_new_mm=left+(static_cast<double>(plan.seam_column)+0.5)*pitch;
     display.width_new_px=r.width_pixels;display.height_new_px=r.height_pixels;
     display.right_new_mm=static_cast<double>(r.region_um.right)/1000.0;
+    display.top_new_mm=static_cast<double>(r.region_um.top)/1000.0;display.bottom_new_mm=static_cast<double>(r.region_um.bottom)/1000.0;
     display.has_new=true;
     // Overlap and the seam's distance to the photographs' edges, row by row, with the new mapping and the same coverage rule as the check.
     const auto map_a=render::DocumentOutputToCamera(r,plan.parameters.camera_a);
@@ -607,7 +1015,13 @@ void FillNew(Display& display,const Plan& plan){
 Plan MakePlan(const Inputs& in,const FixedCompositeProfileBinding& parent,const ParentFacts& facts,const PoseParameters& p_hat,const Provenance& provenance,
     Display& display){
     const auto& active=in.active;
-    const auto raster=ProposeRaster(active,parent,p_hat,in.raster);
+    const auto raster=[&]{
+        try{return ProposeRaster(active,parent,p_hat,in.raster,in.seam);}
+        catch(const RecalibrationRefused& e){
+            if(e.GetReason()==Refusal::band_uncovered)display.target_cover_shortfall=AllRowsUncovered(active.raster,true);
+            throw;
+        }
+    }();
     const double right_mm=static_cast<double>(raster.region_um.right)/1000.0,bottom_mm=static_cast<double>(raster.region_um.bottom)/1000.0;
     display.width_new_px=raster.width_pixels;display.right_new_mm=right_mm;
     if(right_mm>facts.sheet_width_mm || bottom_mm>facts.sheet_height_mm)
@@ -625,7 +1039,10 @@ Plan MakePlan(const Inputs& in,const FixedCompositeProfileBinding& parent,const 
         if(column>=raster.width_pixels)throw RecalibrationRefused(Refusal::creation_check_failed,"the previous seam column is outside the new raster");
     }else{
         try{column=FixedCompositeProvisionalSeamColumn(*parameters);}
-        catch(const std::invalid_argument& e){throw RecalibrationRefused(Refusal::no_overlap,std::string("the new profile has no overlap band: ")+e.what());}
+        catch(const std::invalid_argument& e){
+            display.target_cover_shortfall=UncoveredRows(render::DocumentOutputToCamera(raster,parameters->camera_a),render::DocumentOutputToCamera(raster,parameters->camera_b),raster,true);
+            throw RecalibrationRefused(Refusal::band_uncovered,std::string("the new profile has no overlap band: ")+e.what(),BandReasonOf(display.target_cover_shortfall));
+        }
         origin=FixedSeamOrigin::band_center_provisional;
     }
     return Plan{profile,FixedCompositeProfileFileName(in.hash(Bytes(profile))),raster,column,origin,*parameters};
@@ -644,7 +1061,7 @@ void BuildFromPose(const Inputs& in,Proposal& out,const PoseParameters& p_hat,co
     FillMotion(out.display,in,parent,p_hat);
     std::optional<Plan> plan;
     try{plan=MakePlan(in,parent,facts,p_hat,ProvenanceOf(in,out.estimate_record_sha256,fit),out.display);}
-    catch(const RecalibrationRefused& e){Refuse(out,e.GetReason(),e.what());return;}
+    catch(const RecalibrationRefused& e){Refuse(out,e.GetReason(),e.what(),e.GetSubReason());return;}
     catch(const std::invalid_argument& e){Refuse(out,Refusal::profile_invalid,e.what());return;}
     FillNew(out.display,*plan);
 
@@ -738,14 +1155,20 @@ Proposal ProposeRecalibration(const Inputs& in){
     const auto joined=[](const std::vector<std::string>& v){std::string s;for(const auto& x:v)s+=(s.empty()?"":",")+x;return s;};
 
     Announce(in,Stage::wide_search);
+    out.wide_performed=true;
     out.wide=WideStartOn(in,parent.parameters);
     if(Stopped(in)){Refuse(out,Refusal::stopped,"stopped after the wide search");return out;}
-    if(!out.wide.determined){Refuse(out,Refusal::no_overlap,"wide search: "+out.wide.reason);return out;}
+    if(!out.wide.determined){Refuse(out,Refusal::no_overlap,"wide search: "+out.wide.reason,out.wide.reason);return out;}
+    FillPrevious(out.display,in.active);
+    FillStartMotion(out.display,in,parent,out.wide.pose);
 
     // The geometry of the fine stage: the new raster and the seam at the start pose.
     render::OutputRaster raster_fine=in.active.raster;
-    try{raster_fine=ProposeRaster(in.active,parent,out.wide.pose,in.raster);}
-    catch(const RecalibrationRefused& e){Refuse(out,e.GetReason(),e.what());return out;}
+    try{raster_fine=ProposeRaster(in.active,parent,out.wide.pose,in.raster,in.seam);}
+    catch(const RecalibrationRefused& e){
+        if(e.GetReason()==Refusal::band_uncovered)out.display.target_cover_shortfall=AllRowsUncovered(in.active.raster,false);
+        Refuse(out,e.GetReason(),e.what(),e.GetSubReason());return out;
+    }
     catch(const std::invalid_argument& e){Refuse(out,Refusal::profile_invalid,e.what());return out;}
     render::DocumentRenderParameters parameters_fine(raster_fine,parent.parameters.camera_a,parent.parameters.camera_b,parent.parameters.layout,parent.parameters.resampling);
     std::uint32_t seam_fine;
@@ -753,11 +1176,22 @@ Proposal ProposeRecalibration(const Inputs& in){
         seam_fine=in.active.seam.column;
         if(seam_fine>=raster_fine.width_pixels){Refuse(out,Refusal::creation_check_failed,"the previous seam column is outside the raster");return out;}
     }else{
+        std::optional<MappedFixedSeamInput> input;
         try{
-            const auto input=PoseCorrectedDocumentMappedFixedSeamInput(parameters_fine,out.wide.pose);
-            seam_fine=FixedCompositeBandCenter(FixedCompositeBandOfRows(MappedFixedSeamBand(*in.camera_a,*in.camera_b,input,in.thread_count)));
-        }catch(const std::invalid_argument& e){Refuse(out,Refusal::no_overlap,std::string("no overlap band at the start pose: ")+e.what());return out;}
+            input.emplace(PoseCorrectedDocumentMappedFixedSeamInput(parameters_fine,out.wide.pose));
+            seam_fine=FixedCompositeBandCenter(FixedCompositeBandOfRows(MappedFixedSeamBand(*in.camera_a,*in.camera_b,*input,in.thread_count)));
+        }catch(const std::invalid_argument& e){
+            // Without the mappings (the projection cannot be set up over the raster) no row can be counted: the target camera sees none.
+            std::string reason="all-rows";
+            if(input){
+                out.display.target_cover_shortfall=UncoveredRows(input->camera_a,input->camera_b,raster_fine,false);
+                reason=BandReasonOf(out.display.target_cover_shortfall);
+            }
+            Refuse(out,Refusal::band_uncovered,std::string("no overlap band at the start pose: ")+e.what(),reason);
+            return out;
+        }
     }
+    out.fine_raster=raster_fine;
 
     Announce(in,Stage::fine_fit);
     content_registration::RegistrationSettings settings;

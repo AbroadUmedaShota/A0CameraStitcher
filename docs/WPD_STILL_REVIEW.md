@@ -923,7 +923,7 @@ A0CameraStitcher.StillReview --recalibrate-from-pair --camera-a <JPEG> --camera-
 | `--settings-folder` | 有効な条件 v3 のある設定フォルダ（読むだけ） | なし（必須） |
 | `--staging` | 記録を書く新しいフォルダ | なし（必須） |
 | `--seam` | `center` は新しい重なりの真ん中、`keep` は前の継ぎ目の列 | `center`（所有者の決定） |
-| `--raster` | `follow-b` は合成の範囲を B の動いた分だけ広げる、`keep` は前のまま | `follow-b`（所有者の決定） |
+| `--raster` | `follow-b` は合成の範囲を B の動きに合わせる（右端は B が動いた分だけ広げ、上端と下端は B が写る行まで縮める。縮んだ量は結果に出る）、`keep` は前のまま | `follow-b`（所有者の決定） |
 | `--unverified` | 確かめられなかった時に、警告を見たうえで人が確定できる（`confirm`）か、確定させない（`refuse`） | `confirm`（所有者の決定） |
 | `--pair-id` `--measured-at` | 改訂に書く組の識別子と撮影の時刻（UTC）。無ければ画像のハッシュと現在の時刻から作る | |
 
@@ -939,9 +939,11 @@ A0CameraStitcher.StillReview --recalibrate-from-pair --camera-a <JPEG> --camera-
 | `usable-unverified` | 確かめられなかったが、合っていないとも分かっていない。画面は「未確認の校正」と出し、人が警告を見て確定する | 3 |
 | `unusable` | 作れなかった、または確かめて合っていなかった。確定させない | 1 |
 
-引数の誤りは 2。続く `finding class=… code=…` の行が理由で、`class` は `no-candidate`（位置が決まらず、何も作れなかった）、`rejected`（作って確かめたら合っていなかった）、`unverified`（確かめられなかった）のどれか。`gate state=… maximum_px=… limit_px=… measured_row_share=…` は見本の継ぎ目のずれ（GΩ）で、測れたかどうかとずれの値が出る。ゲートが `fail` でも原因が `unmeasurable`（測れなかった）なら `unverified`、ずれを測って基準を超えた時（`lift`・`pose`・`displacement`）は `rejected`。`screen …` の行は画面に出す文と同じ。
+引数の誤りは 2。続く `finding class=… code=… [reason=…]` の行が理由で、`class` は `no-candidate`（位置が決まらず、何も作れなかった）、`rejected`（作って確かめたら合っていなかった）、`unverified`（確かめられなかった）のどれか。`gate state=… maximum_px=… limit_px=… measured_row_share=…` は見本の継ぎ目のずれ（GΩ）で、測れたかどうかとずれの値が出る。ゲートが `fail` でも原因が `unmeasurable`（測れなかった）なら `unverified`、ずれを測って基準を超えた時（`lift`・`pose`・`displacement`）は `rejected`。`screen …` の行は画面に出す文と同じ。
 
-staging には `estimate-record.json`・`candidate-profile.json`・`candidate-revision.json`（確定したら書かれる物そのもの）、`review/`（見本の合成と v8 の報告）、`seam-crops.png`（継ぎ目の上・中・下の原寸）、`recalibration-report.json`（`a0.pair-recalibration-report.v1`: 判定、理由の符号、基準と対象のカメラ、ゲートの結果、表示の数、各ハッシュ。パスと文は入らない）が並ぶ。確定した時は `confirmation.json`（`a0.pair-recalibration-confirmation.v1`）が加わり、未確認のまま確定したかどうかが残る。3 種の記録（`estimate-record.json`・`recalibration-report.json`・`confirmation.json`）は、基準と対象のカメラを `referenceCamera`・`targetCamera`（値は alias）で書き、カメラごとの値（原画像の SHA-256 `originalSha256`、継ぎ目から写真の端までの割合 `display.edgeShare`）は alias を鍵にしたオブジェクトで書く。版は v1 のままで、公開した後に形を変える時は v2 にする（`docs/design/recalibration-from-pair.md` の 6 節）。条件 v3 の書式に未確認の印を置く場所は無く、変えていない。
+理由の下の行は、止まった所を分けて出す。`wide determined=… reason=… tiles_agreed=… correspondences=… tx_mm=… ty_mm=… rz_deg=… residual_rms_mm=…` は広く探す段（R1）の結果（姿勢が決まらなかった時、数は `none`）、`start_motion right_mm=… down_mm=… rotation_clockwise_deg=…` は R1 が見た A に対する B の位置の変化の目安（図面の座標。傾きと高さは測っていない）、`target_cover_shortfall pose=start|estimate rows_top=… rows_bottom=… top_mm=… bottom_mm=…` は範囲の上と下で B が写っていない行の数と mm（`band-uncovered` の時）、`fine_fit_raster width_px=… height_px=… top_mm=… bottom_mm=…` は細かい合わせに使った範囲（その段が始まらなかった時は出ない）。`seam` の行には、範囲の上端と下端の前後（`raster_top_mm=…->…`、`raster_bottom_mm=…->…`）が付く。候補の範囲の幅・高さ・上下の端が今の改訂と違う時は、ログの行 `log recalibration_raster width_px=…->… height_px=…->… top_mm=…->… bottom_mm=…->…` が付く（カメラが上下にずれた時は、B が写さなくなった上下の行が削られ、高さと上端か下端が変わる）。`no-overlap` は R1 が重なりを見つけなかった時だけで、`reason` は R1 の理由。範囲に B が写らない行がある時は `band-uncovered`（`reason` は `top`・`bottom`・`top-and-bottom`・`all-rows`・`no-common-column`）、範囲の幅が無くなる時は `range-collapsed`（`reason` は `no-width`）。どれも `no-candidate` で、確定させない。
+
+staging には `estimate-record.json`・`candidate-profile.json`・`candidate-revision.json`（確定したら書かれる物そのもの）、`review/`（見本の合成と v8 の報告）、`seam-crops.png`（継ぎ目の上・中・下の原寸）、`recalibration-report.json`（`a0.pair-recalibration-report.v1`: 判定、理由の符号、基準と対象のカメラ、ゲートの結果、広く探す段の結果（`wideSearch`）、細かい合わせに使った範囲（`fineFitRaster`）、表示の数（範囲の高さと上下の端の前後を含む）、各ハッシュ。パスと文は入らない）が並ぶ。確定した時は `confirmation.json`（`a0.pair-recalibration-confirmation.v1`）が加わり、未確認のまま確定したかどうかが残る。3 種の記録（`estimate-record.json`・`recalibration-report.json`・`confirmation.json`）は、基準と対象のカメラを `referenceCamera`・`targetCamera`（値は alias）で書き、カメラごとの値（原画像の SHA-256 `originalSha256`、継ぎ目から写真の端までの割合 `display.edgeShare`）は alias を鍵にしたオブジェクトで書く。版は v1 のままで、公開した後に形を変える時は v2 にする（`docs/design/recalibration-from-pair.md` の 6 節）。条件 v3 の書式に未確認の印を置く場所は無く、変えていない。
 
 ### 確定と前の校正に戻す道
 

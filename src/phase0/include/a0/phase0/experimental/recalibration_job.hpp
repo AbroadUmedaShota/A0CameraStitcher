@@ -82,14 +82,17 @@ inline constexpr std::chrono::seconds kRecalibrationSampleWindow{900};
 
 // ---- Pure decisions (no files, no images) ----
 // How each refusal of the computation counts (docs/design/recalibration-from-pair.md, section 5):
-//   no_candidate  no-overlap, estimate-failed, estimate-not-verified, stopped: no position was found that holds, nothing to confirm
+//   no_candidate  no-overlap, band-uncovered, range-collapsed, estimate-failed, estimate-not-verified, stopped: no position was found that
+//                 holds, or the raster that follows it cannot be made; nothing to confirm. Only reestimate-not-verified can become
+//                 `unverified`, so none of these can be confirmed, with a warning or without
 //   rejected      tilt-exceeded, height-exceeded, creation-check-failed, raster-too-large, raster-outside-sheet, profile-invalid,
 //                 reestimate-displacement; reestimate-not-verified when the estimator on the new profile found the pose out of range;
 //                 reestimate-doubtful (it replaces the code reestimate-not-verified) when that estimator was undetermined for a reason
 //                 that is not "too few marks"
 //   unverified    reestimate-not-verified when that estimator was undetermined and every one of its reasons is "too few marks"
 // `reason` of an estimate-not-verified finding is the estimator's first reason code; of a reestimate-doubtful finding, the first reason
-// that is not "too few marks". `limits` are the condition's (alpha and beta of the estimator's first check, and the minimum number of unique blocks).
+// that is not "too few marks"; of a no-overlap finding, the reason of the wide search; of a band-uncovered or range-collapsed finding,
+// the lower-level reason that came with the refusal (Proposal::refusal_reason). `limits` are the condition's (alpha and beta of the estimator's first check, and the minimum number of unique blocks).
 [[nodiscard]] inline std::vector<RecalibrationFinding> ClassifyProposal(const a0::m2::experimental::recalibration::Proposal& proposal,
     const a0::m2::experimental::content_registration::RegistrationLimits& limits){
     namespace rc=a0::m2::experimental::recalibration;
@@ -99,7 +102,11 @@ inline constexpr std::chrono::seconds kRecalibrationSampleWindow{900};
         RecalibrationFinding finding;
         finding.code=std::string(rc::RefusalCode(refusal));
         switch(refusal){
-        case rc::Refusal::no_overlap: case rc::Refusal::estimate_failed: case rc::Refusal::stopped:
+        case rc::Refusal::no_overlap: case rc::Refusal::band_uncovered: case rc::Refusal::range_collapsed:
+            finding.klass=FindingClass::no_candidate;
+            finding.reason=rc::RefusalReasonOf(proposal,refusal);
+            break;
+        case rc::Refusal::estimate_failed: case rc::Refusal::stopped:
             finding.klass=FindingClass::no_candidate;break;
         case rc::Refusal::estimate_not_verified:
             finding.klass=FindingClass::no_candidate;
@@ -269,6 +276,10 @@ struct RecalibrationJobOutcome {
     std::vector<RecalibrationFinding> findings;
     std::vector<std::string> screen_lines,log_lines;
     RecalibrationResultFacts facts;
+    // What the wide search found (set when it ran), and the raster that the fine stage ran on (set when that stage was started): for the
+    // report and the command line, whether or not a candidate came out.
+    std::optional<a0::m2::experimental::recalibration::WideStart> wide;
+    std::optional<a0::m2::render::OutputRaster> fine_fit_raster;
     // The sample, for the screen: the thumbnail of the composite and the three crops of the seam (one sheet).
     a0::m2::render::BgrImage thumbnail;
     std::optional<SeamCropsExported> seam_crops;
@@ -395,6 +406,23 @@ inline std::string ReportJson(const ReportInput& in){
          <<",\"estimateRecordSha256\":"<<Esc(c.condition.revision.change.report_sha256.value_or(std::string{}))
          <<",\"seamColumn\":"<<c.condition.seam.column<<",\"widthPixels\":"<<c.condition.raster.width_pixels<<",\"heightPixels\":"<<c.condition.raster.height_pixels<<"}";
     }
+    // The wide search and the raster of the fine stage: null when that stage did not run. The pose and the residuals of the wide search are
+    // null when it found no pose; the pose is the target camera's against the reference camera.
+    s<<",\"wideSearch\":";
+    if(o.wide){
+        const auto& w=*o.wide;
+        s<<"{\"determined\":"<<Bool(w.determined)<<",\"reason\":"<<Esc(w.reason)<<",\"tilesAgreed\":"<<w.tiles_agreed<<",\"correspondences\":"<<w.correspondences;
+        if(w.determined)
+            s<<",\"txMm\":"<<Num(w.pose.tx_mm)<<",\"tyMm\":"<<Num(w.pose.ty_mm)<<",\"rzDeg\":"<<Num(w.pose.rz_deg)
+             <<",\"residualRmsMm\":"<<Num(w.residual_rms_mm)<<",\"residualMaxMm\":"<<Num(w.residual_max_mm)<<"}";
+        else s<<",\"txMm\":null,\"tyMm\":null,\"rzDeg\":null,\"residualRmsMm\":null,\"residualMaxMm\":null}";
+    }else s<<"null";
+    s<<",\"fineFitRaster\":";
+    if(o.fine_fit_raster){
+        const auto& r=*o.fine_fit_raster;
+        s<<"{\"widthPx\":"<<r.width_pixels<<",\"heightPx\":"<<r.height_pixels<<",\"topMm\":"<<Num(static_cast<double>(r.region_um.top)/1000.0)
+         <<",\"bottomMm\":"<<Num(static_cast<double>(r.region_um.bottom)/1000.0)<<",\"rightMm\":"<<Num(static_cast<double>(r.region_um.right)/1000.0)<<"}";
+    }else s<<"null";
     s<<",\"estimate\":{\"state\":"<<Esc(in.estimate_state)<<",\"reasons\":[";
     for(std::size_t i=0;i<in.estimate_reasons.size();++i)s<<(i?",":"")<<Esc(in.estimate_reasons[i]);
     s<<"]}";
@@ -412,11 +440,26 @@ inline std::string ReportJson(const ReportInput& in){
     s<<"}";
     s<<",\"display\":{\"hasMotion\":"<<Bool(d.has_motion)<<",\"motionRightMm\":"<<Num(d.motion.camera_motion_mm.x)<<",\"motionDownMm\":"<<Num(d.motion.camera_motion_mm.y)
      <<",\"rotationClockwiseDeg\":"<<Num(d.motion.rotation_clockwise_deg)<<",\"tiltDeg\":"<<Num(d.pose.tilt_deg)<<",\"heightPercent\":"<<Num(d.pose.height_percent)
+     <<",\"hasStartMotion\":"<<Bool(d.has_start_motion)
+     <<",\"startMotionRightMm\":"<<(d.has_start_motion?Num(d.start_motion.camera_motion_mm.x):std::string("null"))
+     <<",\"startMotionDownMm\":"<<(d.has_start_motion?Num(d.start_motion.camera_motion_mm.y):std::string("null"))
+     <<",\"startRotationClockwiseDeg\":"<<(d.has_start_motion?Num(d.start_motion.rotation_clockwise_deg):std::string("null"))
      <<",\"hasOverlap\":"<<Bool(d.has_overlap)<<",\"narrowestOverlapMm\":"<<Num(d.narrowest_overlap_mm)
      <<",\"hasNew\":"<<Bool(d.has_new)<<",\"seamXPreviousMm\":"<<Num(d.seam_x_previous_mm)<<",\"seamXNewMm\":"<<(d.has_new?Num(d.seam_x_new_mm):std::string("null"))
      <<",\"widthPreviousPx\":"<<d.width_previous_px<<",\"widthNewPx\":"<<(d.has_new?std::to_string(d.width_new_px):std::string("null"))
+     <<",\"heightPreviousPx\":"<<d.height_previous_px<<",\"heightNewPx\":"<<(d.has_new?std::to_string(d.height_new_px):std::string("null"))
      <<",\"rightPreviousMm\":"<<Num(d.right_previous_mm)<<",\"rightNewMm\":"<<(d.has_new?Num(d.right_new_mm):std::string("null"))
-     <<",\"hasEdgeDistance\":"<<Bool(d.has_edge_distance)<<",\"edgeShare\":{"<<Esc(rc::kReferenceCamera)<<":"<<Num(d.edge_share_a)<<","<<Esc(rc::kTargetCamera)<<":"<<Num(d.edge_share_b)<<"}}";
+     <<",\"topPreviousMm\":"<<Num(d.top_previous_mm)<<",\"bottomPreviousMm\":"<<Num(d.bottom_previous_mm)
+     <<",\"topNewMm\":"<<(d.has_new?Num(d.top_new_mm):std::string("null"))<<",\"bottomNewMm\":"<<(d.has_new?Num(d.bottom_new_mm):std::string("null"))
+     <<",\"hasEdgeDistance\":"<<Bool(d.has_edge_distance)<<",\"edgeShare\":{"<<Esc(rc::kReferenceCamera)<<":"<<Num(d.edge_share_a)<<","<<Esc(rc::kTargetCamera)<<":"<<Num(d.edge_share_b)<<"}";
+    // The rows that the target camera does not see (band-uncovered), named by the role: it is a value of the target camera only.
+    s<<",\"targetCoverShortfall\":";
+    if(d.target_cover_shortfall.present){
+        const auto& f=d.target_cover_shortfall;
+        s<<"{\"pose\":"<<Esc(f.at_estimate?"estimate":"start")<<",\"rowsTop\":"<<f.rows_top<<",\"rowsBottom\":"<<f.rows_bottom
+         <<",\"topMm\":"<<Num(f.top_mm)<<",\"bottomMm\":"<<Num(f.bottom_mm)<<"}";
+    }else s<<"null";
+    s<<"}";
     s<<"}";
     return s.str();
 }
@@ -468,6 +511,7 @@ inline bool IsCanonicalOriginal(const fs::path& file,const wchar_t* alias){
     const auto stop_asked=[&]{
         if(!request.stop.stop_requested())return false;
         out.findings.clear();out.candidate.reset();out.facts=RecalibrationResultFacts{};out.thumbnail=render::BgrImage{};out.seam_crops.reset();
+        out.wide.reset();out.fine_fit_raster.reset();
         find(FindingClass::no_candidate,"stopped");
         return true;
     };
@@ -486,6 +530,12 @@ inline bool IsCanonicalOriginal(const fs::path& file,const wchar_t* alias){
         out.screen_lines=RecalibrationScreenLines(out.verdict,out.findings,out.facts);
         out.log_lines.push_back("recalibration_verdict verdict="+std::string(RecalibrationVerdictCode(out.verdict))+" unverified="+(out.unverified()?"1":"0")+
             " policy="+report.policy+" candidate="+(out.candidate?"1":"0")+" total_s="+Num(out.seconds)+" camera_operations=0 settings_written=0");
+        // The raster that the candidate has, when it is not the one in force: width, height and the top and bottom edges, before and after.
+        if(const auto& d=out.facts.display;d.has_new && (d.width_new_px!=d.width_previous_px || d.height_new_px!=d.height_previous_px ||
+            d.top_new_mm!=d.top_previous_mm || d.bottom_new_mm!=d.bottom_previous_mm))
+            out.log_lines.push_back("recalibration_raster width_px="+std::to_string(d.width_previous_px)+"->"+std::to_string(d.width_new_px)+
+                " height_px="+std::to_string(d.height_previous_px)+"->"+std::to_string(d.height_new_px)+
+                " top_mm="+Num(d.top_previous_mm)+"->"+Num(d.top_new_mm)+" bottom_mm="+Num(d.bottom_previous_mm)+"->"+Num(d.bottom_new_mm));
         for(const auto& f:out.findings)
             out.log_lines.push_back("recalibration_finding class="+std::string(FindingClassCode(f.klass))+" code="+f.code+(f.reason.empty()?std::string{}:" reason="+f.reason));
         if(staging_created){
@@ -576,6 +626,8 @@ inline bool IsCanonicalOriginal(const fs::path& file,const wchar_t* alias){
         if(stop_asked())return finish();   // the computation is done; the rebuild, the sample and the crops are not started
 
         out.facts.display=proposal.display;
+        if(proposal.wide_performed)out.wide=proposal.wide;
+        out.fine_fit_raster=proposal.fine_raster;
         report.estimate_state=std::string(cr::RegistrationStateCode(proposal.estimate.state));report.estimate_reasons=proposal.estimate.reasons;
         verification=proposal.verification;
         out.findings=ClassifyProposal(proposal,limits);
