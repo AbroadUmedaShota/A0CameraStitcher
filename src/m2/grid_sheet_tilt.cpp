@@ -26,27 +26,55 @@ Point Rotate(Point v, double degrees) {
     return {c * v.x - s * v.y, s * v.x + c * v.y};
 }
 double Distance(Point a, Point b) { return std::hypot(a.x - b.x, a.y - b.y); }
+bool Finite(double v) { return std::isfinite(v); }
+bool FinitePositive(double v) { return std::isfinite(v) && v > 0; }
+bool FiniteNonNegative(double v) { return std::isfinite(v) && v >= 0; }
 
-void ValidateProjection(const render::CameraProjection& p) {
-    const auto& i = p.intrinsics;
-    Require(std::isfinite(i.fx_pixels) && std::isfinite(i.fy_pixels) && i.fx_pixels > 0 && i.fy_pixels > 0 &&
-        std::isfinite(i.cx_pixels) && std::isfinite(i.cy_pixels), "grid sheet tilt: the projection has no valid intrinsics");
+void ValidateProfile(const GridSheetProfile& profile) {
+    const auto& i = profile.projection.intrinsics;
+    Require(FinitePositive(i.fx_pixels) && FinitePositive(i.fy_pixels) && Finite(i.cx_pixels) && Finite(i.cy_pixels),
+        "grid sheet tilt: the projection has no valid intrinsics");
+    Require(profile.picture_width >= 16 && profile.picture_height >= 16 && profile.picture_width <= 32768 && profile.picture_height <= 32768,
+        "grid sheet tilt: the profile's picture size is not set");
+    // A principal point outside the middle half of the profile's own picture means the size and the projection do not
+    // belong together (a projection of another resolution); no lens puts it there.
+    const double w = profile.picture_width, h = profile.picture_height;
+    Require(i.cx_pixels >= 0.25 * w && i.cx_pixels <= 0.75 * w && i.cy_pixels >= 0.25 * h && i.cy_pixels <= 0.75 * h,
+        "grid sheet tilt: the profile's principal point is not in the middle of its picture size");
 }
+
 void ValidateSettings(const GridSheetTiltSettings& s) {
     const auto& d = s.detection;
-    Require(std::isfinite(d.pitch_min_px) && std::isfinite(d.pitch_max_px) && d.pitch_min_px > 4 && d.pitch_max_px > d.pitch_min_px,
+    Require(FinitePositive(d.pitch_min_px) && FinitePositive(d.pitch_max_px) && d.pitch_min_px > 4 && d.pitch_max_px > d.pitch_min_px,
         "grid sheet tilt: the pitch range is not set");
-    Require(d.window_half_size > 0 && d.window_min_points >= 1 && d.direction_min_points >= 1 && d.fit_max_points >= 100 && d.fit_iterations >= 1 &&
-        d.line_min_points >= 3 && d.node_min_count >= 8 && d.coverage_cell_px >= 1 && d.flat_cells_across >= 1,
+    Require(FinitePositive(d.window_half_size) && d.window_min_points >= 1 && d.direction_min_points >= 1 && d.lattice_min_points >= 1 &&
+        d.fit_max_points >= 100 && d.fit_iterations >= 1 && d.fit_min_inliers >= 9 && d.line_min_points >= 3 && d.node_min_count >= 8 &&
+        FinitePositive(d.node_max_gap_px) && d.coverage_cell_px >= 1 && d.coverage_cell_min_points >= 1 && d.flat_cells_across >= 1 &&
+        d.flat_cell_min_points >= 1 && Finite(d.flat_cell_coherence) && d.flat_cell_coherence > 0 && d.flat_cell_coherence < 1,
         "grid sheet tilt: the detection settings are not set");
-    Require(d.pitch_coarse_divisor >= 4 && d.pitch_fine_step > 0 && d.pitch_fine_span > 0 && d.window_scan_points >= 50 && d.init_scan_points >= 100,
+    Require(Finite(d.window_min_score) && d.window_min_score > 0 && d.window_min_score <= 1 && Finite(d.second_direction_window_deg) &&
+        d.second_direction_window_deg > 0 && d.second_direction_window_deg <= 45,
+        "grid sheet tilt: the first lattice settings are not set");
+    Require(Finite(d.pitch_coarse_divisor) && d.pitch_coarse_divisor >= 4 && FinitePositive(d.pitch_fine_step) && FinitePositive(d.pitch_fine_span) &&
+        d.pitch_fine_span < 1 && d.window_scan_points >= 50 && d.init_scan_points >= 100,
         "grid sheet tilt: the pitch scan settings are not set");
-    Require(d.direction_gate_deg > 0 && d.direction_gate_deg < 45 && d.direction_match_deg > 0 && d.direction_match_deg < 45 && d.final_gate_px > 0,
+    Require(Finite(d.direction_gate_deg) && d.direction_gate_deg > 0 && d.direction_gate_deg < 45 && Finite(d.direction_match_deg) &&
+        d.direction_match_deg > 0 && d.direction_match_deg < 45 && FinitePositive(d.final_gate_px) && FinitePositive(d.fit_settle_px),
         "grid sheet tilt: the gates are not set");
+    double previous_radius = 0;
+    for (std::size_t stage = 0; stage < d.radii.size(); ++stage) {
+        Require(FinitePositive(d.radii[stage]) && d.radii[stage] > previous_radius, "grid sheet tilt: the fit radii do not grow");
+        previous_radius = d.radii[stage];
+        Require(FinitePositive(d.gates_px[stage][0]), "grid sheet tilt: a fit stage has no gate");
+        for (double gate : d.gates_px[stage]) Require(FiniteNonNegative(gate), "grid sheet tilt: a fit gate is not set");
+    }
     const auto& a = s.acceptance;
-    const auto finite = [](double v) { return std::isfinite(v) && v >= 0; };
-    Require(finite(a.max_residual_rms_px) && finite(a.max_method_spread_deg) && finite(a.min_visible_fraction) && finite(a.max_off_lattice_cell_fraction) &&
-        finite(a.off_lattice_offset_px) && a.min_lines_per_family >= 2, "grid sheet tilt: the acceptance is not set");
+    Require(FiniteNonNegative(a.max_residual_rms_px) && FiniteNonNegative(a.max_method_spread_deg) && FiniteNonNegative(a.min_visible_fraction) &&
+        FiniteNonNegative(a.max_off_lattice_cell_fraction) && FiniteNonNegative(a.off_lattice_offset_px) && FiniteNonNegative(a.max_lattice_aspect_deviation) &&
+        FiniteNonNegative(a.max_lattice_skew_deg) && a.min_lines_per_family >= 2, "grid sheet tilt: the acceptance is not set");
+    // The rms of the points inside the final gate stays near final_gate / sqrt(3) even when they lie anywhere in it (they
+    // are cut off by the gate), so a residual line at or above that never refuses anything.
+    Require(a.max_residual_rms_px < d.final_gate_px / std::sqrt(3.0), "grid sheet tilt: the residual line is beyond what the final gate lets through");
 }
 
 double LeanDistance(const detail::OrientationNumbers& a, const detail::OrientationNumbers& b) { return Distance(a.lean_sheet_deg, b.lean_sheet_deg); }
@@ -64,30 +92,37 @@ ImageView ViewOf(const render::BgrImage& image) {
 GridSheetTiltSettings WorkingDraftSettings() {
     GridSheetTiltSettings s;
     // Working numbers for development. They only decide when a measurement is given up and why; none of them is an
-    // accepted optical threshold or a statement about what tilt is acceptable.
+    // accepted optical threshold or a statement about what tilt is acceptable. The method spread is a disagreement
+    // between three computations on the same points, not a tolerance on the tilt.
     s.acceptance.min_ridge_points = 20000;
     s.acceptance.min_lines_per_family = 20;
     s.acceptance.min_lattice_span = 20;
-    s.acceptance.min_visible_fraction = 0.05;
-    s.acceptance.max_residual_rms_px = 1.5;
+    s.acceptance.min_visible_fraction = 0.3;          // the picture is of the sheet itself, not of a drawing on it
+    s.acceptance.max_lattice_aspect_deviation = 0.02;
+    s.acceptance.max_lattice_skew_deg = 1.0;
+    s.acceptance.max_residual_rms_px = 0.8;           // below the final gate's 2.5 / sqrt(3)
     s.acceptance.max_method_spread_deg = 0.3;
     s.acceptance.max_off_lattice_cell_fraction = 0.15;
     s.acceptance.off_lattice_offset_px = 4.0;
+    s.pair.max_rotation_mismatch_deg = 2.0;
     return s;
 }
 
 std::string_view RefusalCode(GridSheetRefusal refusal) {
     switch (refusal) {
     case GridSheetRefusal::none: return "none";
+    case GridSheetRefusal::picture_not_profile_size: return "picture-not-profile-size";
     case GridSheetRefusal::too_few_ridge_points: return "too-few-ridge-points";
     case GridSheetRefusal::no_grid_found: return "no-grid-found";
     case GridSheetRefusal::fit_failed: return "fit-failed";
     case GridSheetRefusal::too_few_lines: return "too-few-lines";
     case GridSheetRefusal::span_too_small: return "span-too-small";
     case GridSheetRefusal::view_too_small: return "view-too-small";
+    case GridSheetRefusal::grid_not_square: return "grid-not-square";
     case GridSheetRefusal::residual_too_large: return "residual-too-large";
-    case GridSheetRefusal::methods_disagree: return "methods-disagree";
+    case GridSheetRefusal::flatness_not_judged: return "flatness-not-judged";
     case GridSheetRefusal::sheet_not_flat: return "sheet-not-flat";
+    case GridSheetRefusal::methods_disagree: return "methods-disagree";
     }
     throw std::invalid_argument("unknown grid sheet refusal");
 }
@@ -97,15 +132,17 @@ std::string_view RefusalCode(GridSheetPairRefusal refusal) {
     case GridSheetPairRefusal::none: return "none";
     case GridSheetPairRefusal::reference_not_measured: return "reference-not-measured";
     case GridSheetPairRefusal::target_not_measured: return "target-not-measured";
-    case GridSheetPairRefusal::quarter_turn_ambiguous: return "quarter-turn-ambiguous";
+    case GridSheetPairRefusal::turn_mismatch: return "turn-mismatch";
     }
     throw std::invalid_argument("unknown grid sheet pair refusal");
 }
 
-GridSheetTiltOutcome MeasureGridSheetTilt(std::string_view camera, const ImageView& picture,
-    const render::CameraProjection& profile_projection, const GridSheetTiltSettings& settings) {
-    ValidateProjection(profile_projection);
+GridSheetTiltOutcome MeasureGridSheetTilt(std::string_view camera, const ImageView& picture, const GridSheetProfile& profile,
+    const GridSheetTiltSettings& settings) {
+    Require(picture.pixels != nullptr && picture.width >= 16 && picture.height >= 16, "grid sheet tilt: the picture is empty or too small");
+    ValidateProfile(profile);
     ValidateSettings(settings);
+    const auto& projection = profile.projection;
     const auto& det = settings.detection;
     const auto& acc = settings.acceptance;
     GridSheetTiltOutcome out;
@@ -114,7 +151,10 @@ GridSheetTiltOutcome MeasureGridSheetTilt(std::string_view camera, const ImageVi
     const auto refuse = [&](GridSheetRefusal why) { out.refusal = why; out.tilt.reset(); return out; };
 
     // The calibrated turn of the image axes: a programming error when the profile itself is not a valid projection.
-    const double calibration_azimuth = content_registration::OrientationOf(profile_projection).rotation_clockwise_deg;
+    const double calibration_azimuth = content_registration::OrientationOf(projection).rotation_clockwise_deg;
+
+    // Only the profile's own picture size: the pixel numbers of the projection hold for that size alone.
+    if (picture.width != profile.picture_width || picture.height != profile.picture_height) return refuse(GridSheetRefusal::picture_not_profile_size);
 
     // (a) lines
     const detail::RidgeResult ridge = detail::DetectRidges(picture, det);
@@ -122,7 +162,7 @@ GridSheetTiltOutcome MeasureGridSheetTilt(std::string_view camera, const ImageVi
     if (ridge.points.size() < std::max<std::size_t>(acc.min_ridge_points, 1)) return refuse(GridSheetRefusal::too_few_ridge_points);
 
     // (c) points without the lens distortion
-    const detail::Lens lens = detail::LensOf(profile_projection);
+    const detail::Lens lens = detail::LensOf(projection);
     const double focal = lens.MeanFocal();
     const detail::PreparedPoints points = detail::PreparePoints(ridge.points, lens, true);
 
@@ -133,37 +173,47 @@ GridSheetTiltOutcome MeasureGridSheetTilt(std::string_view camera, const ImageVi
 
     // (d) the lattice
     const detail::LatticeFit fit = detail::FitLattice(points, focal, *initial, det);
-    if (!fit.ok) return refuse(GridSheetRefusal::fit_failed);
+    ev.fit_converged = fit.converged;
+    ev.fit_last_step_px = fit.last_step_px;
+    if (!fit.ok || !fit.converged) return refuse(GridSheetRefusal::fit_failed);
     const detail::Mat3 h = detail::LatticeToPlane(fit.parameters);
     if (!detail::PositivelyOriented(h)) return refuse(GridSheetRefusal::fit_failed);
+    const detail::LatticeShape shape = detail::ShapeOfLattice(h);
+    ev.lattice_aspect_ratio = shape.aspect_ratio;
+    ev.lattice_skew_deg = shape.skew_deg;
 
     const detail::Assignment assignment = detail::AssignPoints(fit.parameters, points, focal, det.direction_match_deg, det.final_gate_px);
-    std::array<std::int32_t, 2> lowest{INT32_MAX, INT32_MAX}, highest{INT32_MIN, INT32_MIN};
     double sum_sq = 0;
     for (std::size_t i = 0; i < points.size(); ++i) {
         if (!assignment.ok[i]) continue;
         ++ev.used_points;
         sum_sq += static_cast<double>(assignment.distance_px[i]) * assignment.distance_px[i];
-        const auto f = assignment.family[i];
-        lowest[f] = std::min(lowest[f], assignment.index[i]); highest[f] = std::max(highest[f], assignment.index[i]);
     }
+    ev.used_point_fraction = static_cast<double>(ev.used_points) / static_cast<double>(ev.ridge_points);
     if (ev.used_points == 0) return refuse(GridSheetRefusal::fit_failed);
     ev.residual_rms_px = std::sqrt(sum_sq / static_cast<double>(ev.used_points));
-    for (int f = 0; f < 2; ++f) ev.lattice_span[f] = highest[f] - lowest[f] + 1;
     ev.visible_fraction = detail::VisibleFraction(ridge.points, points, assignment, picture.width, picture.height, det.coverage_cell_px, det.coverage_cell_min_points);
 
     // (e) the tilt, three ways
-    const detail::OrientationNumbers main = detail::OrientationOfLattice(profile_projection, h);
+    const detail::OrientationNumbers main = detail::OrientationOfLattice(projection, h);
     if (!main.ok) return refuse(GridSheetRefusal::fit_failed);
     ev.tilt_deg_fit = main.tilt_deg;
     const auto lines = detail::FitLines(points, assignment, focal, det.line_min_points);
-    for (const auto& l : lines) ++ev.lines[static_cast<std::size_t>(l.family)];
+    // The span counts lattice lines from the first to the last fitted line (a line with enough points), so a few stray
+    // points far out do not widen it.
+    std::array<std::int64_t, 2> lowest{INT64_MAX, INT64_MAX}, highest{INT64_MIN, INT64_MIN};
+    for (const auto& l : lines) {
+        const auto f = static_cast<std::size_t>(l.family);
+        ++ev.lines[f];
+        lowest[f] = std::min<std::int64_t>(lowest[f], l.index); highest[f] = std::max<std::int64_t>(highest[f], l.index);
+    }
+    for (std::size_t f = 0; f < 2; ++f) ev.lattice_span[f] = ev.lines[f] ? static_cast<std::int32_t>(highest[f] - lowest[f] + 1) : 0;
     const detail::NodeFit nodes = detail::FitNodes(lines, h, focal, det);
     ev.nodes = nodes.nodes;
     detail::OrientationNumbers by_nodes;
     if (nodes.ok) {
         ev.node_residual_rms_px = nodes.rms_px;
-        by_nodes = detail::OrientationOfLattice(profile_projection, nodes.lattice_to_plane);
+        by_nodes = detail::OrientationOfLattice(projection, nodes.lattice_to_plane);
         if (by_nodes.ok) ev.tilt_deg_nodes = by_nodes.tilt_deg;
     }
     const detail::VanishingFit vanishing = detail::FitVanishing(lines, h);
@@ -173,19 +223,25 @@ GridSheetTiltOutcome MeasureGridSheetTilt(std::string_view camera, const ImageVi
         v.lean_sheet_deg = vanishing.lean_sheet_deg;
         ev.method_spread_deg = std::max({LeanDistance(main, by_nodes), LeanDistance(main, v), LeanDistance(by_nodes, v)});
     }
+    ev.tilt_formal_sigma_deg = detail::FormalTiltSigma(fit.parameters, points, focal, projection, det);
+    ev.half_split_spread_deg = detail::HalfSplitSpread(fit.parameters, points, ridge.points, assignment, focal, projection, det);
     const detail::FlatnessCheck flat = detail::CheckFlatness(fit.parameters, points, ridge.points, picture.width, picture.height, focal, acc.off_lattice_offset_px, det);
     ev.off_lattice_cell_fraction = flat.off_lattice_fraction;
     ev.judged_cells = flat.judged_cells;
 
-    // The caller's lines decide whether the value is shown.
+    // The caller's lines decide whether the value is shown. Each comparison is written so that a value that was not
+    // reached (NaN) refuses.
     if (ev.lines[0] < acc.min_lines_per_family || ev.lines[1] < acc.min_lines_per_family || !nodes.ok || !by_nodes.ok || !vanishing.ok)
         return refuse(GridSheetRefusal::too_few_lines);
     if (ev.lattice_span[0] < static_cast<std::int64_t>(acc.min_lattice_span) || ev.lattice_span[1] < static_cast<std::int64_t>(acc.min_lattice_span))
         return refuse(GridSheetRefusal::span_too_small);
-    if (ev.visible_fraction < acc.min_visible_fraction) return refuse(GridSheetRefusal::view_too_small);
-    if (ev.residual_rms_px > acc.max_residual_rms_px) return refuse(GridSheetRefusal::residual_too_large);
-    if (ev.off_lattice_cell_fraction > acc.max_off_lattice_cell_fraction) return refuse(GridSheetRefusal::sheet_not_flat);
-    if (ev.method_spread_deg > acc.max_method_spread_deg) return refuse(GridSheetRefusal::methods_disagree);
+    if (!(ev.visible_fraction >= acc.min_visible_fraction)) return refuse(GridSheetRefusal::view_too_small);
+    if (!(std::abs(ev.lattice_aspect_ratio - 1.0) <= acc.max_lattice_aspect_deviation) || !(std::abs(ev.lattice_skew_deg) <= acc.max_lattice_skew_deg))
+        return refuse(GridSheetRefusal::grid_not_square);
+    if (!(ev.residual_rms_px <= acc.max_residual_rms_px)) return refuse(GridSheetRefusal::residual_too_large);
+    if (flat.judged_cells == 0) return refuse(GridSheetRefusal::flatness_not_judged);
+    if (!(ev.off_lattice_cell_fraction <= acc.max_off_lattice_cell_fraction)) return refuse(GridSheetRefusal::sheet_not_flat);
+    if (!(ev.method_spread_deg <= acc.max_method_spread_deg)) return refuse(GridSheetRefusal::methods_disagree);
 
     GridSheetTilt tilt;
     tilt.camera = std::string(camera);
@@ -201,7 +257,8 @@ GridSheetTiltOutcome MeasureGridSheetTilt(std::string_view camera, const ImageVi
 }
 
 GridSheetPairOutcome CompareGridSheetTilts(const GridSheetTiltOutcome& reference, const GridSheetTiltOutcome& target, const GridSheetPairAcceptance& acceptance) {
-    Require(std::isfinite(acceptance.min_quarter_turn_margin_deg) && acceptance.min_quarter_turn_margin_deg >= 0, "grid sheet tilt: the quarter turn margin is not set");
+    Require(FiniteNonNegative(acceptance.max_rotation_mismatch_deg) && acceptance.max_rotation_mismatch_deg < 45,
+        "grid sheet tilt: the rotation mismatch line is not set");
     GridSheetPairOutcome out;
     if (!reference.tilt) { out.refusal = GridSheetPairRefusal::reference_not_measured; return out; }
     if (!target.tilt) { out.refusal = GridSheetPairRefusal::target_not_measured; return out; }
@@ -214,10 +271,9 @@ GridSheetPairOutcome CompareGridSheetTilts(const GridSheetTiltOutcome& reference
         mismatch[static_cast<std::size_t>(k)] = Wrap180(b.image_x_azimuth_deg + 90.0 * k - a.image_x_azimuth_deg - calibrated_difference);
         if (std::abs(mismatch[static_cast<std::size_t>(k)]) < std::abs(mismatch[static_cast<std::size_t>(best)])) best = k;
     }
-    double second = 1e300;
-    for (int k = 0; k < 4; ++k) if (k != best) second = std::min(second, std::abs(mismatch[static_cast<std::size_t>(k)]));
-    const double margin = second - std::abs(mismatch[static_cast<std::size_t>(best)]);
-    if (margin < acceptance.min_quarter_turn_margin_deg) { out.refusal = GridSheetPairRefusal::quarter_turn_ambiguous; return out; }
+    out.rotation_mismatch_deg = mismatch[static_cast<std::size_t>(best)];
+    // A mismatch below 45 degrees also makes the quarter turn unique.
+    if (!(std::abs(out.rotation_mismatch_deg) <= acceptance.max_rotation_mismatch_deg)) { out.refusal = GridSheetPairRefusal::turn_mismatch; return out; }
 
     // Both leans in the reference's sheet frame, then the optical axes as unit vectors (toward the sheet).
     const Point lean_a = a.lean_sheet_deg;
@@ -239,8 +295,7 @@ GridSheetPairOutcome CompareGridSheetTilts(const GridSheetTiltOutcome& reference
     pair.lean_difference_drawing_deg = Rotate(diff, to_drawing);
     pair.relative_rotation_deg = Wrap180(b.image_x_azimuth_deg + 90.0 * best - a.image_x_azimuth_deg);
     pair.quarter_turns = best;
-    pair.rotation_mismatch_deg = mismatch[static_cast<std::size_t>(best)];
-    pair.quarter_turn_margin_deg = margin;
+    pair.rotation_mismatch_deg = out.rotation_mismatch_deg;
     out.refusal = GridSheetPairRefusal::none;
     out.pair = pair;
     return out;

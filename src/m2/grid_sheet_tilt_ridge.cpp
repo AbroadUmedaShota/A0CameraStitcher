@@ -3,8 +3,9 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
-#include <numeric>
+#include <exception>
 #include <stdexcept>
+#include <system_error>
 #include <thread>
 
 namespace a0::m2::experimental::grid_sheet_tilt::detail {
@@ -127,11 +128,16 @@ void BandRidges(const ImageView& im, const Kernels& k, int y0, int y1, float thr
             const float half_trace = 0.5f * (a + c);
             // A ridge has lambda1 < -threshold and |lambda2| < ratio |lambda1|, so half its trace is below -(1 - ratio) / 2 threshold.
             if (half_trace >= -0.5f * (1.0f - axis_ratio) * threshold) continue;
-            const float disc = std::sqrt(std::max(half_trace * half_trace - (a * c - b * b), 0.0f));
+            const float half_difference = 0.5f * (a - c);
+            const float disc = std::hypot(half_difference, b);
             const float l1 = half_trace - disc, l2 = half_trace + disc;
             if (!(l1 < -threshold) || !(std::abs(l2) < axis_ratio * (-l1))) continue;
-            float nx = b, ny = l1 - a;
-            if (std::hypot(nx, ny) < 1e-9f * (std::abs(l1) + 1e-12f)) { nx = l1 - c; ny = b; }
+            // The eigenvector of l1 is (b, l1 - a) and also (l1 - c, b). Of l1 - a = -(half_difference + disc) and
+            // l1 - c = half_difference - disc, the one whose two terms add up is used: the other cancels to rounding noise
+            // for a line along an image axis (b near zero) and would point along the line.
+            float nx, ny;
+            if (half_difference >= 0) { nx = b; ny = -(half_difference + disc); }
+            else { nx = half_difference - disc; ny = b; }
             const float norm = std::hypot(nx, ny);
             if (!(norm > 0)) continue;
             nx /= norm; ny /= norm;
@@ -166,25 +172,40 @@ double BandNoise(const ImageView& im, const Kernels& k, int y0, int y1, Scratch&
     return 1.4826 * median(m);
 }
 
+// Calls work(i) for every i below `count` on up to `threads` threads. The indices share no state, so the result does not
+// depend on the thread count. An exception in a worker is caught there and the first one in thread order is rethrown
+// after every thread has been joined; a thread that cannot be started leaves its share to the others.
 template <class Work>
 void RunParallel(std::size_t count, unsigned threads, Work work) {
     if (threads <= 1 || count <= 1) {
         for (std::size_t i = 0; i < count; ++i) work(i);
         return;
     }
+    const unsigned n = static_cast<unsigned>(std::min<std::size_t>(threads, count));
     std::atomic<std::size_t> next{0};
-    const auto body = [&] {
-        for (;;) {
-            const std::size_t i = next.fetch_add(1);
-            if (i >= count) return;
-            work(i);
+    std::atomic<bool> stop{false};
+    std::vector<std::exception_ptr> errors(n);
+    const auto body = [&](unsigned t) {
+        try {
+            while (!stop.load()) {
+                const std::size_t i = next.fetch_add(1);
+                if (i >= count) return;
+                work(i);
+            }
+        } catch (...) {
+            errors[t] = std::current_exception();
+            stop.store(true);
         }
     };
     std::vector<std::thread> pool;
-    const unsigned n = static_cast<unsigned>(std::min<std::size_t>(threads, count));
-    for (unsigned t = 1; t < n; ++t) pool.emplace_back(body);
-    body();
+    try {
+        for (unsigned t = 1; t < n; ++t) pool.emplace_back(body, t);
+    } catch (const std::system_error&) {
+        // A thread could not start: the threads that did, and this one, take the remaining indices.
+    }
+    body(0);
     for (auto& t : pool) t.join();
+    for (const auto& error : errors) if (error) std::rethrow_exception(error);
 }
 
 }   // namespace

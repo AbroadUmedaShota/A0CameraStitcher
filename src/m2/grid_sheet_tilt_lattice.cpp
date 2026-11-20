@@ -3,10 +3,8 @@
 
 #include <algorithm>
 #include <cmath>
-#include <complex>
 #include <limits>
 #include <numbers>
-#include <numeric>
 #include <stdexcept>
 #include <utility>
 
@@ -14,6 +12,7 @@ namespace a0::m2::experimental::grid_sheet_tilt::detail {
 namespace {
 
 constexpr double kPi = std::numbers::pi;
+constexpr double kMaxLatticeIndex = 1e6;   // lattice lines further than this from the first lattice's origin are not counted
 
 Mat3 Multiply(const Mat3& a, const Mat3& b) {
     Mat3 r{};
@@ -193,6 +192,8 @@ Assignment AssignPoints(const LatticeParameters& p, const PreparedPoints& points
         const bool first = s1 < s2;
         const double x = sx * kLatticeScale, y = sy * kLatticeScale;
         const double coordinate = first ? x : y;
+        // A lattice index that does not fit the index type is no line of this picture (and its conversion would be undefined).
+        if (!(std::abs(coordinate) < kMaxLatticeIndex)) continue;
         const double k = std::rint(coordinate);
         const double d = (coordinate - k) / (first ? ngx : ngy) * focal;
         a.distance_px[i] = static_cast<float>(d);
@@ -245,6 +246,7 @@ struct StepResult {
     LatticeParameters parameters{};
     std::size_t inliers{};
     bool moved{};
+    double shift_px{};   // largest change of a point's distance to its line made by the step (pixels)
 };
 
 // One robust Gauss-Newton step of the lattice fit with the assignment held fixed. The robust weights come from the
@@ -307,6 +309,7 @@ StepResult GaussNewtonStep(const PreparedPoints& points, double focal, const Lat
         for (double v : rt) if (!std::isfinite(v)) { finite = false; break; }
         if (finite && cost_of(rt) <= cost0) {
             out.parameters = trial; out.ok = true;
+            for (std::size_t m = 0; m < rt.size(); ++m) out.shift_px = std::max(out.shift_px, std::abs(rt[m] - r[m]));
             double change = 0;
             for (int i = 0; i < 8; ++i) change = std::max(change, std::abs(trial[i] - p[i]) / (std::abs(trial[i]) + 1e-3));
             out.moved = change >= 1e-7;
@@ -317,17 +320,36 @@ StepResult GaussNewtonStep(const PreparedPoints& points, double focal, const Lat
     return out;
 }
 
-bool FitStage(const PreparedPoints& points, double focal, LatticeParameters& p, const std::array<double, 4>& gates, const GridSheetDetectionSettings& s) {
+struct StageResult {
+    bool ok{};
+    double last_shift_px{std::numeric_limits<double>::infinity()};   // the last step of the row's last gate
+};
+StageResult FitStage(const PreparedPoints& points, double focal, LatticeParameters& p, const std::array<double, 4>& gates, const GridSheetDetectionSettings& s) {
+    StageResult out;
     for (double gate : gates) {
         if (gate <= 0) break;
         for (std::uint32_t it = 0; it < s.fit_iterations; ++it) {
             const StepResult step = GaussNewtonStep(points, focal, p, gate, s.direction_match_deg, s.fit_min_inliers);
-            if (step.inliers < s.fit_min_inliers || !step.ok) return false;
+            if (step.inliers < s.fit_min_inliers || !step.ok) return out;
             p = step.parameters;
+            out.last_shift_px = step.shift_px;
             if (!step.moved) break;
         }
     }
-    return true;
+    out.ok = true;
+    return out;
+}
+
+// Every `stride`-th point of `members`, at most about `max_points` of them.
+PreparedPoints Subset(const PreparedPoints& points, const std::vector<std::uint32_t>& members, std::uint32_t max_points) {
+    const std::size_t stride = members.size() / std::max<std::size_t>(max_points, 1) + 1;
+    PreparedPoints sub;
+    for (std::size_t m = 0; m < members.size(); m += stride) {
+        const auto i = members[m];
+        sub.qx.push_back(points.qx[i]); sub.qy.push_back(points.qy[i]); sub.tx.push_back(points.tx[i]); sub.ty.push_back(points.ty[i]);
+        sub.source.push_back(points.source[i]);
+    }
+    return sub;
 }
 
 }   // namespace
@@ -340,19 +362,19 @@ LatticeFit FitLattice(const PreparedPoints& points, double focal, const InitialL
         std::vector<std::uint32_t> inside;
         for (std::size_t i = 0; i < points.size(); ++i)
             if (std::abs(points.qx[i] - start.centre_x) < radius && std::abs(points.qy[i] - start.centre_y) < radius) inside.push_back(static_cast<std::uint32_t>(i));
-        const std::size_t stride = inside.size() / std::max<std::size_t>(s.fit_max_points, 1) + 1;
-        PreparedPoints sub;
-        for (std::size_t m = 0; m < inside.size(); m += stride) {
-            const auto i = inside[m];
-            sub.qx.push_back(points.qx[i]); sub.qy.push_back(points.qy[i]); sub.tx.push_back(points.tx[i]); sub.ty.push_back(points.ty[i]);
-            sub.source.push_back(points.source[i]);
-        }
+        const PreparedPoints sub = Subset(points, inside, s.fit_max_points);
         LatticeParameters p = fit.parameters;
-        if (!FitStage(sub, focal, p, s.gates_px[std::min<std::size_t>(stage, s.gates_px.size() - 1)], s)) {
-            fit.ok = stage > 0;   // a later stage that runs out of points leaves the earlier result
+        const StageResult result = FitStage(sub, focal, p, s.gates_px[std::min<std::size_t>(stage, s.gates_px.size() - 1)], s);
+        if (!result.ok) {
+            // A later stage that runs out of points leaves the earlier result, which covers only a smaller window: it is
+            // kept as evidence but does not count as converged.
+            fit.ok = stage > 0;
+            fit.converged = false;
             return fit;
         }
         fit.parameters = p;
+        fit.last_step_px = result.last_shift_px;
+        fit.converged = result.last_shift_px <= s.fit_settle_px;
     }
     fit.ok = true;
     return fit;
@@ -476,7 +498,7 @@ std::optional<InitialLattice> FindInitialLattice(const PreparedPoints& points, d
         normal[family][0] = -std::sin(th); normal[family][1] = std::cos(th);
         std::vector<std::uint32_t> sel;
         for (auto i : window) if (DirectionDistance(angle[i], th) < tolerance) sel.push_back(i);
-        if (sel.size() < 500) return std::nullopt;
+        if (sel.size() < std::max<std::size_t>(s.lattice_min_points, 1)) return std::nullopt;
         const std::size_t stride = sel.size() / std::max<std::size_t>(s.init_scan_points, 1) + 1;
         std::vector<double> along;
         for (std::size_t m = 0; m < sel.size(); m += stride) {
@@ -744,6 +766,117 @@ OrientationNumbers OrientationOfLattice(const render::CameraProjection& profile,
     return out;
 }
 
+LatticeShape ShapeOfLattice(const Mat3& h) {
+    LatticeShape out;
+    const double c0[3] = {h[0], h[3], h[6]}, c1[3] = {h[1], h[4], h[7]};
+    const double n0 = std::sqrt(c0[0] * c0[0] + c0[1] * c0[1] + c0[2] * c0[2]);
+    const double n1 = std::sqrt(c1[0] * c1[0] + c1[1] * c1[1] + c1[2] * c1[2]);
+    if (!(n0 > 0) || !(n1 > 0) || !std::isfinite(n0) || !std::isfinite(n1)) return out;
+    const double cosine = (c0[0] * c1[0] + c0[1] * c1[1] + c0[2] * c1[2]) / (n0 * n1);
+    out.aspect_ratio = n1 / n0;
+    out.skew_deg = std::asin(std::clamp(cosine, -1.0, 1.0)) / kDegrees;
+    return out;
+}
+
+// ---- the uncertainty evidence ---------------------------------------------------------------------------------------
+
+double FormalTiltSigma(const LatticeParameters& p, const PreparedPoints& points, double focal, const render::CameraProjection& profile,
+    const GridSheetDetectionSettings& s) {
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double gate = s.final_gate_px;
+    const Assignment a = AssignPoints(p, points, focal, s.direction_match_deg, gate);
+    std::vector<std::uint32_t> idx;
+    std::vector<std::uint8_t> fam;
+    std::vector<std::int32_t> k;
+    std::vector<double> r0;
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        if (!a.ok[i]) continue;
+        idx.push_back(static_cast<std::uint32_t>(i)); fam.push_back(a.family[i]); k.push_back(a.index[i]); r0.push_back(a.distance_px[i]);
+    }
+    if (idx.size() < 9) return nan;
+    // The weights of the fit's last step (GaussNewtonStep).
+    const double c = std::min(std::max(3.0 * ScaleOf(r0), 0.3), gate);
+    std::array<std::array<double, 8>, 8> normal{};
+    double weighted_sq = 0, weight_sum = 0;
+    constexpr std::size_t kChunk = 50000;   // bounds the Jacobian's memory
+    std::vector<std::uint32_t> ci;
+    std::vector<std::uint8_t> cf;
+    std::vector<std::int32_t> ck;
+    std::vector<double> r, jac;
+    for (std::size_t begin = 0; begin < idx.size(); begin += kChunk) {
+        const std::size_t end = std::min(idx.size(), begin + kChunk);
+        ci.assign(idx.begin() + static_cast<std::ptrdiff_t>(begin), idx.begin() + static_cast<std::ptrdiff_t>(end));
+        cf.assign(fam.begin() + static_cast<std::ptrdiff_t>(begin), fam.begin() + static_cast<std::ptrdiff_t>(end));
+        ck.assign(k.begin() + static_cast<std::ptrdiff_t>(begin), k.begin() + static_cast<std::ptrdiff_t>(end));
+        LatticeResiduals(p, points, ci, cf, ck, focal, r, &jac);
+        for (std::size_t m = 0; m < ci.size(); ++m) {
+            const double w = Tukey(r0[begin + m], c);
+            if (w <= 0) continue;
+            weighted_sq += w * r[m] * r[m];
+            weight_sum += w;
+            const double* row = jac.data() + m * 8;
+            for (int i = 0; i < 8; ++i) for (int j = i; j < 8; ++j) normal[i][j] += w * row[i] * row[j];
+        }
+    }
+    if (!(weight_sum > 9)) return nan;
+    for (int i = 0; i < 8; ++i) for (int j = 0; j < i; ++j) normal[i][j] = normal[j][i];
+    const double variance = weighted_sq / (weight_sum - 8);
+    // The tilt's gradient against the eight parameters, by central differences of the decomposition.
+    std::array<double, 8> gradient{};
+    for (int j = 0; j < 8; ++j) {
+        const double h = 1e-6 * std::max(std::abs(p[static_cast<std::size_t>(j)]), 1e-3);
+        auto pp = p, pm = p;
+        pp[static_cast<std::size_t>(j)] += h; pm[static_cast<std::size_t>(j)] -= h;
+        const auto op = OrientationOfLattice(profile, LatticeToPlane(pp)), om = OrientationOfLattice(profile, LatticeToPlane(pm));
+        if (!op.ok || !om.ok) return nan;
+        gradient[static_cast<std::size_t>(j)] = (op.tilt_deg - om.tilt_deg) / (2 * h);
+    }
+    // gradient^T N^-1 gradient, with the normal equations scaled to unit diagonal.
+    std::array<double, 8> scale{};
+    for (int i = 0; i < 8; ++i) scale[static_cast<std::size_t>(i)] = std::sqrt(normal[i][i]) + 1e-30;
+    std::array<std::array<double, 8>, 8> scaled{};
+    std::array<double, 8> scaled_gradient{};
+    for (int i = 0; i < 8; ++i) {
+        scaled_gradient[static_cast<std::size_t>(i)] = gradient[static_cast<std::size_t>(i)] / scale[static_cast<std::size_t>(i)];
+        for (int j = 0; j < 8; ++j) scaled[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] = normal[i][j] / (scale[static_cast<std::size_t>(i)] * scale[static_cast<std::size_t>(j)]);
+    }
+    std::array<double, 8> x{};
+    if (!Solve<8>(scaled, scaled_gradient, x)) return nan;
+    double quadratic = 0;
+    for (std::size_t i = 0; i < 8; ++i) quadratic += scaled_gradient[i] * x[i];
+    if (!(quadratic >= 0) || !std::isfinite(quadratic)) return nan;
+    return std::sqrt(variance * quadratic);
+}
+
+double HalfSplitSpread(const LatticeParameters& p, const PreparedPoints& points, const std::vector<RidgePoint>& ridges, const Assignment& used,
+    double focal, const render::CameraProjection& profile, const GridSheetDetectionSettings& s) {
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    std::vector<double> xs, ys;
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        if (!used.ok[i]) continue;
+        xs.push_back(ridges[points.source[i]].x); ys.push_back(ridges[points.source[i]].y);
+    }
+    if (xs.empty()) return nan;
+    const double mid_x = Median(xs), mid_y = Median(ys);
+    const auto lean_of = [&](auto inside) -> std::optional<render::Point> {
+        std::vector<std::uint32_t> members;
+        for (std::size_t i = 0; i < points.size(); ++i) {
+            const auto& r = ridges[points.source[i]];
+            if (inside(r.x, r.y)) members.push_back(static_cast<std::uint32_t>(i));
+        }
+        const PreparedPoints sub = Subset(points, members, s.fit_max_points);
+        LatticeParameters q = p;
+        if (!FitStage(sub, focal, q, s.gates_px.back(), s).ok) return std::nullopt;
+        const auto o = OrientationOfLattice(profile, LatticeToPlane(q));
+        if (!o.ok) return std::nullopt;
+        return o.lean_sheet_deg;
+    };
+    const auto left = lean_of([&](double x, double) { return x < mid_x; }), right = lean_of([&](double x, double) { return x >= mid_x; });
+    const auto top = lean_of([&](double, double y) { return y < mid_y; }), bottom = lean_of([&](double, double y) { return y >= mid_y; });
+    if (!left || !right || !top || !bottom) return nan;
+    return std::max(std::hypot(left->x - right->x, left->y - right->y), std::hypot(top->x - bottom->x, top->y - bottom->y));
+}
+
 // ---- coverage and flatness ------------------------------------------------------------------------------------------
 
 double VisibleFraction(const std::vector<RidgePoint>& ridges, const PreparedPoints& points, const Assignment& a,
@@ -807,7 +940,8 @@ FlatnessCheck CheckFlatness(const LatticeParameters& p, const PreparedPoints& po
         const double offset = std::atan2(cell.zi, cell.zr) / (2 * kPi) * (cell.pitch_sum / static_cast<double>(cell.count));
         if (coherence > s.flat_cell_coherence && std::abs(offset) > offset_px) ++flagged;
     }
-    out.off_lattice_fraction = out.judged_cells ? static_cast<double>(flagged) / static_cast<double>(out.judged_cells) : 0.0;
+    // No judged cell: the flatness is unknown, not shown (NaN fails every acceptance comparison).
+    out.off_lattice_fraction = out.judged_cells ? static_cast<double>(flagged) / static_cast<double>(out.judged_cells) : std::numeric_limits<double>::quiet_NaN();
     return out;
 }
 

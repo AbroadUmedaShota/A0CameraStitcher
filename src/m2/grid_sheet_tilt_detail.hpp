@@ -8,6 +8,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <vector>
 
@@ -78,6 +79,8 @@ struct Assignment {
 struct LatticeFit {
     LatticeParameters parameters{};
     bool ok{};
+    bool converged{};     // every stage ran, and the last step of the last gate moved no point's line by more than fit_settle_px
+    double last_step_px{std::numeric_limits<double>::quiet_NaN()};
 };
 // The growing fit of the prototype: windows of increasing size around the first lattice, gates shrinking inside each.
 [[nodiscard]] LatticeFit FitLattice(const PreparedPoints& points, double focal, const InitialLattice& start, const GridSheetDetectionSettings& s);
@@ -104,6 +107,26 @@ struct OrientationNumbers {
 [[nodiscard]] OrientationNumbers OrientationOfLattice(const render::CameraProjection& profile_projection, const Mat3& lattice_to_plane);
 // Same orientation sign (the plane's own right-handedness) of the matrix's linear part at the principal point.
 [[nodiscard]] bool PositivelyOriented(const Mat3& lattice_to_plane);
+
+// The two lattice steps on the sheet. For a square grid the first two columns of the lattice-to-plane matrix (normalised
+// camera units) are the camera's view of two orthogonal sheet directions of equal length: their length ratio is one and
+// their angle a right angle, whatever the pose.
+struct LatticeShape {
+    double aspect_ratio{std::numeric_limits<double>::quiet_NaN()};   // |second column| / |first column|
+    double skew_deg{std::numeric_limits<double>::quiet_NaN()};       // 90 degrees less the angle between them (signed)
+};
+[[nodiscard]] LatticeShape ShapeOfLattice(const Mat3& lattice_to_plane);
+
+// The tilt's standard deviation from the robust normal equations of the lattice fit at `p` (final gate, all points),
+// propagated through OrientationOfLattice. Treats every point as independent: a lower bound. NaN when it cannot be formed.
+[[nodiscard]] double FormalTiltSigma(const LatticeParameters& p, const PreparedPoints& points, double focal,
+    const render::CameraProjection& profile_projection, const GridSheetDetectionSettings& s);
+
+// The lattice refitted (last gate row, from `p`) to the points left and right of the median picture x of the used points,
+// and above and below their median y; the larger vector distance between the two leans of a split. NaN when a half does
+// not fit.
+[[nodiscard]] double HalfSplitSpread(const LatticeParameters& p, const PreparedPoints& points, const std::vector<RidgePoint>& ridges,
+    const Assignment& used, double focal, const render::CameraProjection& profile_projection, const GridSheetDetectionSettings& s);
 
 struct LineFit {
     int family{};
