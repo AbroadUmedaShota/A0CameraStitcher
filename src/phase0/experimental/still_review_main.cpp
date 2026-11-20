@@ -7,6 +7,8 @@
 #include "a0/phase0/experimental/still_alignment_text.hpp"
 #include "a0/phase0/experimental/fixed_composite_text.hpp"
 #include "a0/phase0/experimental/fixed_composite_lens_text.hpp"
+#include "a0/phase0/experimental/pair_review_registration.hpp"
+#include "a0/phase0/experimental/live_registration_display.hpp"
 #include "a0/phase0/experimental/fixed_composite_tool.hpp"
 #include "a0/phase0/experimental/fixed_composite_tool_v2.hpp"
 #include "a0/phase0/experimental/fixed_composite_cli_v3.hpp"
@@ -39,6 +41,69 @@ std::wstring Number(double value){
 }
 struct Loaded {review::SavedStillReview record;a0::m2::render::BgrImage image;};
 Loaded Load(const fs::path& path){auto record=review::LoadSavedStillReview(path);auto image=review::LoadStillReviewImage(record);return {std::move(record),std::move(image)};}
+// A report whose mapping is fixed: the profile's (v7), or the profile's with that capture's registration (v8, v9). Its picture is
+// the saved JPEG alone. There is nothing to place by hand, so the manual tools are off and the two originals are not decoded.
+// This is the one place that decides it; anything specific to one version asks the record for that version itself.
+bool UsesFixedMapping(const review::SavedStillReview& record){return record.fixed_composite_lens.has_value() || record.fixed_composite_registration.has_value();}
+// The originals the manual tools place; a fixed-mapping report has none to decode. `decoded` counts the originals decoded (smoke output).
+std::array<a0::m2::render::BgrImage,2> DecodeSources(const review::SavedStillReview& record,unsigned& decoded){
+    if(UsesFixedMapping(record))return {};
+    auto sources=review::LoadStillReviewSources(record);decoded=2;return sources;
+}
+// UTF-8 sentences with LF breaks, as the edit control wants them (CRLF).
+std::wstring ControlText(std::string_view utf8){
+    std::wstring text;for(const auto c:a0::phase0::experimental::WidenUtf8(utf8)){if(c==L'\n')text+=L'\r';text+=c;}return text;
+}
+// The sentences of a v8 or v9 report: the ones the development preview shows after the shot, made by the same function from the
+// report's values (level, pose, gate, assessment, warnings). Nothing is worded here.
+a0::phase0::experimental::RegistrationReviewLines RegistrationLines(const review::SavedFixedCompositeRegistration& record){
+    review::StillReviewResult result;result.fixed_composite_registration=record;
+    return a0::phase0::experimental::DescribeRegistrationReview(result);
+}
+std::string RegistrationGateSentence(const review::SavedFixedCompositeRegistration& record){return a0::phase0::experimental::RegistrationGateStateText(record.registration.gate);}
+// v9: the amounts of a position that was set by hand, when the JPEG was made with it (the sentence the live state row says). Empty for
+// every other report: no position given, a position of another condition, or one the JPEG did not use.
+std::string HandSumSentence(const review::SavedFixedCompositeRegistration& record){
+    const auto& capture=record.registration;
+    if(!capture.confirmed_position || !capture.confirmed_check || !capture.confirmed_check->used)return {};
+    const auto& position=*capture.confirmed_position;
+    if(position.source!=review::ConfirmedPositionSource::manual || position.condition_sha256!=record.condition_sha256 || !position.manual_entered)return {};
+    return a0::phase0::experimental::LiveHandSumText(position.manual_entered);
+}
+// UTF-8 of a panel text, with the control's CRLF breaks as LF.
+std::string PanelUtf8(const std::wstring& text){
+    std::wstring lf;for(size_t i=0;i<text.size();++i){if(text[i]==L'\r' && i+1<text.size() && text[i+1]==L'\n')continue;lf+=text[i];}
+    if(lf.empty())return {};
+    const int length=WideCharToMultiByte(CP_UTF8,0,lf.data(),static_cast<int>(lf.size()),nullptr,0,nullptr,nullptr);
+    if(length<=0)return {};
+    std::string utf8(static_cast<size_t>(length),'\0');
+    WideCharToMultiByte(CP_UTF8,0,lf.data(),static_cast<int>(lf.size()),utf8.data(),length,nullptr,nullptr);return utf8;
+}
+// The pixels of a rectangle of a device context as the display holds them (BGR, rows from the top, no padding): copied into a bitmap of the
+// display's own format and read back with GetDIBits. Empty when any step fails.
+std::vector<unsigned char> ReadBackBgr(HDC source,int x,int y,unsigned width,unsigned height){
+    std::vector<unsigned char> bgr;
+    if(!width || !height)return bgr;
+    const HDC copy=CreateCompatibleDC(source);if(!copy)return bgr;
+    const HBITMAP bitmap=CreateCompatibleBitmap(source,static_cast<int>(width),static_cast<int>(height));
+    if(bitmap){
+        const auto previous=SelectObject(copy,bitmap);
+        const bool selected=previous && previous!=HGDI_ERROR;
+        const bool copied=selected && BitBlt(copy,0,0,static_cast<int>(width),static_cast<int>(height),source,x,y,SRCCOPY)!=FALSE;
+        if(selected)SelectObject(copy,previous);
+        if(copied){
+            BITMAPINFO info{};info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);info.bmiHeader.biWidth=static_cast<LONG>(width);
+            info.bmiHeader.biHeight=-static_cast<LONG>(height);info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;info.bmiHeader.biCompression=BI_RGB;
+            std::vector<unsigned char> bgra(static_cast<size_t>(width)*height*4);
+            if(GetDIBits(copy,bitmap,0,height,bgra.data(),&info,DIB_RGB_COLORS)==static_cast<int>(height)){
+                bgr.resize(static_cast<size_t>(width)*height*3);
+                for(size_t p=0;p<static_cast<size_t>(width)*height;++p)std::copy_n(bgra.data()+p*4,3,bgr.data()+p*3);
+            }
+        }
+        DeleteObject(bitmap);
+    }
+    DeleteDC(copy);return bgr;
+}
 // The inspector's buttons in command order: button i is created with command id kFirstButtonId+i. To add a
 // button, append its label here, place it in Inspector::Layout and handle its id in Inspector::Command; the
 // button array, the WM_COMMAND range, the control-fit check and EnableChanges follow this list's size.
@@ -53,9 +118,12 @@ constexpr const wchar_t* kSeamCropsOff=L"継ぎ目の上・中・下";
 constexpr int kSummaryTop=218,kHelpTop=242,kPointHelpTop=266;
 struct Inspector {
     Loaded current;
-    // The decoded A/B of the manual tools. A lens-aware (v7) report has no manual tools, so none are decoded (#405 W4).
+    unsigned original_decodes{}; // the originals decoded for the manual tools (0 for a fixed-mapping report)
+    // The decoded A/B of the manual tools. A fixed-mapping report (v7, v8, v9) has no manual tools, so none are decoded (#405 W4, #418).
     std::array<a0::m2::render::BgrImage,2> sources;
-    bool lens{};unsigned lens_stage{};
+    // lens: v7 only. registration: v8 and v9. fixed_mapping: any of them (UsesFixedMapping). Wording and values of one version are read
+    // only behind its own flag; a fixed_mapping branch holds what v7, v8 and v9 share.
+    bool lens{},registration{},fixed_mapping{};unsigned lens_stage{};
     review::ReviewViewport viewport;
     std::array<HWND,kButtonLabels.size()> buttons{};
     std::array<HWND,4> edits{};
@@ -97,12 +165,27 @@ struct Inspector {
     unsigned crop_stage{},crop_paints{},crop_pixel_failures{},crop_seam_pixels{};
     // #418 review: commands that act on the whole-image view return to it first; counted by the smoke.
     unsigned crop_returns{},crop_guarded{};
+    // #418: what the smoke saw of a fixed-mapping report's window. The manual tools are every button but the views (0..3), the seam
+    // line (30) and the crops (33), and the four fields: none enabled, each refused by the command, nothing started by the refusal.
+    // `layout_failed` is a layout check that did not hold (a screen narrower than the buttons need). It fails the run exactly as
+    // before, but the crops smoke goes on, so that its output tells "the report did not open" from "the window is too narrow".
+    bool fixed_tools_checked{},layout_failed{},v7_text_shown{},registration_text_shown{};
+    // The status lines of a registered report that the right-hand panel shows, the sentence of its confirmed position (v9) and that of the hand amounts.
+    unsigned status_lines{},status_lines_shown{};bool confirmed_text_expected{},confirmed_text_shown{},hand_sum_expected{},hand_sum_shown{};
+    unsigned manual_tool_count{},manual_tools_enabled{},manual_refusals{};
+    // What the smoke saw of the picture and the panel, for the test to judge against its own decode of the saved JPEG (#418): the SHA-256 of the
+    // picture the window holds, the panel's text as the control shows it, and, per crop, where it was cut and the SHA-256 of the pixels read back
+    // from the drawing surface after the crop was drawn (GetDIBits, every pixel) and of the crop itself.
+    std::string picture_sha256,panel_utf8;
+    struct CropReadback{unsigned left{},top{},width{},height{},seam_column{};std::string drawn_sha256,crop_sha256;};
+    std::array<std::optional<CropReadback>,3> crop_readback;
     // #382 smoke: checked before the stages below, whose counters restart after it.
     unsigned draft_stage{},draft_saved{},draft_rejections{};bool draft_verified{};fs::path draft_parent;
     review::StillAlignmentGeometry draft_parent_geometry{};std::optional<review::StillAlignmentGeometry> draft_estimate;
     explicit Inspector(Loaded loaded,bool test):current(std::move(loaded)),
-        sources(current.record.fixed_composite_lens?std::array<a0::m2::render::BgrImage,2>{}:review::LoadStillReviewSources(current.record)),
-        lens(current.record.fixed_composite_lens.has_value()),smoke(test){
+        sources(DecodeSources(current.record,original_decodes)),
+        lens(current.record.fixed_composite_lens.has_value()),registration(current.record.fixed_composite_registration.has_value()),
+        fixed_mapping(UsesFixedMapping(current.record)),smoke(test){
         viewport={current.image.width,current.image.height,1,1,0,current.image.width/2.0,current.image.height/2.0};
         displayed_x=current.record.translation_x;displayed_y=current.record.translation_y;
         blend=current.record.blend?review::BlendMethod::seam_cut:review::BlendMethod::linear_feather;
@@ -123,6 +206,15 @@ struct Inspector {
     }
     std::wstring BlendText() const {
         const auto& b=current.record.blend;
+        if(registration){
+            // The preview's sentences of a v8 or v9 report, then the saved blend's brightness ratio as v6 and v7 show it.
+            const auto lines=RegistrationLines(*current.record.fixed_composite_registration);
+            std::string text;for(const auto& line:lines.status)text+=line+"\n";
+            if(const auto hand=HandSumSentence(*current.record.fixed_composite_registration);!hand.empty())text+=hand+"\n";
+            text+="\n";for(const auto& line:lines.warnings)text+=line+"\n";
+            return ControlText(text)+L"\r\n明るさの比 A/B: "+a0::phase0::experimental::StillFixed(b->ratio_minimum,3)+L"〜"+a0::phase0::experimental::StillFixed(b->ratio_maximum,3)+L"\r\n"+ColorText()+
+                a0::phase0::experimental::kFixedMappingNoManualTools+L"\r\n\r\n";
+        }
         if(lens)return a0::phase0::experimental::FixedCompositeLensDetails(current.record)+L"明るさの比 A/B: "+a0::phase0::experimental::StillFixed(b->ratio_minimum,3)+L"〜"+a0::phase0::experimental::StillFixed(b->ratio_maximum,3)+L"\r\n"+ColorText();const std::wstring next=std::wstring(L"次の再Merge: ")+(blend==review::BlendMethod::seam_cut?L"継ぎ目":L"線形")+L"\r\n\r\n";
         if(current.record.fixed_composite)return a0::phase0::experimental::FixedCompositeDetails(current.record)+L"明るさの比 A/B: "+a0::phase0::experimental::StillFixed(b->ratio_minimum,3)+L"〜"+a0::phase0::experimental::StillFixed(b->ratio_maximum,3)+L"\r\n"+ColorText()+next;
         if(!b)return L"合成（保存JPEG）: 線形 feather\r\n"+next;
@@ -139,8 +231,17 @@ struct Inspector {
         status=L"全体表示に戻しました。";++crop_returns;
     }
     // What each smoke run must have seen by the time its window closes (one function per run).
-    bool CropsSmokePassed() const {return crop_stage==4 && crop_paints>=2 && !crop_pixel_failures && crop_seam_pixels && layout_verified && crop_returns==4 && crop_guarded==1;}
-    bool LensSmokePassed() const {return lens_stage==2 && seam_pixels && layout_verified;}
+    // The crops' own stages hold apart from the window layout, so that the output can say which of the two failed.
+    bool CropsStagesPassed() const {return crop_stage==4 && crop_paints>=2 && !crop_pixel_failures && crop_seam_pixels && crop_returns==4 && crop_guarded==1 && FixedToolsPassed();}
+    bool CropsSmokePassed() const {return CropsStagesPassed() && layout_verified;}
+    // Every status line of the report is in the panel; the confirmed position's sentence and the hand amounts are there exactly when the report has them.
+    bool RegistrationSentencesShown() const {return status_lines && status_lines_shown==status_lines && confirmed_text_shown==confirmed_text_expected && hand_sum_shown==hand_sum_expected;}
+    // A fixed-mapping report: every manual tool off and refused, no original decoded, its own sentences shown and not another version's.
+    bool FixedToolsPassed() const {
+        if(!fixed_mapping)return true;
+        return fixed_tools_checked && !original_decodes && manual_tool_count==manual_refusals && !manual_tools_enabled && !(registration && (v7_text_shown || !registration_text_shown || !RegistrationSentencesShown()));
+    }
+    bool LensSmokePassed() const {return lens_stage==2 && seam_pixels && layout_verified && FixedToolsPassed();}
     bool ResumeSmokePassed() const {return resume_verified && layout_verified;}
     bool ManualSmokePassed() const {
         return draft_verified && smoke_stage==11 && seam_pixels && current.record.blend && saved==1 && conditions_loaded==1 && zoom_paints[0]>=2 && zoom_paints[1]>=2 && zoom_paints[2]>=1 && pan_events && mode_paints[1] && mode_paints[2] && mode_paints[3] && mode_paints[4] && point_picks==4 && points.size()==3 && point_proposals==4 && point_applications==1 && point_undos==1 && point_rejections==1 && marker_pixels && point_role_changes==2 && unverified_displays==2 && layout_verified && sessions_saved==1 && sessions_loaded==1;
@@ -148,10 +249,10 @@ struct Inspector {
     bool SmokePassed() const {
         if(failed)return false;
         if(!smoke)return true;
-        return crops_smoke?CropsSmokePassed():lens?LensSmokePassed():resume_smoke?ResumeSmokePassed():ManualSmokePassed();
+        return crops_smoke?CropsSmokePassed():fixed_mapping?LensSmokePassed():resume_smoke?ResumeSmokePassed():ManualSmokePassed();
     }
     void EnableChanges(bool enabled){
-        if(lens){ // only the seam line is a tool of a lens-aware report
+        if(fixed_mapping){ // only the seam line is a tool of a fixed-mapping report (v7, v8, v9)
             for(size_t i=4;i<buttons.size();++i)EnableWindow(buttons[i],FALSE);for(auto edit:edits)EnableWindow(edit,FALSE);
             EnableWindow(buttons[30],enabled);EnableWindow(buttons[kSeamCropsButton],TRUE);return;
         }
@@ -197,7 +298,7 @@ struct Inspector {
         EnableChanges(false);status=L"対応点・用途・調整値を別の作業ファイルへ保存しています…";InvalidateRect(window,nullptr,FALSE);
     }
     void RestoreWork(HWND window,const review::SavedReviewSession& session){
-        if(lens)throw std::invalid_argument("a lens-aware report has no manual work to restore");
+        if(fixed_mapping)throw std::invalid_argument("a fixed-mapping report has no manual work to restore");
         const auto& b=session.review;
         if(!review::ReviewSessionBelongsToPair(session,current.record))throw std::invalid_argument("work belongs to another original pair");
         auto baseline=Load(b.report);if(baseline.record.report_sha256!=session.state.review_report_sha256)throw std::invalid_argument("work baseline changed");
@@ -241,6 +342,12 @@ struct Inspector {
     // not apply enters them only through 「推定値を入力欄へ」, never on opening,
     // so a re-Merge that changes only the blend keeps the parent geometry.
     void InitialDraft(){
+        if(registration){
+            // The level and the gate, as the preview's status row says them (report values only).
+            const auto& f=*current.record.fixed_composite_registration;
+            status=a0::phase0::experimental::WidenUtf8(a0::phase0::experimental::GeometryLevelText(f.registration.level))+L" / "+a0::phase0::experimental::WidenUtf8(RegistrationGateSentence(f));
+            EnableChanges(true);return;
+        }
         if(lens){status=a0::phase0::experimental::FixedCompositeLensLine(*current.record.fixed_composite_lens);EnableChanges(true);return;}
         SetDraft();const auto estimate=review::EstimatedStillReviewGeometry(current.record);EnableWindow(buttons[32],estimate.has_value());
         if(current.record.fixed_composite){status=a0::phase0::experimental::FixedCompositeLine(*current.record.fixed_composite);
@@ -280,7 +387,7 @@ struct Inspector {
     }
     void UpdateMeasurements(){
         if(!residual_text)return;
-        if(lens){SetWindowTextW(residual_text,BlendText().c_str());return;}
+        if(fixed_mapping){SetWindowTextW(residual_text,BlendText().c_str());return;}
         const auto measured=review::MeasureReviewCorrespondences(points,preview_parameters,sources[0].width,sources[0].height);
         auto groups=[&](const auto& parameters){
             return GroupMetrics(review::ReviewPointRole::fitting,review::MeasureReviewCorrespondences(points,parameters,sources[0].width,sources[0].height,review::ReviewPointRole::fitting))+L"\r\n"+
@@ -437,7 +544,7 @@ struct Inspector {
             }
         }
         ReleaseDC(window,dc);
-        if(valid)++layout_verified;else failed=true;
+        if(valid)++layout_verified;else if(crops_smoke)layout_failed=true;else failed=true;
     }
     void StartSave(HWND window){
         if(Busy() || closing)return;ReadDraft();
@@ -480,6 +587,51 @@ struct Inspector {
         if(!smoke)return;
         auto click=[&](int index){SendMessageW(window,WM_COMMAND,MAKEWPARAM(kFirstButtonId+index,BN_CLICKED),reinterpret_cast<LPARAM>(buttons[static_cast<size_t>(index)]));};
         if(Clock::now()-started>std::chrono::seconds(210) || failed){failed=true;SendMessageW(window,WM_CLOSE,0,0);return;}
+        if(fixed_mapping && !fixed_tools_checked){
+            // #418: the window of a fixed-mapping report. The manual tools are off and each is refused by its command; the
+            // sentences are the report's own (v8, v9) and not another version's. Nothing is started by the refusals.
+            if(!zoom_paints[0])return;
+            fixed_tools_checked=true;
+            const auto is_manual=[](size_t i){return i>=4 && i!=30 && i!=static_cast<size_t>(kSeamCropsButton);};
+            for(size_t i=0;i<buttons.size();++i)if(is_manual(i)){++manual_tool_count;if(IsWindowEnabled(buttons[i]))++manual_tools_enabled;}
+            for(const auto edit:edits)if(IsWindowEnabled(edit))++manual_tools_enabled;
+            for(size_t i=0;i<buttons.size();++i)if(is_manual(i)){
+                const auto count=expected_rejections;expect_rejection=true;click(static_cast<int>(i));expect_rejection=false;
+                if(expected_rejections==count+1)++manual_refusals;
+            }
+            if(mode || pick_stage || pending_a || proposal || !points.empty() || saved || sessions_saved || Busy() || seam_crops)failed=true;
+            picture_sha256=a0::m2::experimental::FixedCompositeBytesSha256(current.image.bgr);
+            if(registration){
+                wchar_t metrics[16384]{};GetWindowTextW(residual_text,metrics,static_cast<int>(std::size(metrics)));
+                const std::wstring panel=metrics,summary=SummaryText(0);
+                panel_utf8=PanelUtf8(panel);
+                // The sentences of the v7 report are about its scale correction and its turned originals; v8 and v9 have neither.
+                v7_text_shown=panel.find(L"倍率の補正")!=std::wstring::npos || summary.find(L"倍率の補正")!=std::wstring::npos || summary.find(L"A/Bを回して")!=std::wstring::npos;
+                const auto& f=*current.record.fixed_composite_registration;
+                registration_text_shown=panel.find(a0::phase0::experimental::WidenUtf8(RegistrationGateSentence(f)))!=std::wstring::npos;
+                const auto in_panel=[&](const std::string& sentence){return panel.find(a0::phase0::experimental::WidenUtf8(sentence))!=std::wstring::npos;};
+                for(const auto& line:RegistrationLines(f).status){++status_lines;if(in_panel(line))++status_lines_shown;}
+                const auto confirmed=a0::phase0::experimental::ConfirmedPositionText(f),hand=HandSumSentence(f);
+                confirmed_text_expected=!confirmed.empty();confirmed_text_shown=confirmed_text_expected && in_panel(confirmed);
+                hand_sum_expected=!hand.empty();hand_sum_shown=hand_sum_expected && in_panel(hand);
+            }
+            std::cout<<"fixed_mapping_window=1 registration="<<registration<<" original_decodes="<<original_decodes<<" manual_tools="<<manual_tool_count<<" manual_tools_enabled="<<manual_tools_enabled
+                <<" manual_tools_refused="<<manual_refusals<<" v7_text_shown="<<v7_text_shown<<" registration_text_shown="<<registration_text_shown
+                <<" status_lines="<<status_lines<<" status_lines_shown="<<status_lines_shown<<" confirmed_position_text_expected="<<confirmed_text_expected<<" confirmed_position_text_shown="<<confirmed_text_shown
+                <<" hand_sum_expected="<<hand_sum_expected<<" hand_sum_shown="<<hand_sum_shown
+                <<" image_width="<<current.image.width<<" image_height="<<current.image.height<<" image_sha256="<<picture_sha256<<'\n';
+            // The panel as the control holds it, one output line per line of the panel, UTF-8, so that a test can compare the sentences themselves.
+            if(registration){
+                for(size_t at=0;at<=panel_utf8.size();){
+                    const auto end=panel_utf8.find('\n',at);
+                    std::cout<<"panel_line="<<panel_utf8.substr(at,end==std::string::npos?std::string::npos:end-at)<<'\n';
+                    if(end==std::string::npos)break;at=end+1;
+                }
+            }
+            std::cout<<std::flush;
+            if(!FixedToolsPassed())failed=true;
+            return;
+        }
         if(crops_smoke){
             // #418 stage 0: off at the start; on shows the three crops (their pixels are compared in Paint and in full here);
             // the seam line is drawn over them; off returns to the whole image.
@@ -494,7 +646,10 @@ struct Inspector {
                 // Review H1: a command on the whole-image view (picking a point, zoom, a comparison, the jump to the seam)
                 // returns to that view first, so the next click is a click on the view that is shown.
                 const auto label_is=[&](const wchar_t* expected){wchar_t text[64]{};GetWindowTextW(buttons[kSeamCropsButton],text,static_cast<int>(std::size(text)));return std::wstring(text)==expected;};
-                for(const int id:{21,1,12,3}){
+                // A fixed-mapping report has no point picking or comparison to start from the crops; its commands on the whole-image
+                // view are the four views (whole, 100%, 200%, the seam).
+                const std::vector<int> ids=fixed_mapping?std::vector<int>{1,2,3,0}:std::vector<int>{21,1,12,3};
+                for(const int id:ids){
                     if(!seam_crops)click(kSeamCropsButton);
                     if(!seam_crops || !label_is(kSeamCropsOn))failed=true;
                     const auto returns=crop_returns;click(id);
@@ -507,7 +662,8 @@ struct Inspector {
                         click(22);if(pick_stage || pending_a)failed=true;
                     }
                 }
-                click(10);click(0);
+                if(!fixed_mapping)click(10);
+                click(0);
                 // The guard behind it: with the crops on and a point pending (not reachable by the commands), a click records nothing.
                 {const auto guarded=crop_guarded;const auto count=points.size();
                     seam_crops=true;pick_stage=1;
@@ -519,11 +675,11 @@ struct Inspector {
             }else if(crop_stage==3 && zoom_paints[0]){++crop_stage;SendMessageW(window,WM_CLOSE,0,0);}
             return;
         }
-        if(lens){
-            // A lens-aware report shows its saved JPEG, the seam line and the scale notes; nothing else is a tool.
+        if(fixed_mapping){
+            // A fixed-mapping report shows its saved JPEG and the seam line (v7 also the scale notes); nothing else is a tool.
             if(lens_stage==0 && zoom_paints[0]){
                 wchar_t metrics[16384]{};GetWindowTextW(residual_text,metrics,static_cast<int>(std::size(metrics)));
-                if(std::wstring(metrics).find(L"倍率の補正")==std::wstring::npos)failed=true;
+                if(lens && std::wstring(metrics).find(L"倍率の補正")==std::wstring::npos)failed=true;
                 ++lens_stage;click(30);
             }else if(lens_stage==1 && seam_pixels){++lens_stage;SendMessageW(window,WM_CLOSE,0,0);}
             return;
@@ -659,8 +815,14 @@ struct Inspector {
     // The three lines of text above the image area. `view_mode` is the comparison mode (0 = the saved JPEG).
     std::wstring SummaryText(int view_mode) const {
         const auto degrees=view_mode?draft_degrees:current.record.rotation_degrees,scale=view_mode?draft_scale:current.record.scale;
-        std::wstring summary=lens?L"保存JPEG（校正の写像） / "+std::to_wstring(viewport.image_width)+L" × "+std::to_wstring(viewport.image_height)+L" px  / 倍率の補正 ×"+a0::phase0::experimental::StillFixed(current.record.fixed_composite_lens->scale.applied_scale,5):(view_mode?L"調整プレビュー（未保存） / ":L"保存JPEG / ")+std::to_wstring(viewport.image_width)+L" × "+std::to_wstring(viewport.image_height)+L" px  / B位置="+std::to_wstring(view_mode?draft_x:displayed_x)+L", "+std::to_wstring(view_mode?draft_y:displayed_y)+L"  回転="+std::to_wstring(degrees)+L"° 倍率="+std::to_wstring(scale*100)+L"%";
-        summary+=current.record.geometry.orientation==review::MountOrientation::rotated_180?L"  取付: 180°回転（A/Bを回して表示・合成）":L"  取付: 通常";
+        const auto size=std::to_wstring(viewport.image_width)+L" × "+std::to_wstring(viewport.image_height)+L" px";
+        std::wstring summary;
+        if(registration)summary=L"保存JPEG（校正の写像） / "+size+L"  / "+a0::phase0::experimental::WidenUtf8(a0::phase0::experimental::GeometryLevelName(current.record.fixed_composite_registration->registration.level.level));
+        else if(lens)summary=L"保存JPEG（校正の写像） / "+size+L"  / 倍率の補正 ×"+a0::phase0::experimental::StillFixed(current.record.fixed_composite_lens->scale.applied_scale,5);
+        else summary=std::wstring(view_mode?L"調整プレビュー（未保存） / ":L"保存JPEG / ")+size+L"  / B位置="+std::to_wstring(view_mode?draft_x:displayed_x)+L", "+std::to_wstring(view_mode?draft_y:displayed_y)+L"  回転="+std::to_wstring(degrees)+L"° 倍率="+std::to_wstring(scale*100)+L"%";
+        // v8 and v9 keep the originals in their saved orientation (the profile's mapping turns them); v1 to v7 turn them before drawing.
+        if(current.record.geometry.orientation==review::MountOrientation::rotated_180)summary+=registration?L"  取付: 180°回転":L"  取付: 180°回転（A/Bを回して表示・合成）";
+        else summary+=L"  取付: 通常";
         return summary;
     }
     static std::wstring HelpText(){return L"未校正・操作検証用 / 回転・倍率で周辺を切り取ります。差分は重なり部分のみ。比較不可の範囲は格子表示。";}
@@ -737,6 +899,12 @@ struct Inspector {
                 pixels_ok=pixels_ok && GetPixel(dc,x+static_cast<int>(at[0]),y+static_cast<int>(at[1]))==RGB(bgr[2],bgr[1],bgr[0]);
             }
             if(pixels_ok)++crop_paints;else ++crop_pixel_failures;
+            if(smoke && drawn>0){
+                // Every pixel of the crop's rectangle, read back before the seam line is drawn over it.
+                const auto drawn_pixels=ReadBackBgr(dc,x,y,c.image.width,c.image.height);
+                crop_readback[i]=CropReadback{c.left,c.top,c.image.width,c.image.height,c.seam_column,
+                    drawn_pixels.empty()?std::string():a0::m2::experimental::FixedCompositeBytesSha256(drawn_pixels),a0::m2::experimental::FixedCompositeBytesSha256(c.image.bgr)};
+            }
             if(!show_seam)continue;
             // The recorded seam of each row, relative to the crop (one column for a fixed composite).
             std::vector<POINT> line;
@@ -799,6 +967,8 @@ struct Inspector {
             status=seam_crops?L"継ぎ目の上・中・下を原寸（保存JPEGの1画素＝画面の1画素）で並べています。左から上・中・下。「継ぎ目を表示」で桃色の線を重ねます。":L"全体表示に戻しました。";
             InvalidateRect(window,nullptr,FALSE);return;
         }
+        // A fixed-mapping report has nothing to place by hand: every other command is refused, whoever sends it.
+        if(fixed_mapping)throw std::invalid_argument("a fixed-mapping report has no manual tool");
         if(Busy() || closing)return;
         if(id==128 || id==129){if(pick_stage)throw std::invalid_argument("finish or cancel the pending point");if(id==128)StartWorkSave(window);else LoadWork(window);return;}
         if(id>=121 && id<=127){PointCommand(window,id);return;}
@@ -1009,6 +1179,13 @@ int wmain(int argc,wchar_t** argv){
         std::cout<<"point_pairs="<<app->points.size()<<" point_picks="<<app->point_picks<<" point_proposals="<<app->point_proposals<<" point_applications="<<app->point_applications<<" point_undos="<<app->point_undos<<" outside_point_rejections="<<app->point_rejections<<" verified_marker_pixels="<<app->marker_pixels<<" point_role_changes="<<app->point_role_changes<<" unverified_displays="<<app->unverified_displays<<'\n';
         std::cout<<"overlay_paints="<<app->mode_paints[1]<<" difference_paints="<<app->mode_paints[2]<<" a_paints="<<app->mode_paints[3]<<" b_paints="<<app->mode_paints[4]<<" conditions_loaded="<<app->conditions_loaded<<" invalid_input_rejections="<<app->expected_rejections<<'\n';
         std::cout<<"ui_controls_fit="<<app->layout_verified<<" seam_line_paints="<<app->seam_pixels<<'\n';
+        // The seam crops' own stages and the window layout are reported apart (a narrow screen fails the layout, not the report).
+        std::cout<<"fixed_mapping="<<app->fixed_mapping<<" original_decodes="<<app->original_decodes<<" crops_stages_passed="<<app->CropsStagesPassed()<<" crop_stage="<<app->crop_stage<<" crop_paints="<<app->crop_paints
+            <<" crop_pixel_failures="<<app->crop_pixel_failures<<" crop_seam_pixels="<<app->crop_seam_pixels<<" crop_returns="<<app->crop_returns<<" crop_guarded="<<app->crop_guarded
+            <<" layout_failed="<<app->layout_failed<<" stage_failed="<<app->failed<<'\n';
+        for(size_t i=0;i<app->crop_readback.size();++i)if(const auto& r=app->crop_readback[i])
+            std::cout<<"seam_crop index="<<i<<" left="<<r->left<<" top="<<r->top<<" width="<<r->width<<" height="<<r->height<<" seam_column="<<r->seam_column
+                <<" drawn_sha256="<<r->drawn_sha256<<" crop_sha256="<<r->crop_sha256<<'\n';
         std::cout<<"draft_verified="<<app->draft_verified<<" draft_revisions="<<app->draft_saved<<" draft_rejections="<<app->draft_rejections<<'\n';
         std::cout<<"fit_paints="<<app->zoom_paints[0]<<" native_paints="<<app->zoom_paints[1]<<" double_paints="<<app->zoom_paints[2]<<" verified_gdi_paints="<<app->verified_paints<<" pan_events="<<app->pan_events<<" revisions="<<app->saved<<" shutter_operations=0 result="<<(pass?"PASS":"FAIL")<<std::endl;
         return pass?0:1;

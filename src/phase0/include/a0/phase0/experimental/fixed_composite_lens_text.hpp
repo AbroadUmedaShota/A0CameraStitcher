@@ -4,6 +4,8 @@
 #include <string>
 
 namespace a0::phase0::experimental {
+// The note of a report whose mapping is the profile's (v7, and v8 and v9 which the inspector shows the same way): the manual tools are off.
+inline constexpr const wchar_t* kFixedMappingNoManualTools=L"再Merge・位置/回転/倍率の調整は、この報告では使えません（校正の写像で描いています）";
 // Display text for the lens-aware fixed composite (#405 W4, report v7). Rounded for reading; the
 // report keeps the full values. Never states a quality pass. The condition is shown as unapproved,
 // and the profile as a calibrated draft, as they are.
@@ -47,6 +49,6 @@ inline std::wstring FixedCompositeLensDetails(const a0::m2::experimental::SavedS
             StillSigned(s.unexplained_shift_mm.x,2)+L", "+StillSigned(s.unexplained_shift_mm.y,2)+L" mm（出力 "+StillSigned(s.unexplained_shift_output_pixels.x,2)+L", "+StillSigned(s.unexplained_shift_output_pixels.y,2)+L" px）\r\n";
     text+=FixedPolicyLine(f.policy_limit,s.limit_percent)+L"\r\n\r\n";
     text+=L"倍率の推定に使った一致タイル "+std::to_wstring(f.tiles_agreed)+L"/"+std::to_wstring(f.tiles_matched)+L"/"+std::to_wstring(f.tiles_searched)+L"\r\n";
-    return text+L"再Merge・位置/回転/倍率の調整は、この報告では使えません（校正の写像で描いています）\r\n\r\n";
+    return text+kFixedMappingNoManualTools+L"\r\n\r\n";
 }
 }
