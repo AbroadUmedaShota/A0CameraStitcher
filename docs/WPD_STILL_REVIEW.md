@@ -705,7 +705,7 @@ StillReview の窓は、写像が固定の報告（v7、v8、v9。画素の位�
 - 原画像 2 枚は復号しない（保存したJPEGだけを復号する）。実寸の出力では約 217 MB の確保が要らなくなる。smoke の出力 `original_decodes` が復号した原画像の数（手で合わせる報告は 2、写像が固定の報告は 0）
 - 手で合わせる道具は使えない。「全体表示・100%・200%・継ぎ目へ」「継ぎ目を表示」「継ぎ目の上・中・下」以外のボタン（B の移動・回転・倍率、調整値を戻す、再Merge・条件保存、保存JPEG・半透明・差分・A のみ・B のみ、保存条件を読込、対応点、作業の保存・読込、合成の切り替え、推定値）と 4 つの入力欄は無効にし、命令が届いても断る（例外にして何も始めない。再Merge は新しい `revision-*` を作らない）。作業の復元（`--session`）も断る
 - v8 と v9 の窓の文は、報告の値から、開発用プレビューが撮影の後に出す文を作る関数（`DescribeRegistrationReview`）で作る。右の欄に位置合わせの段とその理由、B の姿勢と紙面、継ぎ目のズレの状態と最大、位置合わせの確認と警告の件数、警告の全件。状態行に段とゲートの文。要約の行は「保存JPEG（校正の写像）」、大きさ、段（G1〜G4、v9 では「確定した位置」も）。取付が 180° の時は「取付: 180°回転」（v8 と v9 は原画像を保存の向きのまま使い、向きは profile の写像が持つので、v7 の「A/Bを回して表示・合成」とは言わない）。ゲートと位置の出どころの文を窓の側で作り直さない
-- v9 で、撮影が位置を渡された報告（`confirmedPosition`・`confirmedPositionCheck` がある）は、状態の文の次に位置の文（`ConfirmedPositionText`。例「手で直した位置で JPEG を作りました（自動で測ると継ぎ目で最大 1.50 px 違います）」）が出る。手で直した位置を JPEG が使った時（段 `confirmed`）は、続けて手で直した量の文（`LiveHandSumText`。ライブの状態の行と同じ関数。例「手で直しました（Bの絵の動き 左右 右へ 12 px・上下 上へ 4 px・回り 時計回りに 0.05°、撮影の画素。合計）。」）が出る。位置が条件の位置のままの撮影や、位置を使わなかった撮影は、手で直した量を出さない（位置の文は、位置を使わなかった理由を言う時に出る）。どちらの文も報告の値から作る
+- v9 で、撮影が位置を渡された報告（`confirmedPosition`・`confirmedPositionCheck` がある）は、右の欄の状態の文のうち 2 行目（段の文の次）に位置の文（`ConfirmedPositionText`。例「手で直した位置で JPEG を作りました（自動で測ると継ぎ目で最大 2.5 px 違います）」。数字は `tests/fixed_composite_registration_text_tests.cpp` の文の試験が使う値）が出る。手で直した位置を JPEG が使った時（段 `confirmed`）は、状態の文を全部出した後に、手で直した量の文（`LiveHandSumText`。ライブの状態の行と同じ関数。例「手で直しました（Bの絵の動き 左右 右へ 12 px・上下 上へ 4 px・回り 時計回りに 0.05°、撮影の画素。合計）。」）が 1 行出る。その後に空行と警告が続く。位置が条件の位置のままの撮影や、位置を使わなかった撮影は、手で直した量を出さない（位置の文は、位置を使わなかった理由を言う時に出る）。どちらの文も報告の値から作る
 - 継ぎ目の上・中・下は、v8・v9 でも同じ関数（`ExtractSeamCrops`）で、保存JPEGを読み直した画素から切る。中央の列は報告の `fixedCompositeRegistration.seam.column`、行は今は合成の全行（ゲートが測れない行を除く扱いは別の段）
 
 ### 確認（v8・v9）
@@ -716,13 +716,16 @@ StillReview の窓は、写像が固定の報告（v7、v8、v9。画素の位�
 - v9・手で直した位置の撮影（段 `confirmed`。位置を渡した撮影で、保存JPEGは位置なしの撮影と違う画素）
 - v8 の形（上の位置なしの報告から、スキーマの文字列と 2 つの null の欄だけを戻した物。#437 段 2 より前に撮った報告）
 
-以下は 3 つのどれにも当てる。
+以下は 3 つのどれにも当てる（1 バイトの試験だけは別で、その項に書く）。
 
 - `--export-seam-crops` の PNG の 3 枚の全画素が、試験の側で復号した保存JPEG（WIC を直接使う）の同じ座標の画素と一致する。中心の列が報告の `seam.column`、行は先頭・中央・末尾。1 画素左右にずらす・1 行下げると一致しない。窓が切り出す元の画素（読み手の復号）も、試験の側の復号と同じ
-- `--report <報告> --seam-crops-smoke` と `--smoke` が、窓を開く（`review_loaded=1 ui_window_visible=1`、`invalid review similarity` を出さない）。窓の smoke の出力で、原画像を復号しない（`original_decodes=0`）、手の道具は全部無効で全部断られる（`manual_tools_enabled=0`、`manual_tools_refused` が `manual_tools` と同じ数）、v7 の文が出ない・ゲートの文が出る、状態の文の全行が右の欄にある（`status_lines_shown` が `status_lines` と同じ）、位置の文と手で直した量の文は、手で直した位置の撮影にだけ出る（`confirmed_position_text_shown`・`hand_sum_shown` が、`..._expected` と同じ）、切り出しの全画素を画面から読み戻して一致（`crop_pixel_failures=0`）、断った操作が何も書かない
-- 位置を渡さない撮影と手で直した位置の撮影のそれぞれで、保存JPEGを 1 バイト変えると、窓が開かず（`review_loaded=1` が出ない）、`--export-seam-crops` も PNG を作らない。変えていない写しは開く
+- `--report <報告> --seam-crops-smoke` と `--smoke` が、窓を開く（`review_loaded=1 ui_window_visible=1`、`invalid review similarity` を出さない）。窓の smoke の出力で、原画像を復号しない（`original_decodes=0`）、手の道具は全部無効で全部断られる（`manual_tools_enabled=0`、`manual_tools_refused` が `manual_tools` と同じ数）、v7 の文が出ない・ゲートの文が出る
+- 窓が持つ絵と描いた絵を、窓の外の復号と比べる。窓の smoke の `fixed_mapping_window=1 …` の行に、窓が持つ絵の `image_width`・`image_height`・`image_sha256`（`current.image` の SHA-256）が出る。`--seam-crops-smoke` は最後に切り出し 3 枚の行（`seam_crop index=… left top width height seam_column drawn_sha256 crop_sha256`）を出す。`drawn_sha256` は、切り出しを描いた後の裏の描画先から全画素を読み戻した（GDI の `GetDIBits`。描画の変換で色が変わる所があれば一致しない）画素の SHA-256、`crop_sha256` は描く前の切り出しの画素のもの。試験は、WIC で直接復号した保存JPEGの SHA-256 と、同じ位置（`left`・`top`・`width`・`height`）の切り出しの SHA-256 を自分で取って、どちらも一致する事を見る。位置は、中央の列が報告の `seam.column`、幅は中央から左右に等しい、行は先頭・中央・末尾（`DecideSeamCropRows`）である事も見る。以前の「切り出しの 3 画素を画面から読み戻す」検査（`crop_pixel_failures`）は窓の内部の確認として残り、保証の根拠にはしない
+- 窓の右の欄の文は、欄が実際に出した行を `panel_line=` として UTF-8 のまま出力し、試験が記録から作った文と比べる。状態の文は `DescribeRegistrationReview` が作る文と同じ並び、手で直した位置の撮影では、続けて `LiveHandSumText(記録の manual_entered)` の 1 行、位置の文は `ConfirmedPositionText(記録)` が 1 行だけ、空行の後に警告が同じ並び。位置を渡さない撮影と v8 の形には、位置の文も手で直した量の文も無い。窓が自分で数える欄（`status_lines_shown`・`confirmed_position_text_shown`・`hand_sum_shown`）は残るが、保証の根拠にはしない
+- 窓を開く前後（`--export-seam-crops`、`--seam-crops-smoke`、`--smoke` を走らせた後）で、報告・保存JPEG・原画像・設定フォルダ（rig profile の写しを含む）・fixtures のファイルの SHA-256 が同じ
+- 位置を渡さない撮影と手で直した位置の撮影のそれぞれ（通常の取付の v9 の 2 件。180° の取付と v8 の形では行わない）で、保存JPEGを 1 バイト変えると、窓が開かず（`review_loaded=1` が出ない）、`--export-seam-crops` も PNG を作らない。断った理由が、報告の検証に落ちた時の理由（`saved uncalibrated review failed validation`）である事を、読み手・書き出し・窓の標準エラーで見る。変えていない写しは開く
 - `--seam-crops-smoke` の出力に、切り出しの段の結果（`crops_stages_passed`）と窓の配置の検査（`layout_failed`）を別々に出す。配置の検査で落ちた時も、切り出しの段は最後まで進める（合否は配置の検査も含めて今までどおり。落ちた時の終了コードは 1 のまま）
-- 窓の配置の検査（ボタンの右端が窓の中に収まる）は、画面の幅が約 1175 画素以上必要。それより狭い画面では v7・v8・v9・`seam-cut` のどの報告でも `button_layout_failure` で落ち、終了コード 1 になる。報告が開けたかどうかは、上の出力で画面の幅に依らず判定する
+- 窓の配置の検査（ボタンの右端が窓の中に収まる）は、窓の中の幅が 1180 画素以上必要（ボタンの右端が 1180。窓の最小は外枠で 1240×720）。それより狭い画面では v7・v8・v9・`seam-cut` のどの報告でも `button_layout_failure` で落ち、終了コード 1 になる。報告が開けたかどうかは、上の出力で画面の幅に依らず判定する
 
 ### 行の決め方（※仮定）
 
