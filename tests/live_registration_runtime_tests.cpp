@@ -10,14 +10,17 @@
 #include <cmath>
 #include <deque>
 #include <functional>
+#include <future>
 #include <iomanip>
 #include <iostream>
 #include <limits>
 #include <memory>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 using namespace a0::phase0::experimental;
@@ -121,6 +124,10 @@ struct Rig {
     FixedPreviewPlan plan;
     LiveFrameSource frames;
     LiveEstimator estimator;
+    // The checks that a test connects (#437 stage 2): a hand step's, and an estimate's position's before it is drawn. Empty: refused / none.
+    LiveHandChecker hand_check;
+    LiveMappingChecker mapping_check;
+    std::vector<std::pair<ex::RegisteredMapping,ex::HandCounts>> hand_checks;
     // `carry`: the machine of the session before. `sha`: the condition's sha; it is the condition's own unless a case says otherwise.
     explicit Rig(bool live=true,const Pose& base=Pose{},ex::MountOrientation mount=ex::MountOrientation::normal,
         std::optional<LivePlacementMachine> carry=std::nullopt,const std::string& sha=kSha)
@@ -129,6 +136,11 @@ struct Rig {
         config.base_pose=base;config.live_enabled=live;config.mount=mount;
         config.condition_sha256=sha;config.placement=std::move(carry);
         config.log=[this](const std::string& line){log.push_back(line);};
+        config.hand_check=[this](const ex::RegisteredMapping& base,const ex::HandCounts& total){
+            if(!hand_check)throw std::runtime_error("no check of hand steps");
+            return hand_check(base,total);
+        };
+        config.mapping_check=[this](const ex::RegisteredMapping& mapping){return mapping_check?mapping_check(mapping):std::vector<std::string>{};};
         runtime=std::make_unique<LiveRegistrationRuntime>(config,condition.profile.parameters);
         plan=PlanFixedPreviewV3(condition,mount,kW,kH);
         frames.ready=[this]{return ready;};
@@ -183,7 +195,7 @@ void NotConnected(){
     status=rig.runtime->Status();
     CHECK(status.placement.outcome==LivePlacementOutcomeKind::not_decided && status.placement.activity==LivePlacementActivity::idle);
     CHECK(Contains(status.state_text,"位置を決められませんでした") && Contains(status.state_text,"未接続") && Contains(status.state_text,"条件の位置"));
-    CHECK(Contains(status.state_text,"自動位置合わせ"));
+    CHECK(Contains(status.state_text,"「自動調整」") && !Contains(status.state_text,"自動位置合わせ"));
     CHECK(Contains(status.orientation.b_short,"B: 向きを測れていません"));
     CHECK(Contains(status.orientation.a_short,"A（校正時）: 回転なし") || Contains(status.orientation.a_short,"A（校正時）: 右回りに") || Contains(status.orientation.a_short,"A（校正時）: 左回りに"));
     CHECK(Contains(status.orientation_line,"Aに対する今の値") && Contains(status.orientation_line,"A（校正時）") && Contains(status.orientation_line,"B: 向きを測れていません"));
@@ -327,22 +339,21 @@ void SeamAndWhole(){
     Rig rig;
     if(!Usable(rig)){Check(false,"plan");return;}
     const ex::RegisteredMapping zero{},leaning{Pose{0.3,-0.3,0,0,0,0.3},{},std::nullopt},shifted{Pose{0,0,0,0.5,0,0},{},std::nullopt};
-    const double seam=LiveSeamMappingDifferencePx(rig.plan,zero,leaning,kLiveSeamDifferenceRows),whole=LiveMappingDifferencePx(rig.plan,zero,leaning,9);
-    std::cerr<<"info a lean of B (0.3 degrees each way): "<<seam<<" px at the seam, "<<whole<<" px over C\n";
-    CHECK(seam>0 && whole>seam);
-    // A shift of the baseline is the same at the seam as anywhere, to within the lattice.
-    CHECK(LiveSeamMappingDifferencePx(rig.plan,zero,zero,kLiveSeamDifferenceRows)==0 && LiveSeamMappingDifferencePx(rig.plan,leaning,leaning,5)==0);
-    CHECK(LiveSeamMappingDifferencePx(rig.plan,zero,shifted,kLiveSeamDifferenceRows)>0);
-    CHECK(LiveSeamMappingDifferencePx(rig.plan,zero,leaning,kLiveSeamDifferenceRows)==LiveSeamMappingDifferencePx(rig.plan,leaning,zero,kLiveSeamDifferenceRows));
-    REJECT(LiveSeamMappingDifferencePx(rig.plan,zero,leaning,1));
-    REJECT(LiveSeamMappingDifferencePx(FixedPreviewPlan{},zero,leaning,kLiveSeamDifferenceRows));
-    REJECT(LiveSeamMappingDifferencePx(rig.plan,zero,ex::RegisteredMapping{Pose{std::numeric_limits<double>::quiet_NaN(),0,0,0,0,0},{},std::nullopt},kLiveSeamDifferenceRows));
-    // The same distance in the JPEG's pixels: C's pixels times C's pitch over the raster's.
-    const double output=LiveSeamMappingDifferenceOutputPx(rig.plan,zero,leaning,kLiveSeamDifferenceRows);
+    // The one measure of the seam (SeamDifferencePx), in the JPEG's pixels; the whole of C is in C's pixels.
+    const double seam=LiveSeamMappingDifferenceOutputPx(rig.plan,zero,leaning),whole=LiveMappingDifferencePx(rig.plan,zero,leaning,9);
     const double ratio=rig.plan.grid.pitch_mm/(25.4/rig.plan.live->raster.dpi);
-    CHECK(ratio>1 && std::abs(output-seam*ratio)<=1e-9*std::max(1.0,output));
-    CHECK(LiveSeamMappingDifferenceOutputPx(rig.plan,zero,zero,kLiveSeamDifferenceRows)==0);
-    REJECT(LiveSeamMappingDifferenceOutputPx(FixedPreviewPlan{},zero,leaning,kLiveSeamDifferenceRows));
+    std::cerr<<"info a lean of B (0.3 degrees each way): "<<seam<<" px (the JPEG's) at the seam, "<<whole<<" px (C's) over C\n";
+    CHECK(ratio>1 && seam>0 && whole*ratio>seam);
+    CHECK(LiveSeamMappingDifferenceOutputPx(rig.plan,zero,zero)==0 && LiveSeamMappingDifferenceOutputPx(rig.plan,leaning,leaning)==0);
+    CHECK(LiveSeamMappingDifferenceOutputPx(rig.plan,zero,shifted)>0);
+    CHECK(LiveSeamMappingDifferenceOutputPx(rig.plan,zero,leaning)==LiveSeamMappingDifferenceOutputPx(rig.plan,leaning,zero));
+    // The number is the one function's, not another lattice's: the same call on the context's own pieces.
+    {
+        const auto& c=*rig.plan.live;
+        CHECK(seam==ex::SeamDifferencePx(c.model_b,c.centre_a,c.origin_mm,ex::content_registration::FrameOfRaster(c.raster),zero,leaning,c.seam_column,c.raster.height_pixels));
+    }
+    REJECT(LiveSeamMappingDifferenceOutputPx(FixedPreviewPlan{},zero,leaning));
+    REJECT(LiveSeamMappingDifferenceOutputPx(rig.plan,zero,ex::RegisteredMapping{Pose{std::numeric_limits<double>::quiet_NaN(),0,0,0,0,0},{},std::nullopt}));
 }
 
 // An estimate that decides nothing: P and the plan stay, the sentence says why, nothing is asked for again, and the next press is a new try.
@@ -482,7 +493,7 @@ void Disabled(){
     CHECK(!shot.job_ran && shot.rebaked && rig.runtime->CurrentPlan() && SameNine(rig.runtime->CurrentPlan()->live->baked,jpeg));
     CHECK(Contains(rig.runtime->Status().state_text,"撮影の後の自動調整で位置を確定しました（G2）") && rig.jobs.empty());
     // The button is refused for this condition, so the sentence does not tell the person to press it.
-    CHECK(!Contains(rig.runtime->Status().state_text,"自動位置合わせ"));
+    CHECK(!Contains(rig.runtime->Status().state_text,"「自動調整」"));
 }
 
 // A new plan for another frame size drops the baked plan; P stays and is baked into the new plan, and no estimate is asked for.
@@ -570,16 +581,16 @@ void AfterCapture(){
     // The sentence: the level, how far the live C moved from where it was before the shot along the seam (in the JPEG's pixels), that the live C
     // is now at the JPEG's position, and layer 2 with its largest shift (what the live C does not show).
     const ex::RegisteredMapping jpeg_without_layer_two{jpeg.pose,jpeg.surface,std::nullopt};
-    const double distance=LiveSeamMappingDifferenceOutputPx(rig.plan,ex::RegisteredMapping{live_pose,{},std::nullopt},jpeg_without_layer_two,kLiveSeamDifferenceRows);
+    const double distance=LiveSeamMappingDifferenceOutputPx(rig.plan,ex::RegisteredMapping{live_pose,{},std::nullopt},jpeg_without_layer_two);
     CHECK(status.placement.capture && status.placement.capture->difference_px && *status.placement.capture->difference_px==distance && distance>0);
     // The live C against the JPEG's position after the shot: no distance (the number in the sentence is not that one).
-    CHECK(LiveSeamMappingDifferenceOutputPx(rig.plan,status.placement.mapping,jpeg_without_layer_two,kLiveSeamDifferenceRows)==0);
+    CHECK(LiveSeamMappingDifferenceOutputPx(rig.plan,status.placement.mapping,jpeg_without_layer_two)==0);
     {
         std::ostringstream moved;moved.imbue(std::locale::classic());moved<<std::fixed<<std::setprecision(1)<<distance;
         CHECK(Contains(status.state_text,"撮影の後の自動調整で位置を確定しました（G1）。撮影の前のライブの位置から継ぎ目で最大 "+moved.str()+" px（JPEGの画素）動かしました。今のライブのCはJPEGと同じ位置です"));
     }
     CHECK(!Contains(status.state_text,"違います") && !Contains(status.state_text,"ライブの位置と継ぎ目"));
-    CHECK(Contains(status.state_text,"JPEGの局所の補正（最大 0.5 px）はライブのCには出ません") && Contains(status.state_text,"自動位置合わせ"));
+    CHECK(Contains(status.state_text,"JPEGの局所の補正（最大 0.5 px）はライブのCには出ません") && Contains(status.state_text,"「自動調整」"));
     CHECK(status.placement.capture && status.placement.capture->layer_two_dropped && status.placement.capture->layer_two_max_px && *status.placement.capture->layer_two_max_px==0.5);
     // Not drawn yet: until the next pass the plan is the one before, and nothing is asked for.
     CHECK(rig.runtime->CurrentPlan()==before_plan && rig.jobs.size()==1);
@@ -617,7 +628,7 @@ void AfterCapture(){
     // function.
     CHECK(rig.Lines("C live_placement_after_capture ")==1 && Contains(rig.LogText(),"level=G1") && Contains(rig.LogText(),"before_source=auto-start") &&
         Contains(rig.LogText(),LivePlacementFields(ex::RegisteredMapping{live_pose,{},std::nullopt},"before_")) &&
-        Contains(rig.LogText(),LivePlacementLayerTwoFields(true,0.5)+" seam_difference_px=") && Contains(rig.LogText(),"layer_two_dropped=1 layer_two_max_px=0.5 "));
+        Contains(rig.LogText(),LivePlacementLayerTwoFields(true,0.5)+" seam_difference_px="+LivePlacementNumber(distance)+" ") && Contains(rig.LogText(),"layer_two_dropped=1 layer_two_max_px=0.5 "));
     const std::string expected="C live_placement serial="+std::to_string(live.placement.serial+1)+" source=after-capture "+LivePlacementFields(ex::RegisteredMapping{jpeg.pose,jpeg.surface,std::nullopt})+
         " condition_sha256="+kSha+" drawn=1";
     CHECK(Contains(rig.LogText(),expected));
@@ -693,6 +704,526 @@ void CaptureCannotBeDrawn(){
     // The next shot clears it.
     CHECK(rig.runtime->ApplyCapture(ex::RegisteredMapping{Pose{0,0,0.4,2.0,0.0,0.0},{},std::nullopt},"G2",kSha));
     CHECK(rig.Pass().rebaked && !rig.runtime->Status().bake_failed);
+}
+
+// ---- Hand steps, the freeze of a pair capture and the order of a pass (#437 stage 2) ----
+ex::HandCounts H(int a=0,int b=0,int c=0){return ex::HandCounts{a,b,c};}   // (a brace list does not go through the CHECK macro)
+// The check of a hand step in the test's own arithmetic (d px along the seam is d / 16 mm of tx; the real checks are tested in m2_confirmed_position_contracts).
+ex::RegisteredMapping SolvedByHand(const ex::RegisteredMapping& base,const ex::HandCounts& total){
+    const auto v=ex::HandValuesOf(total);
+    ex::RegisteredMapping out=base;
+    out.pose.tx_mm=base.pose.tx_mm+v.seam_dx_px/16.0;
+    out.pose.ty_mm=base.pose.ty_mm+v.seam_dy_px/16.0;
+    out.pose.rz_deg=base.pose.rz_deg+v.rotation_deg;
+    return out;
+}
+void ConnectTestChecks(Rig& rig){
+    rig.hand_check=[&rig](const ex::RegisteredMapping& base,const ex::HandCounts& total){
+        rig.hand_checks.emplace_back(base,total);
+        LiveHandCheck out;out.status=LiveHandCheck::Status::accepted;out.mapping=SolvedByHand(base,total);return out;
+    };
+}
+std::shared_ptr<const FixedPreviewPlan> Drawn(const Rig& rig){return rig.runtime->CurrentPlan()?rig.runtime->CurrentPlan():rig.runtime->BasePlan();}
+
+// A hand press on the runtime: the position waits, the worker bakes it, P becomes it once drawn, and the screen's table is P itself. The sum is solved from
+// the position before the first press; a press before the one before was drawn replaces it; a sum that comes back to 0 goes back to what it was.
+void HandStepOnTheRuntime(){
+    Rig rig;
+    if(!Usable(rig)){Check(false,"plan");return;}
+    ConnectTestChecks(rig);
+    const Pose estimate{0.3,-0.2,0.5,1.5,-1.0,0.0};
+    rig.PlaceFirst(estimate);
+    const auto estimated=rig.runtime->Status().placement;
+    CHECK(rig.runtime->DrawnWithPlacement(Drawn(rig)));
+    const auto jobs=rig.jobs.size();
+    // The press: accepted, and P is not moved until it has been drawn.
+    auto result=rig.runtime->HandStep(H(3,0,0),Drawn(rig),true);
+    CHECK(result.outcome==LiveHandOutcome::accepted && result.total==H(3,0,0) && !result.withdrew_estimate);
+    auto status=rig.runtime->Status();
+    CHECK(SameNine(status.placement.mapping,estimated.mapping) && status.placement.serial==estimated.serial && status.placement.hand_wanted==H(3,0,0));
+    CHECK(rig.hand_checks.size()==1 && SameNine(rig.hand_checks[0].first,estimated.mapping) && rig.hand_checks[0].second==H(3,0,0));
+    const auto held=rig.runtime->CurrentPlan();
+    // A press before the one before it was drawn: the sum of both, solved from the same base.
+    CHECK(rig.runtime->HandStep(H(1,0,0),Drawn(rig),true).outcome==LiveHandOutcome::accepted);
+    CHECK(rig.hand_checks.size()==2 && SameNine(rig.hand_checks[1].first,estimated.mapping) && rig.hand_checks[1].second==H(4,0,0));
+    auto pass=rig.Pass();
+    CHECK(!pass.job_ran && pass.rebaked && rig.jobs.size()==jobs && rig.runtime->CurrentPlan()!=held);
+    status=rig.runtime->Status();
+    const auto by_hand=SolvedByHand(estimated.mapping,H(4,0,0));
+    CHECK(status.placement.source==LivePlacementSource::manual && SameNine(status.placement.mapping,by_hand) && status.placement.serial==estimated.serial+1);
+    CHECK(status.placement.hand_entered==H(4,0,0) && status.placement.base_source==LivePlacementSource::auto_start && !status.placement.hand_wanted);
+    CHECK(rig.runtime->CurrentPlan() && SameNine(rig.runtime->CurrentPlan()->live->baked,by_hand));   // what C draws is P itself, to the bit
+    CHECK(rig.runtime->DrawnWithPlacement(Drawn(rig)) && !rig.runtime->DrawnWithPlacement(held));
+    CHECK(Contains(rig.LogText(),"C live_placement serial="+std::to_string(status.placement.serial)+" source=manual "+LivePlacementFields(by_hand)+" condition_sha256="+kSha+
+        " drawn=1 "+LivePlacementCameraFields()+" base_source=auto-start "+LivePlacementManualFields(H(4,0,0))+" quality_accepted=0"));
+    CHECK(Contains(rig.LogText(),"C live_hand_step result=accepted delta_seam_dx_counts=1"));
+    // The screen was not drawn with P (the plan that was drawn before the bake): the press is refused, and so is a press while Live is stopped.
+    const auto before=rig.runtime->Status().placement;
+    CHECK(rig.runtime->HandStep(H(1,0,0),held,true).outcome==LiveHandOutcome::refused_not_drawn);
+    CHECK(rig.runtime->HandStep(H(1,0,0),Drawn(rig),false).outcome==LiveHandOutcome::refused_stopped);
+    CHECK(rig.runtime->HandStep(H(1,0,0),nullptr,true).outcome==LiveHandOutcome::refused_not_drawn);
+    CHECK(rig.runtime->HandStep(H(),Drawn(rig),true).outcome==LiveHandOutcome::refused_zero);
+    status=rig.runtime->Status();
+    CHECK(status.placement.serial==before.serial && SameNine(status.placement.mapping,before.mapping) && !status.placement.hand_wanted && rig.hand_checks.size()==2);
+    CHECK(Contains(rig.LogText(),"C live_hand_step result=not-drawn") && Contains(rig.LogText(),"C live_hand_step result=stopped"));
+    // The sum comes back to 0: P goes back to the estimate it was, with its source, and no hand mark stays; nothing is checked for it.
+    const auto checked=rig.hand_checks.size();
+    result=rig.runtime->HandStep(H(-4,0,0),Drawn(rig),true);
+    CHECK(result.outcome==LiveHandOutcome::accepted && result.returned_to_base && rig.hand_checks.size()==checked);
+    pass=rig.Pass();
+    CHECK(pass.rebaked);
+    status=rig.runtime->Status();
+    CHECK(status.placement.source==LivePlacementSource::auto_start && SameNine(status.placement.mapping,estimated.mapping) && !status.placement.hand_entered && status.placement.hand_returned);
+    CHECK(SameNine(rig.runtime->CurrentPlan()->live->baked,estimated.mapping) && status.placement.serial==estimated.serial+2);
+    // Many passes with the frames changing do not move a hand position.
+    CHECK(rig.runtime->HandStep(H(0,0,4),Drawn(rig),true).outcome==LiveHandOutcome::accepted);
+    (void)rig.Pass();
+    const auto fixed=rig.runtime->Status().placement;
+    for(int k=0;k<300;++k){
+        rig.a=Textured(kW,kH,static_cast<unsigned>(k)*2+1);rig.b=Textured(kW,kH,static_cast<unsigned>(k)*2+2);
+        (void)rig.Pass();
+    }
+    status=rig.runtime->Status();
+    CHECK(status.placement.serial==fixed.serial && SameNine(status.placement.mapping,fixed.mapping) && rig.jobs.size()==jobs && status.placement.source==LivePlacementSource::manual);
+}
+
+// A press withdraws what was asked for: before the first estimate of the session ran, and while an estimate runs.
+void HandStepWithdrawsTheEstimateOnTheRuntime(){
+    {
+        Rig rig;
+        if(!Usable(rig)){Check(false,"plan");return;}
+        ConnectTestChecks(rig);
+        rig.runtime->PublishBase(rig.plan);
+        CHECK(rig.runtime->Status().placement.activity==LivePlacementActivity::requested);
+        const auto result=rig.runtime->HandStep(H(3,0,0),rig.runtime->BasePlan(),true);
+        CHECK(result.outcome==LiveHandOutcome::accepted && result.withdrew_estimate);
+        rig.script={Estimate(Pose{0.9,0,0,0,0,0})};
+        for(int k=0;k<5;++k)(void)rig.Pass();
+        const auto status=rig.runtime->Status();
+        CHECK(rig.jobs.empty() && status.placement.source==LivePlacementSource::manual && status.placement.base_source==LivePlacementSource::fixed_condition);
+        CHECK(status.placement.activity==LivePlacementActivity::idle && status.placement.counters.jobs==0);
+        // The button asks again.
+        CHECK(rig.runtime->RequestEstimate(LiveEstimateAsk::button)==LiveAskResult::accepted);
+        const auto again=rig.Pass();
+        CHECK(again.job_ran && rig.jobs.size()==1 && rig.runtime->Status().placement.source==LivePlacementSource::auto_button && !rig.runtime->Status().placement.hand_entered);
+    }
+    {
+        // An estimate that runs while the press is made: its result is dropped.
+        Rig rig;
+        if(!Usable(rig)){Check(false,"plan");return;}
+        ConnectTestChecks(rig);
+        rig.runtime->PublishBase(rig.plan);
+        std::shared_ptr<const FixedPreviewPlan> drawn=rig.runtime->BasePlan();
+        LiveHandResult during{};
+        rig.estimator=[&](const LiveJob& job,const render::BgrImage&,const render::BgrImage&){
+            rig.jobs.push_back(job);
+            during=rig.runtime->HandStep(H(3,0,0),drawn,true);
+            return Estimate(Pose{0.9,0,0,0,0,0});
+        };
+        const auto pass=rig.Pass();
+        CHECK(pass.job_ran && pass.accept==LiveAcceptKind::discarded_stale && during.outcome==LiveHandOutcome::accepted && during.withdrew_estimate);
+        const auto status=rig.runtime->Status();
+        CHECK(status.placement.source==LivePlacementSource::manual && status.placement.mapping.pose.rx_deg==0.0 && status.placement.counters.placed==0);
+        CHECK(status.placement.activity==LivePlacementActivity::idle);
+    }
+}
+
+// A press whose check runs while the estimate's position is checked, accepted and baked (the window's gate lets the estimate's check in first and the
+// press's after it): the press still wins. While the press is checked, the estimate's position is neither baked nor drawn; the press is accepted against
+// P, withdraws the estimate, and P becomes P and the one step. The pass runs inside the check of the press, the order the gate gives. A press that is
+// refused (outside the envelope, a check that throws, a pair capture that came meanwhile) leaves the estimate to the passes after it: it is not held
+// for ever.
+void HandStepWinsOverTheEstimateThatIsChecked(){
+    const Pose first{0.3,-0.2,0.5,1.5,-1.0,0.0},second{0.31,-0.2,0.5,1.0,-1.0,0.0};
+    const ex::RegisteredMapping estimated{second,{},std::nullopt};
+    enum class Answer {accept,refuse,thrown,capture};
+    const auto race=[&](Answer answer){
+        Rig rig;
+        if(!Usable(rig)){Check(false,"plan");return;}
+        rig.PlaceFirst(first);
+        const auto before=rig.runtime->Status().placement;
+        const auto held=rig.runtime->CurrentPlan();
+        CHECK(held && SameNine(held->live->baked,before.mapping));
+        CHECK(rig.runtime->RequestEstimate(LiveEstimateAsk::button)==LiveAskResult::accepted);
+        rig.script={Estimate(second)};
+        int inside=0;
+        LivePassResult inner;
+        std::optional<LiveCaptureBegin> begin;
+        rig.hand_check=[&](const ex::RegisteredMapping& base,const ex::HandCounts& total){
+            ++inside;
+            inner=rig.runtime->RunPass(rig.frames,rig.estimator);   // the estimate is checked and accepted while the press is checked
+            if(answer==Answer::capture)begin=rig.runtime->BeginCapture(Drawn(rig));
+            if(answer==Answer::thrown)throw std::runtime_error("the check of the press failed");
+            LiveHandCheck out;
+            if(answer==Answer::refuse){out.status=LiveHandCheck::Status::refused_envelope;out.exceeded={"position"};return out;}
+            out.status=LiveHandCheck::Status::accepted;out.mapping=SolvedByHand(base,total);return out;
+        };
+        const auto result=rig.runtime->HandStep(H(3,0,0),Drawn(rig),true);
+        CHECK(inside==1 && inner.job_ran && inner.accept==LiveAcceptKind::applied);
+        // While the press was checked, the estimate's position was not baked and P did not move.
+        CHECK(!inner.rebaked && rig.runtime->CurrentPlan()==held && rig.runtime->Status().placement.serial==before.serial);
+        if(answer==Answer::accept){
+            CHECK(result.outcome==LiveHandOutcome::accepted && result.withdrew_estimate && result.total==H(3,0,0));
+            const auto pass=rig.Pass();
+            CHECK(!pass.job_ran && pass.rebaked);
+            const auto status=rig.runtime->Status();
+            const auto by_hand=SolvedByHand(before.mapping,H(3,0,0));
+            CHECK(status.placement.source==LivePlacementSource::manual && status.placement.base_source==LivePlacementSource::auto_start && SameNine(status.placement.mapping,by_hand));
+            CHECK(status.placement.serial==before.serial+1 && status.placement.hand_entered==H(3,0,0) && status.placement.counters.placed==before.counters.placed);
+            CHECK(status.placement.activity==LivePlacementActivity::idle && rig.runtime->CurrentPlan() && SameNine(rig.runtime->CurrentPlan()->live->baked,by_hand));
+            CHECK(!SameNine(rig.runtime->CurrentPlan()->live->baked,estimated) && !Contains(rig.LogText(),"source=auto-button"));
+            // Nothing moves the hand position afterwards.
+            for(int k=0;k<20;++k){const auto idle=rig.Pass();CHECK(!idle.job_ran && !idle.rebaked);}
+            CHECK(rig.runtime->Status().placement.serial==status.placement.serial && SameNine(rig.runtime->Status().placement.mapping,by_hand));
+            return;
+        }
+        if(answer==Answer::capture){
+            // The capture took P as it was drawn and dropped the estimate's position; once it ends with no JPEG, the request it kept runs and is drawn.
+            CHECK(result.outcome==LiveHandOutcome::refused_capturing && begin && begin->admission==LiveCaptureAdmission::accepted && begin->dropped_pending);
+            CHECK(begin && begin->grant && begin->grant->serial==before.serial && SameNine(begin->grant->mapping,before.mapping));
+            CHECK(!rig.Pass().rebaked && rig.runtime->CurrentPlan()==held);
+            rig.runtime->EndCapture();
+            rig.script={Estimate(second)};
+        }else{
+            CHECK(result.outcome==(answer==Answer::refuse?LiveHandOutcome::refused_envelope:LiveHandOutcome::refused_error));
+        }
+        // The estimate is drawn by the next pass: it was held only while the press was checked.
+        const auto pass=rig.Pass();
+        CHECK(pass.rebaked);
+        const auto status=rig.runtime->Status();
+        CHECK(status.placement.source==LivePlacementSource::auto_button && SameNine(status.placement.mapping,estimated) && status.placement.serial==before.serial+1);
+        CHECK(!status.placement.hand_entered && rig.runtime->CurrentPlan() && SameNine(rig.runtime->CurrentPlan()->live->baked,estimated));
+    };
+    race(Answer::accept);
+    race(Answer::refuse);
+    race(Answer::thrown);
+    race(Answer::capture);
+}
+
+// A press whose check begins while the estimate's position is being baked (the bake takes long): the table that was baked is not taken, the press wins,
+// and P becomes P and the one step. The press runs on its own thread and is held inside its check until the pass is over; the worker's stop is the
+// seam where it is started (the stop in the bake, see CaptureDuringTheBakeKeepsP).
+void HandStepWinsOverTheEstimateThatIsBaked(){
+    Rig rig;
+    if(!Usable(rig)){Check(false,"plan");return;}
+    rig.PlaceFirst(Pose{0.3,-0.2,0.5,1.5,-1.0,0.0});
+    const auto before=rig.runtime->Status().placement;
+    const auto held=rig.runtime->CurrentPlan();
+    CHECK(rig.runtime->RequestEstimate(LiveEstimateAsk::button)==LiveAskResult::accepted);
+    const ex::RegisteredMapping estimated{Pose{0.31,-0.2,0.5,1.0,-1.0,0.0},{},std::nullopt};
+    rig.script={Estimate(estimated.pose)};
+    std::promise<void> entered,go;
+    auto entered_future=entered.get_future();
+    const auto go_future=go.get_future().share();
+    rig.hand_check=[&](const ex::RegisteredMapping& base,const ex::HandCounts& total){
+        entered.set_value();
+        go_future.wait();
+        LiveHandCheck out;out.status=LiveHandCheck::Status::accepted;out.mapping=SolvedByHand(base,total);return out;
+    };
+    std::thread press;
+    LiveHandResult result;
+    const auto dropped_bakes=rig.runtime->Status().rebakes_dropped;
+    int calls=0;
+    const std::function<bool()> stop=[&]{
+        if(++calls==4){   // before the job (1), after it (2), before the bake (3), in the bake (4)
+            press=std::thread([&]{result=rig.runtime->HandStep(H(3,0,0),held,true);});
+            entered_future.wait();
+        }
+        return false;
+    };
+    const auto pass=rig.runtime->RunPass(rig.frames,rig.estimator,stop);
+    go.set_value();
+    if(press.joinable())press.join();
+    CHECK(calls==4 && pass.job_ran && pass.accept==LiveAcceptKind::applied);
+    CHECK(!pass.rebaked && rig.runtime->CurrentPlan()==held && rig.runtime->Status().placement.serial==before.serial);
+    CHECK(rig.runtime->Status().rebakes_dropped==dropped_bakes+1);   // the estimate's table was baked and not taken
+    CHECK(result.outcome==LiveHandOutcome::accepted && result.withdrew_estimate);
+    CHECK(rig.Pass().rebaked);
+    const auto status=rig.runtime->Status();
+    const auto by_hand=SolvedByHand(before.mapping,H(3,0,0));
+    CHECK(status.placement.source==LivePlacementSource::manual && SameNine(status.placement.mapping,by_hand) && status.placement.serial==before.serial+1);
+    CHECK(rig.runtime->CurrentPlan() && SameNine(rig.runtime->CurrentPlan()->live->baked,by_hand) && !SameNine(rig.runtime->CurrentPlan()->live->baked,estimated));
+    CHECK(status.placement.counters.placed==before.counters.placed && !Contains(rig.LogText(),"source=auto-button"));
+}
+
+// The order of the first pass of a session that begins with a request that was left: P is drawn before the estimate runs, and a bake that fails does
+// not stop the estimate.
+void PIsDrawnBeforeTheEstimate(){
+    Rig first;
+    if(!Usable(first)){Check(false,"plan");return;}
+    const Pose pose{0.3,-0.2,0.5,1.5,-1.0,0.0};
+    first.PlaceFirst(pose);
+    CHECK(first.runtime->RequestEstimate(LiveEstimateAsk::button)==LiveAskResult::accepted);
+    const auto carried=first.runtime->PlacementMachine();   // P is the estimate, and the button's request is left
+    CHECK(carried.Activity()==LivePlacementActivity::requested);
+    {
+        Rig next(true,Pose{},ex::MountOrientation::normal,carried);
+        ConnectTestChecks(next);
+        next.runtime->PublishBase(next.plan);
+        CHECK(!next.runtime->DrawnWithPlacement(next.runtime->BasePlan()) && next.runtime->Status().placement.activity==LivePlacementActivity::requested);
+        // Until P is drawn: a pair capture and a hand press are refused, and nothing changes.
+        const auto before=next.runtime->Status().placement;
+        CHECK(next.runtime->BeginCapture(next.runtime->BasePlan()).admission==LiveCaptureAdmission::not_drawn);
+        CHECK(next.runtime->HandStep(H(3,0,0),next.runtime->BasePlan(),true).outcome==LiveHandOutcome::refused_not_drawn);
+        CHECK(next.runtime->Status().placement.serial==before.serial && !next.runtime->Status().placement.capturing);
+        next.script={Estimate(Pose{0.1,0,0,0.5,0,0})};
+        const auto pass=next.Pass();
+        CHECK(pass.rebaked && pass.job_ran && next.jobs.size()==1);
+        const auto log=next.LogText();
+        const auto rebake=log.find("C live_rebake"),job=log.find("C live_registration job=");
+        CHECK(rebake!=std::string::npos && job!=std::string::npos && rebake<job);   // P is on the screen before the estimate runs
+        CHECK(next.runtime->Status().placement.source==LivePlacementSource::auto_button);
+    }
+    // Then a press that comes after P is drawn and before the estimate is begun wins: the left request is withdrawn.
+    {
+        Rig next(true,Pose{},ex::MountOrientation::normal,carried);
+        ConnectTestChecks(next);
+        next.runtime->PublishBase(next.plan);
+        next.ready=false;   // no pair of frames: the estimate waits
+        const auto pass=next.Pass();
+        CHECK(!pass.job_ran && pass.rebaked && next.runtime->DrawnWithPlacement(Drawn(next)));
+        CHECK(next.runtime->HandStep(H(3,0,0),Drawn(next),true).outcome==LiveHandOutcome::accepted);
+        next.ready=true;next.script={Estimate(Pose{0.1,0,0,0.5,0,0})};
+        for(int k=0;k<5;++k)(void)next.Pass();
+        CHECK(next.jobs.empty() && next.runtime->Status().placement.source==LivePlacementSource::manual && next.runtime->Status().placement.counters.jobs==carried.Counters().jobs);
+    }
+    // P that cannot be drawn: the bake fails, and the estimate that was left runs all the same.
+    {
+        Rig bad_first;
+        bad_first.runtime->PublishBase(bad_first.plan);
+        CHECK(bad_first.runtime->ApplyCapture(ex::RegisteredMapping{Pose{0,0,0.4,3000.0,0.0,0.0},{},std::nullopt},"G1",kSha));
+        CHECK(bad_first.runtime->RequestEstimate(LiveEstimateAsk::button)==LiveAskResult::accepted);
+        Rig next(true,Pose{},ex::MountOrientation::normal,bad_first.runtime->PlacementMachine());
+        next.runtime->PublishBase(next.plan);
+        next.script={Estimate(Pose{0.1,0,0,0.5,0,0})};
+        const auto pass=next.Pass();
+        CHECK(pass.rebake_failed && pass.job_ran && next.jobs.size()==1 && next.runtime->Status().placement.source==LivePlacementSource::auto_button);
+        const auto log=next.LogText();
+        CHECK(log.find("C live_rebake")<log.find("C live_registration job="));
+    }
+}
+
+// The position of an estimate passes the cheap check before it is drawn; one that fails it decides nothing.
+void EstimateIsCheckedBeforeItIsDrawn(){
+    Rig rig;
+    if(!Usable(rig)){Check(false,"plan");return;}
+    rig.runtime->PublishBase(rig.plan);
+    std::vector<ex::RegisteredMapping> asked;
+    rig.mapping_check=[&](const ex::RegisteredMapping& mapping){
+        asked.push_back(mapping);
+        return mapping.pose.tx_mm>2.0?std::vector<std::string>{std::string(kLivePositionSeamOutsideOverlapReason)}:std::vector<std::string>{};
+    };
+    const auto serial=rig.runtime->Status().placement.serial;
+    rig.script={Estimate(Pose{0.3,-0.2,0.5,2.5,-1.0,0.0})};
+    auto pass=rig.Pass();
+    CHECK(pass.job_ran && pass.accept==LiveAcceptKind::kept_previous && !pass.rebaked && asked.size()==1 && !asked[0].parallax);
+    auto status=rig.runtime->Status();
+    CHECK(status.placement.serial==serial && status.placement.source==LivePlacementSource::fixed_condition && status.placement.outcome==LivePlacementOutcomeKind::not_decided);
+    CHECK(status.placement.last_failure.front()==std::string(kLivePositionSeamOutsideOverlapReason) && Contains(status.state_text,"継ぎ目が重なりの外に出ます") && !rig.runtime->CurrentPlan());
+    CHECK(Contains(rig.LogText(),"position_check=seam-outside-overlap") && rig.runtime->Status().placement.counters.not_decided==1);
+    for(int k=0;k<50;++k)CHECK(!rig.Pass().job_ran);   // no retry
+    // A position that passes is drawn as before.
+    rig.script={Estimate(Pose{0.3,-0.2,0.5,1.5,-1.0,0.0})};
+    CHECK(rig.runtime->RequestEstimate(LiveEstimateAsk::button)==LiveAskResult::accepted);
+    pass=rig.Pass();
+    CHECK(pass.accept==LiveAcceptKind::applied && pass.rebaked && asked.size()==2 && rig.runtime->Status().placement.source==LivePlacementSource::auto_button);
+    // A check that throws: the estimate decides nothing, with its own reason.
+    rig.mapping_check=[](const ex::RegisteredMapping&)->std::vector<std::string>{throw std::runtime_error("the check failed");};
+    rig.script={Estimate(Pose{0.3,-0.2,0.5,1.0,-1.0,0.0})};
+    CHECK(rig.runtime->RequestEstimate(LiveEstimateAsk::button)==LiveAskResult::accepted);
+    const auto before=rig.runtime->Status().placement;
+    pass=rig.Pass();
+    status=rig.runtime->Status();
+    CHECK(pass.accept==LiveAcceptKind::kept_previous && status.placement.last_failure.front()==std::string(kLivePositionCheckFailedReason) && status.placement.serial==before.serial);
+    // An estimate that is not usable is not checked.
+    asked.clear();rig.mapping_check=[&](const ex::RegisteredMapping& mapping){asked.push_back(mapping);return std::vector<std::string>{};};
+    rig.script={Unusable("too-dark")};
+    CHECK(rig.runtime->RequestEstimate(LiveEstimateAsk::button)==LiveAskResult::accepted);
+    (void)rig.Pass();
+    CHECK(asked.empty());
+}
+
+// A pair capture on the runtime: what it is given is P as it is drawn; the position that waited is dropped and its bake commits nothing; the estimate
+// that was asked for stays asked for and runs once if no JPEG comes; the button and a hand press are refused meanwhile.
+void CaptureFreezesTheRuntime(){
+    Rig rig;
+    if(!Usable(rig)){Check(false,"plan");return;}
+    ConnectTestChecks(rig);
+    rig.PlaceFirst(Pose{0.3,-0.2,0.5,1.5,-1.0,0.0});
+    const auto drawn_p=rig.runtime->Status().placement;
+    CHECK(rig.runtime->HandStep(H(3,0,0),Drawn(rig),true).outcome==LiveHandOutcome::accepted);   // waits to be drawn
+    const auto wanted=rig.runtime->PlacementMachine().WantedSerial();
+    CHECK(rig.runtime->RequestEstimate(LiveEstimateAsk::button)==LiveAskResult::accepted);
+    const auto begin=rig.runtime->BeginCapture(Drawn(rig));
+    CHECK(begin.admission==LiveCaptureAdmission::accepted && begin.dropped_pending && begin.grant && SameNine(begin.grant->mapping,drawn_p.mapping) && begin.grant->serial==drawn_p.serial);
+    CHECK(begin.grant->source==LivePlacementSource::auto_start && !begin.grant->hand_entered);
+    CHECK(rig.runtime->PlacementMachine().WantedSerial()==wanted+1 && rig.runtime->Status().placement.capturing);
+    // The worker passes while the capture is requested: no job, no bake of what was dropped, P is the one that was given.
+    const auto jobs=rig.jobs.size();
+    for(int k=0;k<20;++k){const auto pass=rig.Pass();CHECK(!pass.job_ran && !pass.rebaked);}
+    auto status=rig.runtime->Status();
+    CHECK(rig.jobs.size()==jobs && SameNine(status.placement.mapping,drawn_p.mapping) && status.placement.serial==drawn_p.serial && !status.placement.hand_wanted);
+    CHECK(rig.runtime->RequestEstimate(LiveEstimateAsk::button)==LiveAskResult::capturing);
+    CHECK(rig.runtime->HandStep(H(1,0,0),Drawn(rig),true).outcome==LiveHandOutcome::refused_capturing);
+    CHECK(rig.runtime->BeginCapture(Drawn(rig)).admission==LiveCaptureAdmission::already_capturing);
+    CHECK(Contains(rig.LogText(),"C live_capture_request admission=accepted serial="+std::to_string(drawn_p.serial)+" source=auto-start dropped_pending=1"));
+    // No JPEG: P is free, and the request that was kept runs once.
+    rig.runtime->EndCapture();
+    rig.script={Estimate(Pose{0.31,-0.2,0.5,1.0,-1.0,0.0})};
+    const auto pass=rig.Pass();
+    CHECK(pass.job_ran && pass.accept==LiveAcceptKind::applied && rig.jobs.size()==jobs+1 && rig.runtime->Status().placement.source==LivePlacementSource::auto_button);
+    // A JPEG made with P itself: P, its source and its serial stay; the capture is over; the request that was kept is gone.
+    const auto now=rig.runtime->Status().placement;
+    CHECK(rig.runtime->RequestEstimate(LiveEstimateAsk::button)==LiveAskResult::accepted);
+    const auto grant=rig.runtime->BeginCapture(Drawn(rig)).grant;
+    CHECK(grant && grant->serial==now.serial);
+    CHECK(rig.runtime->ApplyCapture(now.mapping,"confirmed",kSha,std::nullopt,grant->serial));
+    status=rig.runtime->Status();
+    CHECK(status.placement.serial==now.serial && status.placement.source==LivePlacementSource::auto_button && SameNine(status.placement.mapping,now.mapping) && !status.placement.capturing);
+    CHECK(status.placement.activity==LivePlacementActivity::idle && status.placement.capture && status.placement.capture->level=="confirmed");
+    CHECK(Contains(rig.LogText(),"C live_placement_after_capture serial="+std::to_string(now.serial)+" level=confirmed before_source=auto-button") && Contains(rig.LogText(),"seam_difference_px=0 "));
+    for(int k=0;k<20;++k){const auto idle=rig.Pass();CHECK(!idle.job_ran && !idle.rebaked);}
+    // A hand position stays by hand when the JPEG fell to the condition's position.
+    CHECK(rig.runtime->HandStep(H(0,3,0),Drawn(rig),true).outcome==LiveHandOutcome::accepted);
+    (void)rig.Pass();
+    const auto hand=rig.runtime->Status().placement;
+    const auto hand_grant=rig.runtime->BeginCapture(Drawn(rig)).grant;
+    CHECK(hand_grant && hand_grant->source==LivePlacementSource::manual && hand_grant->hand_entered==H(0,3,0) && hand_grant->base_source==LivePlacementSource::auto_button);
+    CHECK(rig.runtime->ApplyCapture(ex::RegisteredMapping{Pose{},{},std::nullopt},"G4",kSha,std::nullopt,hand_grant->serial));
+    status=rig.runtime->Status();
+    CHECK(status.placement.source==LivePlacementSource::manual && SameNine(status.placement.mapping,hand.mapping) && status.placement.serial==hand.serial && status.placement.hand_entered==H(0,3,0));
+    CHECK(!rig.Pass().rebaked && SameNine(rig.runtime->CurrentPlan()->live->baked,hand.mapping));   // the live view is still at the hand position
+}
+
+// A pair capture that is requested while the worker bakes a position that waits: the bake runs with no lock, and the request comes after the
+// worker read what to bake and before it took the result. What the capture was given (P and its serial) is what stays, and the table that the
+// bake made for the position that was dropped is not taken. The worker's stop is the seam where the request is put: it is asked with no lock held
+// right before the bake. `at` is which call of the stop that is (the count is checked, so a change of the pass's order fails here, not silently).
+void CaptureDuringTheBakeKeepsP(){
+    const auto race=[](bool by_hand,int at){
+        Rig rig;
+        if(!Usable(rig)){Check(false,"plan");return;}
+        ConnectTestChecks(rig);
+        rig.PlaceFirst(Pose{0.3,-0.2,0.5,1.5,-1.0,0.0});
+        const auto drawn_p=rig.runtime->Status().placement;
+        const auto held=rig.runtime->CurrentPlan();
+        CHECK(held && SameNine(held->live->baked,drawn_p.mapping));
+        if(by_hand)CHECK(rig.runtime->HandStep(H(3,0,0),Drawn(rig),true).outcome==LiveHandOutcome::accepted);
+        else{
+            CHECK(rig.runtime->RequestEstimate(LiveEstimateAsk::button)==LiveAskResult::accepted);
+            rig.script={Estimate(Pose{0.31,-0.2,0.5,1.0,-1.0,0.0})};
+        }
+        const auto rebakes=rig.runtime->Status().rebakes;
+        const auto dropped_bakes=rig.runtime->Status().rebakes_dropped;
+        const auto placement_lines=rig.Lines("C live_placement serial=");
+        int calls=0;
+        std::optional<LiveCaptureBegin> begin;
+        std::optional<ex::RegisteredMapping> dropped;
+        const std::function<bool()> stop=[&]{
+            if(++calls==at){
+                dropped=rig.runtime->PlacementMachine().Wanted();   // the position that the bake is for
+                begin=rig.runtime->BeginCapture(Drawn(rig));
+            }
+            return false;
+        };
+        const auto pass=rig.runtime->RunPass(rig.frames,rig.estimator,stop);
+        CHECK(calls==at && begin && begin->admission==LiveCaptureAdmission::accepted && begin->grant && begin->dropped_pending);
+        if(!begin || !begin->grant || !dropped)return;
+        CHECK(!SameNine(*dropped,drawn_p.mapping));   // a position did wait to be baked
+        CHECK(SameNine(begin->grant->mapping,drawn_p.mapping) && begin->grant->serial==drawn_p.serial);
+        CHECK(by_hand || begin->dropped_estimate);
+        // After the pass: P and its serial are what the capture was given, nothing waits, and the table on the screen is still baked for P.
+        const auto status=rig.runtime->Status();
+        CHECK(SameNine(status.placement.mapping,begin->grant->mapping) && status.placement.serial==begin->grant->serial && status.placement.capturing);
+        CHECK(!status.placement.hand_wanted && !status.placement.hand_entered && status.placement.source==LivePlacementSource::auto_start);
+        CHECK(!pass.rebaked && status.rebakes==rebakes && rig.runtime->CurrentPlan()==held);
+        CHECK(status.rebakes_dropped==dropped_bakes+1);   // the bake ran after the request and was not taken (the race was met, not missed)
+        CHECK(rig.runtime->CurrentPlan() && !SameNine(rig.runtime->CurrentPlan()->live->baked,*dropped) && rig.runtime->DrawnWithPlacement(Drawn(rig)));
+        CHECK(rig.Lines("C live_placement serial=")==placement_lines && !Contains(rig.LogText(),"source=manual"));
+        // The passes while the capture holds P bake nothing; the JPEG made with P is applied and P stays.
+        for(int k=0;k<5;++k){const auto idle=rig.Pass();CHECK(!idle.rebaked && !idle.job_ran);}
+        CHECK(rig.runtime->ApplyCapture(begin->grant->mapping,"confirmed",kSha,std::nullopt,begin->grant->serial));
+        CHECK(rig.runtime->Status().placement.serial==drawn_p.serial && !rig.Pass().rebaked && rig.runtime->CurrentPlan()==held);
+    };
+    race(true,2);    // a hand position waits: the stop before the bake (1) and the one in the bake (2)
+    race(false,4);   // an estimate was asked for: before the job (1), after it (2), before the bake (3), in the bake (4)
+}
+
+// A bake of P itself that failed: the screen is not drawn with P, so a hand press and a pair capture are refused and change nothing.
+void BakeOfPFailedRefusesHandAndCapture(){
+    Rig rig;
+    if(!Usable(rig)){Check(false,"plan");return;}
+    ConnectTestChecks(rig);
+    rig.PlaceFirst(Pose{0.3,-0.2,0.5,1.5,-1.0,0.0});
+    const auto held=rig.runtime->CurrentPlan();
+    CHECK(rig.runtime->ApplyCapture(ex::RegisteredMapping{Pose{0,0,0.4,3000.0,0.0,0.0},{},std::nullopt},"G1",kSha));   // P that cannot be drawn
+    const auto failed=rig.Pass();
+    CHECK(failed.rebake_failed && !failed.rebaked && rig.runtime->Status().bake_failed && rig.runtime->CurrentPlan()==held);
+    const auto before=rig.runtime->Status().placement;
+    for(const auto& drawn:{Drawn(rig),rig.runtime->BasePlan()}){
+        CHECK(!rig.runtime->DrawnWithPlacement(drawn));
+        CHECK(rig.runtime->HandStep(H(3,0,0),drawn,true).outcome==LiveHandOutcome::refused_not_drawn);
+        const auto begin=rig.runtime->BeginCapture(drawn);
+        CHECK(begin.admission==LiveCaptureAdmission::not_drawn && !begin.grant);
+    }
+    const auto after=rig.runtime->Status().placement;
+    CHECK(rig.hand_checks.empty() && !after.capturing && after.serial==before.serial && SameNine(after.mapping,before.mapping) && !after.hand_wanted);
+    CHECK(Contains(rig.LogText(),"C live_capture_request admission=not-drawn") && Contains(rig.LogText(),"C live_hand_step result=not-drawn"));
+    CHECK(rig.runtime->Status().bake_failed);
+}
+
+// The result of a capture applied on the same runtime: the table that was on the screen was baked for the P before, so until the new P is
+// drawn a hand press and a pair capture made against that table are refused; once it is drawn they are admitted.
+void OldTableAfterTheCaptureIsNotDrawn(){
+    Rig rig;
+    if(!Usable(rig)){Check(false,"plan");return;}
+    ConnectTestChecks(rig);
+    rig.PlaceFirst(Pose{0.3,-0.2,0.5,1.5,-1.0,0.0});
+    const auto old_table=rig.runtime->CurrentPlan();
+    CHECK(rig.runtime->DrawnWithPlacement(old_table));
+    const auto grant=rig.runtime->BeginCapture(old_table).grant;
+    CHECK(grant.has_value());
+    if(!grant)return;
+    const ex::RegisteredMapping jpeg{Pose{0.31,-0.12,0.52,2.25,-1.125,0.0},ex::SurfacePlane{3.5,0.0015,-0.0025},std::nullopt};
+    CHECK(rig.runtime->ApplyCapture(jpeg,"G1",kSha,std::nullopt,grant->serial));
+    const auto applied=rig.runtime->Status().placement;
+    CHECK(applied.source==LivePlacementSource::after_capture && SameNine(applied.mapping,jpeg) && !applied.capturing);
+    CHECK(!rig.runtime->DrawnWithPlacement(old_table));
+    CHECK(rig.runtime->HandStep(H(3,0,0),old_table,true).outcome==LiveHandOutcome::refused_not_drawn);
+    CHECK(rig.runtime->BeginCapture(old_table).admission==LiveCaptureAdmission::not_drawn);
+    CHECK(rig.hand_checks.empty() && !rig.runtime->Status().placement.capturing && rig.runtime->Status().placement.serial==applied.serial);
+    const auto pass=rig.Pass();
+    const auto new_table=rig.runtime->CurrentPlan();
+    CHECK(pass.rebaked && new_table!=old_table && rig.runtime->DrawnWithPlacement(new_table) && !rig.runtime->DrawnWithPlacement(old_table));
+    CHECK(rig.runtime->HandStep(H(3,0,0),new_table,true).outcome==LiveHandOutcome::accepted && rig.hand_checks.size()==1);
+}
+
+// A stop that comes while a job runs: the job did not estimate anything for this session (the request stays, and the next start continues it once),
+// so its position is not checked (the check of a full-size position takes a moment) and nothing is decided, even when the estimator returned a position.
+void StopDuringTheJobSkipsTheCheck(){
+    Rig rig;
+    if(!Usable(rig)){Check(false,"plan");return;}
+    rig.PlaceFirst(Pose{0.3,-0.2,0.5,1.5,-1.0,0.0});
+    int checked=0;
+    rig.mapping_check=[&](const ex::RegisteredMapping&){++checked;return std::vector<std::string>{};};
+    CHECK(rig.runtime->RequestEstimate(LiveEstimateAsk::button)==LiveAskResult::accepted);
+    const auto before=rig.runtime->Status().placement;
+    bool stopped=false;
+    rig.estimator=[&](const LiveJob& job,const render::BgrImage&,const render::BgrImage&){
+        rig.jobs.push_back(job);
+        stopped=true;   // the window stops Live while the estimate runs; the estimator itself did not see it
+        return Estimate(Pose{0.31,-0.2,0.5,1.0,-1.0,0.0});
+    };
+    const auto pass=rig.runtime->RunPass(rig.frames,rig.estimator,[&]{return stopped;});
+    CHECK(pass.job_ran && pass.accept==LiveAcceptKind::discarded_stale && !pass.rebaked && checked==0);
+    auto status=rig.runtime->Status();
+    CHECK(status.placement.activity==LivePlacementActivity::requested && status.placement.ask==LiveEstimateAsk::button && status.placement.counters.not_decided==0);
+    CHECK(status.placement.counters.released==before.counters.released+1 && status.placement.serial==before.serial && SameNine(status.placement.mapping,before.mapping));
+    CHECK(rig.Lines("C live_registration job=")==1);   // the job of the first session only: a stopped job writes no line
+    // The next start continues it once, and then its position is checked.
+    stopped=false;
+    const auto next=rig.runtime->RunPass(rig.frames,rig.estimator,[&]{return false;});
+    CHECK(next.job_ran && next.accept==LiveAcceptKind::applied && checked==1 && rig.runtime->Status().placement.source==LivePlacementSource::auto_button);
 }
 
 // The same calls give the same sentences and plans.
@@ -824,8 +1355,18 @@ void Rejects(){
 }
 }
 
+// One line of the log is one line: a control character becomes a space, a message that may hold a path is withheld, and a plain message is kept.
+void LogSafeText(){
+    CHECK(LiveLogSafeText("a\nb\r\tc")=="a b  c");
+    CHECK(LiveLogSafeText(std::string("x\x01y\x7fz",5))=="x y z");
+    CHECK(LiveLogSafeText("no pixel was drawn")=="no pixel was drawn");
+    CHECK(LiveLogSafeText("C:\\folder\nfile")=="(message withheld: it may hold a path)");
+    CHECK(LiveLogSafeText(std::string(201,'a'))=="(message withheld: it may hold a path)");
+}
+
 int main(){
     try{
+        LogSafeText();
         Design();
         RigIsUsable();
         NotConnected();
@@ -842,6 +1383,17 @@ int main(){
         AfterCapture();
         AfterCaptureCarried();
         CaptureCannotBeDrawn();
+        HandStepOnTheRuntime();
+        HandStepWithdrawsTheEstimateOnTheRuntime();
+        HandStepWinsOverTheEstimateThatIsChecked();
+        HandStepWinsOverTheEstimateThatIsBaked();
+        PIsDrawnBeforeTheEstimate();
+        EstimateIsCheckedBeforeItIsDrawn();
+        CaptureFreezesTheRuntime();
+        CaptureDuringTheBakeKeepsP();
+        BakeOfPFailedRefusesHandAndCapture();
+        OldTableAfterTheCaptureIsNotDrawn();
+        StopDuringTheJobSkipsTheCheck();
         Determinism();
         Thread();
         WorkerSurvives();

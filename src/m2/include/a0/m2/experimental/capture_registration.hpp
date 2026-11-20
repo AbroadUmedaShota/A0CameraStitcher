@@ -1,5 +1,6 @@
 #pragma once
 #include "a0/m2/document_render.hpp"
+#include "a0/m2/experimental/confirmed_position.hpp"
 #include "a0/m2/experimental/content_registration.hpp"
 #include "a0/m2/experimental/fast_seam_measurer.hpp"
 #include "a0/m2/experimental/fixed_composite_profile_common.hpp"
@@ -33,20 +34,67 @@ namespace a0::m2::experimental {
 // G1 pose, surface and layer 2; G2 pose and surface; G3 a uniform shift (surface height and the orthogonal translation) of
 // the coarse stage; G4 the fixed composite condition's mapping (the base pose, no surface, no layer 2). A composite is made at
 // every level.
-enum class GeometryLevel {g1,g2,g3,g4};
+// confirmed (#437, report v9): the window's confirmed position (ConfirmedPosition below): its pose and surface, no layer 2.
+// It is a candidate only when a position was given for this condition, and sits between G2 and G4 (never G3).
+enum class GeometryLevel {g1,g2,g3,g4,confirmed};
 [[nodiscard]] constexpr std::string_view GeometryLevelCode(GeometryLevel level){
     switch(level){
     case GeometryLevel::g1:return "G1";
     case GeometryLevel::g2:return "G2";
     case GeometryLevel::g3:return "G3";
     case GeometryLevel::g4:return "G4";
+    case GeometryLevel::confirmed:return "confirmed";
     }
     return {};
 }
 [[nodiscard]] constexpr std::optional<GeometryLevel> ParseGeometryLevel(std::string_view text){
-    for(const auto l:{GeometryLevel::g1,GeometryLevel::g2,GeometryLevel::g3,GeometryLevel::g4})if(GeometryLevelCode(l)==text)return l;
+    for(const auto l:{GeometryLevel::g1,GeometryLevel::g2,GeometryLevel::g3,GeometryLevel::g4,GeometryLevel::confirmed})if(GeometryLevelCode(l)==text)return l;
     return std::nullopt;
 }
+
+// ---- The confirmed position (#437 stage 2, docs/DECISIONS.md ADR-0046) ----
+// The one position of camera B against camera A that the window's live view is drawn with: the pose and the paper surface (never
+// layer 2), where it came from, a counter of its changes and the condition it belongs to. The window gives it to a capture; the
+// capture uses it for the composite when the estimate on the originals is not trusted (or when it was set by hand) and records it.
+// The estimate itself never sees it: its start, prior and ranges stay the condition's base pose.
+enum class ConfirmedPositionSource {fixed_condition,auto_start,auto_button,after_capture,manual};
+inline constexpr std::array<std::pair<ConfirmedPositionSource,std::string_view>,5> kConfirmedPositionSourceTexts{{
+    {ConfirmedPositionSource::fixed_condition,"fixed-condition"},{ConfirmedPositionSource::auto_start,"auto-start"},
+    {ConfirmedPositionSource::auto_button,"auto-button"},{ConfirmedPositionSource::after_capture,"after-capture"},
+    {ConfirmedPositionSource::manual,"manual"},
+}};
+[[nodiscard]] constexpr std::string_view ConfirmedPositionSourceCode(ConfirmedPositionSource source){
+    for(const auto& e:kConfirmedPositionSourceTexts)if(e.first==source)return e.second;
+    return {};
+}
+[[nodiscard]] constexpr std::optional<ConfirmedPositionSource> ParseConfirmedPositionSource(std::string_view text){
+    for(const auto& e:kConfirmedPositionSourceTexts)if(e.second==text)return e.first;
+    return std::nullopt;
+}
+struct ConfirmedPosition {
+    RegisteredMapping mapping;                          // pose and surface; no layer 2
+    ConfirmedPositionSource source{ConfirmedPositionSource::fixed_condition};
+    std::uint64_t serial{};                             // the window's change counter at the moment of the shot
+    std::string condition_sha256;                       // the condition file the position belongs to
+    // source manual only: where the position was before the first hand step (never manual), and the sum of what was entered since,
+    // in whole counts of the smallest step (HandValuesOf gives the values the report writes).
+    std::optional<ConfirmedPositionSource> base_source;
+    std::optional<HandCounts> manual_entered;
+};
+// What a capture says of the position it was given: whether it made the composite (the level is confirmed), and how far apart the
+// position and the estimate on the originals are along the seam (SeamDifferencePx; output px) when that estimate was usable (a G1
+// or G2 candidate that passed the cheap check), else empty.
+struct ConfirmedPositionCheck {
+    bool used{};
+    std::optional<double> seam_difference_px;
+};
+// The position is the condition's own (the base pose, no surface), compared by value (-0 and +0 are the same).
+[[nodiscard]] bool IsConditionPosition(const ConfirmedPosition& position,const content_registration::PoseParameters& base_pose);
+// The mapping the position draws: its pose and surface, no layer 2.
+[[nodiscard]] RegisteredMapping ConfirmedMappingOf(const ConfirmedPosition& position);
+// Throws std::invalid_argument for a position a report cannot carry: not finite, with layer 2, a condition hash that is not 64 lower-case
+// hex digits, a hand step without its base or its amount (or the other way round), a hand sum of 0, or a base that is itself manual.
+void ValidateConfirmedPosition(const ConfirmedPosition& position);
 
 // What the coarse stage found when the fit is not trusted and the shift is unique (the G3 candidate, 11.18): the paper height
 // h0 that explains the shift along the baseline, and B's translation (B's camera frame, mm, added to p_b) that explains the
@@ -76,6 +124,9 @@ struct GeometryLevelInput {
     const RegistrationLines* lines{};                                  // the condition's ranges and lines (required; apply_beyond_envelope set)
     std::uint32_t seam_column{};                                       // the condition's seam column (layer 2's w is centred on it)
     MappingCoverCheckFunction cover_check;                             // required
+    // #437: the window's confirmed position, when one was given for this condition (the caller leaves it null for a position of another
+    // condition). It is never an input of the estimate: p_b stays the start, the prior and the base of the ranges.
+    const ConfirmedPosition* confirmed_position{};
 };
 struct GeometryLevelDecision {
     GeometryLevel level{GeometryLevel::g4};
@@ -85,6 +136,10 @@ struct GeometryLevelDecision {
     struct Applied {bool pose{},surface{},parallax{};} applied;
     bool beyond_envelope_applied{};
     RegisteredMapping mapping;     // the mapping of the chosen level
+    // #437: the pose and surface of the G1 or G2 candidate that passed the cheap check (the estimate "hits": layer 2 left out), whether or not
+    // that level was the one chosen (a position set by hand is used instead). Empty when the estimate is not trusted, was not a candidate
+    // (beyond its range without applyBeyondEnvelope) or failed the check.
+    std::optional<RegisteredMapping> estimate_hit;
 };
 // Thrown by SelectGeometryLevel when even G4 (the condition's own mapping) fails the cheap check: the condition is broken and no
 // composite is made (11.18). SeamCovered() is false when the seam left the overlap, true when an output pixel is not covered.
@@ -102,6 +157,10 @@ private:
 // cover_check (or cannot be built: the check throws std::invalid_argument) is passed over with the reason
 // seam-outside-overlap-at-level or output-uncovered-at-level. Throws std::invalid_argument for a missing required input and
 // GeometryLevelUnavailable when G4 fails the check.
+// With a confirmed position (#437, ADR-0046) that is not the condition's own position the candidates are, from the top:
+//  - set by hand (source manual): confirmed {the position}, G4. The G1/G2 candidates are only checked, for estimate_hit;
+//  - otherwise: G1, G2 as above, confirmed, G4. G3 is not a candidate.
+// A position that is the condition's own (bit for bit), or none, leaves the candidates exactly as they were.
 [[nodiscard]] GeometryLevelDecision SelectGeometryLevel(const GeometryLevelInput& input);
 
 // The applied flags as the report records them: pose for G1 to G3, surface when the mapping's plane is not zero, parallax when
@@ -143,6 +202,8 @@ enum class WarningCode {
     placement_unverified,placement_mismatch,
     gate_configuration,gate_not_run,seam_wide_search,
     geometry_level,time_budget,
+    // Report v9 only (#437). After the 21 above, so that the order of a report's warnings is the v8 order with these at the end.
+    position_by_hand,position_from_live,estimate_beyond_envelope,
 };
 inline constexpr std::array<std::pair<WarningCode,std::string_view>,21> kWarningCodeTexts{{
     {WarningCode::camera_position,"camera-position"},{WarningCode::camera_rotation,"camera-rotation"},
@@ -158,13 +219,24 @@ inline constexpr std::array<std::pair<WarningCode,std::string_view>,21> kWarning
     {WarningCode::seam_wide_search,"seam-wide-search"},
     {WarningCode::geometry_level,"geometry-level"},{WarningCode::time_budget,"time-budget"},
 }};
+// The codes a v9 report adds (#437). A v8 reader does not know them and refuses a report that has one.
+inline constexpr std::array<std::pair<WarningCode,std::string_view>,3> kWarningCodeTextsV9{{
+    {WarningCode::position_by_hand,"position-by-hand"},{WarningCode::position_from_live,"position-from-live"},
+    {WarningCode::estimate_beyond_envelope,"estimate-beyond-envelope"},
+}};
 [[nodiscard]] constexpr std::string_view WarningCodeText(WarningCode code){
     for(const auto& e:kWarningCodeTexts)if(e.first==code)return e.second;
+    for(const auto& e:kWarningCodeTextsV9)if(e.first==code)return e.second;
     return {};
 }
 [[nodiscard]] constexpr std::optional<WarningCode> ParseWarningCode(std::string_view text){
     for(const auto& e:kWarningCodeTexts)if(e.second==text)return e.first;
+    for(const auto& e:kWarningCodeTextsV9)if(e.second==text)return e.first;
     return std::nullopt;
+}
+[[nodiscard]] constexpr bool IsWarningCodeOfV9(WarningCode code){
+    for(const auto& e:kWarningCodeTextsV9)if(e.first==code)return true;
+    return false;
 }
 
 // The component a warning is about (11.17.2: camera-position etc.).
@@ -172,6 +244,7 @@ enum class WarningComponent {
     camera_position,camera_rotation,camera_tilt,camera_height,
     surface_height,surface_tilt,output_edge,
     seam_lift,fold,gutter,seam,placement,gate,geometry_level,time_budget,
+    confirmed_position,   // report v9 only (#437)
 };
 inline constexpr std::array<std::pair<WarningComponent,std::string_view>,15> kWarningComponentTexts{{
     {WarningComponent::camera_position,"camera-position"},{WarningComponent::camera_rotation,"camera-rotation"},
@@ -182,12 +255,16 @@ inline constexpr std::array<std::pair<WarningComponent,std::string_view>,15> kWa
     {WarningComponent::placement,"placement"},{WarningComponent::gate,"gate"},
     {WarningComponent::geometry_level,"geometry-level"},{WarningComponent::time_budget,"time-budget"},
 }};
+// The component a v9 report adds (#437). The name has no "placement" in it: the v8 gate.placement and the warnings placement-* mean something else.
+inline constexpr std::string_view kWarningComponentTextConfirmedPosition="confirmed-position";
 [[nodiscard]] constexpr std::string_view WarningComponentText(WarningComponent c){
     for(const auto& e:kWarningComponentTexts)if(e.first==c)return e.second;
+    if(c==WarningComponent::confirmed_position)return kWarningComponentTextConfirmedPosition;
     return {};
 }
 [[nodiscard]] constexpr std::optional<WarningComponent> ParseWarningComponent(std::string_view text){
     for(const auto& e:kWarningComponentTexts)if(e.second==text)return e.first;
+    if(text==kWarningComponentTextConfirmedPosition)return WarningComponent::confirmed_position;
     return std::nullopt;
 }
 
@@ -315,6 +392,10 @@ struct CaptureRegistration {
     registration_gate::RegistrationGateResult gate;
     TimeBudgetRecord time_budget;
     std::string geometry_hash;                                // RegistrationGeometryHash, 64 lower-case hex
+    // Report v9 (#437): the confirmed position the window gave this capture, as given, and what the capture did with it. Both are set, or
+    // neither (the position was not given: a calibration's sample, a window that has none). Never an input of the estimate.
+    std::optional<ConfirmedPosition> confirmed_position;
+    std::optional<ConfirmedPositionCheck> confirmed_check;
 };
 
 // The four range components of p-hat - p_b (11.19.2): |(dtx, dty)| mm, |drz| deg, |(drx, dry)| deg, |dtz| percent, each against
@@ -377,11 +458,17 @@ struct SavedFixedCompositeRegistration {
 // The geometry hash input of a record (the applied mapping of its level, the layout and the condition).
 [[nodiscard]] GeometryHashInput GeometryHashInputOf(const SavedFixedCompositeRegistration& record);
 
-// The JSON values of the three v8 members the registered composite owns: fixedCompositeRegistration (object), warnings (array),
+// The two versions of the registered composite's members (the report's schema a0.uncalibrated-still-review.v8 and .v9). v9 (#437) adds
+// fixedCompositeRegistration.confirmedPosition and .confirmedPositionCheck (before geometryLevel), the geometry level confirmed, and the
+// warning codes position-by-hand, position-from-live and estimate-beyond-envelope with the component confirmed-position. Everything
+// else is v8's, name for name.
+enum class RegistrationReportFormat {v8,v9};
+// The JSON values of the three members the registered composite owns: fixedCompositeRegistration (object), warnings (array),
 // assessment (object). No spaces, members in the formats document's order, numbers with 17 significant digits in the classic
 // locale, -0 written as 0. The record must be consistent (its derived fields equal to their derivation); the writer checks it
-// and throws std::logic_error otherwise, so a report it writes is one the reader accepts.
-[[nodiscard]] std::string FixedCompositeRegistrationJson(const SavedFixedCompositeRegistration& record);
+// and throws std::logic_error otherwise, so a report it writes is one the reader accepts. A record with a confirmed position, the level
+// confirmed or a v9 warning cannot be written as v8 (std::logic_error).
+[[nodiscard]] std::string FixedCompositeRegistrationJson(const SavedFixedCompositeRegistration& record,RegistrationReportFormat format=RegistrationReportFormat::v8);
 [[nodiscard]] std::string RegistrationWarningsJson(const std::vector<RegistrationWarning>& warnings);
 [[nodiscard]] std::string RegistrationAssessmentJson(const RegistrationAssessment& assessment);
 // Fills the derived fields of a record from its recorded quantities: the components from base, the warnings, the assessment, the
@@ -459,6 +546,10 @@ struct CaptureRegistrationRequest {
     MappingCoverCheckFunction cover_check;    // the cheap check of a candidate mapping (the caller's: it needs the condition library)
     std::function<double()> remaining_ms;     // milliseconds left before the deadline; empty: no deadline, every stage runs
     unsigned thread_count{1};                 // 1..256; the result does not depend on it
+    // #437: the window's confirmed position, and the SHA-256 of the condition file this capture is made with. A position of another condition
+    // (its condition_sha256 differs) is recorded and not used. Empty: the composite is what it was before the position existed.
+    std::optional<ConfirmedPosition> confirmed_position;
+    std::string condition_sha256;
 };
 // How long the stages took, from remaining_ms (empty without it). For the log only: never in the report.
 struct CaptureStageMilliseconds {
@@ -514,9 +605,11 @@ struct RegistrationRecordIdentity {
 [[nodiscard]] SavedFixedCompositeRegistration RecordOfCapture(const RegistrationRecordIdentity& identity,const CaptureRegistrationRequest& request,
     const PreparedCaptureRegistration& prepared,const FixedCompositeSha256& hash);
 
-// The strict reader of a whole v8 report text's three members above (the rest of the report is the caller's). Rejects a
-// missing, extra or duplicated member, a value of the wrong kind or out of range, an unknown code, any derived field that
-// differs from its derivation (components, applied flags, warnings, assessment, both geometry hashes), and any text that the
-// writer would not write for the values read. Every failure is std::invalid_argument.
+// The strict reader of a whole v8 or v9 report text's three members above (the rest of the report is the caller's; the report's schema
+// names the version, and any other schema is refused). Rejects a missing, extra or duplicated member, a value of the wrong kind or out
+// of range, an unknown code, any derived field that differs from its derivation (components, applied flags, warnings, assessment, both
+// geometry hashes), and any text that the writer would not write for the values read. A v8 text that has anything of v9 is refused: the
+// v8 reader reads a v8 report as it always did. A v9 text whose level confirmed has a mapping that is not its confirmed position, or whose
+// position and check disagree with the rest of the record, is refused. Every failure is std::invalid_argument.
 [[nodiscard]] SavedFixedCompositeRegistration ReadFixedCompositeRegistrationReport(std::string_view report_text,const FixedCompositeSha256& hash);
 }

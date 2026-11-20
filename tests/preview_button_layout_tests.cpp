@@ -1,6 +1,7 @@
 // Contract of the pure button layout of the development preview (#437 stage 0). No window, no camera.
 #include "a0/phase0/experimental/preview_button_layout.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <initializer_list>
 #include <string>
@@ -94,6 +95,53 @@ int main(){
         auto items=LowerButtonItems();items.insert(items.begin()+kLowerSeam+1,LayoutButton{100});
         const auto added=FlowButtons(items,12,1385,52,36);
         Check(added.boxes[kLowerSeam+1].x==1245+140+10 || added.boxes[kLowerSeam+1].row==1,"an added button follows the seam button or wraps");
+    }
+    // A condition v3 has the hand buttons (#437 stage 2): after the other buttons, on a row of their own, in one row at every width the window can have; the
+    // four position buttons of the uncalibrated C stand aside and the automatic button stays; nothing is outside the window or on another button.
+    {
+        Check(LowerButtonItems(true).size()==static_cast<std::size_t>(kLowerButtonCount+kPreviewHandButtonCount),"hand list: the lower buttons and the hand buttons");
+        Check(LowerButtonItems(false).size()==static_cast<std::size_t>(kLowerButtonCount),"no hand buttons: the list is the old one");
+        for(const int width:{1000,1024,1056,1280,1400,1920,3000}){
+            const auto plan=PlanPreviewButtons(width,true);
+            const std::string tag=" hand width="+std::to_string(width);
+            Check(plan.lower.size()==static_cast<std::size_t>(kLowerButtonCount+kPreviewHandButtonCount),"plan size"+tag);
+            for(int j=0;j<4;++j)Check(plan.lower[kLowerMerge0+j].width==0,"a position button of the uncalibrated C has no place"+tag);
+            Check(plan.lower[kLowerMerge0+4].width==135 && plan.lower[kLowerMerge0+4].x==12 && plan.lower[kLowerMerge0+4].y==kLowerButtonsTop,"the automatic button is the first of the row"+tag);
+            int row_of_others=0;
+            for(const int index:std::initializer_list<int>{kLowerMerge0+4,kLowerPair,kLowerReview,kLowerSeam})row_of_others=std::max(row_of_others,plan.lower[static_cast<std::size_t>(index)].row);
+            const auto& first=plan.lower[static_cast<std::size_t>(kLowerHandFirst)];
+            Check(first.row==row_of_others+1 && first.x==kLayoutMargin,"the hand buttons begin a row of their own"+tag);
+            for(int i=0;i<kPreviewHandButtonCount;++i){
+                const auto& box=plan.lower[static_cast<std::size_t>(kLowerHandFirst+i)];
+                Check(box.row==first.row && box.y==first.y && box.width>0,"the hand buttons are in one row"+tag);
+                if(i)Check(box.x>=plan.lower[static_cast<std::size_t>(kLowerHandFirst+i-1)].x+plan.lower[static_cast<std::size_t>(kLowerHandFirst+i-1)].width+kLayoutGap,"in order, with the gap"+tag);
+            }
+            for(std::size_t a=0;a<plan.lower.size();++a){
+                if(plan.lower[a].width==0)continue;
+                Check(plan.lower[a].x>=kLayoutMargin && plan.lower[a].x+plan.lower[a].width<=width-kLayoutRightMargin,"inside the window"+tag);
+                for(std::size_t c=a+1;c<plan.lower.size();++c)if(plan.lower[c].width!=0)Check(!Overlap(plan.lower[a],plan.lower[c]),"no overlap"+tag);
+            }
+            int bottom=0;
+            for(const auto& box:plan.lower)if(box.width)bottom=std::max(bottom,box.y+box.height);
+            Check(bottom<=kLowerTitleRow+plan.lower_shift,"hand: content starts below the buttons"+tag);
+            Check(plan.lower_shift>=PlanPreviewButtons(width,false).lower_shift,"the hand row only pushes the content down"+tag);
+        }
+    }
+    // The rows under the title of C: a short text keeps the places the rows had before they were measured; a longer text takes room and pushes the rest down.
+    {
+        const auto plain=PlanLowerRows(0,0,false),short_registered=PlanLowerRows(10,10,true);
+        Check(plain.picture_top==140 && plain.note_height==kLowerNoteMinHeight,"no rows: the picture starts at 140");
+        Check(short_registered.state_top==140 && short_registered.orientation_top==163 && short_registered.picture_top==186 && short_registered.state_height==21,"a registered C: 140, 163, 186");
+        Check(short_registered.picture_top-plain.picture_top==46,"the two rows take 46");
+        const auto long_note=PlanLowerRows(50,10,true);
+        Check(long_note.note_height==50 && long_note.state_top==long_note.note_top+50+kLowerRowGap && long_note.picture_top==short_registered.picture_top+(50-kLowerNoteMinHeight),"a note of three lines pushes the rows down by what it needs");
+        const auto long_state=PlanLowerRows(10,63,true);
+        Check(long_state.state_height==63 && long_state.orientation_top==long_state.state_top+63+kLowerRowGap && long_state.picture_top==short_registered.picture_top+(63-kLowerStateMinHeight),"a state row of three lines pushes the rest down");
+        for(const int note:{0,15,28,29,45,90})for(const int state:{0,10,21,22,70}){
+            const auto plan=PlanLowerRows(note,state,true);
+            Check(plan.note_top+plan.note_height+kLowerRowGap<=plan.state_top && plan.state_top+plan.state_height+kLowerRowGap<=plan.orientation_top &&
+                plan.orientation_top+plan.orientation_height+kLowerRowGap<=plan.picture_top,"the rows never overlap: note "+std::to_string(note)+" state "+std::to_string(state));
+        }
     }
     std::printf("preview_button_layout_checks=%u failures=%u\n",checks,failures);
     return failures?1:0;

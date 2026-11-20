@@ -6,7 +6,7 @@
 //  - ComposePairWithSelection: the branch of the pair capture that turns the selected condition (v1, v2 or the revision in force of
 //    v3) into one StillReviewRequest and calls the review writer. The v1 and v2 branches are the ones SavePairReview always had.
 //    A condition that cannot be applied is a skip with its reason, never an error: the originals are kept either way.
-//  - DescribeRegistrationReview: the lines for the status row and for the log of a v8 review: the level (G1 to G4), the pose of B
+//  - DescribeRegistrationReview: the lines for the status row and for the log of a v8 or v9 review: the level (G1 to G4, confirmed), the pose of B
 //    and the paper surface, the gate and its largest displacement, every warning (the sentences of
 //    fixed_composite_registration_text.hpp), the time of each stage. The sentences are made there and nowhere else. No camera
 //    identifier and no path is written.
@@ -16,6 +16,7 @@
 #include "a0/m2/experimental/fixed_scale_correction.hpp"
 #include "a0/m2/experimental/still_review.hpp"
 #include "a0/phase0/experimental/fixed_composite_registration_text.hpp"
+#include "a0/phase0/experimental/live_placement.hpp"
 #include <algorithm>
 #include <cmath>
 #include <exception>
@@ -45,9 +46,13 @@ struct PairCompositeOutcome {
 // `request` has everything except the condition. `selection` is the result of SelectFixedComposite for the setup, which the caller
 // has already logged when it was not usable. The condition and its profile are owned by `selection`, which must outlive the call.
 // v1: the similarity composite (report v6); v2: the lens-aware one (v7, with the scale limit compared with the policy's); v3: the
-// registered one (v8). Only FixedCompositeUnavailable is turned into a skip; every other failure is the caller's (the deadline).
+// registered one (v9; v8 before #437). Only FixedCompositeUnavailable is turned into a skip; every other failure is the caller's (the deadline).
+// `confirmed_position` (#437) is the window's confirmed position at the moment of the shot; it reaches only the registered composite, which
+// records it and uses it as ADR-0046 says. Empty (the default): a calibration's sample, or a caller without a window; the report then says
+// confirmedPosition null.
 [[nodiscard]] inline PairCompositeOutcome ComposePairWithSelection(const a0::m2::experimental::FixedCompositeSelection& selection,
-    a0::m2::experimental::StillReviewRequest request,const std::optional<a0::m2::experimental::StillMergePolicy>& merge_policy){
+    a0::m2::experimental::StillReviewRequest request,const std::optional<a0::m2::experimental::StillMergePolicy>& merge_policy,
+    std::optional<a0::m2::experimental::ConfirmedPosition> confirmed_position=std::nullopt){
     namespace m2e=a0::m2::experimental;
     PairCompositeOutcome outcome;
     const m2e::LoadedFixedCompositeCondition* condition=selection.loaded?std::get_if<m2e::LoadedFixedCompositeCondition>(&*selection.loaded):nullptr;
@@ -65,7 +70,7 @@ struct PairCompositeOutcome {
         // The registered composite takes the deadline of the request as the time left for its stages (PlanReviewStages decides
         // which stages the remaining time holds; the 180-second window of the pair capture is not extended). 0 threads: the
         // hardware's count; the composite does not depend on it.
-        request.fixed_composite_registration=m2e::StillReviewRequest::FixedCompositeRegistration{&condition_v3->condition,&condition_v3->profile,condition_v3->file_sha256,0};
+        request.fixed_composite_registration=m2e::StillReviewRequest::FixedCompositeRegistration{&condition_v3->condition,&condition_v3->profile,condition_v3->file_sha256,0,std::move(confirmed_position)};
     }else{
         outcome.skip=selection.reason;
         return outcome;
@@ -192,7 +197,27 @@ inline RegistrationTextContext ContextOf(const ex::SavedFixedCompositeRegistrati
 }
 }
 
-// `review` must hold a v8 record (fixed_composite_registration); an empty result otherwise. The context points into `review`.
+// The log line of the confirmed position a review was given, written from the record the review's writer wrote (read back from the report: never
+// from the window's own copy), with the same functions that write the live log's position line: LivePlacementCameraFields for the two cameras and
+// LivePlacementFields (FormatRecordNumber inside) for the nine numbers, so the two lines compare as text. `given=0` when the capture was given none.
+[[nodiscard]] inline std::string ConfirmedPositionLogLine(const a0::m2::experimental::SavedFixedCompositeRegistration& record){
+    namespace ex=a0::m2::experimental;
+    const auto& capture=record.registration;
+    if(!capture.confirmed_position || !capture.confirmed_check)return "pair_review_confirmed_position given=0 used=0 quality_accepted=0";
+    const auto& p=*capture.confirmed_position;const auto& check=*capture.confirmed_check;
+    std::ostringstream line;line.imbue(std::locale::classic());
+    line<<"pair_review_confirmed_position given=1 serial="<<p.serial<<" source="<<ex::ConfirmedPositionSourceCode(p.source)
+        <<" base_source="<<(p.base_source?std::string(ex::ConfirmedPositionSourceCode(*p.base_source)):std::string("none"))
+        <<' '<<LivePlacementCameraFields()<<' '<<LivePlacementFields(p.mapping);
+    if(p.manual_entered)line<<' '<<LivePlacementManualFields(*p.manual_entered);
+    else line<<" manual_entered=none";
+    line<<" condition_sha256="<<p.condition_sha256<<" condition_matches="<<(p.condition_sha256==record.condition_sha256?1:0)<<" used="<<(check.used?1:0)
+        <<" seam_difference_px="<<(check.seam_difference_px?LivePlacementNumber(*check.seam_difference_px):std::string("none"))
+        <<" level="<<ex::GeometryLevelCode(capture.level.level)<<" quality_accepted=0";
+    return line.str();
+}
+
+// `review` must hold a v8 or v9 record (fixed_composite_registration); an empty result otherwise. The context points into `review`.
 [[nodiscard]] inline RegistrationReviewLines DescribeRegistrationReview(const a0::m2::experimental::StillReviewResult& review){
     using namespace pair_review_detail;
     RegistrationReviewLines lines;
@@ -204,6 +229,7 @@ inline RegistrationTextContext ContextOf(const ex::SavedFixedCompositeRegistrati
     // The status row: the level and why; the pose of B and the surface; the gate and its largest displacement; the warnings and the
     // assessment; the stages the time budget dropped.
     lines.status.push_back(GeometryLevelText(capture.level));
+    if(auto position=ConfirmedPositionText(record);!position.empty())lines.status.push_back(std::move(position));
     lines.status.push_back(RegistrationPoseSummaryText(capture.registration,context)+"。"+SurfaceText(capture.surface));
     lines.status.push_back(RegistrationGateStateText(capture.gate));
     unsigned exceeded=0,unverified=0,notices=0;
@@ -241,6 +267,7 @@ inline RegistrationTextContext ContextOf(const ex::SavedFixedCompositeRegistrati
         <<" condition_sequence="<<record.condition_sequence<<" seam_column="<<record.seam_column<<" raster="<<record.raster.width_pixels<<"x"<<record.raster.height_pixels
         <<" geometry_hash="<<capture.geometry_hash<<" quality_accepted=0";
     lines.log.push_back(head.str());
+    lines.log.push_back(ConfirmedPositionLogLine(record));
 
     {
         std::ostringstream pose;pose.imbue(std::locale::classic());

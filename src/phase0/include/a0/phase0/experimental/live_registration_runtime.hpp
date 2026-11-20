@@ -154,7 +154,10 @@ inline constexpr std::string_view kLiveEstimateRefusedReason="estimate-refused";
 // replaced by a note otherwise.
 [[nodiscard]] inline std::string LiveLogSafeText(std::string_view text){
     if(text.find('\\')!=std::string_view::npos || text.find('/')!=std::string_view::npos || text.size()>200)return "(message withheld: it may hold a path)";
-    return std::string(text);
+    // One line of the log is one line: a control character (a line break above all) becomes a space.
+    std::string safe(text);
+    for(auto& c:safe)if(static_cast<unsigned char>(c)<0x20 || static_cast<unsigned char>(c)==0x7f)c=' ';
+    return safe;
 }
 
 // What the estimate was made with and what it measured, for one log line (numbers and codes only).
@@ -268,6 +271,12 @@ inline constexpr std::string_view kLiveEstimateRefusedReason="estimate-refused";
     return [](const LiveEstimatorInputs& inputs){return EstimateLiveRegistration(inputs,kLiveEstimatorDesignDraft);};
 }
 
+// The cheap check that an estimate's position passes before it is drawn (the one a hand step's result passes too: CheckRegisteredMappingCover
+// with the condition's profile, seam column and the design's blend width). It returns the reasons that the position fails
+// (kLivePositionSeamOutsideOverlapReason, kLivePositionOutputUncoveredReason); empty: it passes. It runs with no lock held and may throw (the
+// estimate is then not decided, with kLivePositionCheckFailedReason). Empty function: no check.
+using LiveMappingChecker=std::function<std::vector<std::string>(const a0::m2::experimental::RegisteredMapping&)>;
+
 using LivePlanSource=std::function<std::shared_ptr<const FixedPreviewPlan>()>;
 // The estimator that runs a job of the machine: it prepares the inputs from the plan in force and calls the entrance. A plan without a
 // registered context gives an estimate that cannot be used (reason "no-registered-plan"). `ranges` is what the condition says
@@ -299,47 +308,17 @@ using LivePlanSource=std::function<std::shared_ptr<const FixedPreviewPlan>()>;
     };
 }
 
-// The largest distance, in C pixels, between where `a` and `b` put the same pixel of the seam in the document: a lattice of rows
-// down C's grid by the seam column and the columns a blend width either side of it (the pixels that C's blend can show), where camera B
-// shows the sample. LiveMappingDifferencePx measures the same thing over all of C, and there the directions that the seam does not
-// constrain count as much as the ones it does. +infinity where a mapping cannot place a sample or B shows none of the lattice.
-// Throws what LiveDocumentHomography throws.
-[[nodiscard]] inline double LiveSeamMappingDifferencePx(const FixedPreviewPlan& plan,const a0::m2::experimental::RegisteredMapping& a,
-    const a0::m2::experimental::RegisteredMapping& b,unsigned rows){
-    if(!plan.live || !plan.live->table_b)throw std::invalid_argument("no registered plan");
-    if(rows<2)throw std::invalid_argument("at least 2 rows");
-    const auto& context=*plan.live;
-    const auto ha=LiveDocumentHomography(context,a),hb=LiveDocumentHomography(context,b);
-    const auto& grid=context.grid;
-    const std::int64_t seam=plan.view.seam_column,reach=std::max<std::int64_t>(1,plan.settings.width_pixels);
-    double largest=0;
-    bool any=false;
-    for(unsigned j=0;j<rows;++j){
-        const auto y=static_cast<std::uint32_t>(std::llround(static_cast<double>(j)*static_cast<double>(grid.height-1)/static_cast<double>(rows-1)));
-        for(const std::int64_t offset:{-reach,std::int64_t{0},reach}){
-            const std::int64_t column=seam+offset;
-            if(column<0 || column>=static_cast<std::int64_t>(grid.width))continue;
-            const auto x=static_cast<std::uint32_t>(column);
-            if(std::isnan((*context.table_b)[static_cast<size_t>(y)*grid.width+x].x))continue;
-            const a0::m2::render::Point document{grid.left_mm+(x+.5)*grid.pitch_mm,grid.top_mm+(y+.5)*grid.pitch_mm};
-            a0::m2::render::Point pa=document,pb=document;
-            if((ha && !a0::m2::render::TryTransform(*ha,document,pa)) || (hb && !a0::m2::render::TryTransform(*hb,document,pb)))
-                return std::numeric_limits<double>::infinity();
-            largest=std::max(largest,std::hypot(pa.x-pb.x,pa.y-pb.y)/grid.pitch_mm);
-            any=true;
-        }
-    }
-    return any?largest:std::numeric_limits<double>::infinity();
-}
-inline constexpr unsigned kLiveSeamDifferenceRows=17;
-
-// The same distance in pixels of the JPEG's raster (the condition's), which is what a person reads: C's pixels times C's pitch over the
-// raster's pitch. +infinity where the mapping cannot place a sample. Throws what LiveSeamMappingDifferencePx throws.
+// The largest distance, in pixels of the JPEG's raster (the condition's), between where `a` and `b` put the same pixel of the seam in the
+// document, as SeamDifferencePx (confirmed_position.hpp) measures it: the one measure that the screen's sentence after a shot, the log's
+// seam_difference_px and the report's seamDifferencePx all use. Neither mapping may carry layer 2. LiveMappingDifferencePx measures the same
+// thing over all of C, and there the directions that the seam does not constrain count as much as the ones it does.
+// Throws std::invalid_argument without a registered plan, for a mapping with layer 2, and where a mapping cannot place a sample.
 [[nodiscard]] inline double LiveSeamMappingDifferenceOutputPx(const FixedPreviewPlan& plan,const a0::m2::experimental::RegisteredMapping& a,
-    const a0::m2::experimental::RegisteredMapping& b,unsigned rows){
-    const double in_c=LiveSeamMappingDifferencePx(plan,a,b,rows);
+    const a0::m2::experimental::RegisteredMapping& b){
     if(!plan.live || !plan.live->raster.dpi)throw std::invalid_argument("no registered plan");
-    return in_c*plan.live->grid.pitch_mm/(25.4/static_cast<double>(plan.live->raster.dpi));
+    const auto& context=*plan.live;
+    return a0::m2::experimental::SeamDifferencePx(context.model_b,context.centre_a,context.origin_mm,a0::m2::experimental::content_registration::FrameOfRaster(context.raster),
+        a,b,context.seam_column,context.raster.height_pixels);
 }
 
 // ---- What the window shows ------------------------------------------------------------------------------------------------------
@@ -351,6 +330,7 @@ struct LiveStatus {
     LiveOrientationTexts orientation;
     std::string orientation_line;          // LiveOrientationRowText (UTF-8, one line)
     std::uint64_t rebakes{},rebake_failures{};
+    std::uint64_t rebakes_dropped{};       // tables that were baked and not taken (what was wanted changed while the bake ran)
 };
 
 // What the worker reads of the frames.
@@ -385,6 +365,8 @@ public:
         a0::m2::experimental::MountOrientation mount{a0::m2::experimental::MountOrientation::normal};
         std::string condition_sha256;                                           // the file that this session was read from (not empty)
         std::optional<LivePlacementMachine> placement;                          // the machine of the sessions before: P is carried across them
+        LiveHandChecker hand_check;                                             // the check of a hand step (see LiveHandChecker); empty: every step is refused
+        LiveMappingChecker mapping_check;                                       // the check of an estimate's position before it is drawn; empty: none
         std::function<void(const std::string&)> log;                            // one line per event; may be empty
     };
     // `profile` is the condition's verified profile: A's calibrated direction and B's moved direction come from it.
@@ -413,13 +395,16 @@ public:
     // A capture ended with a JPEG made with `mapping` (the mapping of the geometry level it chose) from the condition of `condition_sha256`:
     // P becomes that mapping, with layer 2 left out. False (nothing changed) when the condition is not the session's.
     // `layer_two_max_px`: the largest shift of the JPEG's layer 2 (LivePlacementLayerTwoMaxPx), for the sentence and the log.
+    // The capture is over whatever the answer: a hold of P by BeginCapture ends. Level "confirmed": P was the JPEG's own position and stays
+    // as it is (with its source and serial). A hand-set P stays too. `given_serial`: the serial of the position that the capture recorded it
+    // was given; it must be P's.
     bool ApplyCapture(const a0::m2::experimental::RegisteredMapping& mapping,const std::string& level,const std::string& condition_sha256,
-        std::optional<double> layer_two_max_px=std::nullopt){
+        std::optional<double> layer_two_max_px=std::nullopt,std::optional<std::uint64_t> given_serial=std::nullopt){
         std::optional<std::string> line;
         bool applied=false;
         {
             std::lock_guard lock(mutex_);
-            applied=machine_.ApplyCapture(mapping,level,condition_sha256,layer_two_max_px);
+            applied=machine_.ApplyCapture(mapping,level,condition_sha256,layer_two_max_px,given_serial);
             if(applied){
                 bake_failed_=false;failed_wanted_serial_.reset();
                 MeasureCaptureLocked();
@@ -430,6 +415,66 @@ public:
         if(line)Log(*line);
         return applied;
     }
+
+    // ---- Hand steps and the freeze of a pair capture (#437 stage 2) ----
+    // Whether the picture on the screen was drawn with a table baked for P: `drawn` is the plan that the last picture was drawn with (not
+    // CurrentPlan() as it is now: a table that was swapped in a moment ago has not been drawn yet). The one test that a pair capture and a hand
+    // press are both admitted by.
+    [[nodiscard]] bool DrawnWithPlacement(const std::shared_ptr<const FixedPreviewPlan>& drawn) const {
+        std::lock_guard lock(mutex_);
+        return DrawnWithPlacementLocked(drawn);
+    }
+    // A hand press (LivePlacementMachine::PrepareHandStep has the rules). `live_running`: the window's Live runs and is not stopping. The
+    // check runs with no lock held. Accepted: a position waits to be drawn, the worker bakes it, and P becomes it once drawn.
+    // While the press is checked, an estimate's position is neither baked nor drawn (Rebake), so that a press that is accepted withdraws it
+    // whichever of the two checks ran first (ADR-0046 decision 3); a press that is refused leaves it to the next pass.
+    LiveHandResult HandStep(const a0::m2::experimental::HandCounts& delta,const std::shared_ptr<const FixedPreviewPlan>& drawn,bool live_running){
+        LiveHandPrepared prepared;
+        {
+            std::lock_guard lock(mutex_);
+            prepared=machine_.PrepareHandStep(delta,LiveHandContext{live_running,DrawnWithPlacementLocked(drawn)});
+            if(prepared.outcome!=LiveHandOutcome::accepted)PublishStatusLocked();
+            else ++hand_checks_running_;
+        }
+        LiveHandResult result;
+        if(prepared.outcome!=LiveHandOutcome::accepted){
+            result.outcome=prepared.outcome;
+        }else{
+            LiveHandCheck check;
+            try{check=EvaluateLiveHandCheck(config_.hand_check,prepared.proposal);}
+            catch(...){std::lock_guard lock(mutex_);--hand_checks_running_;PublishStatusLocked();throw;}
+            std::lock_guard lock(mutex_);
+            --hand_checks_running_;
+            result=machine_.CommitHandStep(prepared.proposal,check);
+            PublishStatusLocked();
+        }
+        Log(HandStepLine(delta,result));
+        return result;
+    }
+    // The request of a pair capture: P is frozen (nothing changes it, and no estimate begins) until ApplyCapture or EndCapture. What it is given
+    // is P as it is drawn. Refused (nothing changes) unless the screen was drawn with P.
+    LiveCaptureBegin BeginCapture(const std::shared_ptr<const FixedPreviewPlan>& drawn){
+        LiveCaptureBegin begin;
+        {
+            std::lock_guard lock(mutex_);
+            begin=machine_.BeginCapture(DrawnWithPlacementLocked(drawn));
+            PublishStatusLocked();
+        }
+        std::ostringstream line;line.imbue(std::locale::classic());
+        line<<"C live_capture_request admission="<<LiveCaptureAdmissionCode(begin.admission);
+        if(begin.grant)line<<" serial="<<begin.grant->serial<<" source="<<LivePlacementSourceCode(begin.grant->source)<<" dropped_pending="<<(begin.dropped_pending?1:0)
+            <<" dropped_estimate="<<(begin.dropped_estimate?1:0);
+        line<<" quality_accepted=0";
+        Log(line.str());
+        return begin;
+    }
+    // The pair capture ended with no JPEG that applies: P is free again.
+    void EndCapture(){
+        std::lock_guard lock(mutex_);
+        machine_.EndCapture();
+        PublishStatusLocked();
+    }
+
     // The machine as it is now: the window keeps it across the sessions (the runtime of the next session starts from it).
     [[nodiscard]] LivePlacementMachine PlacementMachine() const {std::lock_guard lock(mutex_);return machine_;}
 
@@ -457,8 +502,9 @@ public:
     [[nodiscard]] int WorkersRunning() const {return workers_running_.load();}
 
     // One pass of the worker: the estimate when one is asked for, then the bake when P is to be replaced or has not been drawn, then the
-    // status. `stop` is the worker's stop: the job carries it to the estimator, and after it answers true nothing is baked. A job that
-    // was stopped, or that had no frames, did not estimate anything: it is asked for again (not counted as an estimate that decided nothing).
+    // status. `stop` is the worker's stop: the job carries it to the estimator, and after it answers true nothing is checked or baked. A job
+    // that was stopped (by the estimator's word, or by a stop that came while it ran), or that had no frames, did not estimate anything: it is
+    // asked for again (not counted as an estimate that decided nothing).
     LivePassResult RunPass(const LiveFrameSource& frames,const LiveEstimator& estimator,const std::function<bool()>& stop={}){
         if(!estimator)throw std::invalid_argument("live runtime: no estimator");
         LivePassResult result;
@@ -469,6 +515,18 @@ public:
             base=base_;
             asked=machine_.Activity()==LivePlacementActivity::requested;
             if(!base || !base->live){PublishStatusLocked();return result;}
+        }
+        // A position that waits, or P itself when its table was not baked (the session began, or a shot ended), is drawn before the estimate that
+        // was asked for runs: a hand press after the session began then comes after P is on the screen, and the estimate that is asked for
+        // again is overtaken by it (a press withdraws it). A bake that fails does not stop the estimate.
+        if(asked && !(stop && stop())){
+            bool unbaked=false;
+            {
+                std::lock_guard lock(mutex_);
+                const auto from=current_?current_:base_;
+                unbaked=from && from->live && !LivePlacementSameMapping(from->live->baked,machine_.Wanted());
+            }
+            if(unbaked)Rebake(result,stop);
         }
         std::optional<LiveJob> job;
         if(asked && frames.ready && frames.ready()){
@@ -500,7 +558,13 @@ public:
                     outcome.reasons.emplace_back("estimator-exception");
                     outcome.detail="an exception of an unknown kind";
                 }
-                const bool interrupted=std::find(outcome.reasons.begin(),outcome.reasons.end(),std::string(kLiveEstimateStoppedReason))!=outcome.reasons.end();
+                // A job that the estimator says was stopped, or that ends after the worker was stopped, did not estimate anything for this session: it is
+                // asked for again (ADR-0046 decision 2: a stop keeps the request, and the next start continues it once), and its position is not checked.
+                const bool interrupted=std::find(outcome.reasons.begin(),outcome.reasons.end(),std::string(kLiveEstimateStoppedReason))!=outcome.reasons.end() ||
+                    (stop && stop());
+                // The position of an estimate that decided one passes the same cheap check as a hand step before it is drawn; one that fails it is
+                // not decided (P stays), as a position that the JPEG could not be made with would show on the screen what the JPEG cannot have.
+                if(!interrupted && outcome.usable && config_.mapping_check)CheckEstimatedPosition(outcome);
                 std::optional<std::string> line;
                 {
                     std::lock_guard lock(mutex_);
@@ -550,10 +614,59 @@ private:
     // Never called with mutex_ held.
     void Log(const std::string& line) const {if(config_.log)config_.log(line);}
 
+    [[nodiscard]] bool DrawnWithPlacementLocked(const std::shared_ptr<const Plan>& drawn) const {
+        return drawn && drawn->live && LivePlacementSameMapping(drawn->live->baked,machine_.Placement());
+    }
+    // An estimate's position waits to be drawn while a hand press is checked: it is not baked or drawn until the press is answered.
+    [[nodiscard]] bool EstimateHeldLocked() const {return hand_checks_running_>0 && machine_.PendingIsEstimate();}
+    // Runs the caller's cheap check on an estimate that decided a position, with no lock held; what it finds (or what it throws) makes the
+    // outcome not usable, with its reasons in front of the estimator's.
+    void CheckEstimatedPosition(LiveEstimateOutcome& outcome) const {
+        std::vector<std::string> failed;
+        std::string thrown;
+        try{failed=config_.mapping_check(a0::m2::experimental::RegisteredMapping{outcome.pose,outcome.surface,std::nullopt});}
+        catch(const std::exception& error){failed={std::string(kLivePositionCheckFailedReason)};thrown=LiveLogSafeText(error.what());}
+        catch(...){failed={std::string(kLivePositionCheckFailedReason)};thrown="an exception of an unknown kind";}
+        if(failed.empty())return;
+        outcome.usable=false;
+        std::string joined;
+        for(size_t i=0;i<failed.size();++i)joined+=(i?",":"")+failed[i];
+        outcome.detail+=(outcome.detail.empty()?"":" ")+std::string("position_check=")+joined+(thrown.empty()?"":" position_check_detail="+thrown);
+        outcome.reasons.insert(outcome.reasons.begin(),failed.begin(),failed.end());
+    }
+    // The line of a hand press: what it was, what it came to and, when it was refused, why (numbers and codes only).
+    [[nodiscard]] static std::string HandStepLine(const a0::m2::experimental::HandCounts& delta,const LiveHandResult& result){
+        std::ostringstream line;line.imbue(std::locale::classic());
+        line<<"C live_hand_step result="<<LiveHandOutcomeCode(result.outcome)<<" delta_seam_dx_counts="<<delta.seam_dx<<" delta_seam_dy_counts="<<delta.seam_dy
+            <<" delta_rotation_counts="<<delta.rotation<<" total_seam_dx_counts="<<result.total.seam_dx<<" total_seam_dy_counts="<<result.total.seam_dy
+            <<" total_rotation_counts="<<result.total.rotation;
+        if(result.outcome==LiveHandOutcome::accepted)
+            line<<" returned_to_base="<<(result.returned_to_base?1:0)<<" condition_position="<<(result.became_condition_position?1:0)
+                <<" withdrew_estimate="<<(result.withdrew_estimate?1:0);
+        if(result.outcome==LiveHandOutcome::refused_envelope){
+            line<<" exceeded=";
+            for(size_t i=0;i<result.exceeded.size();++i)line<<(i?",":"")<<LiveLogSafeText(result.exceeded[i]);
+        }
+        if(result.outcome==LiveHandOutcome::refused_cover)line<<" seam_covered="<<(result.seam_covered?1:0)<<" output_covered="<<(result.output_covered?1:0);
+        if(result.outcome==LiveHandOutcome::refused_error)line<<" detail="<<LiveLogSafeText(result.detail);
+        line<<" quality_accepted=0";
+        return line.str();
+    }
+    [[nodiscard]] static std::string_view LiveCaptureAdmissionCode(LiveCaptureAdmission admission){
+        switch(admission){
+        case LiveCaptureAdmission::accepted:return "accepted";
+        case LiveCaptureAdmission::not_configured:return "not-configured";
+        case LiveCaptureAdmission::already_capturing:return "already-capturing";
+        case LiveCaptureAdmission::not_drawn:return "not-drawn";
+        }
+        return {};
+    }
+
     // Bakes camera B's table again whenever the mapping that is wanted (a position that waits to be drawn, else P) is not the one the plan in
     // use was baked for; there is no distance below which a bake is skipped, so what C draws is P itself. The bake runs with no lock held; the
     // result is taken only if the base plan is still the one it was made for and the wanted mapping is still the one that was baked (a shot or
     // a new condition may have changed it meanwhile). A position that waits becomes P when it has been drawn, and is dropped when it could not be.
+    // An estimate's position is not baked, nor taken when its bake ends, while a hand press is checked (HandStep).
     void Rebake(LivePassResult& result,const std::function<bool()>& stop){
         std::shared_ptr<const Plan> from;
         std::uint64_t serial{},wanted_serial{};
@@ -565,6 +678,7 @@ private:
             serial=base_serial_;from=current_?current_:base_;
             wanted_serial=machine_.WantedSerial();wanted=machine_.Wanted();
             if(failed_wanted_serial_==wanted_serial)return;   // the same mapping failed already; wait for another
+            if(EstimateHeldLocked())return;   // a hand press is checked: the estimate's position waits for its answer
             if(LivePlacementSameMapping(from->live->baked,wanted)){
                 // Already drawn (P itself, or a position that came out the same as P).
                 if(machine_.HasPending())machine_.Committed();
@@ -582,8 +696,10 @@ private:
         std::optional<std::string> placement_line;
         {
             std::lock_guard lock(mutex_);
-            if(base_serial_!=serial)return;   // another base plan was published meanwhile; P is baked into it by the next pass
-            if(machine_.WantedSerial()!=wanted_serial)return;   // the wanted mapping changed meanwhile; the next pass bakes it
+            // A table that was baked and is not taken is counted (rebakes_dropped).
+            if(base_serial_!=serial){++rebakes_dropped_;return;}   // another base plan was published meanwhile; P is baked into it by the next pass
+            if(machine_.WantedSerial()!=wanted_serial){++rebakes_dropped_;return;}   // the wanted mapping changed meanwhile; the next pass bakes it
+            if(EstimateHeldLocked()){++rebakes_dropped_;return;}   // a hand press began to be checked meanwhile; the next pass bakes again if it is refused
             text<<"C live_rebake wanted_serial="<<wanted_serial<<" ms="<<milliseconds;
             if(baked.ok){
                 current_=std::make_shared<const Plan>(std::move(baked.plan));
@@ -627,7 +743,10 @@ private:
         logged_serial_=machine_.Serial();
         std::ostringstream line;line.imbue(std::locale::classic());
         line<<"C live_placement serial="<<machine_.Serial()<<" source="<<LivePlacementSourceCode(machine_.Source())<<' '<<LivePlacementFields(machine_.Placement())
-            <<" condition_sha256="<<machine_.ConditionSha256()<<" drawn=1 quality_accepted=0";
+            <<" condition_sha256="<<machine_.ConditionSha256()<<" drawn=1 "<<LivePlacementCameraFields();
+        const auto view=machine_.View();
+        if(view.hand_entered && view.base_source)line<<" base_source="<<LivePlacementSourceCode(*view.base_source)<<' '<<LivePlacementManualFields(*view.hand_entered);
+        line<<" quality_accepted=0";
         return line.str();
     }
     // What a shot did, once: P before the shot, the level, how far P moved (seam_difference_px, when it was measured) and layer 2 that C does not draw.
@@ -637,7 +756,7 @@ private:
         std::ostringstream line;line.imbue(std::locale::classic());
         line<<"C live_placement_after_capture serial="<<machine_.Serial()<<" level="<<note->level<<" before_source="<<LivePlacementSourceCode(note->before_source)
             <<' '<<LivePlacementFields(note->before,"before_")<<' '<<LivePlacementLayerTwoFields(note->layer_two_dropped,note->layer_two_max_px);
-        if(note->difference_px)line<<" seam_difference_px="<<*note->difference_px;
+        if(note->difference_px)line<<" seam_difference_px="<<LivePlacementNumber(*note->difference_px);
         line<<" quality_accepted=0";
         return line.str();
     }
@@ -645,7 +764,7 @@ private:
     void MeasureCaptureLocked(){
         if(!machine_.CaptureDifferencePending() || !base_ || !base_->live)return;
         try{
-            const double pixels=LiveSeamMappingDifferenceOutputPx(*base_,machine_.Capture()->before,machine_.Placement(),kLiveSeamDifferenceRows);
+            const double pixels=LiveSeamMappingDifferenceOutputPx(*base_,machine_.Capture()->before,machine_.Placement());
             machine_.SetCaptureDifference(pixels);
         }catch(const std::exception&){}   // not measured: the sentence leaves the number out
     }
@@ -666,7 +785,7 @@ private:
         next.state_text=LivePlacementStateText(view,bake_failed_);
         next.orientation=LiveOrientationTextsOf(orientation_a_,orientation_b_);
         next.orientation_line=LiveOrientationRowText(next.orientation);
-        next.rebakes=rebakes_;next.rebake_failures=rebake_failures_;
+        next.rebakes=rebakes_;next.rebake_failures=rebake_failures_;next.rebakes_dropped=rebakes_dropped_;
         status_=std::move(next);
     }
 
@@ -682,7 +801,8 @@ private:
     std::optional<CameraOrientation> orientation_a_,orientation_b_;
     std::optional<std::uint64_t> orientation_serial_;
     LiveStatus status_;
-    std::uint64_t rebakes_{},rebake_failures_{};
+    std::uint64_t rebakes_{},rebake_failures_{},rebakes_dropped_{};
+    unsigned hand_checks_running_{};   // hand presses between PrepareHandStep and CommitHandStep
     std::atomic<int> workers_running_{0};
 };
 }

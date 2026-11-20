@@ -420,13 +420,13 @@ FixedCompositeCreationCheckV3 MakeFixedCompositeCreationCheckV3(CreationCheckDet
 }
 
 RegisteredMappingCover CheckRegisteredMappingCover(const render::DocumentRenderParameters& parameters,const RegisteredMapping& mapping,
-    std::uint32_t seam_column,const SeamBlendSettings& blend){
+    std::uint32_t seam_column,const SeamBlendSettings& blend,unsigned threads){
+    if(threads<1 || threads>kSeamBlendMaxThreads)throw std::invalid_argument("registered mapping cover: thread count must be 1..256");
     RegisteredMappingCover cover;
     const auto input=RegisteredDocumentMappedFixedSeamInput(parameters,mapping,seam_column);
-    render::BgrImage frame;
-    frame.width=static_cast<std::uint32_t>(kD810SensorWidthPixels);frame.height=static_cast<std::uint32_t>(kD810SensorHeightPixels);
-    frame.bgr.assign(render::PixelCount(frame.width,frame.height)*3,0);
-    try{cover.seam_covered=CanRenderMappedFixedSeam(frame,frame,input,seam_column,blend);}
+    // The seam check reads the D810 frame's size only, so no frame is made.
+    const auto width=static_cast<std::uint32_t>(kD810SensorWidthPixels),height=static_cast<std::uint32_t>(kD810SensorHeightPixels);
+    try{cover.seam_covered=CanRenderMappedFixedSeamBySize(width,height,width,height,input,seam_column,blend,threads);}
     catch(const std::invalid_argument&){cover.seam_covered=false;}   // a row without an overlap, or an overlap that is not one run
     cover.uncovered_edge_pixels=CountUncoveredEdge(input);
     cover.output_covered=cover.uncovered_edge_pixels==0;

@@ -308,7 +308,7 @@ struct SavedFixedCompositeLens {
     bool wide_search{};
     unsigned tiles_searched{},tiles_matched{},tiles_agreed{};
 };
-// What a v8 report records about the registered fixed composite (#417): SavedFixedCompositeRegistration in
+// What a v8 or v9 report records about the registered fixed composite (#417, #437): SavedFixedCompositeRegistration in
 // capture_registration.hpp, with its JSON writer and strict reader.
 
 // How far this capture's B sat from where the condition puts it: the estimate
@@ -365,14 +365,19 @@ struct StillReviewRequest {
     std::optional<FixedCompositeLens> fixed_composite_lens;
     // #417: compose with the registered fixed composite (condition v3 and the profile it names, read by the caller from the
     // revision in force). Both are owned by the caller and must outlive the call. Exclusive with fixed_composite,
-    // fixed_composite_lens, manual_revision, automatic_alignment and blend. The report is v8. condition_sha256 is the SHA-256 of
-    // the exact revision file bytes. The originals must be the profile's frame size.
+    // fixed_composite_lens, manual_revision, automatic_alignment and blend. The report is v9 (v8 before #437). condition_sha256 is the
+    // SHA-256 of the exact revision file bytes. The originals must be the profile's frame size.
     struct FixedCompositeRegistration {
         const FixedCompositeConditionV3* condition{};
         const FixedCompositeProfileBinding* profile{};
         std::string condition_sha256;   // LoadedFixedCompositeConditionV3::file_sha256
         // Threads for the measurer (1..256); 0 is the hardware's count. The composite and the report do not depend on it.
         unsigned thread_count{};
+        // #437: the confirmed position of the development window's live view at the moment of the shot. Empty (a calibration's sample, a caller
+        // without a window): the composite is what it was before the position existed and the report records no position (confirmedPosition
+        // null). Given, it is recorded as it was given; it is used for the composite as ADR-0046 says, and only when its condition_sha256 is
+        // this condition's. It is never an input of the estimate on the originals.
+        std::optional<ConfirmedPosition> confirmed_position;
     };
     std::optional<FixedCompositeRegistration> fixed_composite_registration;
 };
@@ -418,7 +423,7 @@ struct StillReviewResult {
     // v7 only (#405 W4). alignment_milliseconds is then the scale estimate (prior, tiles, decision),
     // blend_milliseconds the composite.
     std::optional<SavedFixedCompositeLens> fixed_composite_lens;
-    // v8 only (#417). alignment_milliseconds is then the estimate (pose, surface, layer 2), blend_milliseconds the composite,
+    // v8 and v9 only (#417, #437). alignment_milliseconds is then the estimate (pose, surface, layer 2), blend_milliseconds the composite,
     // and registration_milliseconds each stage (for the log only: never in the report, addendum 11.25.4).
     std::optional<SavedFixedCompositeRegistration> fixed_composite_registration;
     std::optional<CaptureStageMilliseconds> registration_milliseconds;
@@ -430,6 +435,11 @@ struct StillReviewResult {
 // Exists only in the explicitly enabled development preview build. A separate
 // uncalibrated review report, never a successful product StitchJob manifest.
 StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& request);
+// The cheap check of a candidate mapping that the capture's registration makes (design 11.23.4): the seam with
+// half the blend width inside the overlap on every row, and the outer edge of the output covered. Exported for the tests, which hold it against
+// CheckRegisteredMappingCover (fixed_composite_creation_v3.hpp) for the same mapping: it calls it, on `threads` threads. The frames are not read.
+[[nodiscard]] MappingCoverCheck RegisteredMappingCoverOfCapturedFrames(const render::DocumentRenderParameters& parameters,const RegisteredMapping& mapping,
+    std::uint32_t seam_column,const SeamBlendSettings& blend,const render::BgrImage& a,const render::BgrImage& b,unsigned threads);
 struct SavedStillReview {
     std::filesystem::path report,jpeg,camera_a_original,camera_b_original;
     std::string report_sha256,jpeg_sha256,camera_a_sha256,camera_b_sha256,pair_id;
@@ -450,7 +460,7 @@ struct SavedStillReview {
     // (0, 0, 0, 1, empty): the mapping is the profile's. width/height are the condition's raster.
     // A tool that places B by a similarity (re-Merge, the saved-condition maker) must refuse it.
     std::optional<SavedFixedCompositeLens> fixed_composite_lens;
-    // v8 reports only (#417). Like v7, translation_x/y, rotation_degrees, scale and crop carry nothing (0, 0, 0, 1, empty): the
+    // v8 and v9 reports only (#417, #437). Like v7, translation_x/y, rotation_degrees, scale and crop carry nothing (0, 0, 0, 1, empty): the
     // mapping is the profile's with the recorded registration. width/height are the condition's raster. A tool that places B by
     // a similarity must refuse it.
     std::optional<SavedFixedCompositeRegistration> fixed_composite_registration;
