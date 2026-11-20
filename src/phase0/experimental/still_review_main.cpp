@@ -70,6 +70,40 @@ std::string HandSumSentence(const review::SavedFixedCompositeRegistration& recor
     if(position.source!=review::ConfirmedPositionSource::manual || position.condition_sha256!=record.condition_sha256 || !position.manual_entered)return {};
     return a0::phase0::experimental::LiveHandSumText(position.manual_entered);
 }
+// UTF-8 of a panel text, with the control's CRLF breaks as LF.
+std::string PanelUtf8(const std::wstring& text){
+    std::wstring lf;for(size_t i=0;i<text.size();++i){if(text[i]==L'\r' && i+1<text.size() && text[i+1]==L'\n')continue;lf+=text[i];}
+    if(lf.empty())return {};
+    const int length=WideCharToMultiByte(CP_UTF8,0,lf.data(),static_cast<int>(lf.size()),nullptr,0,nullptr,nullptr);
+    if(length<=0)return {};
+    std::string utf8(static_cast<size_t>(length),'\0');
+    WideCharToMultiByte(CP_UTF8,0,lf.data(),static_cast<int>(lf.size()),utf8.data(),length,nullptr,nullptr);return utf8;
+}
+// The pixels of a rectangle of a device context as the display holds them (BGR, rows from the top, no padding): copied into a bitmap of the
+// display's own format and read back with GetDIBits. Empty when any step fails.
+std::vector<unsigned char> ReadBackBgr(HDC source,int x,int y,unsigned width,unsigned height){
+    std::vector<unsigned char> bgr;
+    if(!width || !height)return bgr;
+    const HDC copy=CreateCompatibleDC(source);if(!copy)return bgr;
+    const HBITMAP bitmap=CreateCompatibleBitmap(source,static_cast<int>(width),static_cast<int>(height));
+    if(bitmap){
+        const auto previous=SelectObject(copy,bitmap);
+        const bool selected=previous && previous!=HGDI_ERROR;
+        const bool copied=selected && BitBlt(copy,0,0,static_cast<int>(width),static_cast<int>(height),source,x,y,SRCCOPY)!=FALSE;
+        if(selected)SelectObject(copy,previous);
+        if(copied){
+            BITMAPINFO info{};info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);info.bmiHeader.biWidth=static_cast<LONG>(width);
+            info.bmiHeader.biHeight=-static_cast<LONG>(height);info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;info.bmiHeader.biCompression=BI_RGB;
+            std::vector<unsigned char> bgra(static_cast<size_t>(width)*height*4);
+            if(GetDIBits(copy,bitmap,0,height,bgra.data(),&info,DIB_RGB_COLORS)==static_cast<int>(height)){
+                bgr.resize(static_cast<size_t>(width)*height*3);
+                for(size_t p=0;p<static_cast<size_t>(width)*height;++p)std::copy_n(bgra.data()+p*4,3,bgr.data()+p*3);
+            }
+        }
+        DeleteObject(bitmap);
+    }
+    DeleteDC(copy);return bgr;
+}
 // The inspector's buttons in command order: button i is created with command id kFirstButtonId+i. To add a
 // button, append its label here, place it in Inspector::Layout and handle its id in Inspector::Command; the
 // button array, the WM_COMMAND range, the control-fit check and EnableChanges follow this list's size.
@@ -139,6 +173,12 @@ struct Inspector {
     // The status lines of a registered report that the right-hand panel shows, the sentence of its confirmed position (v9) and that of the hand amounts.
     unsigned status_lines{},status_lines_shown{};bool confirmed_text_expected{},confirmed_text_shown{},hand_sum_expected{},hand_sum_shown{};
     unsigned manual_tool_count{},manual_tools_enabled{},manual_refusals{};
+    // What the smoke saw of the picture and the panel, for the test to judge against its own decode of the saved JPEG (#418): the SHA-256 of the
+    // picture the window holds, the panel's text as the control shows it, and, per crop, where it was cut and the SHA-256 of the pixels read back
+    // from the drawing surface after the crop was drawn (GetDIBits, every pixel) and of the crop itself.
+    std::string picture_sha256,panel_utf8;
+    struct CropReadback{unsigned left{},top{},width{},height{},seam_column{};std::string drawn_sha256,crop_sha256;};
+    std::array<std::optional<CropReadback>,3> crop_readback;
     // #382 smoke: checked before the stages below, whose counters restart after it.
     unsigned draft_stage{},draft_saved{},draft_rejections{};bool draft_verified{};fs::path draft_parent;
     review::StillAlignmentGeometry draft_parent_geometry{};std::optional<review::StillAlignmentGeometry> draft_estimate;
@@ -560,9 +600,11 @@ struct Inspector {
                 if(expected_rejections==count+1)++manual_refusals;
             }
             if(mode || pick_stage || pending_a || proposal || !points.empty() || saved || sessions_saved || Busy() || seam_crops)failed=true;
+            picture_sha256=a0::m2::experimental::FixedCompositeBytesSha256(current.image.bgr);
             if(registration){
                 wchar_t metrics[16384]{};GetWindowTextW(residual_text,metrics,static_cast<int>(std::size(metrics)));
                 const std::wstring panel=metrics,summary=SummaryText(0);
+                panel_utf8=PanelUtf8(panel);
                 // The sentences of the v7 report are about its scale correction and its turned originals; v8 and v9 have neither.
                 v7_text_shown=panel.find(L"倍率の補正")!=std::wstring::npos || summary.find(L"倍率の補正")!=std::wstring::npos || summary.find(L"A/Bを回して")!=std::wstring::npos;
                 const auto& f=*current.record.fixed_composite_registration;
@@ -576,7 +618,17 @@ struct Inspector {
             std::cout<<"fixed_mapping_window=1 registration="<<registration<<" original_decodes="<<original_decodes<<" manual_tools="<<manual_tool_count<<" manual_tools_enabled="<<manual_tools_enabled
                 <<" manual_tools_refused="<<manual_refusals<<" v7_text_shown="<<v7_text_shown<<" registration_text_shown="<<registration_text_shown
                 <<" status_lines="<<status_lines<<" status_lines_shown="<<status_lines_shown<<" confirmed_position_text_expected="<<confirmed_text_expected<<" confirmed_position_text_shown="<<confirmed_text_shown
-                <<" hand_sum_expected="<<hand_sum_expected<<" hand_sum_shown="<<hand_sum_shown<<'\n'<<std::flush;
+                <<" hand_sum_expected="<<hand_sum_expected<<" hand_sum_shown="<<hand_sum_shown
+                <<" image_width="<<current.image.width<<" image_height="<<current.image.height<<" image_sha256="<<picture_sha256<<'\n';
+            // The panel as the control holds it, one output line per line of the panel, UTF-8, so that a test can compare the sentences themselves.
+            if(registration){
+                for(size_t at=0;at<=panel_utf8.size();){
+                    const auto end=panel_utf8.find('\n',at);
+                    std::cout<<"panel_line="<<panel_utf8.substr(at,end==std::string::npos?std::string::npos:end-at)<<'\n';
+                    if(end==std::string::npos)break;at=end+1;
+                }
+            }
+            std::cout<<std::flush;
             if(!FixedToolsPassed())failed=true;
             return;
         }
@@ -847,6 +899,12 @@ struct Inspector {
                 pixels_ok=pixels_ok && GetPixel(dc,x+static_cast<int>(at[0]),y+static_cast<int>(at[1]))==RGB(bgr[2],bgr[1],bgr[0]);
             }
             if(pixels_ok)++crop_paints;else ++crop_pixel_failures;
+            if(smoke && drawn>0){
+                // Every pixel of the crop's rectangle, read back before the seam line is drawn over it.
+                const auto drawn_pixels=ReadBackBgr(dc,x,y,c.image.width,c.image.height);
+                crop_readback[i]=CropReadback{c.left,c.top,c.image.width,c.image.height,c.seam_column,
+                    drawn_pixels.empty()?std::string():a0::m2::experimental::FixedCompositeBytesSha256(drawn_pixels),a0::m2::experimental::FixedCompositeBytesSha256(c.image.bgr)};
+            }
             if(!show_seam)continue;
             // The recorded seam of each row, relative to the crop (one column for a fixed composite).
             std::vector<POINT> line;
@@ -1125,6 +1183,9 @@ int wmain(int argc,wchar_t** argv){
         std::cout<<"fixed_mapping="<<app->fixed_mapping<<" original_decodes="<<app->original_decodes<<" crops_stages_passed="<<app->CropsStagesPassed()<<" crop_stage="<<app->crop_stage<<" crop_paints="<<app->crop_paints
             <<" crop_pixel_failures="<<app->crop_pixel_failures<<" crop_seam_pixels="<<app->crop_seam_pixels<<" crop_returns="<<app->crop_returns<<" crop_guarded="<<app->crop_guarded
             <<" layout_failed="<<app->layout_failed<<" stage_failed="<<app->failed<<'\n';
+        for(size_t i=0;i<app->crop_readback.size();++i)if(const auto& r=app->crop_readback[i])
+            std::cout<<"seam_crop index="<<i<<" left="<<r->left<<" top="<<r->top<<" width="<<r->width<<" height="<<r->height<<" seam_column="<<r->seam_column
+                <<" drawn_sha256="<<r->drawn_sha256<<" crop_sha256="<<r->crop_sha256<<'\n';
         std::cout<<"draft_verified="<<app->draft_verified<<" draft_revisions="<<app->draft_saved<<" draft_rejections="<<app->draft_rejections<<'\n';
         std::cout<<"fit_paints="<<app->zoom_paints[0]<<" native_paints="<<app->zoom_paints[1]<<" double_paints="<<app->zoom_paints[2]<<" verified_gdi_paints="<<app->verified_paints<<" pan_events="<<app->pan_events<<" revisions="<<app->saved<<" shutter_operations=0 result="<<(pass?"PASS":"FAIL")<<std::endl;
         return pass?0:1;

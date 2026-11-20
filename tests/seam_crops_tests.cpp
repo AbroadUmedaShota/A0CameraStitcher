@@ -3,19 +3,25 @@
 // record, a real seam-cut review written and read back, and the inspector itself
 // (--export-seam-crops, and the window's own check with --seam-crops-smoke).
 // With the rig profile v2 fixture (argument 2) it also writes registered reviews (upright and mounted a half turn) with the real
-// writer and opens them: the window, the export, and a JPEG changed by one byte (#418). The writer's report is v9; the cases are a v9
+// writer and opens them: the window, the export, and a JPEG changed by one byte (#418). What the window holds and draws (the picture, every
+// pixel of the three crops read back from the drawing surface, the sentences of its panel) is compared with the saved JPEG decoded here by WIC
+// and with the sentences made here from the record, never with the window's own copies. The second argument is required. The writer's report is v9; the cases are a v9
 // report without a position, a v9 report with a position set by hand (level confirmed), and the first of them in the v8 form (what a
 // capture made before v9 saved).
 #include "a0/m2/experimental/seam_crops.hpp"
 #include "a0/phase0/experimental/seam_crops_export.hpp"
 #include "a0/phase0/experimental/live_registration_display.hpp"
+#include "a0/phase0/experimental/pair_review_registration.hpp"
 #include "a0/phase0/phase0.hpp"
 #include "registered_review_fixture.hpp"
 #include <Windows.h>
 #include <wincodec.h>
 #include <wrl/client.h>
+#include <algorithm>
 #include <fstream>
+#include <functional>
 #include <iostream>
+#include <map>
 #include <optional>
 #include <set>
 #include <source_location>
@@ -298,6 +304,110 @@ BgrImage Cut(const BgrImage& image,std::uint32_t left,std::uint32_t width){
     return out;
 }
 std::set<std::string> Entries(const fs::path& folder){std::set<std::string> names;for(const auto& e:fs::directory_iterator(folder))names.insert(e.path().filename().string());return names;}
+// The word after `name` (given with its "="), for the first place where `name` starts a word of the output; up to the next space or break.
+std::string Token(const std::string& text,const std::string& name){
+    for(size_t at=text.find(name);at!=std::string::npos;at=text.find(name,at+1)){
+        if(at>0 && text[at-1]!=' ' && text[at-1]!='\n')continue;
+        const auto from=at+name.size(),end=text.find_first_of(" \r\n",from);
+        return text.substr(from,end==std::string::npos?std::string::npos:end-from);
+    }
+    return {};
+}
+// What follows `prefix` on every output line that starts with it (the line break and a CR left out).
+std::vector<std::string> LinesAfter(const std::string& text,const std::string& prefix){
+    std::vector<std::string> lines;
+    for(size_t at=0;at<text.size();){
+        auto end=text.find('\n',at);if(end==std::string::npos)end=text.size();
+        auto line=text.substr(at,end-at);if(!line.empty() && line.back()=='\r')line.pop_back();
+        if(line.rfind(prefix,0)==0)lines.push_back(line.substr(prefix.size()));
+        at=end+1;
+    }
+    return lines;
+}
+// A window of an image: the pixels at [left,left+width) x [top,top+height). Empty when it does not lie inside.
+BgrImage WindowOf(const BgrImage& image,long long left,long long top,long long width,long long height){
+    if(left<0 || top<0 || width<=0 || height<=0 || left+width>image.width || top+height>image.height)return {};
+    BgrImage out{static_cast<std::uint32_t>(width),static_cast<std::uint32_t>(height),std::vector<std::uint8_t>(static_cast<size_t>(width)*static_cast<size_t>(height)*3)};
+    for(long long y=0;y<height;++y)std::copy_n(image.bgr.data()+(static_cast<size_t>(top+y)*image.width+static_cast<size_t>(left))*3,static_cast<size_t>(width)*3,out.bgr.data()+static_cast<size_t>(y)*static_cast<size_t>(width)*3);
+    return out;
+}
+// The SHA-256 of every file under the folders, by path: what the window must leave as it found it.
+using Digest=std::map<std::string,std::string>;
+Digest TreeDigest(const std::vector<fs::path>& folders){
+    Digest digest;
+    for(const auto& folder:folders)for(const auto& e:fs::recursive_directory_iterator(folder))if(e.is_regular_file()){
+        const auto bytes=ReadBytes(e.path());
+        digest[e.path().string()]=FixedCompositeBytesSha256(std::vector<unsigned char>(bytes.begin(),bytes.end()));
+    }
+    return digest;
+}
+std::string What(const std::function<void()>& call){try{call();}catch(const std::exception& error){return error.what();}return {};}
+constexpr const char* kRejectedReview="saved uncalibrated review failed validation";
+
+// The picture the window holds (its SHA-256, size) against the saved JPEG decoded here by WIC. The window's own copy is not the reference.
+void CheckPicture(const std::string& out,const BgrImage& jpeg){
+    const auto sha=Token(out,"image_sha256=");
+    Check(sha.size()==64 && sha==FixedCompositeBytesSha256(jpeg.bgr));
+    Check(Field(out,"image_width=")==jpeg.width && Field(out,"image_height=")==jpeg.height);
+}
+// The crops the window drew: where each was cut (inside the JPEG, centred on the seam column, the rows of DecideSeamCropRows) and every pixel
+// read back from the drawing surface, against the same window of the JPEG decoded here.
+void CheckCrops(const std::string& out,const BgrImage& jpeg,std::uint32_t seam){
+    const auto rows=LinesAfter(out,"seam_crop ");
+    Check(rows.size()==3);
+    if(rows.size()!=3)return;
+    std::optional<long long> common;
+    for(size_t i=0;i<3;++i){
+        const auto& row=rows[i];
+        const auto left=Field(row,"left="),top=Field(row,"top="),width=Field(row,"width="),height=Field(row,"height="),column=Field(row,"seam_column=");
+        Check(Field(row,"index=")==static_cast<long long>(i) && left && top && width && height && column);
+        if(!(left && top && width && height && column))continue;
+        Check(*column==seam && *left<=*column && *width==2*(*column-*left)+1 && *left+*width<=jpeg.width);
+        Check(*width>=33 && *height>=33 && *height<=jpeg.height);
+        if(!common)common=*height;
+        Check(*height==*common);
+        const long long expected_top=i==0?0:i==2?static_cast<long long>(jpeg.height)-*height:(static_cast<long long>(jpeg.height)-*height)/2;
+        Check(*top==expected_top);
+        const auto window=WindowOf(jpeg,*left,*top,*width,*height);
+        Check(!window.bgr.empty());
+        const auto expected=FixedCompositeBytesSha256(window.bgr);
+        const auto drawn=Token(row,"drawn_sha256="),cut=Token(row,"crop_sha256=");
+        Check(drawn.size()==64 && drawn==expected);   // every pixel the display holds after the draw
+        Check(cut.size()==64 && cut==expected);       // and the crop that was handed to the draw
+    }
+}
+// The sentences in the panel, in the panel's order, against the ones made here from the record: the status lines, then (a position set by
+// hand and used) the amounts of the hand, a blank line, then the warnings. The position's sentence and the hand's sentence are there only for
+// a position that was given, and are not there otherwise.
+void CheckPanel(const std::string& out,const SavedStillReview& record,bool by_hand){
+    const auto& registration=*record.fixed_composite_registration;
+    StillReviewResult shown;shown.fixed_composite_registration=registration;
+    const auto expected=px::DescribeRegistrationReview(shown);
+    const auto lines=LinesAfter(out,"panel_line=");
+    Check(!expected.status.empty() && lines.size()>expected.status.size());
+    size_t at=0;bool in_order=true;
+    for(const auto& sentence:expected.status){in_order=in_order && at<lines.size() && lines[at]==sentence;++at;}
+    Check(in_order);
+    const std::string hand_prefix="手で直しました（",position_prefix="手で直した位置で";
+    size_t hands=0,positions=0;
+    for(const auto& line:lines){if(line.rfind(hand_prefix,0)==0)++hands;if(line.rfind(position_prefix,0)==0)++positions;}
+    if(by_hand){
+        const auto& position=registration.registration.confirmed_position;
+        Check(position.has_value());
+        const auto position_text=px::ConfirmedPositionText(registration);
+        Check(!position_text.empty() && positions==1 && std::count(lines.begin(),lines.end(),position_text)==1);
+        if(position){
+            const auto hand=px::LiveHandSumText(position->manual_entered);
+            Check(hands==1 && at<lines.size() && lines[at]==hand);
+        }
+        ++at;
+    }else Check(hands==0 && positions==0);
+    Check(at<lines.size() && lines[at].empty());
+    ++at;
+    bool warnings=true;
+    for(const auto& warning:expected.warnings){warnings=warnings && at<lines.size() && lines[at]==warning;++at;}
+    Check(warnings);
+}
 
 // A registered review (report v8 or v9) in the window and in the export. The window and the export show the saved JPEG alone: what
 // they show is compared with the JPEG decoded here. The window does not decode the originals, and each manual tool is off and
@@ -306,8 +416,13 @@ std::set<std::string> Entries(const fs::path& folder){std::set<std::string> name
 // `schema`: the report's version. `by_hand`: the JPEG was made with a position set by hand (v9, level confirmed). Every other report
 // has no position, so the sentences of the position and of the hand amounts are not on the window.
 struct Expect {const char* schema;bool by_hand;};
-void OneRegistered(const fs::path& root,const fs::path& inspector,const fs::path& report,bool turned,const std::string& label,const Expect& expect){
+// `guarded`: folders besides the report's own that the window must leave as they were (the settings folder with the rig profile, the fixtures).
+void OneRegistered(const fs::path& root,const fs::path& inspector,const fs::path& report,bool turned,const std::string& label,const Expect& expect,const std::vector<fs::path>& guarded){
     std::cout<<"registered review: "<<label<<'\n';
+    // Everything the window may be near, as it is before any run: the report, the JPEG, the originals, the settings and the profile.
+    std::vector<fs::path> watched=guarded;watched.push_back(report.parent_path().parent_path());
+    const auto digest_before=TreeDigest(watched);
+    Check(digest_before.size()>=4);
     const auto record=LoadSavedStillReview(report);
     Check(record.fixed_composite_registration && !record.fixed_composite_lens && record.blend && !record.blend->seam_x.empty());
     Check((record.geometry.orientation==MountOrientation::rotated_180)==turned);
@@ -373,6 +488,11 @@ void OneRegistered(const fs::path& root,const fs::path& inspector,const fs::path
     Check(Field(crops.out,"confirmed_position_text_expected=")==hand && Field(crops.out,"confirmed_position_text_shown=")==hand);
     Check(Field(crops.out,"hand_sum_expected=")==hand && Field(crops.out,"hand_sum_shown=")==hand);
     Check(Field(crops.out,"crops_stages_passed=")==1 && Field(crops.out,"crop_pixel_failures=")==0 && Field(crops.out,"crop_stage=")==4 && Field(crops.out,"stage_failed=")==0);
+    // What the window itself holds and drew, judged against the JPEG decoded here (not against the window's own copy of it): the picture, the
+    // three crops with every pixel read back from the drawing surface, and the sentences of the panel.
+    CheckPicture(crops.out,jpeg);
+    CheckCrops(crops.out,jpeg,seam);
+    CheckPanel(crops.out,record,expect.by_hand);
     Check(Entries(review_folder.parent_path())==before);                                                                             // the refusals wrote nothing
     // The window's whole verdict, as before: the layout check stays. Only a screen too narrow for the buttons may fail it.
     if(Has(crops.out,"button_layout_failure="))std::cout<<"note: the screen is too narrow for the window's buttons; its layout check fails and the run exits 1 (it did the same for every report)\n";
@@ -381,7 +501,11 @@ void OneRegistered(const fs::path& root,const fs::path& inspector,const fs::path
     const auto plain=RunCaptured(inspector,L"--report \""+report.wstring()+L"\" --smoke",240000,root);
     Check(Has(plain.out,"review_loaded=1 ui_window_visible=1") && !Has(plain.err,"invalid review similarity"));
     Check(plain.code==0);
+    CheckPicture(plain.out,jpeg);
+    CheckPanel(plain.out,record,expect.by_hand);
     Check(Entries(review_folder.parent_path())==before);
+    // After the exports and both window runs the report, the JPEG, the originals, the settings and the profile are the same bytes.
+    Check(TreeDigest(watched)==digest_before);
 }
 // The JPEG changed by one byte: the report no longer opens, in the window or in the export, and no PNG is made.
 void ChangedJpeg(const fs::path& root,const fs::path& inspector,const StillReviewResult& made,const std::string& label){
@@ -396,12 +520,16 @@ void ChangedJpeg(const fs::path& root,const fs::path& inspector,const StillRevie
     Check(bytes.size()>1000);
     bytes[bytes.size()/2]=static_cast<char>(bytes[bytes.size()/2]^0x01);
     { std::ofstream out(folder/"uncalibrated-review.jpg",std::ios::binary|std::ios::trunc);out.write(bytes.data(),static_cast<std::streamsize>(bytes.size())); }
-    Check(Throws([&]{const auto record=LoadSavedStillReview(folder/"uncalibrated-review.json");(void)LoadStillReviewImage(record);}));
+    // The refusal is for the changed byte (the saved JPEG no longer matches the report), not for another cause: the reason is the reader's
+    // one reason for a report that fails its validation, in the reader and in what the export and the window print.
+    Check(What([&]{const auto record=LoadSavedStillReview(folder/"uncalibrated-review.json");(void)LoadStillReviewImage(record);})==kRejectedReview);
     const auto exported=RunCaptured(inspector,L"--export-seam-crops \""+folder.wstring()+L"\" \""+(root/("damaged-"+label+".png")).wstring()+L"\"",120000,root);
     Check(exported.code!=0 && !fs::exists(root/("damaged-"+label+".png")) && !Has(exported.out,"seam_crops_exported=1"));
+    Check(Has(exported.err,"seam_crops_exported=0") && Has(exported.err,std::string("reason=")+kRejectedReview));
     for(const auto* mode:{L"--seam-crops-smoke",L"--smoke"}){
         const auto window=RunCaptured(inspector,L"--report \""+(folder/"uncalibrated-review.json").wstring()+L"\" "+mode,240000,root);
         Check(window.code!=0 && !Has(window.out,"review_loaded=1"));
+        Check(Has(window.err,std::string("still review failed: ")+kRejectedReview));
     }
 }
 // What a capture made before v9 saved: the v9 report of a capture without a position is, apart from its schema, the v8 report plus
@@ -435,9 +563,10 @@ void Registered(const fs::path& root,const fs::path& inspector,const fs::path& f
         hand_request.fixed_composite_registration->confirmed_position=rf::HandPosition(settings);
         const auto by_hand=WriteUncalibratedStillReview(hand_request);
         Check(ReadBytes(made.jpeg)!=ReadBytes(by_hand.jpeg));   // the position changed the saved JPEG: the two cases do not show the same picture
-        OneRegistered(root,inspector,made.report,turned,name,{"v9",false});
-        OneRegistered(root,inspector,by_hand.report,turned,name+"-hand",{"v9",true});
-        OneRegistered(root,inspector,AsV8(root,made,name),turned,name+"-v8",{"v8",false});
+        const std::vector<fs::path> guarded{settings.folder,fixture};
+        OneRegistered(root,inspector,made.report,turned,name,{"v9",false},guarded);
+        OneRegistered(root,inspector,by_hand.report,turned,name+"-hand",{"v9",true},guarded);
+        OneRegistered(root,inspector,AsV8(root,made,name),turned,name+"-v8",{"v8",false},guarded);
         if(!turned){upright=made;upright_hand=by_hand;}
     }
     if(upright)ChangedJpeg(root,inspector,*upright,"v9");
@@ -518,7 +647,11 @@ int main(int argc,char** argv){
         Png(root);
         RealReview(root/"real",argc>1?fs::path(argv[1]):fs::path());
         if(argc>2)Registered(root/"registered",fs::path(argv[1]),fs::path(argv[2]));
-        else std::cout<<"registered reviews skipped: pass the StillReview executable and the rig profile v2 fixture folder\n";
+        else{
+            // The registered reviews are the contract of #418: running without them is a failure, never a pass.
+            std::cerr<<"the registered reviews were not run: pass the StillReview executable and the rig profile v2 fixture folder\n";
+            Check(false);
+        }
         std::error_code ignored;fs::remove_all(root,ignored);
     }catch(const std::exception& error){std::cerr<<"exception: "<<error.what()<<'\n';++failures;}
     std::cout<<checks<<" checks, "<<failures<<" failures\n";
