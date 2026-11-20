@@ -146,6 +146,14 @@ cr::PoseParameters PoseForShift(const render::CameraProjection& camera_b, double
     return cr::PoseParameters{0, 0, 0, b, 0, 0};
 }
 
+// The counts of an estimate whose fine stage stopped for want of points (too-few-points) on its first measurement, with nothing counted by
+// the coarse stage and no vote (R = 0): the counts on which that reason alone is a lack of marks.
+cr::EvidenceCounts StoppedFirstNothingCounted() {
+    cr::EvidenceCounts e;
+    e.rival_anchor_support = 0;
+    return e;
+}
+
 // ---- The stand-in for the computation ----
 enum class Fake { ready, check_not_trusted, check_doubtful, check_failed, check_out_of_range, displacement, no_overlap, band_uncovered, range_collapsed, tilt, throws, throws_memory, outside_sheet };
 constexpr const char* kRecord = "{\"schema\":\"test-record\"}";
@@ -218,6 +226,7 @@ RecalibrationComputation FakeComputation(Fake mode, std::vector<std::string>* st
             // What the computation does when the estimator on the new profile cannot be trusted: no candidate, one refusal.
             p.candidate.reset(); p.ready = false; p.refusals = {rc::Refusal::reestimate_not_verified};
             p.verification.state = cr::RegistrationState::undetermined; p.verification.passed = false; p.verification.reasons = {"too-few-points"};
+            p.verification.evidence = StoppedFirstNothingCounted();
             break;
         case Fake::check_doubtful:
             // Undetermined for want of marks AND for a sign that the placement does not fit: not "too few marks" alone.
@@ -360,6 +369,7 @@ void Decisions() {
         p.verification.performed = true;
         p.verification.state = row.check;
         p.verification.reasons = {"too-few-points"};
+        p.verification.evidence = StoppedFirstNothingCounted();
         const auto f = ClassifyProposal(p, kLimits);
         CHECK(f.size() == 1 && f[0].klass == row.klass && f[0].code == std::string(rc::RefusalCode(row.refusal)));
     }
@@ -387,6 +397,7 @@ void Decisions() {
             rc::Proposal alone;
             alone.refusals = {refusal};
             alone.verification.performed = true; alone.verification.state = cr::RegistrationState::undetermined; alone.verification.reasons = {"too-few-points"};
+            alone.verification.evidence = StoppedFirstNothingCounted();
             alone.has_pose = true; alone.estimate_record_text = kRecord;
             CHECK(!OnlyUnverifiedCheck(alone, kLimits));
             auto beside = alone;
@@ -412,6 +423,7 @@ void Decisions() {
         q.refusals = {rc::Refusal::reestimate_not_verified};
         q.verification.state = cr::RegistrationState::undetermined;
         q.verification.reasons = {"too-few-points"};
+        q.verification.evidence = StoppedFirstNothingCounted();
         CHECK(ClassifyProposal(q, kLimits).front().reason == "too-few-points");
     }
     // The check on the new profile when it is undetermined: told by ALL of its reasons (the table of the ruling, one function in m2).
@@ -429,8 +441,9 @@ void Decisions() {
             {"unique-blocks, more than half of the blocks disagree", {"unique-blocks"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "unique-blocks", 8, 3, 8, 3, 0},
             {"unique-blocks, the only anchor was dropped", {"unique-blocks"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "unique-blocks", 6, 5, 1, 0, 0},
             {"unique-blocks, no counts carried", {"unique-blocks"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "unique-blocks"},
-            {"every reason of the family", {"coarse-no-unique-blocks", "repeating-only", "too-few-points", "prediction-uncertain", "too-dark"}, 0, 0, FindingClass::unverified, "reestimate-not-verified", "coarse-no-unique-blocks"},
-            {"too-few-points, nothing counted (a follow-up estimate or a record without counts)", {"too-few-points"}, 0, 0, FindingClass::unverified, "reestimate-not-verified", "too-few-points"},
+            {"every reason of the family", {"coarse-no-unique-blocks", "repeating-only", "too-few-points", "prediction-uncertain", "too-dark"}, 0, 0, FindingClass::unverified, "reestimate-not-verified", "coarse-no-unique-blocks", 0, 0, 0, 0, 0},
+            {"too-few-points, nothing counted and no vote", {"too-few-points"}, 0, 0, FindingClass::unverified, "reestimate-not-verified", "too-few-points", 0, 0, 0, 0, 0},
+            {"too-few-points, nothing counted and the rival not carried (counts that were not carried)", {"too-few-points"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "too-few-points"},
             {"too-few-points, the blocks that were counted agree", {"too-few-points"}, 0, 0, FindingClass::unverified, "reestimate-not-verified", "too-few-points", 8, 8, 8, 8, 0},
             {"too-few-points, the counts V2 fails on the anchors alone", {"too-few-points"}, 0, 0, FindingClass::unverified, "reestimate-not-verified", "too-few-points", 6, 6, 1, 1, 0},
             {"too-few-points, more than half of the blocks disagree", {"too-few-points"}, 0, 0, FindingClass::rejected, "reestimate-doubtful", "too-few-points", 8, 3, 8, 3, 0},
@@ -494,6 +507,7 @@ void Decisions() {
         rc::Proposal p;
         p.refusals = {rc::Refusal::reestimate_not_verified};
         p.verification.performed = true; p.verification.state = cr::RegistrationState::undetermined; p.verification.reasons = {"too-few-points"};
+        p.verification.evidence = StoppedFirstNothingCounted();
         p.has_pose = true; p.estimate_record_text = kRecord;
         CHECK(OnlyUnverifiedCheck(p, kLimits));
         auto no_pose = p; no_pose.has_pose = false;

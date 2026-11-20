@@ -537,7 +537,8 @@ struct RegistrationResult {
 // another place than the vote's winner (R >= 1) shows a disagreement or an estimate that cannot be trusted, not a lack of marks.
 // too-few-points comes from the fine stage, which returns before V2 runs; the coarse stage's counts then stand in for V2 (a disagreement
 // that V2 would have named must not pass because the points were few). It is a shortage only in one of two cases:
-//   T0  nothing was counted (U = C = A = CA = 0): a follow-up estimate, or counts that were not carried. m is not read.
+//   T0  nothing was counted (U = C = A = CA = 0) and R = 0 (the form of a follow job's result, which has no vote). m is not read.
+//       Counts that were not carried (R at its default) are a doubt.
 //   T1  m >= 1, CA <= A <= U and CA <= C <= U hold, C >= m, 2C >= U (V2's own half line), and either CA >= m (V2 would pass) or
 //       1 <= A < m, CA = A and R = 0 (V2 would fail on the number of anchors alone: S2).
 // V2 (EstimateOn's verdict), the coarse stage's vote and the fine stage's early return depend on this: change them together.
@@ -556,6 +557,7 @@ struct EvidenceCounts {
     std::uint32_t rival_anchor_support{std::numeric_limits<std::uint32_t>::max()};
 };
 [[nodiscard]] EvidenceCounts EvidenceCountsOf(const RegistrationDiagnostics& diagnostics);
+// Pass the full estimates of a recalibration's check and sample only; the result of a follow job or of an estimate on a grid is not passed.
 [[nodiscard]] EvidenceShortage AssessEvidenceShortage(const std::vector<std::string>& reasons, const EvidenceCounts& counts,
     const RegistrationLimits& limits);
 [[nodiscard]] EvidenceShortage AssessEvidenceShortage(const RegistrationResult& result, const RegistrationLimits& limits);

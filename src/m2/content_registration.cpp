@@ -1524,7 +1524,8 @@ EvidenceShortage AssessEvidenceShortage(const std::vector<std::string>& reasons,
             if (reason == known) shortage = true;
         if (reason == "too-few-points") {
             // The fine stage stopped for want of points, so V2 never ran; the coarse stage's counts stand in for it (see the comment at the
-            // early return in EstimateOn). T0: the coarse stage counted nothing (a follow-up estimate, or counts that were not carried): a shortage as before.
+            // early return in EstimateOn). T0: the coarse stage counted nothing and no anchor pointed to another place (R = 0: the form of
+            // a follow job's result, which has no vote). Counts that were not carried keep R at its default and are a doubt.
             // T1: the counts are those V2 passes (the consistent blocks reach the minimum and are at least half of the blocks used, and
             // the anchors that agree reach it too), or those that V2 fails on the number of anchors alone (S2). Anything else is a
             // disagreement that V2 would have named, and it is a doubt whatever the number of points.
@@ -1536,7 +1537,7 @@ EvidenceShortage AssessEvidenceShortage(const std::vector<std::string>& reasons,
             const bool nothing_counted = u == 0 && c == 0 && a == 0 && ca == 0;                                      // T0
             const bool v2_would_pass = sane && c >= m && 2ull*c >= u &&                                               // T1
                 (ca >= m || (a >= 1 && a < m && ca == a && no_rival));
-            shortage = nothing_counted || v2_would_pass;
+            shortage = (nothing_counted && no_rival) || v2_would_pass;
         }
         if (reason == "unique-blocks") {
             // One code, two places of the estimator: the coarse stage (too few unique blocks, nothing counted as consistent yet) and
