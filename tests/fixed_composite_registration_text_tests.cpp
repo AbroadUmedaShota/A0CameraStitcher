@@ -636,6 +636,103 @@ int main() {
             }
     }
 
+    // ---- the confirmed position (#437, report v9): the sentences of the level confirmed, of its three warnings, and of the record ----
+    {
+        const RegistrationTextContext none{};
+        // The level confirmed is a level of its own; nothing in its sentence is the generic "the estimate was not trusted".
+        auto level = ex::GeometryLevelDecision{};
+        level.level = ex::GeometryLevel::confirmed;
+        CheckText(GeometryLevelText(level), "位置合わせを 確定した位置（ライブの位置。紙の浮きは補正しない）で行いました", "geometry level confirmed");
+        level.reasons = {"seam-outside-overlap-at-level", "seam-outside-overlap-at-level"};
+        CheckText(GeometryLevelText(level), "位置合わせを 確定した位置（ライブの位置。紙の浮きは補正しない）で行いました。理由: 継ぎ目が重なりの外に出るため", "geometry level confirmed, the upper levels refused");
+        level.beyond_envelope_applied = true;
+        Check(Contains(GeometryLevelText(level), "許容の範囲を超えた量も"), "geometry level confirmed beyond");
+        CheckSentence(GeometryLevelName(ex::GeometryLevel::confirmed), "the name of the level confirmed");
+        // The three warnings of v9: a sentence of their own, plain words, no value needed.
+        const auto by_hand = RegistrationWarningText(W(Code::position_by_hand, Cls::notice, 0, std::nullopt, Unit::rows), none);
+        const auto from_live = RegistrationWarningText(W(Code::position_from_live, Cls::notice, 0, std::nullopt, Unit::rows), none);
+        auto beyond_warning = W(Code::estimate_beyond_envelope, Cls::notice, 0, std::nullopt, Unit::rows, Rem::check_camera_mount);
+        beyond_warning.interpretations = {"camera-position", "camera-rotation"};
+        const auto beyond = RegistrationWarningText(beyond_warning, none);
+        CheckText(by_hand, "手で直した位置で作りました", "position-by-hand");
+        CheckText(from_live, "ライブで決めた位置で作りました（撮影の後の自動調整では位置を決められませんでした）", "position-from-live");
+        CheckText(beyond, "撮影した画像から測った B の位置か紙の面が、許される範囲より大きく動いています（位置、回り）。設置が動いたかもしれません。この JPEG はライブの画面で決めていた位置で作り、測った位置は当てていません。校正の取り直しが要るかもしれません", "estimate-beyond-envelope");
+        beyond_warning.interpretations = {"camera-height", "surface-height", "surface-tilt"};
+        CheckText(RegistrationWarningText(beyond_warning, none), "撮影した画像から測った B の位置か紙の面が、許される範囲より大きく動いています（高さ、紙の高さ、紙の傾き）。設置が動いたかもしれません。この JPEG はライブの画面で決めていた位置で作り、測った位置は当てていません。校正の取り直しが要るかもしれません", "estimate-beyond-envelope with the paper");
+        beyond_warning.interpretations = {"camera-position", "camera-rotation"};
+        for (const auto& text : {by_hand, from_live, beyond}) CheckSentence(text, "a sentence of v9");
+        Check(by_hand != from_live && from_live != beyond && by_hand != beyond, "distinct sentences of v9");
+        beyond_warning.interpretations.clear();
+        CheckSentence(RegistrationWarningText(beyond_warning, none), "estimate-beyond-envelope without the components");
+        Check(!Contains(RegistrationWarningText(beyond_warning, none), "（）"), "no empty brackets");
+        CheckText(RegistrationWarningLine(W(Code::position_by_hand, Cls::notice, 0, std::nullopt, Unit::rows), none), "【お知らせ】手で直した位置で作りました", "line of position-by-hand");
+        CheckText(RegistrationWarningLine(beyond_warning, none), "【お知らせ】" + RegistrationWarningText(beyond_warning, none) + "。カメラの取り付けを確かめてください", "line of estimate-beyond-envelope");
+        {
+            auto unverified = beyond_warning;
+            unverified.warning_class = Cls::unverified;
+            CheckText(RegistrationWarningLine(unverified, none), "【確かめられていません】" + RegistrationWarningText(unverified, none) + "。カメラの取り付けを確かめてください", "line of estimate-beyond-envelope, as the report derives it");
+        }
+        for (const auto code : {Code::position_by_hand, Code::position_from_live, Code::estimate_beyond_envelope})
+            for (const auto cls : {Cls::exceeded, Cls::unverified, Cls::notice})
+                for (const double value : {0.0, 2.5, std::nan("")})
+                    CheckSentence(RegistrationWarningLine(W(code, cls, value, std::optional<double>(1.0), Unit::mm, Rem::review_visually), RichContext()), "sweep of v9");
+
+        // What the record says about its position.
+        const auto sha = std::string(64, '7');
+        ex::SavedFixedCompositeRegistration record;
+        record.condition_sha256 = sha;
+        record.base_pose = {0.05, 0, 0, 0.5, 0, 0};
+        const auto set = [&](ex::ConfirmedPositionSource source, ex::GeometryLevel level_code, bool used, std::optional<double> difference, const std::string& position_sha,
+                             const std::vector<std::string>& reasons) {
+            ex::ConfirmedPosition p;
+            p.mapping = ex::RegisteredMapping{{0.25, 0, 0, 1.5, 0, 0}, {}, std::nullopt};
+            p.source = source;
+            p.condition_sha256 = position_sha;
+            if (source == ex::ConfirmedPositionSource::manual) {
+                p.base_source = ex::ConfirmedPositionSource::auto_start;
+                p.manual_entered = ex::HandCounts{3, 0, 0};
+            }
+            record.registration.confirmed_position = p;
+            record.registration.confirmed_check = ex::ConfirmedPositionCheck{used, difference};
+            record.registration.level.level = level_code;
+            record.registration.level.reasons = reasons;
+        };
+        using S = ex::ConfirmedPositionSource;
+        using L = ex::GeometryLevel;
+        CheckText(ConfirmedPositionText(ex::SavedFixedCompositeRegistration{}), "", "no position, nothing to say");
+        set(S::auto_button, L::g1, false, 1.5, sha, {});
+        CheckText(ConfirmedPositionText(record), "", "the estimate on the originals was used: nothing to say");
+        set(S::auto_button, L::confirmed, true, std::nullopt, sha, {});
+        CheckText(ConfirmedPositionText(record), "ライブで決めた位置で作りました（撮影の後の自動調整では位置を決められませんでした）", "the live position was used");
+        set(S::manual, L::confirmed, true, 2.5, sha, {});
+        CheckText(ConfirmedPositionText(record), "手で直した位置で JPEG を作りました（自動で測ると継ぎ目で最大 2.5 px 違います）", "the hand position was used, the estimate hit");
+        set(S::manual, L::confirmed, true, 0.0, sha, {});
+        CheckText(ConfirmedPositionText(record), "手で直した位置で JPEG を作りました（自動で測ると継ぎ目で最大 0 px 違います）", "the hand position was used, the same as the estimate");
+        set(S::manual, L::confirmed, true, std::nullopt, sha, {});
+        CheckText(ConfirmedPositionText(record), "手で直した位置で JPEG を作りました（自動では測れませんでした）", "the hand position was used, no estimate");
+        set(S::manual, L::g4, false, 1.0, sha, {"seam-outside-overlap-at-level"});
+        CheckText(ConfirmedPositionText(record), "手で直した位置では継ぎ目が重なりの外に出るため、JPEG は条件の位置で作りました。ライブは手で直した位置のままです", "the hand position was refused, the seam");
+        set(S::manual, L::g4, false, std::nullopt, sha, {"output-uncovered-at-level"});
+        CheckText(ConfirmedPositionText(record), "手で直した位置では出力の端が覆われないため、JPEG は条件の位置で作りました。ライブは手で直した位置のままです", "the hand position was refused, the output edge");
+        set(S::auto_start, L::g4, false, std::nullopt, sha, {"seam-outside-overlap-at-level", "seam-outside-overlap-at-level", "output-uncovered-at-level"});
+        CheckText(ConfirmedPositionText(record), "撮影の後の自動調整では位置を決められず、ライブで決めた位置では出力の端が覆われないため、JPEG は条件の位置で作りました。ライブも条件の位置にしました", "the live position was refused");
+        set(S::auto_start, L::g4, false, std::nullopt, sha, {});
+        CheckText(ConfirmedPositionText(record), "撮影の後の自動調整では位置を決められず、ライブで決めた位置では安い検査に通らないため、JPEG は条件の位置で作りました。ライブも条件の位置にしました", "refused, no reason recorded");
+        set(S::auto_button, L::g3, false, std::nullopt, std::string(64, '8'), {});
+        CheckText(ConfirmedPositionText(record), "撮影の前に固定の合成条件が変わったので、ライブの位置を使わずに、新しい条件で JPEG を作りました。ライブは新しい条件の位置に戻し、自動調整を 1 回行います", "another condition");
+        set(S::manual, L::g4, false, std::nullopt, std::string(64, '8'), {});
+        CheckText(ConfirmedPositionText(record), "撮影の前に固定の合成条件が変わったので、ライブの位置を使わずに、新しい条件で JPEG を作りました。手で直した位置を捨て、ライブは新しい条件の位置に戻し、自動調整を 1 回行います",
+                  "another condition, a hand position");
+        // The condition's own position: nothing to say, whatever the source and the level.
+        set(S::auto_button, L::g4, false, std::nullopt, sha, {});
+        record.registration.confirmed_position->mapping.pose = record.base_pose;
+        CheckText(ConfirmedPositionText(record), "", "the condition's own position");
+        for (const auto code : {S::auto_button, S::manual}) {
+            set(code, L::g4, false, std::nullopt, sha, {"seam-outside-overlap-at-level"});
+            for (const auto& text : {ConfirmedPositionText(record)}) CheckSentence(text, "a sentence of the record");
+        }
+    }
+
     std::cout << checks << " checks, " << failures << " failures\n";
     return failures == 0 ? 0 : 1;
 }

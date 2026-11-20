@@ -289,7 +289,7 @@ void PlacementTexts(){
     view.activity=LivePlacementActivity::idle;view.ask.reset();
     // The condition's position, nothing asked yet (a session that began with an estimate that was refused or not wanted).
     auto text=LivePlacementStateText(view);
-    CHECK(Contains(text,"条件の位置") && Contains(text,"自動位置合わせ") && one_line(text) && no_verdict(text));
+    CHECK(Contains(text,"条件の位置") && Contains(text,"「自動調整」") && !Contains(text,"自動位置合わせ") && one_line(text) && no_verdict(text));
     // A condition that has no live estimate.
     view.live_enabled=false;
     text=LivePlacementStateText(view);
@@ -310,7 +310,7 @@ void PlacementTexts(){
     // An estimate that decided nothing: the reason in plain words, what is kept, where it came from, and what to do.
     view.outcome=LivePlacementOutcomeKind::not_decided;view.last_failure={"too-dark"};
     text=LivePlacementStateText(view);
-    CHECK(Contains(text,"位置を決められませんでした（理由: 暗すぎます）") && Contains(text,"前の位置のままです（出どころ: ボタンの自動）") && Contains(text,"「自動位置合わせ」を押してください") &&
+    CHECK(Contains(text,"位置を決められませんでした（理由: 暗すぎます）") && Contains(text,"前の位置のままです（出どころ: ボタンの自動）") && Contains(text,"「自動調整」を押してください") && !Contains(text,"自動位置合わせ") &&
         one_line(text) && no_verdict(text));
     view.source=LivePlacementSource::fixed_condition;
     CHECK(Contains(LivePlacementStateText(view),"出どころ: 条件の位置"));
@@ -383,10 +383,10 @@ void PlacementTexts(){
     // The button is named only where it works: a condition without registration.live refuses it.
     view.live_enabled=false;
     text=LivePlacementStateText(view);
-    CHECK(!Contains(text,"自動位置合わせ") && Contains(text,"位置を確定しました（G1）") && one_line(text));
+    CHECK(!Contains(text,"「自動調整」") && Contains(text,"位置を確定しました（G1）") && one_line(text));
     view.capture->level="G4";view.capture->layer_two_dropped=true;
     text=LivePlacementStateText(view);
-    CHECK(!Contains(text,"自動位置合わせ") && Contains(text,"JPEGの局所の補正（最大 0.4 px）はライブのCには出ません") && text.size()>=std::string("出ません").size() && text.substr(text.size()-std::string("出ません").size())=="出ません");
+    CHECK(!Contains(text,"「自動調整」") && Contains(text,"JPEGの局所の補正（最大 0.4 px）はライブのCには出ません") && text.size()>=std::string("出ません").size() && text.substr(text.size()-std::string("出ません").size())=="出ません");
     view.live_enabled=true;view.capture->level="G1";view.capture->layer_two_dropped=false;
     // A shot's position with no note (a carried machine that lost it) is still said.
     view.capture.reset();
@@ -398,8 +398,309 @@ void PlacementTexts(){
     CHECK(LivePlacementStateText(view)==LivePlacementStateText(view));
 }
 
+// The sentences of the hand steps (#437 stage 2): the buttons' counts and what the sentences say of them, every refusal, the busy and dropped
+// sentences, the state row of a hand-set position before and after a shot, and the way back. The directions are held to what is drawn by the
+// window smoke; here the table is held to its own words.
+void HandTexts(){
+    using ex::HandCounts;
+    // The six buttons, two sizes: the counts, and the direction that the sentence names for the same counts.
+    const std::vector<std::pair<LiveHandButton,const char*>> buttons{{LiveHandButton::right,"左右 右へ"},{LiveHandButton::left,"左右 左へ"},{LiveHandButton::down,"上下 下へ"},
+        {LiveHandButton::up,"上下 上へ"},{LiveHandButton::turn_clockwise,"回り 時計回りに"},{LiveHandButton::turn_counter_clockwise,"回り 反時計回りに"}};
+    for(const auto& button:buttons){
+        for(const bool fine:{false,true}){
+            const auto counts=LiveHandCountsOf(button.first,fine);
+            const bool turn=button.first==LiveHandButton::turn_clockwise || button.first==LiveHandButton::turn_counter_clockwise;
+            const int amount=std::abs(turn?counts.rotation:counts.seam_dx+counts.seam_dy);
+            CHECK(amount==(turn?(fine?1:4):(fine?1:3)));                         // 12 px = 3, 4 px = 1, 0.2 degrees = 4, 0.05 degrees = 1
+            CHECK((counts.seam_dx!=0)+(counts.seam_dy!=0)+(counts.rotation!=0)==1);   // one axis at a time
+            CHECK(Contains(LiveHandMovesText(counts),button.second));
+        }
+    }
+    // Opposite buttons cancel exactly in counts (the sum comes back to exactly 0 whatever the order).
+    for(const auto& pair:std::vector<std::pair<LiveHandButton,LiveHandButton>>{{LiveHandButton::right,LiveHandButton::left},{LiveHandButton::down,LiveHandButton::up},
+        {LiveHandButton::turn_clockwise,LiveHandButton::turn_counter_clockwise}})
+        for(const bool fine:{false,true})CHECK(ex::AddHandCounts(LiveHandCountsOf(pair.first,fine),LiveHandCountsOf(pair.second,fine)).IsZero());
+    // The screen's own signs: right, down and clockwise are positive; the constants of the table are what the window smoke checks against a drawing.
+    {
+        const auto right=LiveHandScreenMoveOf(LiveHandCountsOf(LiveHandButton::right,false)),down=LiveHandScreenMoveOf(LiveHandCountsOf(LiveHandButton::down,true));
+        const auto turn=LiveHandScreenMoveOf(LiveHandCountsOf(LiveHandButton::turn_clockwise,false));
+        CHECK(right.right_px==12 && right.down_px==0 && right.clockwise_deg==0);
+        CHECK(down.down_px==4 && down.right_px==0);
+        CHECK(Near(turn.clockwise_deg,0.2,1e-15) && turn.right_px==0);
+        CHECK(kLiveHandSeamDxScreenSign*kLiveHandSeamDxScreenSign==1 && kLiveHandSeamDyScreenSign*kLiveHandSeamDyScreenSign==1 && kLiveHandRotationScreenSign*kLiveHandRotationScreenSign==1);
+    }
+    // The sum as a sentence: zero is 0, the three parts are always there, and a degree has two decimals.
+    CHECK(LiveHandMovesText({})=="左右 0 px・上下 0 px・回り 0°");
+    CHECK(LiveHandMovesText(ex::AddHandCounts(LiveHandCountsOf(LiveHandButton::right,false),LiveHandCountsOf(LiveHandButton::turn_clockwise,true)))=="左右 右へ 12 px・上下 0 px・回り 時計回りに 0.05°");
+    CHECK(LiveHandMovesText(ex::AddHandCounts(LiveHandCountsOf(LiveHandButton::up,true),LiveHandCountsOf(LiveHandButton::turn_counter_clockwise,false)))=="左右 0 px・上下 上へ 4 px・回り 反時計回りに 0.20°");
+    // The scale: one live pixel is so many pixels of the JPEG, and a value that cannot be one says nothing.
+    CHECK(Contains(LiveHandScaleText(11.5),"ライブの 1 画素は撮影の約 11.5 画素") && Contains(LiveHandScaleText(11.5),"拡大確認・再Merge"));
+    CHECK(LiveHandScaleText(0).empty() && LiveHandScaleText(kNaN).empty() && LiveHandScaleText(-3).empty());
+
+    // Every refusal has its own words and says what to do; none is empty, none is another's, and the ones that change nothing say so.
+    const std::vector<LiveHandOutcome> outcomes{LiveHandOutcome::refused_not_configured,LiveHandOutcome::refused_capturing,LiveHandOutcome::refused_stopped,LiveHandOutcome::refused_not_drawn,
+        LiveHandOutcome::refused_zero,LiveHandOutcome::refused_range,LiveHandOutcome::refused_envelope,LiveHandOutcome::refused_cover,LiveHandOutcome::refused_unsolvable,
+        LiveHandOutcome::refused_error,LiveHandOutcome::refused_stale};
+    std::vector<std::string> seen;
+    LiveHandResult result;
+    CHECK(LiveHandRefusalText(result).empty() || result.outcome!=LiveHandOutcome::accepted);   // the default result is not an accepted one
+    result.outcome=LiveHandOutcome::accepted;
+    CHECK(LiveHandRefusalText(result).empty());
+    for(const auto outcome:outcomes){
+        result.outcome=outcome;
+        const auto text=LiveHandRefusalText(result);
+        CHECK(!text.empty() && text.find('\n')==std::string::npos && std::find(seen.begin(),seen.end(),text)==seen.end());
+        seen.push_back(text);
+        CHECK(!Contains(text,"基準内") && !Contains(text,"合格"));
+    }
+    CHECK(seen.size()==11);
+    result.outcome=LiveHandOutcome::refused_envelope;result.exceeded={"position"};
+    auto text=LiveHandRefusalText(result);
+    CHECK(Contains(text,"範囲の端です。これ以上は動かせません") && Contains(text,"超える項目: 位置") && Contains(text,"校正の取り直し") && Contains(text,"位置は変えていません"));
+    text=LiveHandRefusalText(result,true);
+    CHECK(Contains(text,"今の位置は範囲の外") && Contains(text,"「自動調整」か校正の取り直し") && !Contains(text,"範囲の端です"));
+    result.outcome=LiveHandOutcome::refused_cover;result.seam_covered=false;result.output_covered=true;
+    CHECK(Contains(LiveHandRefusalText(result),"継ぎ目が重なりの外に出るため") && Contains(LiveHandRefusalText(result),"位置は変えていません"));
+    result.seam_covered=true;result.output_covered=false;
+    CHECK(Contains(LiveHandRefusalText(result),"出力の端が覆われないため") && !Contains(LiveHandRefusalText(result),"継ぎ目"));
+    result.outcome=LiveHandOutcome::refused_not_drawn;
+    CHECK(Contains(LiveHandRefusalText(result),"描き終わるまで少し待ってから押してください") && !Contains(LiveHandRefusalText(result),"ライブを止めて再開"));
+    CHECK(Contains(LiveHandRefusalText(result,false,true),"「自動調整」を押すか、ライブを止めて再開してください"));
+    result.outcome=LiveHandOutcome::refused_stopped;
+    CHECK(Contains(LiveHandRefusalText(result),"ライブを止めている間は位置を動かせません") && Contains(LiveHandRefusalText(result),"「ライブ再開」"));
+    result.outcome=LiveHandOutcome::refused_capturing;
+    CHECK(Contains(LiveHandRefusalText(result),"撮影中は位置を動かせません"));
+
+    // The check of a press that takes a moment, the presses that came meanwhile, and what happens to them.
+    CHECK(LiveHandBusyText(0)=="押したことを受け付けました。位置を確かめています…");
+    CHECK(Contains(LiveHandBusyText(3),"押したことを受け付けました。位置を確かめています…") && Contains(LiveHandBusyText(3),"3 回分は、確かめが終わってからまとめて入れます"));
+    CHECK(LiveHandQueueDroppedText(0).empty() && Contains(LiveHandQueueDroppedText(2),"2 回分も入れていません"));
+    CHECK(Contains(LiveHandDroppedByCaptureText(),"撮影を頼んだので") && Contains(LiveHandDroppedByCaptureText(),"位置は撮影の前のまま"));
+    CHECK(Contains(LiveHandWithdrewEstimateText(),"自動調整の途中だった"));
+    CHECK(Contains(LiveHandBecameConditionText(),"条件の位置に戻った"));
+    CHECK(LiveEstimateRefusedText(LiveAskResult::accepted).empty() && Contains(LiveEstimateRefusedText(LiveAskResult::capturing),"撮影中は「自動調整」を押せません") &&
+        !LiveEstimateRefusedText(LiveAskResult::busy).empty() && !LiveEstimateRefusedText(LiveAskResult::disabled).empty());
+    // A capture that was not started.
+    CHECK(LiveCaptureRefusalText(LiveCaptureAdmission::accepted).empty());
+    CHECK(Contains(LiveCaptureRefusalText(LiveCaptureAdmission::not_drawn),"ライブの合成がまだ確定した位置で描けていないので、撮影できません") && !Contains(LiveCaptureRefusalText(LiveCaptureAdmission::not_drawn),"ライブを止めて再開"));
+    CHECK(Contains(LiveCaptureRefusalText(LiveCaptureAdmission::not_drawn,true),"「自動調整」を押すか、ライブを止めて再開してください"));
+    CHECK(!LiveCaptureRefusalText(LiveCaptureAdmission::not_configured).empty() && !LiveCaptureRefusalText(LiveCaptureAdmission::already_capturing).empty() &&
+        LiveCaptureRefusalText(LiveCaptureAdmission::not_configured)!=LiveCaptureRefusalText(LiveCaptureAdmission::already_capturing));
+
+    // The state row.
+    LivePlacementView view;
+    view.live_enabled=true;
+    const auto one_line=[](const std::string& value){return !value.empty() && value.find('\n')==std::string::npos;};
+    view.source=LivePlacementSource::manual;view.base_source=LivePlacementSource::auto_button;
+    view.hand_entered=ex::AddHandCounts(LiveHandCountsOf(LiveHandButton::right,false),LiveHandCountsOf(LiveHandButton::turn_clockwise,true));
+    text=LivePlacementStateText(view);
+    CHECK(Contains(text,"手で直しました（Bの絵の動き 左右 右へ 12 px・上下 0 px・回り 時計回りに 0.05°、撮影の画素。合計）。この位置で撮影します") && Contains(text,"「自動調整」") && one_line(text));
+    CHECK(!Contains(text,"ライブのCもその位置へ移しました") && !Contains(text,"条件の位置で描いています"));
+    // The shot after a hand step: the live C stays at the hand-set position, whether the JPEG was made with it (confirmed) or with the condition's own
+    // position (G4, the cheap check refused the hand-set one). The first of these used to be said as "the live C moved to the JPEG's position".
+    view.capture=LivePlacementCaptureNote{};view.capture->level="confirmed";view.capture->difference_px=0.0;
+    text=LivePlacementStateText(view);
+    CHECK(Contains(text,"手で直した位置で JPEG を作りました。ライブは手で直した位置のままです") && !Contains(text,"移しました") && !Contains(text,"この位置で撮影します") && one_line(text));
+    view.capture->level="G4";
+    text=LivePlacementStateText(view);
+    CHECK(Contains(text,"手で直した位置では継ぎ目が重なりの外に出るか出力の端が覆われないため、JPEG は条件の位置で作りました。ライブは手で直した位置のままです") && !Contains(text,"ライブのCもその位置へ移しました") && one_line(text));
+    view.capture.reset();
+    // Without the registration.live the way back through an estimate is not named.
+    view.live_enabled=false;
+    CHECK(!Contains(LivePlacementStateText(view),"「自動調整」"));
+    view.live_enabled=true;
+    // A hand position that waits to be drawn, an estimate asked for, a capture that holds the position, a bake that failed.
+    view.hand_wanted=ex::HandCounts{1,0,0};
+    CHECK(Contains(LivePlacementStateText(view),"手で直した位置を描いています…") && one_line(LivePlacementStateText(view)));
+    view.hand_wanted.reset();
+    view.activity=LivePlacementActivity::requested;view.ask=LiveEstimateAsk::button;
+    CHECK(LivePlacementStateText(view)=="自動合成中です…");
+    view.activity=LivePlacementActivity::idle;view.ask.reset();
+    view.capturing=true;
+    CHECK(Contains(LivePlacementStateText(view),"撮影中は位置を動かせません") && one_line(LivePlacementStateText(view)));
+    view.capturing=false;
+    // A hand-set position whose table could not be baked says it is the hand-set one, not an estimate.
+    CHECK(Contains(LivePlacementStateText(view,true),"手で直した位置ではCを描けませんでした") && !Contains(LivePlacementStateText(view,true),"推定した位置"));
+    // A hand position after an estimate that decided nothing says where the position came from.
+    view.outcome=LivePlacementOutcomeKind::not_decided;view.last_failure={"repeating-only"};
+    text=LivePlacementStateText(view);
+    CHECK(Contains(text,"前の位置のままです（出どころ: 手で直した位置）") && Contains(text,"「自動調整」を押してください"));
+    view.outcome=LivePlacementOutcomeKind::none;view.last_failure.clear();
+    // Back to what it was before the hand steps (the sum came back to 0): said once, with what happens at the next shot.
+    view.source=LivePlacementSource::auto_button;view.base_source.reset();view.hand_entered.reset();view.hand_returned=true;
+    text=LivePlacementStateText(view);
+    CHECK(Contains(text,"手で動かした量が 0 に戻ったので、手で直す前の位置に戻しました。撮影の後の自動調整で位置が変わることがあります") && one_line(text));
+    view.hand_returned=false;
+    // A shot that used the position as it was (level confirmed) while the position is an estimate's.
+    view.outcome=LivePlacementOutcomeKind::placed;view.outcome_ask=LiveEstimateAsk::button;
+    view.capture=LivePlacementCaptureNote{};view.capture->level="confirmed";
+    text=LivePlacementStateText(view);
+    CHECK(Contains(text,"ライブで決めていた位置で JPEG を作りました（撮影の後の自動調整では位置を決められませんでした）。ライブの位置は変えていません") && one_line(text));
+    // The shot after an earlier shot made the position (after_capture), when this one used it as it was (confirmed): not "moved to the JPEG's position".
+    view.source=LivePlacementSource::after_capture;view.capture=LivePlacementCaptureNote{};view.capture->level="confirmed";view.capture->difference_px=0.0;
+    text=LivePlacementStateText(view);
+    CHECK(Contains(text,"ライブで決めていた位置で JPEG を作りました（撮影の後の自動調整では位置を決められませんでした）。ライブの位置は変えていません") &&
+        !Contains(text,"条件の位置で作りました") && !Contains(text,"移しました") && one_line(text));
+    view.source=LivePlacementSource::auto_button;
+    view.capture.reset();
+    // A condition that changed under a hand-set position: said in front of whatever else is said.
+    view.hand_discarded_by_condition=true;view.source=LivePlacementSource::fixed_condition;view.outcome=LivePlacementOutcomeKind::none;
+    text=LivePlacementStateText(view);
+    CHECK(text.find("固定の合成条件が変わったので、手で直した位置を捨て、新しい条件の位置に戻しました。自動調整を 1 回行います。")==0 && one_line(text));
+    view.activity=LivePlacementActivity::requested;view.ask=LiveEstimateAsk::condition_changed;
+    CHECK(Contains(LivePlacementStateText(view),"自動調整を 1 回行います。自動合成中です…"));
+    // Without a live estimate in the condition nothing is estimated, so no estimate is promised.
+    view.live_enabled=false;view.activity=LivePlacementActivity::idle;view.ask.reset();
+    text=LivePlacementStateText(view);
+    CHECK(text.find("固定の合成条件が変わったので、手で直した位置を捨て、新しい条件の位置に戻しました。")==0 && !Contains(text,"自動調整を 1 回行います") && one_line(text));
+    view.live_enabled=true;
+    // A layer 2 that is too small to read as a number is said without one; the screen that is not drawn with the position yet says so.
+    {
+        LivePlacementView shot_view;shot_view.live_enabled=true;shot_view.source=LivePlacementSource::after_capture;
+        shot_view.capture=LivePlacementCaptureNote{};shot_view.capture->level="G1";shot_view.capture->layer_two_dropped=true;shot_view.capture->difference_px=1.0;
+        shot_view.capture->layer_two_max_px=0.03;
+        text=LivePlacementStateText(shot_view);
+        CHECK(Contains(text,"。局所の補正はライブのCには出ません") && !Contains(text,"最大 0.0") && !Contains(text,"局所の補正（"));
+        shot_view.capture->layer_two_max_px=0.05;
+        CHECK(Contains(LivePlacementStateText(shot_view),"JPEGの局所の補正（最大 0.1 px）はライブのCには出ません"));
+        CHECK(Contains(LiveNotDrawnYetText(),"まだ確定した位置で描けていません") && Contains(LiveNotDrawnYetText(),"少し待って") && LiveNotDrawnYetText().find('\n')==std::string::npos);
+    }
+    // No sentence of the hand steps calls the picture within a criterion or says that a composite cannot be saved.
+    for(const auto& sentence:{LiveHandBusyText(2),LiveHandDroppedByCaptureText(),LiveHandWithdrewEstimateText(),LiveHandBecameConditionText(),LiveHandScaleText(11.5)})
+        CHECK(!Contains(sentence,"基準内") && !Contains(sentence,"合格") && !Contains(sentence,"書き出せません") && !Contains(sentence,"保存できません"));
+}
+
+// The state row against the machine (#437 stage 2): each situation is brought about in a LivePlacementMachine with the calls the window makes, and the
+// sentence made from the machine's own view says what the machine holds, not what a neighbouring situation would say. A sentence that is made from
+// the view alone could say "the condition's position" for a hand-set one, or "moved to the JPEG's position" for a position that the shot kept.
+void StateTextFollowsMachine(){
+    const std::string sha(64,'a'),other(64,'b');
+    const ex::content_registration::PoseParameters base{0.1,-0.2,0.3,1.0,-2.0,0.4};
+    // A check that accepts and moves B in proportion to the counts, so that no result is the condition's own position.
+    const LiveHandChecker checker=[](const ex::RegisteredMapping& hand_base,const ex::HandCounts& total){
+        LiveHandCheck check;check.status=LiveHandCheck::Status::accepted;check.mapping=hand_base;
+        check.mapping.pose.tx_mm+=0.05*total.seam_dx;check.mapping.pose.ty_mm+=0.05*total.seam_dy;check.mapping.pose.rz_deg+=0.01*total.rotation;
+        return check;
+    };
+    const auto started=[&]{LivePlacementMachine machine;machine.BeginSession(sha,base,true);return machine;};
+    const auto text_of=[](const LivePlacementMachine& machine){return LivePlacementStateText(machine.View());};
+    const auto press=[&](LivePlacementMachine& machine,LiveHandButton button,bool fine){
+        const auto result=machine.HandStep(LiveHandCountsOf(button,fine),LiveHandContext{true,true},checker);
+        CHECK(result.outcome==LiveHandOutcome::accepted);
+        machine.Committed();
+    };
+    const auto placed_by_estimate=[&](LivePlacementMachine& machine,double tx){
+        const auto job=machine.BeginJob();
+        CHECK(job.has_value());
+        LiveEstimateOutcome outcome;outcome.usable=true;outcome.pose=base;outcome.pose.tx_mm+=tx;
+        if(job){machine.Accept(*job,outcome);machine.Committed();}
+    };
+    const auto condition_mapping=ex::RegisteredMapping{base,{},std::nullopt};
+    const auto one_line=[](const std::string& value){return !value.empty() && value.find('\n')==std::string::npos;};
+
+    // A hand-set position is by hand, with its amounts (the sentence is made from the machine's sum), and is not "the condition's position".
+    {
+        auto machine=started();
+        press(machine,LiveHandButton::right,false);
+        auto view=machine.View();
+        auto text=text_of(machine);
+        CHECK(view.source==LivePlacementSource::manual && view.hand_entered && !view.hand_returned && !view.capturing);
+        CHECK(Contains(text,"手で直しました（Bの絵の動き "+LiveHandMovesText(*view.hand_entered)+"、撮影の画素。合計）。この位置で撮影します") && !Contains(text,"条件の位置で描いています") && one_line(text));
+        press(machine,LiveHandButton::turn_clockwise,true);
+        view=machine.View();text=text_of(machine);
+        CHECK(Contains(text,"左右 右へ 12 px・上下 0 px・回り 時計回りに 0.05°") && *view.hand_entered==ex::AddHandCounts(LiveHandCountsOf(LiveHandButton::right,false),LiveHandCountsOf(LiveHandButton::turn_clockwise,true)));
+        // the shot freezes the position: said while it holds
+        const auto begin=machine.BeginCapture(true);
+        CHECK(begin.admission==LiveCaptureAdmission::accepted && begin.grant);
+        CHECK(machine.View().capturing && Contains(text_of(machine),"撮影中は位置を動かせません") && one_line(text_of(machine)));
+        // the JPEG was made with the position: the live C stays at it
+        CHECK(begin.grant && machine.ApplyCapture(machine.Placement(),"confirmed",sha,std::nullopt,begin.grant->serial));
+        view=machine.View();text=text_of(machine);
+        CHECK(view.source==LivePlacementSource::manual && view.capture && view.capture->level=="confirmed" && !view.capturing);
+        CHECK(Contains(text,"手で直した位置で JPEG を作りました。ライブは手で直した位置のままです") && !Contains(text,"移しました") && !Contains(text,"条件の位置で描いています") && one_line(text));
+        // the cheap check refused the hand-set position at the shot: the JPEG has the condition's own, the live C still the hand-set one
+        const auto second=machine.BeginCapture(true);
+        CHECK(second.admission==LiveCaptureAdmission::accepted && second.grant);
+        CHECK(second.grant && machine.ApplyCapture(condition_mapping,"G4",sha,std::nullopt,second.grant->serial));
+        view=machine.View();text=text_of(machine);
+        CHECK(view.source==LivePlacementSource::manual && view.capture && view.capture->level=="G4");
+        CHECK(Contains(text,"手で直した位置では継ぎ目が重なりの外に出るか出力の端が覆われないため、JPEG は条件の位置で作りました。ライブは手で直した位置のままです") && !Contains(text,"ライブのCもその位置へ移しました") && one_line(text));
+        // a condition that changed: the hand-set position is dropped and one estimate is asked for, and the row says both
+        machine.BeginSession(other,base,true);
+        view=machine.View();text=text_of(machine);
+        CHECK(view.source==LivePlacementSource::fixed_condition && !view.hand_entered && view.hand_discarded_by_condition && view.activity==LivePlacementActivity::requested);
+        CHECK(text.find("固定の合成条件が変わったので、手で直した位置を捨て、新しい条件の位置に戻しました。自動調整を 1 回行います。")==0 && Contains(text,"自動合成中です…") && !Contains(text,"手で直しました"));
+    }
+    // A position that was not by hand has no sentence about a hand-set one when the condition changes.
+    {
+        auto machine=started();
+        placed_by_estimate(machine,0.3);
+        machine.BeginSession(other,base,true);
+        CHECK(!machine.View().hand_discarded_by_condition && !Contains(text_of(machine),"手で直した位置を捨て"));
+    }
+    // The sum comes back to exactly 0: the position is what it was before the hand steps and the sentence says that (from the condition's position, and from an estimate's).
+    for(const bool from_estimate:{false,true}){
+        auto machine=started();
+        if(from_estimate)placed_by_estimate(machine,0.3);
+        const auto before=machine.View();
+        press(machine,LiveHandButton::right,false);
+        press(machine,LiveHandButton::up,true);
+        CHECK(machine.View().source==LivePlacementSource::manual);
+        press(machine,LiveHandButton::left,false);
+        press(machine,LiveHandButton::down,true);
+        const auto view=machine.View();const auto text=text_of(machine);
+        CHECK(view.hand_returned && !view.hand_entered && view.source==before.source && LivePlacementSameMapping(view.mapping,before.mapping));
+        CHECK(Contains(text,"手で動かした量が 0 に戻ったので、手で直す前の位置に戻しました。撮影の後の自動調整で位置が変わることがあります") && !Contains(text,"手で直しました") &&
+            !Contains(text,"Cは条件の位置で描いています") && one_line(text));
+    }
+    // A shot that used an estimate's position as it was (level confirmed): the position and its source stay, and the row does not say "moved".
+    {
+        auto machine=started();
+        placed_by_estimate(machine,0.3);
+        const auto source=machine.View().source;
+        const auto begin=machine.BeginCapture(true);
+        CHECK(begin.admission==LiveCaptureAdmission::accepted && begin.grant && begin.grant->source==source);
+        CHECK(begin.grant && machine.ApplyCapture(machine.Placement(),"confirmed",sha,std::nullopt,begin.grant->serial));
+        const auto view=machine.View();const auto text=text_of(machine);
+        CHECK(view.source==source && view.capture && view.capture->level=="confirmed");
+        CHECK(Contains(text,"ライブで決めていた位置で JPEG を作りました（撮影の後の自動調整では位置を決められませんでした）。ライブの位置は変えていません") &&
+            !Contains(text,"移しました") && !Contains(text,"条件の位置で作りました") && one_line(text));
+        // the same after a position that an earlier shot made (after_capture)
+        const auto first=machine.BeginCapture(true);
+        CHECK(first.admission==LiveCaptureAdmission::accepted && first.grant);
+        ex::RegisteredMapping made=machine.Placement();made.pose.tx_mm+=0.2;
+        CHECK(first.grant && machine.ApplyCapture(made,"G2",sha,std::nullopt,first.grant->serial));
+        CHECK(machine.View().source==LivePlacementSource::after_capture && Contains(text_of(machine),"撮影の後の自動調整で位置を確定しました（G2）"));
+        const auto again=machine.BeginCapture(true);
+        CHECK(again.admission==LiveCaptureAdmission::accepted && again.grant);
+        CHECK(again.grant && machine.ApplyCapture(machine.Placement(),"confirmed",sha,std::nullopt,again.grant->serial));
+        const auto kept=text_of(machine);
+        CHECK(machine.View().source==LivePlacementSource::after_capture && Contains(kept,"ライブで決めていた位置で JPEG を作りました（撮影の後の自動調整では位置を決められませんでした）。ライブの位置は変えていません") &&
+            !Contains(kept,"条件の位置で作りました") && !Contains(kept,"移しました"));
+    }
+    // A hand position that waits to be drawn, and an estimate that was asked for: said while they wait.
+    {
+        auto machine=started();
+        const auto result=machine.HandStep(LiveHandCountsOf(LiveHandButton::right,false),LiveHandContext{true,true},checker);
+        CHECK(result.outcome==LiveHandOutcome::accepted && machine.View().hand_wanted);
+        CHECK(Contains(text_of(machine),"手で直した位置を描いています…") && !Contains(text_of(machine),"自動合成中です…"));   // the press withdrew the estimate
+        machine.Committed();
+        CHECK(!machine.View().hand_wanted && machine.View().source==LivePlacementSource::manual);
+    }
+}
+
+// The codes of where a position came from: the live log's and the report's are the same words, for every source (the window gives the report the
+// live code read back as the report's source).
+void SourceCodes(){
+    for(const auto source:{LivePlacementSource::fixed_condition,LivePlacementSource::auto_start,LivePlacementSource::auto_button,LivePlacementSource::after_capture,LivePlacementSource::manual}){
+        const auto parsed=ex::ParseConfirmedPositionSource(LivePlacementSourceCode(source));
+        CHECK(parsed.has_value() && ex::ConfirmedPositionSourceCode(*parsed)==LivePlacementSourceCode(source));
+    }
+}
+
 int main(){
     try{
+        SourceCodes();
         Tilt();
         Turn();
         Mounting();
@@ -411,6 +712,8 @@ int main(){
         BFromPose();
         ConnectionTexts();
         PlacementTexts();
+        HandTexts();
+        StateTextFollowsMachine();
     }catch(const std::exception& e){++failures;std::cerr<<"unexpected exception: "<<e.what()<<'\n';}
     std::cout<<checks<<" checks, "<<failures<<" failures\n";
     return failures?1:0;

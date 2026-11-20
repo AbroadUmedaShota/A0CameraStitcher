@@ -290,6 +290,14 @@ struct MappedOverlapRow {std::uint32_t first{},end{};};
     const MappedFixedSeamInput& input,std::uint32_t seam_column,const SeamBlendSettings& settings,const ColorMatch& color,unsigned thread_count);
 [[nodiscard]] bool CanRenderMappedFixedSeam(const render::BgrImage& a,const render::BgrImage& b,
     const MappedFixedSeamInput& input,std::uint32_t seam_column,const SeamBlendSettings& settings,unsigned thread_count);
+// CanRenderMappedFixedSeam from the sizes of the two frames alone (#437): the coverage test reads a frame's width and height and never its
+// pixels, so a check of a mapping needs no frame. It gives the answer and the std::invalid_argument (type and text) that CanRenderMappedFixedSeam
+// gives for frames of these sizes whose buffers match them, checked in the same order (the settings, thread_count, the output's size, the
+// mappings, A's size, B's size); CanRenderMappedFixedSeam checks the buffers and then calls it. The answer does not depend on thread_count.
+[[nodiscard]] bool CanRenderMappedFixedSeamBySize(std::uint32_t camera_a_width,std::uint32_t camera_a_height,std::uint32_t camera_b_width,
+    std::uint32_t camera_b_height,const MappedFixedSeamInput& input,std::uint32_t seam_column,const SeamBlendSettings& settings,unsigned thread_count);
+// The largest thread_count the functions above take (the smallest is 1).
+inline constexpr unsigned kSeamBlendMaxThreads=256;
 [[nodiscard]] SeamBlendResult RenderDocumentFixedSeam(const render::BgrImage& a,const render::BgrImage& b,
     const render::DocumentRenderParameters& parameters,std::uint32_t seam_column,const SeamBlendSettings& settings,const ColorMatch& color,unsigned thread_count);
 [[nodiscard]] bool CanRenderDocumentFixedSeam(const render::BgrImage& a,const render::BgrImage& b,

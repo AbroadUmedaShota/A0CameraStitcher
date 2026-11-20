@@ -59,12 +59,16 @@ struct BaselineGeometryV3 {
 
 // The cheap check made on each capture on the mapping that was chosen (11.23.4): the seam and half the blend width inside the
 // overlap on every row (CanRenderMappedFixedSeam's rule) and the outer edge of the output covered. A mapping beyond the
-// ranges is not covered by the creation check; this is where it is first checked.
+// ranges is not covered by the creation check; this is where it is first checked. It is the one cover check of a position (#437): a hand
+// step (CheckHandStep), an estimate of the live view before it is drawn (the window's check) and a capture's candidate
+// (RegisteredMappingCoverOnThreads) all call it, so the three answer alike. No frame is made: the seam check reads the D810 frame's size
+// only (CanRenderMappedFixedSeamBySize). `threads` (1..kSeamBlendMaxThreads, else std::invalid_argument) are the threads of the overlap
+// scan; the answer does not depend on them.
 struct RegisteredMappingCover {
     bool seam_covered{};
     bool output_covered{};
     std::uint32_t uncovered_edge_pixels{};
 };
 [[nodiscard]] RegisteredMappingCover CheckRegisteredMappingCover(const render::DocumentRenderParameters& parameters,
-    const RegisteredMapping& mapping,std::uint32_t seam_column,const SeamBlendSettings& blend);
+    const RegisteredMapping& mapping,std::uint32_t seam_column,const SeamBlendSettings& blend,unsigned threads=1);
 }

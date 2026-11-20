@@ -1,5 +1,5 @@
 #pragma once
-// Canonical texts of the fixed composite condition v3 and the review report v8 for the tests of #417
+// Canonical texts of the fixed composite condition v3 and the review report v8 and v9 for the tests of #417 and #437
 // (docs/design/fixed-composite-registration-formats.md). Every test that needs a v3 or v8 text builds it here instead of
 // writing the text out, so that when a field is added there is one place to change besides the writer and the reader
 // (format rule 1 and 7). The text has the members in the order the document gives, written the way the document says
@@ -10,6 +10,7 @@
 // whose warnings do not follow from its quantities, or whose geometry hash is not the hash of its geometry, is built as asked.
 // A test that needs a consistent report sets the pieces consistently (the writer lane's own test does so with the real
 // functions). Header only; the standard library only.
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -177,6 +178,23 @@ inline std::string WarningJson(const WarningSpec& w){
 }
 
 struct ReportV8Options {
+    // Report v9 (#437): `v9` adds fixedCompositeRegistration.confirmedPosition and .confirmedPositionCheck (before geometryLevel) and nothing else;
+    // ReportV9Text sets it with the v9 schema. false: the text is v8's, byte for byte what it was before v9 existed. The position and its
+    // check are written as given (null when absent); like the rest of this builder it does not check that they agree with the level.
+    bool v9{false};
+    struct ConfirmedPositionSpec {
+        std::uint64_t serial{7};
+        std::string source{"auto-button"};                // fixed-condition, auto-start, auto-button, after-capture, manual
+        std::optional<std::string> base_source;           // manual only
+        std::string condition_sha256{Hex64('7')};
+        Pose pose{0.25,-0.125,0.0625,1.5,-0.5,0.25};
+        double h0_mm{1},slope_x{0.0078125},slope_y{-0.00390625};
+        std::optional<std::array<double,3>> manual_entered;   // seamDxPx, seamDyPx, rotationDeg: manual only
+    };
+    std::optional<ConfirmedPositionSpec> confirmed_position;
+    struct ConfirmedCheckSpec {bool used{false};std::optional<double> seam_difference_px;};
+    std::optional<ConfirmedCheckSpec> confirmed_check;
+    std::optional<std::array<double,3>> mapping_plane;    // geometryLevel.mapping.surface (h0Mm, slopeX, slopeY) in place of the estimate's plane
     // Members that v7 has (written as v7 writes them).
     std::string schema{"a0.uncalibrated-still-review.v8"};
     std::string pair_id{"pair-0001"};
@@ -256,6 +274,19 @@ struct ReportV8Options {
     std::vector<std::string> assessment_exceeded,assessment_unverified;
 };
 
+inline std::string ConfirmedPositionJson(const std::optional<ReportV8Options::ConfirmedPositionSpec>& p){
+    using namespace detail;
+    if(!p)return "null";
+    return "{\"referenceCamera\":\"CAM-A\",\"targetCamera\":\"CAM-B\",\"serial\":"+Int(static_cast<long long>(p->serial))+",\"source\":"+Str(p->source)+
+        ",\"baseSource\":"+(p->base_source?Str(*p->base_source):std::string("null"))+",\"conditionSha256\":"+Str(p->condition_sha256)+",\"pose\":"+PoseJson(p->pose)+
+        ",\"surface\":{\"h0Mm\":"+Num(p->h0_mm)+",\"slopeX\":"+Num(p->slope_x)+",\"slopeY\":"+Num(p->slope_y)+"},\"manualEntered\":"+
+        (p->manual_entered?"{\"seamDxPx\":"+Num((*p->manual_entered)[0])+",\"seamDyPx\":"+Num((*p->manual_entered)[1])+",\"rotationDeg\":"+Num((*p->manual_entered)[2])+"}":std::string("null"))+"}";
+}
+inline std::string ConfirmedCheckJson(const std::optional<ReportV8Options::ConfirmedCheckSpec>& k){
+    using namespace detail;
+    return k?"{\"used\":"+Bool(k->used)+",\"seamDifferencePx\":"+OptNum(k->seam_difference_px)+"}":std::string("null");
+}
+
 inline std::string ReportV8Text(const ReportV8Options& o={}){
     using namespace detail;
     const bool estimated=o.surface_state=="estimated";
@@ -306,10 +337,11 @@ inline std::string ReportV8Text(const ReportV8Options& o={}){
     // geometryLevel
     const Pose mapping_pose=o.mapping_pose?*o.mapping_pose:(o.level=="G4"?o.base_pose:o.pose);
     const bool plane=o.mapping_surface&&estimated&&o.level!="G4";
+    const std::array<double,3> plane_values=o.mapping_plane?*o.mapping_plane:std::array<double,3>{plane?o.surface_height_mm:0,plane?o.surface_slope_x:0,plane?o.surface_slope_y:0};
     const std::string level="{\"level\":"+Str(o.level)+",\"reasons\":"+Strings(o.level_reasons)+",\"applied\":{\"pose\":"+Bool(o.level_applied_pose)+",\"surface\":"+
         Bool(o.level_applied_surface)+",\"parallax\":"+Bool(o.level_applied_parallax)+"},\"beyondEnvelopeApplied\":"+Bool(o.beyond_envelope_applied)+
-        ",\"mapping\":{\"pose\":"+PoseJson(mapping_pose)+",\"surface\":{\"h0Mm\":"+Num(plane?o.surface_height_mm:0)+",\"slopeX\":"+Num(plane?o.surface_slope_x:0)+
-        ",\"slopeY\":"+Num(plane?o.surface_slope_y:0)+"},\"parallax\":null},\"coarseShift\":"+
+        ",\"mapping\":{\"pose\":"+PoseJson(mapping_pose)+",\"surface\":{\"h0Mm\":"+Num(plane_values[0])+",\"slopeX\":"+Num(plane_values[1])+
+        ",\"slopeY\":"+Num(plane_values[2])+"},\"parallax\":null},\"coarseShift\":"+
         (o.coarse_shift_translation?"{\"surfaceHeightMm\":0,\"translationXMm\":"+Num(o.coarse_shift_translation->first)+",\"translationYMm\":"+
             Num(o.coarse_shift_translation->second)+"}":std::string("null"))+"}";
     // gate
@@ -365,12 +397,21 @@ inline std::string ReportV8Text(const ReportV8Options& o={}){
         "},\"profile\":{\"file\":"+Str(o.profile.file)+",\"fileSha256\":"+Str(o.profile.file_sha256)+",\"fingerprintSha256\":"+Str(o.profile.fingerprint_sha256)+
         ",\"profileId\":"+(o.profile_id?Str(*o.profile_id):std::string("null"))+"},\"raster\":"+RasterJson(o.raster)+",\"seam\":"+SeamJson(o.seam)+
         ",\"layout\":{\"mixingWidthPx\":"+Int(o.mixing_width_px)+",\"omegaMarginPx\":"+Int(o.omega_margin_px)+",\"guardPx\":"+Int(o.guard_px)+
-        ",\"bandHalfWidthPx\":"+Int(o.band_half_width_px)+"},\"basePose\":"+PoseJson(o.base_pose)+",\"limits\":"+limits+",\"registration\":"+reg+",\"surface\":"+surf+",\"parallax\":"+pl+",\"folds\":[],\"pointSource\":"+point_source_json+",\"geometryLevel\":"+level+
+        ",\"bandHalfWidthPx\":"+Int(o.band_half_width_px)+"},\"basePose\":"+PoseJson(o.base_pose)+",\"limits\":"+limits+",\"registration\":"+reg+",\"surface\":"+surf+",\"parallax\":"+pl+",\"folds\":[],\"pointSource\":"+point_source_json+
+        (o.v9?",\"confirmedPosition\":"+ConfirmedPositionJson(o.confirmed_position)+",\"confirmedPositionCheck\":"+ConfirmedCheckJson(o.confirmed_check):std::string{})+
+        ",\"geometryLevel\":"+level+
         ",\"gate\":"+gate+",\"timeBudget\":"+budget+",\"geometryHash\":"+Str(o.geometry_hash)+"},"
         "\"blend\":{\"method\":\"fixed-seam\",\"widthPixels\":8,\"edgeMarginPixels\":64,\"differenceMean\":0.5,\"differenceMaximum\":3,"
         "\"brightness\":{\"windowHalfWidthPixels\":32,\"smoothingRows\":128,\"ratioMinimum\":0.984375,\"ratioMaximum\":1.015625,\"saturationLimitedPixels\":0}},"
         "\"warnings\":"+warnings+",\"assessment\":{\"state\":"+Str(o.assessment_state)+",\"exceeded\":"+Strings(o.assessment_exceeded)+",\"unverified\":"+Strings(o.assessment_unverified)+
         ",\"qualityAccepted\":false,\"acceptanceEvidence\":false}}";
     return s;
+}
+
+// The report v9 (#437): the v8 text with the schema a0.uncalibrated-still-review.v9 and the two members of the confirmed position. Every member
+// that v8 has is written as ReportV8Text writes it, from the same options.
+inline std::string ReportV9Text(ReportV8Options o={}){
+    o.v9=true;o.schema="a0.uncalibrated-still-review.v9";
+    return ReportV8Text(o);
 }
 }

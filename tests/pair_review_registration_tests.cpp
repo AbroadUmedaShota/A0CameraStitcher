@@ -133,10 +133,112 @@ void Sentences(const m2e::StillReviewResult& review, const char* name) {
 }
 }
 
+// What the sentence after the shot says the live view does, against what the machine does with the same result. The sentences are made from the record
+// alone (ConfirmedPositionText); the machine is given the level and the mapping that the record has.
+void SentencesAndMachine() {
+    const std::string sha(64, '7'), other(64, '8');
+    const m2e::content_registration::PoseParameters base{0.05, 0, 0, 0.5, 0, 0};
+    const m2e::RegisteredMapping condition{base, {}, std::nullopt};
+    const auto record = [&](m2e::ConfirmedPositionSource source, m2e::GeometryLevel level, bool used, const m2e::RegisteredMapping& position, const std::string& position_sha,
+                            std::vector<std::string> reasons, const m2e::RegisteredMapping& level_mapping) {
+        m2e::SavedFixedCompositeRegistration r;
+        r.condition_sha256 = sha;
+        r.base_pose = base;
+        m2e::ConfirmedPosition p;
+        p.mapping = position;
+        p.source = source;
+        p.serial = 0;
+        p.condition_sha256 = position_sha;
+        if (source == m2e::ConfirmedPositionSource::manual) { p.base_source = m2e::ConfirmedPositionSource::auto_start; p.manual_entered = m2e::HandCounts{3, 0, 0}; }
+        r.registration.confirmed_position = p;
+        r.registration.confirmed_check = m2e::ConfirmedPositionCheck{used, std::nullopt};
+        r.registration.level.level = level;
+        r.registration.level.reasons = std::move(reasons);
+        r.registration.level.mapping = level_mapping;
+        return r;
+    };
+    const auto estimate = m2e::RegisteredMapping{{0.15, -0.05, 0.1, 0.9, -0.25, 0.1}, {}, std::nullopt};
+    // A machine that holds an automatic position (the first session's estimate: auto-start, as the records below say), or the same position moved
+    // by hand from it (the check is the test's own arithmetic).
+    const LiveHandChecker check = [](const m2e::RegisteredMapping& hand_base, const m2e::HandCounts& total) {
+        LiveHandCheck out;
+        out.status = LiveHandCheck::Status::accepted;
+        out.mapping = hand_base;
+        out.mapping.pose.tx_mm += m2e::HandValuesOf(total).seam_dx_px / 16.0;
+        return out;
+    };
+    const auto machine_at = [&](bool by_hand) {
+        LivePlacementMachine machine;
+        machine.BeginSession(sha, base, true);
+        const auto job = machine.BeginJob();
+        LiveEstimateOutcome outcome;
+        outcome.usable = true;
+        outcome.pose = estimate.pose;
+        machine.Accept(*job, outcome);
+        machine.Committed();
+        if (by_hand) { CHECK(machine.HandStep(m2e::HandCounts{3, 0, 0}, LiveHandContext{true, true}, check).outcome == LiveHandOutcome::accepted); machine.Committed(); }
+        return machine;
+    };
+    const auto apply = [&](LivePlacementMachine& machine, const m2e::SavedFixedCompositeRegistration& r) {
+        const auto& c = r.registration;
+        const auto grant = machine.BeginCapture(true).grant;
+        CHECK(grant.has_value());
+        return machine.ApplyCapture(c.level.mapping, std::string(m2e::GeometryLevelCode(c.level.level)), r.condition_sha256, std::nullopt, grant ? std::optional<std::uint64_t>(grant->serial) : std::nullopt);
+    };
+    // The live position was used (level confirmed): the live view stays where it was.
+    {
+        auto machine = machine_at(false);
+        const auto before = machine.View();
+        const auto r = record(m2e::ConfirmedPositionSource::auto_start, m2e::GeometryLevel::confirmed, true, machine.Placement(), sha, {}, machine.Placement());
+        CHECK(Contains(ConfirmedPositionText(r), "ライブで決めた位置で作りました"));
+        CHECK(apply(machine, r) && LivePlacementSameMapping(machine.Placement(), before.mapping) && machine.Source() == LivePlacementSource::auto_start && machine.Serial() == before.serial);
+    }
+    // The hand position was used: it stays by hand.
+    {
+        auto machine = machine_at(true);
+        const auto before = machine.View();
+        const auto r = record(m2e::ConfirmedPositionSource::manual, m2e::GeometryLevel::confirmed, true, machine.Placement(), sha, {}, machine.Placement());
+        CHECK(Contains(ConfirmedPositionText(r), "手で直した位置で JPEG を作りました"));
+        CHECK(apply(machine, r) && machine.Source() == LivePlacementSource::manual && LivePlacementSameMapping(machine.Placement(), before.mapping) && machine.Serial() == before.serial);
+    }
+    // The hand position was refused by the cheap check: the JPEG has the condition's position, the live view stays at the hand position.
+    {
+        auto machine = machine_at(true);
+        const auto before = machine.View();
+        const auto r = record(m2e::ConfirmedPositionSource::manual, m2e::GeometryLevel::g4, false, machine.Placement(), sha, {"seam-outside-overlap-at-level"}, condition);
+        CHECK(Contains(ConfirmedPositionText(r), "ライブは手で直した位置のままです"));
+        CHECK(apply(machine, r) && machine.Source() == LivePlacementSource::manual && LivePlacementSameMapping(machine.Placement(), before.mapping) && machine.Serial() == before.serial &&
+              machine.View().hand_entered == (m2e::HandCounts{3, 0, 0}));
+    }
+    // The live position was refused as well: the JPEG has the condition's position and the live view goes to it.
+    {
+        auto machine = machine_at(false);
+        const auto r = record(m2e::ConfirmedPositionSource::auto_start, m2e::GeometryLevel::g4, false, machine.Placement(), sha, {"output-uncovered-at-level", "output-uncovered-at-level", "output-uncovered-at-level"}, condition);
+        CHECK(Contains(ConfirmedPositionText(r), "ライブも条件の位置にしました"));
+        CHECK(apply(machine, r) && LivePlacementSameMapping(machine.Placement(), condition) && machine.Source() == LivePlacementSource::after_capture);
+    }
+    // The condition changed before the shot: the result is not applied to the live view, and the next session goes back to the new condition's position and asks once.
+    {
+        auto machine = machine_at(true);
+        const auto r = record(m2e::ConfirmedPositionSource::manual, m2e::GeometryLevel::g1, false, machine.Placement(), sha, {}, estimate);
+        auto changed = r;
+        changed.condition_sha256 = other;
+        CHECK(Contains(ConfirmedPositionText(changed), "手で直した位置を捨て、ライブは新しい条件の位置に戻し、自動調整を 1 回行います"));
+        const auto before = machine.View();
+        const auto grant = machine.BeginCapture(true).grant;
+        CHECK(grant && !machine.ApplyCapture(estimate, "G1", other, std::nullopt, grant->serial) && LivePlacementSameMapping(machine.Placement(), before.mapping) && machine.Source() == LivePlacementSource::manual);
+        machine.BeginSession(other, base, true);
+        const auto view = machine.View();
+        CHECK(view.source == LivePlacementSource::fixed_condition && LivePlacementSameMapping(view.mapping, condition) && view.hand_discarded_by_condition &&
+              view.activity == LivePlacementActivity::requested && view.ask == LiveEstimateAsk::condition_changed && machine.BeginJob().has_value());
+    }
+}
+
 int main(int argc, char** argv) {
     try {
         if (argc < 2) throw std::invalid_argument("usage: pair_review_registration_tests <rig-profile-v2 fixture folder>");
         pair_synthetic::detail::Hr(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
+        SentencesAndMachine();
         const auto base_profile = ReadText(fs::path(argv[1]) / "calibrated-draft.json");
         root = fs::current_path() / ("pair-review-registration-test-" + std::to_string(GetCurrentProcessId()) + "-" + std::to_string(GetTickCount64()));
         fs::create_directories(root);
@@ -179,6 +281,79 @@ int main(int argc, char** argv) {
                 CHECK(Contains(lines.status.back(), "警告") || Contains(lines.status[3], "警告"));
                 CHECK(Contains(lines.log.back(), " skipped=none"));
             }
+        }
+
+        // 1b. A confirmed position set by hand (#437): the window gives it to the composite, the writer records it, and the log line of the capture is made from the
+        // report read back from the file (never from the window's own copy). The line and the report's numbers are the same strings; the sentence says whose position it is.
+        {
+            m2e::ConfirmedPosition given;
+            given.mapping = m2e::RegisteredMapping{m2e::content_registration::PoseParameters{0.125, -0.0625, 0.1875, 0.75, -0.375, 0.25}, m2e::SurfacePlane{1.5, 0.00390625, -0.001953125}, std::nullopt};
+            given.source = m2e::ConfirmedPositionSource::manual;
+            given.base_source = m2e::ConfirmedPositionSource::auto_button;
+            given.manual_entered = m2e::HandCounts{3, 0, -1};
+            given.serial = 12;
+            given.condition_sha256 = settings.loaded.file_sha256;
+            auto outcome = ComposePairWithSelection(selection, RequestFor(frames, "review-hand", m2e::MountOrientation::normal, std::chrono::seconds(900)), std::nullopt, given);
+            CHECK(outcome.review.has_value() && !outcome.skip);
+            if (outcome.review && outcome.review->fixed_composite_registration) {
+                const auto& review = *outcome.review;
+                const auto saved = m2e::LoadSavedStillReview(review.report);
+                const auto text = ReadText(review.report);
+                CHECK(saved.fixed_composite_registration.has_value());
+                const auto& written = review.fixed_composite_registration->registration;
+                std::cout << "hand position: level " << m2e::GeometryLevelCode(written.level.level) << ", difference "
+                          << (written.confirmed_check && written.confirmed_check->seam_difference_px ? std::to_string(*written.confirmed_check->seam_difference_px) : std::string("none")) << '\n';
+                CHECK(written.level.level == m2e::GeometryLevel::confirmed && written.confirmed_check && written.confirmed_check->used);
+                CHECK(written.confirmed_check && written.confirmed_check->seam_difference_px && *written.confirmed_check->seam_difference_px > 0);   // the estimate hit, and the hand position differs from it
+                if (saved.fixed_composite_registration) {
+                    const auto& read = saved.fixed_composite_registration->registration;
+                    CHECK(read.confirmed_position && read.level.level == m2e::GeometryLevel::confirmed && read.level.mapping.pose.tx_mm == given.mapping.pose.tx_mm);
+                    // The line, from the record read back.
+                    const auto line = ConfirmedPositionLogLine(*saved.fixed_composite_registration);
+                    CHECK(line == ConfirmedPositionLogLine(*review.fixed_composite_registration));
+                    CHECK(Contains(line, "pair_review_confirmed_position given=1 serial=12 source=manual base_source=auto-button reference_camera=CAM-A target_camera=CAM-B " + LivePlacementFields(given.mapping) +
+                                             " manual_seam_dx_px=12 manual_seam_dy_px=0 manual_rotation_deg=-0.050000000000000003 condition_sha256=" + settings.loaded.file_sha256 + " condition_matches=1 used=1 seam_difference_px="));
+                    CHECK(Contains(line, " level=confirmed quality_accepted=0"));
+                    // The nine numbers of the line are the strings the report holds (found in the report's own text, not rebuilt from the values).
+                    const auto at = text.find("\"confirmedPosition\":{");
+                    CHECK(at != std::string::npos);
+                    const std::pair<const char*, const char*> keys[] = {{"rxDeg", "rx_deg"}, {"ryDeg", "ry_deg"}, {"rzDeg", "rz_deg"}, {"txMm", "tx_mm"}, {"tyMm", "ty_mm"}, {"tzPercent", "tz_percent"},
+                                                                         {"h0Mm", "h0_mm"}, {"slopeX", "slope_x"}, {"slopeY", "slope_y"}};
+                    for (const auto& [json_key, log_key] : keys) {
+                        const auto from = text.find("\"" + std::string(json_key) + "\":", at) + std::string(json_key).size() + 3;
+                        const auto json_number = text.substr(from, text.find_first_of(",}", from) - from);
+                        const auto log_at = line.find(" " + std::string(log_key) + "=") + std::string(log_key).size() + 2;
+                        const auto log_number = line.substr(log_at, line.find(' ', log_at) - log_at);
+                        CHECK(!json_number.empty() && json_number == log_number);
+                    }
+                    // The difference at the seam: the report's number and the log's.
+                    const auto diff_json_at = text.find("\"seamDifferencePx\":", at);
+                    const auto diff_from = diff_json_at + std::string("\"seamDifferencePx\":").size();
+                    const auto diff_json = text.substr(diff_from, text.find_first_of(",}", diff_from) - diff_from);
+                    const auto diff_log_at = line.find(" seam_difference_px=") + std::string(" seam_difference_px=").size();
+                    CHECK(diff_json_at != std::string::npos && diff_json == line.substr(diff_log_at, line.find(' ', diff_log_at) - diff_log_at));
+                }
+                // The status row says it, the warning is a notice, and the log has the line next to the first one.
+                const auto lines = DescribeRegistrationReview(review);
+                bool said = false;
+                for (const auto& s : lines.status) said = said || Contains(s, "手で直した位置で JPEG を作りました（自動で測ると継ぎ目で最大 ");
+                CHECK(said);
+                CHECK(lines.log.size() >= 3 && Contains(lines.log[1], "pair_review_confirmed_position given=1"));
+                bool notice = false;
+                for (const auto& w : lines.warnings) notice = notice || Contains(w, "【お知らせ】手で直した位置で作りました");
+                CHECK(notice);
+                for (const auto& s : lines.status) CHECK(!Contains(s, "CAM-A") && !Contains(s, "CAM-B") && !Contains(s, root.string()));
+                for (const auto& s : lines.warnings) CHECK(!Contains(s, "CAM-A") && !Contains(s, "CAM-B"));
+            }
+            // The codes the live log and the report share are the same words.
+            CHECK(m2e::ConfirmedPositionSourceCode(m2e::ConfirmedPositionSource::fixed_condition) == LivePlacementSourceCode(LivePlacementSource::fixed_condition) &&
+                  m2e::ConfirmedPositionSourceCode(m2e::ConfirmedPositionSource::auto_start) == LivePlacementSourceCode(LivePlacementSource::auto_start) &&
+                  m2e::ConfirmedPositionSourceCode(m2e::ConfirmedPositionSource::auto_button) == LivePlacementSourceCode(LivePlacementSource::auto_button) &&
+                  m2e::ConfirmedPositionSourceCode(m2e::ConfirmedPositionSource::after_capture) == LivePlacementSourceCode(LivePlacementSource::after_capture) &&
+                  m2e::ConfirmedPositionSourceCode(m2e::ConfirmedPositionSource::manual) == LivePlacementSourceCode(LivePlacementSource::manual));
+            // A capture without a position says so in one line, and nothing about cameras.
+            const auto none = ConfirmedPositionLogLine(m2e::SavedFixedCompositeRegistration{});
+            CHECK(none == "pair_review_confirmed_position given=0 used=0 quality_accepted=0");
         }
 
         // 2. The same pair with less time: the stages the time holds are run and the others are named. The deadline is the only

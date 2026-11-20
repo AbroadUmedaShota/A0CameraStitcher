@@ -1,6 +1,7 @@
 #include "a0/m2/experimental/capture_registration.hpp"
 
 #include "a0/common/protocol_json.hpp"
+#include "a0/m2/experimental/confirmed_position.hpp"
 #include "a0/m2/experimental/fixed_composite_maps.hpp"
 
 #include <algorithm>
@@ -24,10 +25,10 @@ namespace sg=seam_gate;
 namespace json=a0::common::protocol_json;
 
 // ---- Writing ----
-// Numbers as the formats document says: 17 significant digits, classic locale, -0 as 0.
+// Numbers as the formats document says: 17 significant digits, classic locale, -0 as 0 (FormatRecordNumber, which the log writes with too).
 std::string Num(double v){
     if(!std::isfinite(v))throw std::logic_error("a report number is not finite");
-    std::ostringstream out;out.imbue(std::locale::classic());out<<std::setprecision(17)<<(v==0?0.0:v);return out.str();
+    return FormatRecordNumber(v);
 }
 std::string Int(std::uint64_t v){return std::to_string(v);}
 std::string Text(std::string_view v){return "\""+json::JsonEscape(v)+"\"";}
@@ -182,6 +183,24 @@ const char* PointSourceFault(const CaptureRegistration& c){
     if(why==kMeasurerFailed)return p.edge_share?"point source failure":"";
     return "point source reason";
 }
+// The confirmed position and what the capture did with it (report v9, formats document 4.13).
+std::string ConfirmedPositionJson(const std::optional<ConfirmedPosition>& position){
+    if(!position)return "null";
+    const auto& p=*position;const auto& m=p.mapping;
+    std::string s="{\"referenceCamera\":"+Text(kConfirmedReferenceCamera)+",\"targetCamera\":"+Text(kConfirmedTargetCamera)+",\"serial\":"+Int(p.serial)+
+        ",\"source\":"+Text(ConfirmedPositionSourceCode(p.source))+",\"baseSource\":"+(p.base_source?Text(ConfirmedPositionSourceCode(*p.base_source)):std::string("null"))+
+        ",\"conditionSha256\":"+Text(p.condition_sha256)+",\"pose\":"+PoseJson(m.pose)+",\"surface\":{\"h0Mm\":"+Num(m.surface.h0_mm)+",\"slopeX\":"+Num(m.surface.slope_x)+
+        ",\"slopeY\":"+Num(m.surface.slope_y)+"},\"manualEntered\":";
+    if(p.manual_entered){
+        const auto v=HandValuesOf(*p.manual_entered);
+        s+="{\"seamDxPx\":"+Num(v.seam_dx_px)+",\"seamDyPx\":"+Num(v.seam_dy_px)+",\"rotationDeg\":"+Num(v.rotation_deg)+"}";
+    }else s+="null";
+    return s+"}";
+}
+std::string ConfirmedCheckJson(const std::optional<ConfirmedPositionCheck>& check){
+    if(!check)return "null";
+    return "{\"used\":"+Bool(check->used)+",\"seamDifferencePx\":"+OptNum(check->seam_difference_px)+"}";
+}
 std::string MappingJson(const RegisteredMapping& m){
     std::string s="{\"pose\":"+PoseJson(m.pose)+",\"surface\":{\"h0Mm\":"+Num(m.surface.h0_mm)+",\"slopeX\":"+Num(m.surface.slope_x)+",\"slopeY\":"+Num(m.surface.slope_y)+"},\"parallax\":";
     if(m.parallax){const auto& p=*m.parallax;
@@ -249,7 +268,7 @@ std::string TimeBudgetJson(const TimeBudgetRecord& t){
     for(std::size_t i=0;i<kReviewStageTexts.size();++i)s+=std::string(i?",":"")+Text(kReviewStageTexts[i].second)+":"+Num(t.cost_model.stage_ms[i]);
     return s+"},\"tailReserveMs\":"+Num(t.cost_model.tail_reserve_ms)+"}}";
 }
-std::string RecordJsonUnchecked(const SavedFixedCompositeRegistration& r){
+std::string RecordJsonUnchecked(const SavedFixedCompositeRegistration& r,RegistrationReportFormat format){
     const auto& g=r.raster.region_um;const auto& c=r.registration;
     std::string s="{\"condition\":{\"sha256\":"+Text(r.condition_sha256)+",\"sequence\":"+Int(r.condition_sequence)+"},\"profile\":{\"file\":"+Text(r.profile_file)+
         ",\"fileSha256\":"+Text(r.profile_file_sha256)+",\"fingerprintSha256\":"+Text(r.profile_fingerprint_sha256)+",\"profileId\":"+(r.profile_id?Text(*r.profile_id):std::string("null"))+
@@ -257,7 +276,9 @@ std::string RecordJsonUnchecked(const SavedFixedCompositeRegistration& r){
         "},\"dpi\":"+Int(r.raster.dpi)+",\"widthPixels\":"+Int(r.raster.width_pixels)+",\"heightPixels\":"+Int(r.raster.height_pixels)+"},\"seam\":{\"column\":"+Int(r.seam_column)+
         ",\"origin\":"+Text(r.seam_origin)+"},\"layout\":"+LayoutJson(r.layout)+",\"basePose\":"+PoseJson(r.base_pose)+",\"limits\":"+LimitsJson(r.limits)+
         ",\"registration\":"+RegistrationJson(c.registration,c.level.level)+",\"surface\":"+SurfaceJson(c.surface)+",\"parallax\":"+ParallaxJson(c.parallax,c.level.level)+
-        ",\"folds\":"+FoldsJson(c.parallax.folds)+",\"pointSource\":"+PointSourceJson(c.point_source)+",\"geometryLevel\":"+LevelJson(c.level,c.coarse_shift)+",\"gate\":"+GateJson(c.gate,r.seam_gate_json)+
+        ",\"folds\":"+FoldsJson(c.parallax.folds)+",\"pointSource\":"+PointSourceJson(c.point_source)+
+        (format==RegistrationReportFormat::v9?",\"confirmedPosition\":"+ConfirmedPositionJson(c.confirmed_position)+",\"confirmedPositionCheck\":"+ConfirmedCheckJson(c.confirmed_check):std::string{})+
+        ",\"geometryLevel\":"+LevelJson(c.level,c.coarse_shift)+",\"gate\":"+GateJson(c.gate,r.seam_gate_json)+
         ",\"timeBudget\":"+TimeBudgetJson(c.time_budget)+",\"geometryHash\":"+Text(c.geometry_hash)+"}";
     return s;
 }
@@ -267,6 +288,44 @@ bool Trusted(const cr::RegistrationResult& r){
     return r.has_estimate && (r.state==cr::RegistrationState::verified || r.state==cr::RegistrationState::out_of_envelope);
 }
 bool AnyExceeded(const std::vector<cr::ComponentCheck>& v){for(const auto& c:v)if(c.exceeded)return true;return false;}
+// The inclination of a paper plane, degrees (the estimator's display uses the same expression for its own surface).
+double SurfaceTiltDegOf(const SurfacePlane& plane){
+    constexpr double kPi=3.14159265358979323846;
+    return std::atan(std::hypot(plane.slope_x,plane.slope_y))*180.0/kPi;
+}
+bool FinitePose(const cr::PoseParameters& p){
+    for(const double v:{p.rx_deg,p.ry_deg,p.rz_deg,p.tx_mm,p.ty_mm,p.tz_percent})if(!std::isfinite(v))return false;
+    return true;
+}
+bool LowerHex64(const std::string& s);
+// What a report cannot carry of a position (empty: it can). The writer, the reader and ValidateConfirmedPosition use this one function.
+const char* PositionFault(const ConfirmedPosition& p){
+    const auto& m=p.mapping;
+    if(m.parallax)return "position layer two";
+    if(!FinitePose(m.pose) || !std::isfinite(m.surface.h0_mm) || !std::isfinite(m.surface.slope_x) || !std::isfinite(m.surface.slope_y))return "position not finite";
+    if(!LowerHex64(p.condition_sha256))return "position condition hash";
+    const bool by_hand=p.source==ConfirmedPositionSource::manual;
+    if(by_hand!=p.base_source.has_value() || by_hand!=p.manual_entered.has_value())return "position hand step";
+    if(by_hand){
+        if(*p.base_source==ConfirmedPositionSource::manual)return "position base source";
+        if(p.manual_entered->IsZero())return "position hand sum";
+    }
+    return "";
+}
+// The whole counts of the smallest hand step that give exactly these values (HandValuesOf), or none.
+std::optional<HandCounts> CountsOfHandValues(double dx_px,double dy_px,double rotation_deg){
+    const auto count=[](double value,double per_count,bool divide)->std::optional<std::int32_t>{
+        const double c=std::round(divide?value/per_count:value*per_count);
+        if(!std::isfinite(c) || c<-2147483648.0 || c>2147483647.0)return std::nullopt;
+        return static_cast<std::int32_t>(c);
+    };
+    const auto x=count(dx_px,kHandSeamPixelsPerCount,true),y=count(dy_px,kHandSeamPixelsPerCount,true),r=count(rotation_deg,kHandRotationCountsPerDegree,false);
+    if(!x || !y || !r)return std::nullopt;
+    const HandCounts counts{*x,*y,*r};
+    const auto back=HandValuesOf(counts);
+    if(back.seam_dx_px!=dx_px || back.seam_dy_px!=dy_px || back.rotation_deg!=rotation_deg)return std::nullopt;
+    return counts;
+}
 double PitchMm(const render::OutputRaster& raster){
     if(!raster.dpi)throw std::invalid_argument("raster has no density");
     return 25.4/raster.dpi;
@@ -284,9 +343,17 @@ bool ShiftBeyond(const UniformShift& s,const RegistrationLines& l){
     const double position=std::hypot(s.translation_x_mm,s.translation_y_mm);
     return position>l.envelope.position_mm || (l.surface_envelope && std::abs(s.surface_height_mm)>l.surface_envelope->height_mm);
 }
+// The four range components of a position's pose from p_b and its surface against the surface range: whether the position puts in an
+// amount beyond a range (the same measure as the estimate's, from the position itself).
+bool PositionBeyond(const RegisteredMapping& m,const cr::PoseParameters& base,const RegistrationLines& l){
+    if(AnyExceeded(RegistrationComponentsFromBase(m.pose,base,l.envelope)))return true;
+    return l.surface_envelope && (std::abs(m.surface.h0_mm)>l.surface_envelope->height_mm || SurfaceTiltDegOf(m.surface)>l.surface_envelope->tilt_deg);
+}
 // Whether the chosen level put in an amount beyond a range (the report's beyondEnvelopeApplied).
-bool BeyondApplied(const CaptureRegistration& c,const RegistrationLines& l){
+bool BeyondApplied(const CaptureRegistration& c,const RegistrationLines& l,const cr::PoseParameters& base){
     switch(c.level.level){
+    case GeometryLevel::confirmed:
+        return PositionBeyond(c.level.mapping,base,l);
     case GeometryLevel::g1:
         if(LayerTwoBeyond(c.parallax,l).any)return true;
         [[fallthrough]];
@@ -329,8 +396,10 @@ void PutPose(std::string& out,const char* name,const cr::PoseParameters& p){
 bool LowerHex64(const std::string& s){return s.size()==64 && s.find_first_not_of("0123456789abcdef")==std::string::npos;}
 
 // ---- Reading ----
-[[noreturn]] void Reject(const char* what){throw std::invalid_argument(std::string("report v8: ")+what);}
-struct ReadFailure {[[noreturn]] static void Fail(std::string_view,std::string_view detail){throw std::invalid_argument("report v8: "+std::string(detail));}};
+// The reader names the version it reads in its refusals ("report v8: ..." as always, "report v9: ..." for a v9 text).
+thread_local const char* g_report_name="report v8: ";
+[[noreturn]] void Reject(const char* what){throw std::invalid_argument(std::string(g_report_name)+what);}
+struct ReadFailure {[[noreturn]] static void Fail(std::string_view,std::string_view detail){throw std::invalid_argument(g_report_name+std::string(detail));}};
 using Value=json::JsonValue;
 void Fields(const Value& v,std::initializer_list<const char*> names){
     if(v.kind!=json::JsonKind::object || v.object.size()!=names.size())Reject("members");
@@ -397,8 +466,32 @@ std::string CanonicalText(const std::string& text){
     return Canonical(v);
 }
 
-SavedFixedCompositeRegistration ReadRecord(const Value& v){
-    Fields(v,{"condition","profile","raster","seam","layout","basePose","limits","registration","surface","parallax","folds","pointSource","geometryLevel","gate","timeBudget","geometryHash"});
+ConfirmedPosition ReadConfirmedPosition(const Value& v){
+    Fields(v,{"referenceCamera","targetCamera","serial","source","baseSource","conditionSha256","pose","surface","manualEntered"});
+    if(ReadText(At(v,"referenceCamera"))!=kConfirmedReferenceCamera || ReadText(At(v,"targetCamera"))!=kConfirmedTargetCamera)Reject("position cameras");
+    ConfirmedPosition p;
+    p.serial=ReadUnsigned(At(v,"serial"),std::numeric_limits<std::uint64_t>::max());
+    const auto source=ParseConfirmedPositionSource(ReadText(At(v,"source")));if(!source)Reject("position source");p.source=*source;
+    if(!IsNull(At(v,"baseSource"))){const auto base=ParseConfirmedPositionSource(ReadText(At(v,"baseSource")));if(!base)Reject("position base source");p.base_source=*base;}
+    p.condition_sha256=ReadHash(At(v,"conditionSha256"));
+    p.mapping.pose=ReadPose(At(v,"pose"));
+    const auto& s=At(v,"surface");Fields(s,{"h0Mm","slopeX","slopeY"});
+    p.mapping.surface={ReadNum(At(s,"h0Mm")),ReadNum(At(s,"slopeX")),ReadNum(At(s,"slopeY"))};
+    if(!IsNull(At(v,"manualEntered"))){
+        const auto& e=At(v,"manualEntered");Fields(e,{"seamDxPx","seamDyPx","rotationDeg"});
+        const auto counts=CountsOfHandValues(ReadNum(At(e,"seamDxPx")),ReadNum(At(e,"seamDyPx")),ReadNum(At(e,"rotationDeg")));
+        if(!counts)Reject("position hand amounts");
+        p.manual_entered=*counts;
+    }
+    if(*PositionFault(p))Reject(PositionFault(p));
+    return p;
+}
+
+SavedFixedCompositeRegistration ReadRecord(const Value& v,RegistrationReportFormat format){
+    if(format==RegistrationReportFormat::v9)
+        Fields(v,{"condition","profile","raster","seam","layout","basePose","limits","registration","surface","parallax","folds","pointSource","confirmedPosition","confirmedPositionCheck","geometryLevel","gate","timeBudget","geometryHash"});
+    else
+        Fields(v,{"condition","profile","raster","seam","layout","basePose","limits","registration","surface","parallax","folds","pointSource","geometryLevel","gate","timeBudget","geometryHash"});
     SavedFixedCompositeRegistration r;
     const auto& condition=At(v,"condition");Fields(condition,{"sha256","sequence"});
     r.condition_sha256=ReadHash(At(condition,"sha256"));r.condition_sequence=static_cast<std::uint32_t>(ReadUnsigned(At(condition,"sequence"),999999));
@@ -572,11 +665,21 @@ SavedFixedCompositeRegistration ReadRecord(const Value& v){
         c.point_source=std::move(ps);
         if(*PointSourceFault(c))Reject(PointSourceFault(c));
     }
+    // confirmedPosition and confirmedPositionCheck (v9)
+    if(format==RegistrationReportFormat::v9){
+        if(!IsNull(At(v,"confirmedPosition")))c.confirmed_position=ReadConfirmedPosition(At(v,"confirmedPosition"));
+        if(!IsNull(At(v,"confirmedPositionCheck"))){
+            const auto& k=At(v,"confirmedPositionCheck");Fields(k,{"used","seamDifferencePx"});
+            ConfirmedPositionCheck check;check.used=ReadBool(At(k,"used"));check.seam_difference_px=ReadOptNum(At(k,"seamDifferencePx"));
+            c.confirmed_check=check;
+        }
+    }
     // geometryLevel
     {
         const auto& l=At(v,"geometryLevel");Fields(l,{"level","reasons","applied","beyondEnvelopeApplied","mapping","coarseShift"});
         auto& d=c.level;
         const auto level=ParseGeometryLevel(ReadText(At(l,"level")));if(!level)Reject("level");d.level=*level;
+        if(*level==GeometryLevel::confirmed && format!=RegistrationReportFormat::v9)Reject("level");
         d.reasons=ReadStrings(At(l,"reasons"));
         for(const auto& reason:d.reasons)if(reason!="seam-outside-overlap-at-level" && reason!="output-uncovered-at-level")Reject("level reason");
         const auto& a=At(l,"applied");Fields(a,{"pose","surface","parallax"});d.applied={ReadBool(At(a,"pose")),ReadBool(At(a,"surface")),ReadBool(At(a,"parallax"))};
@@ -725,12 +828,13 @@ SavedFixedCompositeRegistration ReadRecord(const Value& v){
     return r;
 }
 
-RegistrationWarning ReadWarning(const Value& v){
+RegistrationWarning ReadWarning(const Value& v,RegistrationReportFormat format){
     Fields(v,{"code","class","component","value","limit","unit","rowsPx","rowsMm","interpretations","remedy","remedyAmountMm","applied","source"});
     RegistrationWarning w;
-    const auto code=ParseWarningCode(ReadText(At(v,"code")));if(!code)Reject("warning code");w.code=*code;
+    const auto code=ParseWarningCode(ReadText(At(v,"code")));if(!code || (IsWarningCodeOfV9(*code) && format!=RegistrationReportFormat::v9))Reject("warning code");w.code=*code;
     w.warning_class=ReadCode(At(v,"class"),std::array{WarningClass::exceeded,WarningClass::unverified,WarningClass::notice},[](WarningClass x){return std::string(WarningClassCode(x));});
-    const auto component=ParseWarningComponent(ReadText(At(v,"component")));if(!component)Reject("warning component");w.component=*component;
+    const auto component=ParseWarningComponent(ReadText(At(v,"component")));
+    if(!component || (*component==WarningComponent::confirmed_position && format!=RegistrationReportFormat::v9))Reject("warning component");w.component=*component;
     w.value=ReadNum(At(v,"value"));w.limit=ReadOptNum(At(v,"limit"));
     const auto unit=ParseWarningUnit(ReadText(At(v,"unit")));if(!unit)Reject("warning unit");w.unit=*unit;
     const auto range=[&](const char* name)->std::optional<RowSpan>{const auto& x=At(v,name);if(IsNull(x))return std::nullopt;Fields(x,{"first","last"});
@@ -741,17 +845,18 @@ RegistrationWarning ReadWarning(const Value& v){
     w.source=ReadCode(At(v,"source"),std::array{WarningSource::condition,WarningSource::design},[](WarningSource x){return std::string(WarningSourceText(x));});
     return w;
 }
-RegistrationAssessment ReadAssessment(const Value& v){
+RegistrationAssessment ReadAssessment(const Value& v,RegistrationReportFormat format){
     Fields(v,{"state","exceeded","unverified","qualityAccepted","acceptanceEvidence"});
     RegistrationAssessment a;
     a.state=ReadCode(At(v,"state"),std::array{AssessmentState::within_criteria,AssessmentState::outside_criteria,AssessmentState::not_judged},
         [](AssessmentState x){return std::string(AssessmentStateText(x));});
     for(const auto* list:{"exceeded","unverified"})
-        for(const auto& e:ReadArray(At(v,list))){const auto code=ParseWarningCode(ReadText(e));if(!code)Reject("assessment code");
+        for(const auto& e:ReadArray(At(v,list))){const auto code=ParseWarningCode(ReadText(e));if(!code || (IsWarningCodeOfV9(*code) && format!=RegistrationReportFormat::v9))Reject("assessment code");
             (std::strcmp(list,"exceeded")==0?a.exceeded:a.unverified).push_back(*code);}
     if(ReadBool(At(v,"qualityAccepted")) || ReadBool(At(v,"acceptanceEvidence")))Reject("quality flags");
     return a;
 }
+// Compared by value: -0 and +0 are the same, NaN is never the same.
 bool SamePose(const cr::PoseParameters& a,const cr::PoseParameters& b){
     return a.rx_deg==b.rx_deg && a.ry_deg==b.ry_deg && a.rz_deg==b.rz_deg && a.tx_mm==b.tx_mm && a.ty_mm==b.ty_mm && a.tz_percent==b.tz_percent;
 }
@@ -760,9 +865,61 @@ bool SameProfile(const ParallaxProfile& a,const ParallaxProfile& b){
     return a.baseline.x==b.baseline.x && a.baseline.y==b.baseline.y && a.row_spacing_px==b.row_spacing_px && a.first_row_px==b.first_row_px &&
         a.q_px==b.q_px && a.a_px==b.a_px && a.l_px==b.l_px && a.seam_column==b.seam_column;
 }
+// What a position of the capture's own condition (its hash is the condition's) must satisfy to be used for a composite (ADR-0046 decisions 4 and
+// 5; empty: it can be used). A position that is the condition's own is always usable. Otherwise
+//  - a position that came from the condition (fixed-condition) is the condition's own, so any other is not a position of that source;
+//  - a position set by hand has every pose component inside the pose envelope (the paper surface's range is not read: a hand step does not move it);
+//  - any position that is beyond a range (pose, or the paper surface's) is used only when the condition applies what is beyond a range
+//    (applyBeyondEnvelope), as the estimate on the originals and the live view's estimate are.
+// A step past the range is refused, never clamped, so the refusal is the capture's own and not a warning on a composite that was made with it.
+// The capture's entrance (before anything is drawn), the geometry level and the record's reader and writer all call this one function.
+const char* PositionRangeFault(const ConfirmedPosition& p,const cr::PoseParameters& base_pose,const RegistrationLines& lines){
+    if(IsConditionPosition(p,base_pose))return "";
+    if(p.source==ConfirmedPositionSource::fixed_condition)return "fixed-condition position that is not the condition's";
+    if(p.source==ConfirmedPositionSource::manual && AnyExceeded(RegistrationComponentsFromBase(p.mapping.pose,base_pose,lines.envelope)))return "hand position outside the envelope";
+    if(PositionBeyond(p.mapping,base_pose,lines) && !lines.apply_beyond_envelope.value_or(false))return "position outside the envelope that the condition does not apply";
+    return "";
+}
+// What the confirmed position and its check must satisfy against the rest of the record (the reader and the writer check the same). An
+// empty string: consistent; else the first thing that is not. Everything here follows from what the record holds: the position, the
+// condition's hash and base pose, the level and its mapping, and the estimate's state.
+const char* ConfirmedFault(const SavedFixedCompositeRegistration& r){
+    const auto& c=r.registration;
+    const bool confirmed_level=c.level.level==GeometryLevel::confirmed;
+    if(!c.confirmed_position){
+        if(c.confirmed_check)return "position check without a position";
+        return confirmed_level?"level confirmed without a position":"";
+    }
+    if(!c.confirmed_check)return "position without its check";
+    const auto& p=*c.confirmed_position;
+    if(const char* fault=PositionFault(p);*fault)return fault;
+    const bool same_condition=p.condition_sha256==r.condition_sha256;
+    const bool condition_position=IsConditionPosition(p,r.base_pose);
+    const auto& check=*c.confirmed_check;
+    if(check.used!=confirmed_level)return "position used and level";
+    if(confirmed_level && (!same_condition || condition_position || !SamePose(c.level.mapping.pose,p.mapping.pose) || !SamePlane(c.level.mapping.surface,p.mapping.surface) ||
+        c.level.mapping.parallax))return "level confirmed and position";
+    if(same_condition){if(const char* fault=PositionRangeFault(p,r.base_pose,r.limits);*fault)return fault;}
+    if(check.seam_difference_px){
+        if(!same_condition || !Trusted(c.registration) || !std::isfinite(*check.seam_difference_px) || *check.seam_difference_px<0)return "position seam difference";
+    }
+    if(same_condition && !condition_position){
+        // The candidates the level was chosen from: a hand position has the confirmed one and G4, any other position has G1 and G2 before it, never G3.
+        if(p.source==ConfirmedPositionSource::manual && c.level.level!=GeometryLevel::confirmed && c.level.level!=GeometryLevel::g4)return "hand position level";
+        if(p.source!=ConfirmedPositionSource::manual && c.level.level==GeometryLevel::g3)return "G3 with a position";
+    }
+    return "";
+}
 }  // namespace
 
 // ---- Pure pieces ----
+bool IsConditionPosition(const ConfirmedPosition& p,const cr::PoseParameters& base_pose){
+    return IsConditionPosition(p.mapping,base_pose);
+}
+RegisteredMapping ConfirmedMappingOf(const ConfirmedPosition& p){return RegisteredMapping{p.mapping.pose,p.mapping.surface,std::nullopt};}
+void ValidateConfirmedPosition(const ConfirmedPosition& p){
+    if(const char* fault=PositionFault(p);*fault)throw std::invalid_argument(std::string("confirmed position: ")+fault);
+}
 std::vector<cr::ComponentCheck> RegistrationComponentsFromBase(const cr::PoseParameters& pose,const cr::PoseParameters& base,const cr::RegistrationEnvelope& envelope){
     const auto check=[](cr::EnvelopeComponent component,double value,double limit){
         if(!std::isfinite(value) || !(limit>0))throw std::invalid_argument("components need a finite pose and a set envelope");
@@ -788,11 +945,13 @@ std::vector<RegistrationWarning> DeriveRegistrationWarnings(const CaptureRegistr
     const double pitch=PitchMm(raster);
     const auto level=c.level.level;
     std::vector<RegistrationWarning> out;
-    // The pose components, from p_b, when the estimate is trusted; for G3 the coarse translation.
+    // The pose components, from p_b, when the estimate is trusted; for G3 the coarse translation; at the level confirmed (#437) the
+    // components of the confirmed position, which is what the composite was made with.
     const bool trusted=Trusted(c.registration);
-    if(trusted){
-        const auto components=RegistrationComponentsFromBase(c.registration.pose,base,l.envelope);
-        const bool applied=LevelAppliesEstimate(level);
+    const bool confirmed=level==GeometryLevel::confirmed;
+    if(confirmed || trusted){
+        const auto components=RegistrationComponentsFromBase(confirmed?c.level.mapping.pose:c.registration.pose,base,l.envelope);
+        const bool applied=confirmed || LevelAppliesEstimate(level);
         const std::array<std::tuple<WarningCode,WarningComponent,WarningUnit,Remedy>,4> table{{
             {WarningCode::camera_position,WarningComponent::camera_position,WarningUnit::mm,Remedy::check_camera_mount},
             {WarningCode::camera_rotation,WarningComponent::camera_rotation,WarningUnit::deg,Remedy::check_camera_mount},
@@ -807,8 +966,20 @@ std::vector<RegistrationWarning> DeriveRegistrationWarnings(const CaptureRegistr
         if(position>l.envelope.position_mm){auto w=Make(WarningCode::camera_position,WarningClass::exceeded,WarningComponent::camera_position,position,l.envelope.position_mm,WarningUnit::mm,Remedy::check_camera_mount);
             w.applied=true;out.push_back(std::move(w));}
     }
-    // The paper surface (layer 1).
-    if(c.surface.state==SurfaceState::estimated && l.surface_envelope && (trusted || LevelAppliesEstimate(level))){
+    // The paper surface (layer 1). At the level confirmed it is the confirmed position's surface.
+    if(confirmed){
+        if(l.surface_envelope){
+            const auto& plane=c.level.mapping.surface;
+            if(std::abs(plane.h0_mm)>l.surface_envelope->height_mm){
+                auto w=Make(WarningCode::surface_height,WarningClass::exceeded,WarningComponent::surface_height,plane.h0_mm,l.surface_envelope->height_mm,WarningUnit::mm,Remedy::place_drawing_again);
+                w.interpretations={"surface-raised","camera-moved-along-baseline"};w.applied=true;out.push_back(std::move(w));
+            }
+            if(SurfaceTiltDegOf(plane)>l.surface_envelope->tilt_deg){
+                auto w=Make(WarningCode::surface_tilt,WarningClass::exceeded,WarningComponent::surface_tilt,SurfaceTiltDegOf(plane),l.surface_envelope->tilt_deg,WarningUnit::deg,Remedy::place_drawing_again);
+                w.applied=true;out.push_back(std::move(w));
+            }
+        }
+    }else if(c.surface.state==SurfaceState::estimated && l.surface_envelope && (trusted || LevelAppliesEstimate(level))){
         const double height=std::abs(c.surface.plane.h0_mm);
         if(height>l.surface_envelope->height_mm){
             auto w=Make(WarningCode::surface_height,WarningClass::exceeded,WarningComponent::surface_height,c.surface.plane.h0_mm,l.surface_envelope->height_mm,WarningUnit::mm,Remedy::place_drawing_again);
@@ -904,6 +1075,28 @@ std::vector<RegistrationWarning> DeriveRegistrationWarnings(const CaptureRegistr
         if(HasText(p.reasons,kLayerTwoFailed))w.interpretations.emplace_back(kLayerTwoFailed);
         out.push_back(std::move(w));
     }
+    // #437 (report v9): a composite made with the confirmed position says whose position it is; and when the estimate on the originals was
+    // trusted but beyond a range (so it was not applied), that the camera may have moved, which the position's own components do not say. That
+    // one is unverified, not a notice: the picture shows the position that the live view decided while the photographs say the setup moved, so
+    // the assessment is not "within criteria" however the gate came out.
+    if(confirmed && c.confirmed_position){
+        auto w=Make(c.confirmed_position->source==ConfirmedPositionSource::manual?WarningCode::position_by_hand:WarningCode::position_from_live,WarningClass::notice,
+            WarningComponent::confirmed_position,0,std::nullopt,WarningUnit::rows,Remedy::none);
+        w.applied=true;out.push_back(std::move(w));
+    }
+    const bool estimate_surface_beyond=c.surface.state==SurfaceState::estimated && (c.surface.exceeded.height || c.surface.exceeded.tilt);
+    if(confirmed && trusted && (AnyExceeded(c.registration.components) || estimate_surface_beyond)){
+        auto w=Make(WarningCode::estimate_beyond_envelope,WarningClass::unverified,WarningComponent::confirmed_position,0,std::nullopt,WarningUnit::rows,Remedy::check_camera_mount);
+        for(const auto& k:c.registration.components){
+            if(!k.exceeded)continue;
+            const auto name=k.component==cr::EnvelopeComponent::position?WarningCode::camera_position:k.component==cr::EnvelopeComponent::rotation?WarningCode::camera_rotation:
+                k.component==cr::EnvelopeComponent::tilt?WarningCode::camera_tilt:WarningCode::camera_height;
+            w.interpretations.emplace_back(WarningCodeText(name));
+        }
+        if(estimate_surface_beyond && c.surface.exceeded.height)w.interpretations.emplace_back(WarningCodeText(WarningCode::surface_height));
+        if(estimate_surface_beyond && c.surface.exceeded.tilt)w.interpretations.emplace_back(WarningCodeText(WarningCode::surface_tilt));
+        out.push_back(std::move(w));
+    }
     const auto timed_out=[](const SkippedStage& s){return s.stage!=ReviewStage::gate && s.reason==kTimeBudgetReason;};
     if(std::any_of(c.time_budget.skipped.begin(),c.time_budget.skipped.end(),timed_out)){
         auto w=Make(WarningCode::time_budget,WarningClass::notice,WarningComponent::time_budget,0,std::nullopt,WarningUnit::rows,Remedy::none);
@@ -987,7 +1180,7 @@ static void DeriveRecordFields(SavedFixedCompositeRegistration& r){
     else c.surface.exceeded={};
     c.surface.applied=LevelAppliesEstimate(c.level.level) && c.surface.state==SurfaceState::estimated;
     c.level.applied=AppliedOfLevel(c.level.level,c.level.mapping);
-    c.level.beyond_envelope_applied=BeyondApplied(c,r.limits);
+    c.level.beyond_envelope_applied=BeyondApplied(c,r.limits,r.base_pose);
     r.warnings=DeriveRegistrationWarnings(c,r.limits,r.base_pose,r.raster);
     r.assessment=DeriveRegistrationAssessment(r.warnings,c.gate.state);
 }
@@ -1012,15 +1205,19 @@ std::string RegistrationAssessmentJson(const RegistrationAssessment& a){
     const auto codes=[](const std::vector<WarningCode>& v){std::string s="[";for(std::size_t i=0;i<v.size();++i)s+=(i?",":"")+Text(WarningCodeText(v[i]));return s+"]";};
     return "{\"state\":"+Text(AssessmentStateText(a.state))+",\"exceeded\":"+codes(a.exceeded)+",\"unverified\":"+codes(a.unverified)+",\"qualityAccepted\":false,\"acceptanceEvidence\":false}";
 }
-std::string FixedCompositeRegistrationJson(const SavedFixedCompositeRegistration& r){
+std::string FixedCompositeRegistrationJson(const SavedFixedCompositeRegistration& r,RegistrationReportFormat format){
     // The writer refuses a record whose derived fields are not their derivation: what it writes, the reader accepts.
-    const auto text=RecordJsonUnchecked(r);
-    const auto check=[&](bool ok,const char* what){if(!ok)throw std::logic_error(std::string("report v8 record is not consistent: ")+what);};
+    const auto text=RecordJsonUnchecked(r,format);
+    const auto check=[&](bool ok,const char* what){if(!ok)throw std::logic_error(std::string(format==RegistrationReportFormat::v9?"report v9":"report v8")+" record is not consistent: "+what);};
+    // v8 has no place for a confirmed position, its check or the level confirmed (and no warning of v9 follows without them).
+    if(format==RegistrationReportFormat::v8)
+        check(!r.registration.confirmed_position && !r.registration.confirmed_check && r.registration.level.level!=GeometryLevel::confirmed,"the record is v9's");
     check(*PointSourceFault(r.registration)==0,PointSourceFault(r.registration));
+    check(*ConfirmedFault(r)==0,ConfirmedFault(r));
     check(LowerHex64(r.registration.geometry_hash) && r.registration.gate.geometry_hash==r.registration.geometry_hash,"geometry hash");
     auto derived=r;
     try{DeriveRecordFields(derived);}catch(const std::exception& error){throw std::logic_error(std::string("report v8 record cannot be derived: ")+error.what());}
-    check(RecordJsonUnchecked(derived)==text,"derived fields");
+    check(RecordJsonUnchecked(derived,format)==text,"derived fields");
     check(RegistrationWarningsJson(derived.warnings)==RegistrationWarningsJson(r.warnings),"warnings");
     check(RegistrationAssessmentJson(derived.assessment)==RegistrationAssessmentJson(r.assessment),"assessment");
     return text;
@@ -1031,6 +1228,14 @@ GeometryLevelDecision SelectGeometryLevel(const GeometryLevelInput& in){
     if(!in.registration || !in.surface || !in.lines || !in.cover_check || !in.lines->apply_beyond_envelope)
         throw std::invalid_argument("geometry level needs the estimate, the surface, the lines with applyBeyondEnvelope and the cheap check");
     const auto& l=*in.lines;const bool apply=*l.apply_beyond_envelope;const auto& e=*in.registration;
+    // A confirmed position that is not the condition's own changes the candidates (ADR-0046); the condition's own keeps them as they were.
+    const ConfirmedPosition* position=in.confirmed_position;
+    if(position){
+        ValidateConfirmedPosition(*position);
+        if(const char* fault=PositionRangeFault(*position,in.base_pose,l);*fault)throw std::invalid_argument(std::string("confirmed position: ")+fault);
+    }
+    const bool position_row=position && !IsConditionPosition(*position,in.base_pose);
+    const bool by_hand=position_row && position->source==ConfirmedPositionSource::manual;
     std::vector<std::pair<GeometryLevel,RegisteredMapping>> candidates;
     bool estimate_beyond=false,layer_two_beyond=false;
     if(Trusted(e)){
@@ -1047,20 +1252,36 @@ GeometryLevelDecision SelectGeometryLevel(const GeometryLevelInput& in){
             }
             candidates.push_back({GeometryLevel::g2,RegisteredMapping{e.pose,plane,std::nullopt}});
         }
-    }else if(in.coarse_shift && (!ShiftBeyond(*in.coarse_shift,l) || apply)){
+    }else if(in.coarse_shift && !position_row && (!ShiftBeyond(*in.coarse_shift,l) || apply)){
         auto pose=in.base_pose;pose.tx_mm+=in.coarse_shift->translation_x_mm;pose.ty_mm+=in.coarse_shift->translation_y_mm;
         candidates.push_back({GeometryLevel::g3,RegisteredMapping{pose,SurfacePlane{l.surface_envelope?in.coarse_shift->surface_height_mm:0.0,0,0},std::nullopt}});
     }
-    candidates.push_back({GeometryLevel::g4,RegisteredMapping{in.base_pose,{},std::nullopt}});
     GeometryLevelDecision d;
-    for(auto& [level,mapping]:candidates){
+    const auto cover_of=[&](const RegisteredMapping& mapping){
         MappingCoverCheck check{};
         try{check=in.cover_check(mapping);}catch(const std::invalid_argument&){check={false,false};}
+        return check;
+    };
+    const auto hit_of=[](const RegisteredMapping& m){return RegisteredMapping{m.pose,m.surface,std::nullopt};};
+    if(by_hand){
+        // A position set by hand is the composite's position whatever the estimate says: G1 and G2 are only checked, to say whether the estimate
+        // on the originals was usable (estimate_hit). They are never the level, and their reasons are not the level's.
+        for(auto& [level,mapping]:candidates){
+            const auto check=cover_of(mapping);
+            if(check.seam_covered && check.output_covered){d.estimate_hit=hit_of(mapping);break;}
+        }
+        candidates.clear();
+    }
+    if(position_row)candidates.push_back({GeometryLevel::confirmed,ConfirmedMappingOf(*position)});
+    candidates.push_back({GeometryLevel::g4,RegisteredMapping{in.base_pose,{},std::nullopt}});
+    for(auto& [level,mapping]:candidates){
+        const auto check=cover_of(mapping);
         if(check.seam_covered && check.output_covered){
             d.level=level;d.mapping=std::move(mapping);
             d.applied=AppliedOfLevel(d.level,d.mapping);
             d.beyond_envelope_applied=level==GeometryLevel::g1?(estimate_beyond || layer_two_beyond):level==GeometryLevel::g2?estimate_beyond:
-                level==GeometryLevel::g3?ShiftBeyond(*in.coarse_shift,l):false;
+                level==GeometryLevel::g3?ShiftBeyond(*in.coarse_shift,l):level==GeometryLevel::confirmed?PositionBeyond(d.mapping,in.base_pose,l):false;
+            if(level==GeometryLevel::g1 || level==GeometryLevel::g2)d.estimate_hit=hit_of(d.mapping);
             return d;
         }
         if(level==GeometryLevel::g4)throw GeometryLevelUnavailable(check.seam_covered,check.seam_covered?"the condition's mapping leaves an output pixel uncovered":
@@ -1297,6 +1518,14 @@ PreparedCaptureRegistration PrepareCaptureRegistration(const CaptureRegistration
     if(!r.camera_a || !r.camera_b || !r.parameters || !r.cover_check || !r.lines.apply_beyond_envelope || r.thread_count<1 || r.thread_count>256)
         throw std::invalid_argument("capture registration needs both images, the parameters, the cheap check, applyBeyondEnvelope and 1..256 threads");
     if(r.estimator.geometry.mixing_width_px!=r.blend.width_pixels)throw std::invalid_argument("the mixing width is not the blend's");
+    if(r.confirmed_position){
+        // A position a report cannot carry, or one of this condition that its ranges do not allow: refused before anything is drawn (and so
+        // before a JPEG is written that no report could describe).
+        ValidateConfirmedPosition(*r.confirmed_position);
+        if(!r.condition_sha256.empty() && r.confirmed_position->condition_sha256==r.condition_sha256){
+            if(const char* fault=PositionRangeFault(*r.confirmed_position,r.base_pose,r.lines);*fault)throw std::invalid_argument(std::string("confirmed position: ")+fault);
+        }
+    }
     if(!std::isfinite(r.design.estimator_stop_margin_ms) || r.design.estimator_stop_margin_ms<0)
         throw std::invalid_argument("the estimator's stop margin is not finite and non-negative");
     if(r.design.verify_period_rows && r.design.verify_phase>=r.design.verify_period_rows)
@@ -1390,7 +1619,26 @@ PreparedCaptureRegistration PrepareCaptureRegistration(const CaptureRegistration
     GeometryLevelInput level;
     level.registration=&c.registration;level.surface=&c.surface;level.parallax=c.parallax.Applied()?&c.parallax:nullptr;level.coarse_shift=c.coarse_shift;
     level.base_pose=r.base_pose;level.lines=&r.lines;level.seam_column=r.estimator.geometry.seam_column;level.cover_check=r.cover_check;
+    // #437: a position given for this condition takes part in the level; one of another condition is recorded and not used. It is not an input
+    // of anything above (the estimate, layer 2): p_b stays the start, the prior and the base of the ranges.
+    const bool position_belongs=r.confirmed_position && !r.condition_sha256.empty() && r.confirmed_position->condition_sha256==r.condition_sha256;
+    if(position_belongs)level.confirmed_position=&*r.confirmed_position;
     c.level=SelectGeometryLevel(level);
+    if(r.confirmed_position){
+        c.confirmed_position=r.confirmed_position;
+        ConfirmedPositionCheck check;check.used=c.level.level==GeometryLevel::confirmed;
+        // How far the position is from the estimate on the originals, along the seam, when that estimate was usable.
+        if(position_belongs && c.level.estimate_hit){
+            try{
+                const cr::PoseModel model_b(r.parameters->camera_b);
+                const auto centre_a=cr::PoseModel(r.parameters->camera_a).Centre({});
+                const auto& raster=r.parameters->raster;
+                check.seam_difference_px=SeamDifferencePx(model_b,centre_a,cr::SurfaceOriginMm(raster,r.estimator.geometry.seam_column),cr::FrameOfRaster(raster),
+                    *c.level.estimate_hit,ConfirmedMappingOf(*r.confirmed_position),r.estimator.geometry.seam_column,raster.height_pixels);
+            }catch(const std::invalid_argument&){check.seam_difference_px.reset();}
+        }
+        c.confirmed_check=check;
+    }
     // The band measured with M0 is the band of the chosen mapping only when the level placed B by the estimate.
     if(c.level.level!=GeometryLevel::g1 && c.level.level!=GeometryLevel::g2){out.band.reset();out.layout_before_layer_two.reset();}
     // 5 The composite, with the pair the gate will measure.
@@ -1457,7 +1705,7 @@ static void MeasureGateStages(const CaptureRegistrationRequest& r,PreparedCaptur
         return;
     }
     auto g=GateRequestOf(r,prepared,prepared.mapped,c.level.mapping);
-    g.wide_search=wide && (c.level.level==GeometryLevel::g3 || c.level.level==GeometryLevel::g4);
+    g.wide_search=wide && (c.level.level==GeometryLevel::g3 || c.level.level==GeometryLevel::g4 || c.level.level==GeometryLevel::confirmed);
     // 11.30: B placed by a trusted estimate whose own wide check contradicted nothing verifies the placement when the anchors do not.
     if(LevelAppliesEstimate(c.level.level) && Trusted(c.registration) && c.registration.diagnostics.global_contradicted==0)
         g.placement_by_estimate=rg::PlacementByEstimate{c.registration.diagnostics.unique_blocks,c.registration.diagnostics.consistent_blocks};
@@ -1513,12 +1761,20 @@ void MeasureCaptureRegistrationGate(const CaptureRegistrationRequest& r,Prepared
 
 SavedFixedCompositeRegistration ReadFixedCompositeRegistrationReport(std::string_view text,const FixedCompositeSha256& hash){
     if(!hash)throw std::invalid_argument("report v8 reader needs a SHA-256 provider");
+    // The refusals name the version of the text being read; the name is put back whatever happens.
+    struct ReportName {const char* before;~ReportName(){g_report_name=before;}} restore{g_report_name};
+    g_report_name="report v8: ";
     const auto root=ParseText(text);
     if(root.kind!=json::JsonKind::object)Reject("root");
+    const auto schema=ReadText(At(root,"schema"));
+    RegistrationReportFormat format{};
+    if(schema=="a0.uncalibrated-still-review.v8")format=RegistrationReportFormat::v8;
+    else if(schema=="a0.uncalibrated-still-review.v9"){format=RegistrationReportFormat::v9;g_report_name="report v9: ";}
+    else Reject("schema");
     const auto& fcr=At(root,"fixedCompositeRegistration");const auto& warnings=At(root,"warnings");const auto& assessment=At(root,"assessment");
-    auto r=ReadRecord(fcr);
-    for(const auto& w:ReadArray(warnings))r.warnings.push_back(ReadWarning(w));
-    r.assessment=ReadAssessment(assessment);
+    auto r=ReadRecord(fcr,format);
+    for(const auto& w:ReadArray(warnings))r.warnings.push_back(ReadWarning(w,format));
+    r.assessment=ReadAssessment(assessment,format);
     // The level's mapping is the one its estimates give (11.18).
     const auto& c=r.registration;const auto& m=c.level.mapping;
     switch(c.level.level){
@@ -1543,21 +1799,27 @@ SavedFixedCompositeRegistration ReadFixedCompositeRegistrationReport(std::string
     case GeometryLevel::g4:
         if(!SamePose(m.pose,r.base_pose) || !m.surface.IsZero() || m.parallax)Reject("level G4 mapping");
         break;
+    case GeometryLevel::confirmed:
+        // The mapping is the confirmed position itself: its pose and surface bit for bit, no layer 2 (the reader of v8 has no such level).
+        if(!c.confirmed_position || !SamePose(m.pose,c.confirmed_position->mapping.pose) || !SamePlane(m.surface,c.confirmed_position->mapping.surface) || m.parallax)
+            Reject("level confirmed mapping");
+        break;
     }
+    if(*ConfirmedFault(r))Reject(ConfirmedFault(r));
     if(r.layout.seam_column!=r.seam_column)Reject("layout");
     // Every derived field is its derivation, and the text is the one the writer writes for these values.
     auto derived=r;
     try{DeriveSavedFixedCompositeRegistration(derived,hash);}
     catch(const std::invalid_argument&){Reject("derivation");}
     catch(const std::logic_error&){Reject("assessment");}
-    if(const auto want=RecordJsonUnchecked(derived),got=RecordJsonUnchecked(r);want!=got){
+    if(const auto want=RecordJsonUnchecked(derived,format),got=RecordJsonUnchecked(r,format);want!=got){
         std::size_t at=0;while(at<want.size() && at<got.size() && want[at]==got[at])++at;
         const auto from=at>40?at-40:0;
-        throw std::invalid_argument("report v8: derived fields (expected ..."+want.substr(from,80)+"..., read ..."+got.substr(from,80)+"...)");
+        throw std::invalid_argument(std::string(g_report_name)+"derived fields (expected ..."+want.substr(from,80)+"..., read ..."+got.substr(from,80)+"...)");
     }
     if(RegistrationWarningsJson(derived.warnings)!=RegistrationWarningsJson(r.warnings))Reject("warnings");
     if(RegistrationAssessmentJson(derived.assessment)!=RegistrationAssessmentJson(r.assessment))Reject("assessment");
-    if(Canonical(ParseText(RecordJsonUnchecked(r)))!=Canonical(fcr) || Canonical(ParseText(RegistrationWarningsJson(r.warnings)))!=Canonical(warnings) ||
+    if(Canonical(ParseText(RecordJsonUnchecked(r,format)))!=Canonical(fcr) || Canonical(ParseText(RegistrationWarningsJson(r.warnings)))!=Canonical(warnings) ||
         Canonical(ParseText(RegistrationAssessmentJson(r.assessment)))!=Canonical(assessment))Reject("text");
     return r;
 }

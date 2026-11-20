@@ -18,6 +18,13 @@
 namespace a0::m2::experimental {
 namespace {
 using render::BgrImage;
+// The size of a camera's frame: all that the coverage test of a mapped pair reads of a frame (it never reads a pixel). A frame stands for
+// its size, so the functions that take frames pass them as they are.
+struct ImageSize {
+    unsigned width{},height{};
+    ImageSize(unsigned w,unsigned h):width(w),height(h){}
+    ImageSize(const BgrImage& image):width(image.width),height(image.height){}
+};
 double Luminance(const std::array<double,3>& p){return p[0]*0.114+p[1]*0.587+p[2]*0.299;}
 // The blend reads each camera through a mapping from the output pixel (x,y) to a
 // raw position of that camera, sampled bilinearly (coverage [0,w)x[0,h)). A
@@ -66,15 +73,21 @@ struct FunctionMap {
     }
 };
 using MappedFrame=Frame<FunctionMap,FunctionMap>;
-MappedFrame PrepareMapped(const BgrImage& a,const BgrImage& b,const MappedFixedSeamInput& in){
+// The frame of a mapped pair from the input alone: the output's size and both mappings are checked.
+MappedFrame MappedFrameOf(const MappedFixedSeamInput& in){
     (void)render::PixelCount(in.width,in.height);
     if(!in.camera_a || !in.camera_b)throw std::invalid_argument("seam blend needs both output-to-camera mappings");
-    if(a.bgr.size()!=render::PixelCount(a.width,a.height)*3 || b.bgr.size()!=render::PixelCount(b.width,b.height)*3)
-        throw std::invalid_argument("seam blend buffer size does not match its dimensions");
     return {in.width,in.height,FunctionMap{&in.camera_a},FunctionMap{&in.camera_b}};
 }
+// ... and the two frames' buffers against their sizes.
+MappedFrame PrepareMapped(const BgrImage& a,const BgrImage& b,const MappedFixedSeamInput& in){
+    auto frame=MappedFrameOf(in);
+    if(a.bgr.size()!=render::PixelCount(a.width,a.height)*3 || b.bgr.size()!=render::PixelCount(b.width,b.height)*3)
+        throw std::invalid_argument("seam blend buffer size does not match its dimensions");
+    return frame;
+}
 void RequireThreadCount(unsigned threads){
-    if(threads<1 || threads>256)throw std::invalid_argument("seam blend: thread count must be 1..256");
+    if(threads<1 || threads>kSeamBlendMaxThreads)throw std::invalid_argument("seam blend: thread count must be 1..256");
 }
 // body(y) for every row y in [0,rows), on up to `threads` workers that take the rows in increasing order.
 // The rows must not depend on one another: each writes only its own row of the outputs. A row that throws
@@ -149,15 +162,15 @@ Band SampleBand(const BgrImage& a,const BgrImage& b,const Prepared& prepared,uns
     return SampleBandColumns(a,b,prepared.frame,static_cast<unsigned>(first),static_cast<unsigned>(last-first),false,threads);
 }
 // Both cameras have a sample at the output pixel (the coverage test of render::SampleBilinear).
-bool InsideImage(const BgrImage& image,const render::Point& raw){return raw.x>=0.0 && raw.y>=0.0 && raw.x<double(image.width) && raw.y<double(image.height);}
-bool BothCover(const MappedFrame& f,const BgrImage& a,const BgrImage& b,unsigned x,unsigned y){
+bool InsideImage(const ImageSize& image,const render::Point& raw){return raw.x>=0.0 && raw.y>=0.0 && raw.x<double(image.width) && raw.y<double(image.height);}
+bool BothCover(const MappedFrame& f,const ImageSize& a,const ImageSize& b,unsigned x,unsigned y){
     render::Point pa{},pb{};
     return f.map_a(x,y,pa) && InsideImage(a,pa) && f.map_b(x,y,pb) && InsideImage(b,pb);
 }
 // Per output row, the run [first,end) of columns covered by both cameras that
 // contains the first covered column found on a coarse scan (every 8th column,
 // then every column for a row the coarse scan misses), walked to both ends.
-std::vector<MappedOverlapRow> OverlapRows(const MappedFrame& f,const BgrImage& a,const BgrImage& b,unsigned threads){
+std::vector<MappedOverlapRow> OverlapRows(const MappedFrame& f,const ImageSize& a,const ImageSize& b,unsigned threads){
     std::vector<MappedOverlapRow> rows(f.height);
     ForEachRow(f.height,threads,[&](unsigned y){
         long long seed=-1;
@@ -515,8 +528,8 @@ void RequireSeamInOverlap(const Band& band,std::uint32_t column,unsigned blend_w
 // construction and were evaluated by the walk. Every cell of the band that the sampled form evaluates is evaluated here, in the
 // same order within a row, so a mapping that fails (non-finite) fails on the same row; the row's own "not one run" is raised after
 // its scan, as the sampled form does. Costs the mapping evaluations of the band once (no bilinear sample, no logarithm, no band
-// buffer: the sampled band is 2 floats and 2 unsigned per cell).
-bool MappedSeamInOverlap(const MappedFrame& f,const BgrImage& a,const BgrImage& b,std::uint32_t column,unsigned blend_width,unsigned threads){
+// buffer: the sampled band is 2 floats and 2 unsigned per cell). Of the frames it reads the sizes only.
+bool MappedSeamInOverlap(const MappedFrame& f,const ImageSize& a,const ImageSize& b,std::uint32_t column,unsigned blend_width,unsigned threads){
     const auto rows=OverlapRows(f,a,b,threads);unsigned first=f.width,end=0;
     for(const auto& r:rows){first=std::min(first,r.first);end=std::max(end,r.end);}
     first=first?first-1:0;end=std::min(f.width,end+1);
@@ -624,9 +637,18 @@ SeamBlendResult RenderMappedFixedSeam(const BgrImage& a,const BgrImage& b,const 
     return RenderMappedFixedSeam(a,b,input,seam_column,settings,color,1);
 }
 
+bool CanRenderMappedFixedSeamBySize(std::uint32_t camera_a_width,std::uint32_t camera_a_height,std::uint32_t camera_b_width,std::uint32_t camera_b_height,
+    const MappedFixedSeamInput& input,std::uint32_t seam_column,const SeamBlendSettings& settings,unsigned thread_count){
+    ValidateSeamBlendSettings(settings);RequireThreadCount(thread_count);
+    const auto frame=MappedFrameOf(input);
+    (void)render::PixelCount(camera_a_width,camera_a_height);(void)render::PixelCount(camera_b_width,camera_b_height);
+    return MappedSeamInOverlap(frame,ImageSize{camera_a_width,camera_a_height},ImageSize{camera_b_width,camera_b_height},seam_column,settings.width_pixels,thread_count);
+}
+
 bool CanRenderMappedFixedSeam(const BgrImage& a,const BgrImage& b,const MappedFixedSeamInput& input,std::uint32_t seam_column,const SeamBlendSettings& settings,unsigned thread_count){
     ValidateSeamBlendSettings(settings);RequireThreadCount(thread_count);
-    return MappedSeamInOverlap(PrepareMapped(a,b,input),a,b,seam_column,settings.width_pixels,thread_count);
+    (void)PrepareMapped(a,b,input);   // the buffers against their sizes; the coverage reads the sizes only
+    return CanRenderMappedFixedSeamBySize(a.width,a.height,b.width,b.height,input,seam_column,settings,thread_count);
 }
 
 bool CanRenderMappedFixedSeam(const BgrImage& a,const BgrImage& b,const MappedFixedSeamInput& input,std::uint32_t seam_column,const SeamBlendSettings& settings){

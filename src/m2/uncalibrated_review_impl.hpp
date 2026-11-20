@@ -37,38 +37,24 @@ bool LensEstimatorPrior(const FixedCompositeProfileBinding& profile,MountOrienta
         return x>0 && x<static_cast<int>(width) && std::abs(y)<static_cast<int>(height);
     }catch(const std::invalid_argument&){return false;}
 }
-// #417: CheckRegisteredMappingCover (fixed_composite_creation_v3.cpp) for a capture whose decoded frames have the profile's
-// camera size, with the overlap scan of the seam check on `threads` threads. The seam check reads only the frames' sizes, so the
-// captured frames stand for the blank frame CheckRegisteredMappingCover allocates; the outer edge is counted the same way (A first,
-// then B, the same samples in the same order, the same exception for a position that is not finite). The result equals
-// CheckRegisteredMappingCover's; for frames of another size it is CheckRegisteredMappingCover itself.
+// #417, #437: the cheap check of a capture's candidate mapping is CheckRegisteredMappingCover (fixed_composite_creation_v3.cpp) itself, on
+// the review's threads: the one check that a hand step and an estimate of the live view are given too, so a position that passed it there
+// passes it here. It reads the D810 frame's size only, never the captured frames.
 MappingCoverCheck RegisteredMappingCoverOnThreads(const render::DocumentRenderParameters& parameters,const RegisteredMapping& mapping,
-    std::uint32_t seam_column,const SeamBlendSettings& blend,const Image& a,const Image& b,unsigned threads){
-    const auto sized=[](const Image& f){return f.width==kD810SensorWidthPixels && f.height==kD810SensorHeightPixels && f.bgr.size()==render::PixelCount(f.width,f.height)*3;};
-    if(!sized(a) || !sized(b)){const auto cover=CheckRegisteredMappingCover(parameters,mapping,seam_column,blend);return {cover.seam_covered,cover.output_covered};}
-    const auto input=RegisteredDocumentMappedFixedSeamInput(parameters,mapping,seam_column);
-    MappingCoverCheck cover;
-    try{cover.seam_covered=CanRenderMappedFixedSeam(a,b,input,seam_column,blend,threads);}
-    catch(const std::invalid_argument&){cover.seam_covered=false;}
-    const auto covered=[](const render::OutputToCamera& map,double x,double y){
-        render::Point raw{};
-        if(!map({x,y},raw))return false;
-        if(!std::isfinite(raw.x) || !std::isfinite(raw.y))throw std::invalid_argument("output-to-camera mapping returned nonfinite camera coordinates");
-        return raw.x>=0.0 && raw.y>=0.0 && raw.x<static_cast<double>(kD810SensorWidthPixels) && raw.y<static_cast<double>(kD810SensorHeightPixels);
-    };
-    const auto uncovered=[&](std::uint32_t x,std::uint32_t y){
-        return !covered(input.camera_a,static_cast<double>(x),static_cast<double>(y)) && !covered(input.camera_b,static_cast<double>(x),static_cast<double>(y));
-    };
-    std::uint32_t count=0;const std::uint32_t w=input.width,h=input.height;
-    for(std::uint32_t x=0;x<w;++x){if(uncovered(x,0))++count;if(h>1 && uncovered(x,h-1))++count;}
-    for(std::uint32_t y=1;y+1<h;++y){if(uncovered(0,y))++count;if(w>1 && uncovered(w-1,y))++count;}
-    cover.output_covered=count==0;
-    return cover;
+    std::uint32_t seam_column,const SeamBlendSettings& blend,unsigned threads){
+    const auto cover=CheckRegisteredMappingCover(parameters,mapping,seam_column,blend,threads);
+    return {cover.seam_covered,cover.output_covered};
 }
 bool SameLensRaster(const render::OutputRaster& a,const render::OutputRaster& b){
     return a.region_um.left==b.region_um.left && a.region_um.top==b.region_um.top && a.region_um.right==b.region_um.right && a.region_um.bottom==b.region_um.bottom &&
         a.dpi==b.dpi && a.width_pixels==b.width_pixels && a.height_pixels==b.height_pixels;
 }
+}
+// RegisteredMappingCoverOnThreads, exported (declared in still_review.hpp) so that a test can hold the capture's check against the others: a hand
+// step of the confirmed position is checked before the capture makes this one, so the two have to answer alike (#437). The frames are not read.
+MappingCoverCheck RegisteredMappingCoverOfCapturedFrames(const render::DocumentRenderParameters& parameters,const RegisteredMapping& mapping,
+    std::uint32_t seam_column,const SeamBlendSettings& blend,const render::BgrImage&,const render::BgrImage&,unsigned threads){
+    return RegisteredMappingCoverOnThreads(parameters,mapping,seam_column,blend,threads);
 }
 #include "still_review_report_impl.hpp"
 StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
@@ -110,9 +96,12 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
     if(r.fixed_composite_registration){
         const auto& g=*r.fixed_composite_registration;
         if(r.fixed_composite || r.fixed_composite_lens || r.manual_revision || r.automatic_alignment || r.blend!=BlendMethod::linear_feather || !g.condition || !g.profile ||
-            !hash_valid(g.condition_sha256) || g.thread_count>256)
+            !hash_valid(g.condition_sha256))
             throw std::invalid_argument("registered fixed composite review is exclusive and needs the condition, its profile and the condition hash");
+        if(g.thread_count>kSeamBlendMaxThreads)throw std::invalid_argument("registered fixed composite review: thread count must be 0 (one per hardware thread) or 1..256");
         reg_condition=g.condition;reg_profile=g.profile;
+        // A position the report cannot carry is refused before anything is created.
+        if(g.confirmed_position)ValidateConfirmedPosition(*g.confirmed_position);
         // A capture draws with the condition, so a base pose outside the envelope is refused here whatever the revision's kind.
         try{ValidateFixedCompositeConditionV3(*reg_condition);RequireFixedCompositeBasePoseInEnvelopeV3(*reg_condition);}
         catch(const FixedCompositePoseOutsideEnvelope& error){throw FixedCompositeUnavailable(FixedCompositeSkip::pose_outside_envelope,error.what());}
@@ -124,7 +113,7 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
     // The threads of the mapped composites (and of the registered composite's estimate, layer 2 and gate): the request's count for
     // the registered composite when it names one, otherwise one per hardware thread. The images and records do not depend on it.
     const unsigned review_threads=r.fixed_composite_registration && r.fixed_composite_registration->thread_count?r.fixed_composite_registration->thread_count:
-        std::clamp(std::thread::hardware_concurrency(),1u,256u);
+        std::clamp(std::thread::hardware_concurrency(),1u,kSeamBlendMaxThreads);
     ValidateCanonicalPath(r.camera_a_original,"CAM-A");ValidateCanonicalPath(r.camera_b_original,"CAM-B");
     const auto a_path=NormalizedAbsolute(r.camera_a_original),b_path=NormalizedAbsolute(r.camera_b_original),job=NormalizedAbsolute(r.output_directory);
     if(a_path.parent_path().filename()!=L"CAM-A" || b_path.parent_path().filename()!=L"CAM-B")throw std::invalid_argument("review A/B original paths are not alias-bound");
@@ -217,15 +206,17 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
         q.lines.seam_limit_px=c.seam_gate.limit_px;q.lines.seam_guard_band_px=c.seam_gate.guard_band_px;
         q.blend=kSeamBlendDesign;q.design=CaptureRegistrationDesignDraft();
         // The cheap check of each candidate (addendum 11.23.4) from the condition library: the seam with half the blend inside
-        // both covers on every row and the output's outer edge covered, from the mapping alone (no pixel is read; the composite
-        // takes its band once, inside RenderMappedFixedSeam).
-        // CheckRegisteredMappingCover's answer, with the captured frames and the review's threads (RegisteredMappingCoverOnThreads).
+        // both covers on every row and the output's outer edge covered, from the mapping and the D810 frame's size alone (no
+        // pixel is read; the composite takes its band once, inside RenderMappedFixedSeam). It is CheckRegisteredMappingCover on
+        // the review's threads, the check a hand step and an estimate of the live view are given (RegisteredMappingCoverOnThreads).
         const auto* profile_parameters=&reg_profile->parameters;const auto seam=c.seam.column;
-        q.cover_check=[profile_parameters,seam,frame_a=&a.image,frame_b=&b.image,review_threads](const RegisteredMapping& m){
-            return RegisteredMappingCoverOnThreads(*profile_parameters,m,seam,kSeamBlendDesign,*frame_a,*frame_b,review_threads);
+        q.cover_check=[profile_parameters,seam,review_threads](const RegisteredMapping& m){
+            return RegisteredMappingCoverOnThreads(*profile_parameters,m,seam,kSeamBlendDesign,review_threads);
         };
         q.remaining_ms=[deadline=r.deadline]{return std::chrono::duration<double,std::milli>(deadline-std::chrono::steady_clock::now()).count();};
         q.thread_count=review_threads;
+        // #437: the window's confirmed position and the condition it is compared with. The estimate does not see them (p_b stays its start).
+        q.confirmed_position=r.fixed_composite_registration->confirmed_position;q.condition_sha256=r.fixed_composite_registration->condition_sha256;
         const auto started=std::chrono::steady_clock::now();
         // Nothing is created before this point, so a refusal here leaves only the originals.
         try{reg_prepared=PrepareCaptureRegistration(q);}
@@ -398,7 +389,7 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
     std::ostringstream report;
     report.imbue(std::locale::classic());report<<std::setprecision(17);
     const bool similarity=r.manual_revision && (r.manual_revision->rotation_degrees!=0 || r.manual_revision->scale!=1);
-    const char* schema=reg_record?"a0.uncalibrated-still-review.v8":lens_record?"a0.uncalibrated-still-review.v7":fixed_record?"a0.uncalibrated-still-review.v6":automatic?"a0.uncalibrated-still-review.v5":similarity?"a0.uncalibrated-still-review.v3":r.manual_revision?"a0.uncalibrated-still-review.v2":"a0.uncalibrated-still-review.v1";
+    const char* schema=reg_record?"a0.uncalibrated-still-review.v9":lens_record?"a0.uncalibrated-still-review.v7":fixed_record?"a0.uncalibrated-still-review.v6":automatic?"a0.uncalibrated-still-review.v5":similarity?"a0.uncalibrated-still-review.v3":r.manual_revision?"a0.uncalibrated-still-review.v2":"a0.uncalibrated-still-review.v1";
     report<<"{\"schema\":\""<<schema<<"\",\"pairId\":\""<<r.pair_id
         <<"\",\"state\":\"UncalibratedReviewReady\",\"productQualityAccepted\":false,\"physicalScaleVerified\":false,\"liveToStillFieldOfViewVerified\":false,\"automaticRetryCount\":0,\"inputs\":["
         <<"{\"alias\":\"CAM-A\",\"path\":\""<<ReviewPathJson(a_path)<<"\",\"sha256\":\""<<r.camera_a_sha256<<"\",\"bytes\":"<<a.compressed.size()<<"},"
@@ -435,7 +426,7 @@ StillReviewResult WriteUncalibratedStillReview(const StillReviewRequest& r){
         }else report<<"null";
         report<<"}";
     }
-    if(reg_record){report<<",\"geometryBasis\":\"fixed-composite-registration\",\"fixedCompositeRegistration\":"<<FixedCompositeRegistrationJson(*reg_record);WriteFixedSeamBlendJson(report,*seam);
+    if(reg_record){report<<",\"geometryBasis\":\"fixed-composite-registration\",\"fixedCompositeRegistration\":"<<FixedCompositeRegistrationJson(*reg_record,RegistrationReportFormat::v9);WriteFixedSeamBlendJson(report,*seam);
         report<<",\"warnings\":"<<RegistrationWarningsJson(reg_record->warnings)<<",\"assessment\":"<<RegistrationAssessmentJson(reg_record->assessment);}
     else if(lens_record){report<<",\"geometryBasis\":\"fixed-composite-lens\"";WriteFixedCompositeLensJson(report,*lens_record);WriteFixedSeamBlendJson(report,*seam);}
     else if(fixed_record){report<<",\"geometryBasis\":\"fixed-composite\",\"adjustment\":{\"anchor\":\"image-center\",\"rotationDegrees\":"<<fixed_condition->mapping.rotation_degrees<<",\"scale\":"<<fixed_condition->mapping.scale<<"},\"crop\":{\"left\":"<<parameters.crop.left<<",\"top\":"<<parameters.crop.top<<",\"right\":"<<parameters.crop.right<<",\"bottom\":"<<parameters.crop.bottom<<"}";

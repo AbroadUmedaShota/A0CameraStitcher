@@ -559,6 +559,71 @@ int main() {
             auto notch = input;
             notch.camera_b = [base = input.camera_b](render::Point p, render::Point& raw) { return !(p.y == 30 && p.x >= 100 && p.x < 151) && base(p, raw); };
             check(!CanRenderMappedFixedSeam(fa, fb, notch, 150, small) && CanRenderMappedFixedSeam(fa, fb, notch, 160, small), "mapped can: a row that starts right of the seam fails the seam column only");
+
+            // ---- The coverage from the frames' sizes alone (#437) ----
+            // CanRenderMappedFixedSeamBySize against CanRenderMappedFixedSeam on frames of the same sizes: the same answer, or the same exception (type
+            // and text), for every input above that can be checked, on 1, 2, 4 and 8 threads.
+            {
+                const auto outcome = [](auto call) -> std::string {
+                    try { return call() ? "true" : "false"; }
+                    catch (const std::invalid_argument& e) { return std::string("invalid_argument: ") + e.what(); }
+                    catch (const std::exception& e) { return std::string("other: ") + e.what(); }
+                };
+                struct Case { const char* name; MappedFixedSeamInput in; std::uint32_t column; SeamBlendSettings settings; };
+                std::vector<Case> cases;
+                for (const std::uint32_t column : {0u, 50u, 99u, 100u, 101u, 102u, 103u, 150u, 196u, 197u, 198u, 199u, 200u, 299u, 300u, 0xffffffffu}) cases.push_back({"a seam column", input, column, small});
+                for (const std::uint32_t column : {100u, 101u, 102u, 103u, 104u, 195u, 196u, 197u}) cases.push_back({"the design width at the rim", input, column, kSeamBlendDesign});
+                cases.push_back({"invalid settings", input, 150, {4, 8, 8, 40000}});
+                cases.push_back({"no overlap", disjoint, 150, small});
+                cases.push_back({"not one run (a hole)", holed, 150, small});
+                cases.push_back({"not one run (a sliver)", sliver, 150, small});
+                cases.push_back({"a hole on the seam", notch, 150, small});
+                cases.push_back({"a hole beside the seam", notch, 160, small});
+                cases.push_back({"not finite", not_finite, 150, small});
+                cases.push_back({"a missing mapping", no_b, 150, small});
+                cases.push_back({"an empty output", empty, 150, small});
+                cases.push_back({"an output too large", huge, 150, small});
+                cases.push_back({"an uncovered output pixel", wider, 150, small});
+                bool same = true;
+                std::size_t answers = 0, exceptions = 0;
+                for (const auto& c : cases) {
+                    const auto frames = outcome([&] { return CanRenderMappedFixedSeam(fa, fb, c.in, c.column, c.settings); });
+                    (frames.rfind("invalid_argument", 0) == 0 ? exceptions : answers) += 1;
+                    for (const unsigned threads : {1u, 2u, 4u, 8u}) {
+                        const auto by_size = outcome([&] { return CanRenderMappedFixedSeamBySize(200, 80, 200, 80, c.in, c.column, c.settings, threads); });
+                        const auto frames_on = outcome([&] { return CanRenderMappedFixedSeam(fa, fb, c.in, c.column, c.settings, threads); });
+                        if (by_size != frames || frames_on != frames) {
+                            same = false;
+                            std::cerr << "  size form differs (" << c.name << ", column " << c.column << ", " << threads << " threads): frames " << frames << "; size " << by_size << '\n';
+                        }
+                    }
+                }
+                check(same && answers > 20 && exceptions > 7, "the size form gives the frame form's answer and exception for every input, on 1, 2, 4 and 8 threads");
+                // The answers and the exceptions are the ones the inputs are made for (so that the agreement is not on one answer only).
+                const auto size_of = [&](const MappedFixedSeamInput& in, std::uint32_t column) { return outcome([&] { return CanRenderMappedFixedSeamBySize(200, 80, 200, 80, in, column, small, 1); }); };
+                check(size_of(input, 150) == "true" && size_of(input, 99) == "false" && size_of(notch, 150) == "false" && size_of(notch, 160) == "true", "size form: the columns that fit and the ones that do not");
+                check(size_of(disjoint, 150) == "invalid_argument: seam blend needs A and B on every output row", "size form: no overlap");
+                check(size_of(holed, 150) == "invalid_argument: the overlap of A and B is not one run on an output row" && size_of(sliver, 150) == size_of(holed, 150), "size form: not one run");
+                check(size_of(not_finite, 150) == "invalid_argument: output-to-camera mapping returned nonfinite camera coordinates", "size form: not finite");
+                // A camera size that is refused: the same exception from the size and from a frame of that size, for A and for B.
+                for (const auto& [aw, ah, bw, bh] : {std::array<std::uint32_t, 4>{0, 80, 200, 80}, std::array<std::uint32_t, 4>{200, 80, 200, 0}, std::array<std::uint32_t, 4>{200, 80, 2000000, 80}}) {
+                    const BgrImage ea{aw, ah, aw && ah && aw < 100000 ? fa.bgr : std::vector<std::uint8_t>{}}, eb{bw, bh, bw && bh && bw < 100000 ? fb.bgr : std::vector<std::uint8_t>{}};
+                    const auto by_size = outcome([&] { return CanRenderMappedFixedSeamBySize(aw, ah, bw, bh, input, 150, small, 1); });
+                    check(by_size == "invalid_argument: JPEG dimensions are empty or exceed the offline stitch limit" &&
+                          outcome([&] { return CanRenderMappedFixedSeam(ea, eb, input, 150, small, 1); }) == by_size, "a camera size that is refused: the same exception from both forms");
+                }
+                // A frame with no pixels: the frame form refuses its buffer, the size form needs none.
+                const BgrImage no_pixels{200, 80, {}};
+                check(outcome([&] { return CanRenderMappedFixedSeam(no_pixels, fb, input, 150, small); }) == "invalid_argument: seam blend buffer size does not match its dimensions" &&
+                      outcome([&] { return CanRenderMappedFixedSeamBySize(no_pixels.width, no_pixels.height, fb.width, fb.height, input, 150, small, 1); }) == "true",
+                      "the size form takes the sizes of a frame with no pixels");
+                // A thread count outside 1..256: refused by both forms, before anything else.
+                check(kSeamBlendMaxThreads == 256, "the thread limit");
+                for (const unsigned threads : {0u, kSeamBlendMaxThreads + 1})
+                    check(outcome([&] { return CanRenderMappedFixedSeamBySize(200, 80, 200, 80, disjoint, 150, small, threads); }) == "invalid_argument: seam blend: thread count must be 1..256" &&
+                          outcome([&] { return CanRenderMappedFixedSeam(fa, fb, disjoint, 150, small, threads); }) == "invalid_argument: seam blend: thread count must be 1..256", "a thread count outside 1..256 is refused by both forms");
+                check(outcome([&] { return CanRenderMappedFixedSeamBySize(200, 80, 200, 80, input, 150, small, kSeamBlendMaxThreads); }) == "true", "256 threads are taken");
+            }
             // Document entry: unsupported layout and kernel, projection that does not validate.
             const render::OutputRaster tiny{{0, 0, 3000, 2000}, 254, 30, 20};
             const render::CameraProjection ok{{1, 1, 0, 0}, {0, 0, 0, 0, 0}, {10, 0, 0, 0, 10, 0, 0, 0, 1}};
