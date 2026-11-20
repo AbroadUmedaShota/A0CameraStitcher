@@ -51,7 +51,7 @@ inline Rig MakeRig(double scale) {
     r.scale = scale;
     r.width = static_cast<std::uint32_t>(std::lround(7360 * scale));
     r.height = static_cast<std::uint32_t>(std::lround(4912 * scale));
-    r.f = 10250.0 * scale;
+    r.f = 10000.0 * scale;
     r.cx = r.width / 2.0; r.cy = r.height / 2.0;
     return r;
 }
@@ -125,6 +125,7 @@ struct Scene {
     Rig rig;
     Pose pose;
     double mat_deg{0}, pitch_mm{10}, offset_x{3.37}, offset_y{1.91};
+    double second_pitch_ratio{1};     // the second family's pitch over the first's: 1 is a square grid
     double background{40}, amplitude{60}, line_sigma{1.15}, thick_sigma{1.6}, thick_gain{1.5};
     int thick_every{5};
     double noise{1.5};
@@ -230,7 +231,7 @@ public:
             }
         }
         lx = (rm_[0] * hx + rm_[1] * hy) / s_.pitch_mm + s_.offset_x;
-        ly = (rm_[2] * hx + rm_[3] * hy) / s_.pitch_mm + s_.offset_y;
+        ly = (rm_[2] * hx + rm_[3] * hy) / (s_.pitch_mm * s_.second_pitch_ratio) + s_.offset_y;
         return std::isfinite(lx) && std::isfinite(ly);
     }
 
