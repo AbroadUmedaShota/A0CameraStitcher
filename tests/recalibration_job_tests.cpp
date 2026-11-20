@@ -587,6 +587,26 @@ void Decisions() {
         CHECK(Is(f, FindingClass::rejected, "sample-estimate-doubtful") && f[0].reason == "unique-blocks");
         f = one([&](auto& t) { few_anchors(t); t.gate = gate::GateState::fail; });   // a failure beside a doubt stays a failure
         CHECK(f.size() == 2 && f[1].klass == FindingClass::rejected && f[1].code == "gate-fail");
+        // too-few-points on the sample's estimate, told by the same counts: the blocks that were counted agree and the fine stage stopped on
+        // its first measurement (a shortage); more than half of the blocks disagree, or the stop came on the second measurement (a doubt).
+        const auto stopped = [](std::uint32_t u, std::uint32_t c, std::uint32_t a, std::uint32_t ca, std::uint32_t outer) {
+            return [=](auto& t) {
+                t.estimate = cr::RegistrationState::undetermined; t.estimate_reasons = {"too-few-points"};
+                t.estimate_evidence.unique_blocks = u; t.estimate_evidence.consistent_blocks = c;
+                t.estimate_evidence.anchor_blocks = a; t.estimate_evidence.consistent_anchor_blocks = ca;
+                t.estimate_evidence.rival_anchor_support = 0; t.estimate_evidence.outer_iterations = outer;
+            };
+        };
+        f = one(stopped(8, 3, 8, 3, 1));
+        CHECK(Is(f, FindingClass::rejected, "sample-estimate-doubtful") && f[0].reason == "too-few-points");
+        f = one(stopped(8, 8, 8, 8, 1));
+        CHECK(Is(f, FindingClass::unverified, "sample-estimate-undetermined") && f[0].reason == "too-few-points");
+        f = one(stopped(8, 8, 8, 8, 2));
+        CHECK(Is(f, FindingClass::rejected, "sample-estimate-doubtful") && f[0].reason == "too-few-points");
+        // The sample's counts that were never copied (EvidenceCounts as it starts): too-few-points is a doubt, so a lost copy falls to the
+        // safe side.
+        f = one([](auto& t) { t.estimate = cr::RegistrationState::undetermined; t.estimate_reasons = {"too-few-points"}; t.estimate_evidence = cr::EvidenceCounts{}; });
+        CHECK(Is(f, FindingClass::rejected, "sample-estimate-doubtful") && f[0].reason == "too-few-points");
         f = one([](auto& t) { t.composed = false; t.threw = true; });
         CHECK(f.size() == 1 && f[0].code == "sample-failed" && f[0].klass == FindingClass::rejected);
         f = one([](auto& t) { t.composed = false; t.skip = m2e::FixedCompositeSkip::seam_outside_overlap; });
