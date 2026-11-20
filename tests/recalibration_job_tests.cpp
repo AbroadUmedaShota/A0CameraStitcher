@@ -147,7 +147,7 @@ cr::PoseParameters PoseForShift(const render::CameraProjection& camera_b, double
 }
 
 // ---- The stand-in for the computation ----
-enum class Fake { ready, check_not_trusted, check_doubtful, check_failed, check_out_of_range, displacement, no_overlap, tilt, throws, throws_memory, outside_sheet };
+enum class Fake { ready, check_not_trusted, check_doubtful, check_failed, check_out_of_range, displacement, no_overlap, band_uncovered, range_collapsed, tilt, throws, throws_memory, outside_sheet };
 constexpr const char* kRecord = "{\"schema\":\"test-record\"}";
 RecalibrationComputation FakeComputation(Fake mode, std::vector<std::string>* stages = nullptr) {
     RecalibrationComputation c;
@@ -163,11 +163,48 @@ RecalibrationComputation FakeComputation(Fake mode, std::vector<std::string>* st
         const rc::ProfileFit fit{0.1, 0.3, 50};
         rc::Proposal p;
         if (mode == Fake::no_overlap) {
+            // The wide search found no overlap: it ran, and gave its reason.
             p.refusals = {rc::Refusal::no_overlap};
+            p.refusal_reason[rc::Refusal::no_overlap] = "insufficient-tiles";
+            p.wide_performed = true;
+            p.wide.determined = false;
+            p.wide.reason = "insufficient-tiles";
             p.detail = "wide search: insufficient-tiles";
             return p;
         }
+        if (mode == Fake::band_uncovered || mode == Fake::range_collapsed) {
+            // The wide search found B (the numbers are this test's), and the raster that follows B's cover could not be made. What the
+            // computation had filled by then: the raster before, the place that the wide search saw, and the rows that are missing.
+            const auto& r = in.active.raster;
+            p.wide_performed = true;
+            p.wide.determined = true;
+            p.wide.tiles_agreed = 21; p.wide.correspondences = 14;
+            p.wide.pose = cr::PoseParameters{0, 0, -0.8, -3.5, 4.3, 0};
+            p.wide.residual_rms_mm = 1.25; p.wide.residual_max_mm = 3.5;
+            p.display.width_previous_px = r.width_pixels; p.display.height_previous_px = r.height_pixels;
+            p.display.right_previous_mm = static_cast<double>(r.region_um.right) / 1000.0;
+            p.display.top_previous_mm = static_cast<double>(r.region_um.top) / 1000.0; p.display.bottom_previous_mm = static_cast<double>(r.region_um.bottom) / 1000.0;
+            p.display.has_start_motion = true;
+            p.display.start_motion.camera_motion_mm = {-3.5, 4.3};
+            p.display.start_motion.rotation_clockwise_deg = -0.8;
+            if (mode == Fake::band_uncovered) {
+                p.refusals = {rc::Refusal::band_uncovered};
+                p.refusal_reason[rc::Refusal::band_uncovered] = "bottom";
+                auto& s = p.display.target_cover_shortfall;
+                s.present = true; s.at_estimate = false; s.rows_top = 0; s.rows_bottom = 26; s.top_mm = 0; s.bottom_mm = 26 * 25.4 / r.dpi;
+                p.detail = "no overlap band at the start pose: seam blend needs A and B on every output row";
+            } else {
+                p.refusals = {rc::Refusal::range_collapsed};
+                p.refusal_reason[rc::Refusal::range_collapsed] = "no-width";
+                p.detail = "the new raster would have no width";
+            }
+            return p;
+        }
         p = rc::ProposeFromPose(in, pose, fit, kRecord);   // the real pieces after the estimate: the candidate and the creation check
+        // What the computation before it leaves in the proposal: the wide search's pose and the raster that the fine stage ran on.
+        p.wide_performed = true; p.wide.determined = true; p.wide.tiles_agreed = 21; p.wide.correspondences = 14;
+        p.wide.pose = cr::PoseParameters{0, 0, 0.8, 30.0, -1.7, 0}; p.wide.residual_rms_mm = 1.25; p.wide.residual_max_mm = 3.5;
+        p.fine_raster = in.active.raster;
         if (in.progress) in.progress(rc::Stage::verify);
         p.estimate.state = cr::RegistrationState::verified;
         p.estimate.has_estimate = true;
@@ -302,6 +339,8 @@ void Decisions() {
     struct Row {rc::Refusal refusal; cr::RegistrationState check; FindingClass klass;};
     const Row rows[] = {
         {rc::Refusal::no_overlap, cr::RegistrationState::verified, FindingClass::no_candidate},
+        {rc::Refusal::band_uncovered, cr::RegistrationState::verified, FindingClass::no_candidate},
+        {rc::Refusal::range_collapsed, cr::RegistrationState::verified, FindingClass::no_candidate},
         {rc::Refusal::estimate_failed, cr::RegistrationState::verified, FindingClass::no_candidate},
         {rc::Refusal::estimate_not_verified, cr::RegistrationState::verified, FindingClass::no_candidate},
         {rc::Refusal::stopped, cr::RegistrationState::verified, FindingClass::no_candidate},
@@ -323,6 +362,46 @@ void Decisions() {
         p.verification.reasons = {"too-few-points"};
         const auto f = ClassifyProposal(p, kLimits);
         CHECK(f.size() == 1 && f[0].klass == row.klass && f[0].code == std::string(rc::RefusalCode(row.refusal)));
+    }
+    {   // The reason that comes with a refusal is the finding's reason (a code of the closed sets), or nothing.
+        const struct {rc::Refusal refusal; const char* reason;} given[] = {
+            {rc::Refusal::no_overlap, "tied-starts"}, {rc::Refusal::band_uncovered, "top-and-bottom"}, {rc::Refusal::range_collapsed, "no-width"}};
+        for (const auto& g : given) {
+            rc::Proposal p;
+            p.refusals = {g.refusal};
+            CHECK(ClassifyProposal(p, kLimits).front().reason.empty());
+            p.refusal_reason[g.refusal] = g.reason;
+            const auto f = ClassifyProposal(p, kLimits);
+            CHECK(f.size() == 1 && f[0].klass == FindingClass::no_candidate && f[0].reason == g.reason && f[0].code == std::string(rc::RefusalCode(g.refusal)));
+        }
+        // A reason belongs to the refusal it came with: another refusal's reason is not borrowed.
+        rc::Proposal p;
+        p.refusals = {rc::Refusal::no_overlap, rc::Refusal::range_collapsed};
+        p.refusal_reason[rc::Refusal::range_collapsed] = "no-width";
+        const auto f = ClassifyProposal(p, kLimits);
+        CHECK(f.size() == 2 && f[0].reason.empty() && f[1].reason == "no-width");
+    }
+    {   // None of the three refusals that say "nothing was made" can be confirmed: not with the warning, not on its own, not beside the one
+        // refusal that can (a check that lacked marks), and not by rebuilding the candidate from a pose.
+        for (const auto refusal : {rc::Refusal::no_overlap, rc::Refusal::band_uncovered, rc::Refusal::range_collapsed}) {
+            rc::Proposal alone;
+            alone.refusals = {refusal};
+            alone.verification.performed = true; alone.verification.state = cr::RegistrationState::undetermined; alone.verification.reasons = {"too-few-points"};
+            alone.has_pose = true; alone.estimate_record_text = kRecord;
+            CHECK(!OnlyUnverifiedCheck(alone, kLimits));
+            auto beside = alone;
+            beside.refusals = {rc::Refusal::reestimate_not_verified, refusal};
+            CHECK(!OnlyUnverifiedCheck(beside, kLimits));
+            beside.refusals = {refusal, rc::Refusal::reestimate_not_verified};
+            CHECK(!OnlyUnverifiedCheck(beside, kLimits));
+            for (const auto policy : {UnverifiedPolicy::confirm_with_warning, UnverifiedPolicy::refuse_to_confirm}) {
+                CHECK(DecideVerdict(ClassifyProposal(alone, kLimits), policy, false) == RecalibrationVerdict::unusable);
+                CHECK(DecideVerdict(ClassifyProposal(beside, kLimits), policy, false) == RecalibrationVerdict::unusable);
+                // Even if a candidate were there, a finding that is not "unverified" decides.
+                CHECK(DecideVerdict(ClassifyProposal(alone, kLimits), policy, true) == RecalibrationVerdict::unusable);
+                CHECK(DecideVerdict(ClassifyProposal(beside, kLimits), policy, true) == RecalibrationVerdict::unusable);
+            }
+        }
     }
     {   // The estimator's first reason sharpens the finding.
         rc::Proposal p;
@@ -680,6 +759,8 @@ void JobRefusals(const Pair& pair) {
     {
         const struct {Fake mode; const char* name; FindingClass klass; const char* code;} cases[] = {
             {Fake::no_overlap, "staging-noov", FindingClass::no_candidate, "no-overlap"},
+            {Fake::band_uncovered, "staging-band", FindingClass::no_candidate, "band-uncovered"},
+            {Fake::range_collapsed, "staging-coll", FindingClass::no_candidate, "range-collapsed"},
             {Fake::displacement, "staging-disp", FindingClass::rejected, "reestimate-displacement"},
             {Fake::check_out_of_range, "staging-oor", FindingClass::rejected, "reestimate-not-verified"},
             {Fake::check_doubtful, "staging-dbt", FindingClass::rejected, "reestimate-doubtful"},
@@ -713,7 +794,12 @@ void JobRefusals(const Pair& pair) {
         }
         auto r = Request(settings, pair, "staging-tilt", FakeComputation(Fake::tilt));
         const auto o = RunRecalibrationJob(r);
-        CHECK(!o.ready && HasCode(o, "tilt-exceeded") && HasCode(o, "estimate-not-verified") && HasLine(o.screen_lines, "チャートでの校正が要ります") && HasLine(o.screen_lines, "浮いている"));
+        CHECK(!o.ready && HasCode(o, "tilt-exceeded") && HasCode(o, "estimate-not-verified") && HasLine(o.screen_lines, "チャートでの校正が要ります"));
+        // The estimator's own reason (a sheet that is not flat) is a symptom of the tilt here: the line says what comes first, and does not send
+        // the person to the paper. The reason itself stays in the finding and in the record.
+        CHECK(HasLine(o.screen_lines, "細かい合わせも確かな値になりませんでした") && !HasLine(o.screen_lines, "浮いている") && !HasLine(o.screen_lines, "机に直に"));
+        CHECK(std::any_of(o.findings.begin(), o.findings.end(), [](const RecalibrationFinding& f) { return f.code == "estimate-not-verified" && f.reason == "residual-shape"; }));
+        CHECK(HasLine(o.log_lines, "recalibration_finding class=no-candidate code=estimate-not-verified reason=residual-shape"));
     }
     {   // A failure inside the computation (also memory) is an outcome, not an exception; the text of the failure does not reach the screen.
         auto r = Request(settings, pair, "staging-throw", FakeComputation(Fake::throws));
@@ -736,6 +822,124 @@ void JobRefusals(const Pair& pair) {
         CHECK(!fs::exists(r.staging_folder));
     }
     // None of the above wrote into the settings folder.
+    CHECK(Snapshot(settings) == before);
+}
+
+// ---- The reasons that come with a refusal: on the screen, in the log, in the report and on the command line ----
+double NumberOf(const json::JsonValue& v) { return std::stod(v.string); }
+bool IsNull(const json::JsonValue& v) { return v.kind == json::JsonKind::null_value; }
+// Whether the first occurrences of `names`, each searched from where the one before was found, come in this order.
+bool InOrder(const std::string& text, std::initializer_list<const char*> names, std::size_t from = 0) {
+    std::size_t at = from;
+    for (const char* name : names) {
+        const auto found = text.find(name, at);
+        if (found == std::string::npos) { std::cerr << "not in order: " << name << std::endl; return false; }
+        at = found + 1;
+    }
+    return true;
+}
+void SeparateReasons(const Pair& pair) {
+    const auto settings = MakeSettings("settings-reasons");
+    const auto before = Snapshot(settings);
+    const auto wide = [](const fs::path& p) { return p.wstring(); };
+    struct Row {Fake mode; const char* name; const char* code; const char* reason; const char* said; const char* not_said;};
+    const Row rows[] = {
+        {Fake::no_overlap, "staging-r-noov", "no-overlap", "insufficient-tiles", "2 台の写真に、重なっている所が見つかりません", "上下にずれて"},
+        {Fake::band_uncovered, "staging-r-band", "band-uncovered", "bottom", "合成の範囲の下の端を B が写していません", "重なっている所が見つかりません"},
+        {Fake::range_collapsed, "staging-r-coll", "range-collapsed", "no-width", "合成の範囲の幅が無くなります", "重なっている所が見つかりません"},
+    };
+    for (const auto& row : rows) {
+        for (const auto policy : {UnverifiedPolicy::confirm_with_warning, UnverifiedPolicy::refuse_to_confirm}) {
+            auto r = Request(settings, pair, std::string(row.name) + (policy == UnverifiedPolicy::confirm_with_warning ? "-c" : "-r"), FakeComputation(row.mode));
+            r.unverified_policy = policy;
+            const auto o = RunRecalibrationJob(r);
+            CHECK(o.verdict == RecalibrationVerdict::unusable && !o.ready && !o.candidate && o.findings.size() == 1 && OnlyClass(o, FindingClass::no_candidate));
+            CHECK(o.findings.size() == 1 && o.findings[0].code == row.code && o.findings[0].reason == row.reason);
+            // The screen says what happened in words (the code and the reason stay off it), and not what another refusal would say.
+            CHECK(o.screen_lines.size() >= 2 && o.screen_lines.front() == "この校正は使えません" && Has(o.screen_lines[1], row.said));
+            CHECK(!HasLine(o.screen_lines, row.not_said) && !HasLine(o.screen_lines, row.code) && !HasLine(o.screen_lines, row.reason));
+            CHECK(HasLine(o.log_lines, std::string("recalibration_finding class=no-candidate code=") + row.code + " reason=" + row.reason));
+            CHECK(AllPlain(o.screen_lines) && AllPlain(o.log_lines));
+            // Whatever the policy and whatever the person acknowledges, none of the three is confirmed, and nothing is written.
+            const auto confirmed = ConfirmRecalibration(o, settings, kHash, {true});
+            CHECK(!confirmed.written && confirmed.reason == "not-usable");
+            CHECK(!fs::exists(r.staging_folder / "review") && !fs::exists(r.staging_folder / "candidate-revision.json") && fs::exists(r.staging_folder / "recalibration-report.json"));
+            const auto text = ReadAll(r.staging_folder / "recalibration-report.json");
+            const auto report = Tree(text);
+            CHECK(PlainRecord(text) && At(report, "verdict").string == "unusable" && !At(report, "unverified").boolean);
+            const auto& findings = At(report, "findings").array;
+            CHECK(findings.size() == 1 && At(findings[0], "class").string == "no-candidate" && At(findings[0], "code").string == row.code && At(findings[0], "reason").string == row.reason);
+        }
+    }
+    CHECK(Snapshot(settings) == before);
+
+    // The record of a wide search that found nothing: it ran, it says why, and every number it could not give is null. Nothing after it ran.
+    {
+        auto r = Request(settings, pair, "staging-r-noov-report", FakeComputation(Fake::no_overlap));
+        (void)RunRecalibrationJob(r);
+        const auto report = Tree(ReadAll(r.staging_folder / "recalibration-report.json"));
+        const auto& search = At(report, "wideSearch");
+        CHECK(search.kind == json::JsonKind::object && !At(search, "determined").boolean && At(search, "reason").string == "insufficient-tiles");
+        CHECK(NumberOf(At(search, "tilesAgreed")) == 0 && NumberOf(At(search, "correspondences")) == 0);
+        for (const char* key : {"txMm", "tyMm", "rzDeg", "residualRmsMm", "residualMaxMm"}) CHECK(IsNull(At(search, key)));
+        CHECK(IsNull(At(report, "fineFitRaster")));
+        const auto& display = At(report, "display");
+        CHECK(!At(display, "hasStartMotion").boolean && IsNull(At(display, "startMotionRightMm")) && IsNull(At(display, "startMotionDownMm")) && IsNull(At(display, "startRotationClockwiseDeg")));
+        CHECK(!At(display, "hasNew").boolean && IsNull(At(display, "heightNewPx")) && IsNull(At(display, "topNewMm")) && IsNull(At(display, "bottomNewMm")) && IsNull(At(display, "targetCoverShortfall")));
+    }
+    // A raster that B does not cover below: the wide search's pose is in the record and on the screen as a guide, the rows that are missing
+    // are counted, and the fine stage did not run.
+    {
+        auto r = Request(settings, pair, "staging-r-band-report", FakeComputation(Fake::band_uncovered));
+        const auto o = RunRecalibrationJob(r);
+        const auto report = Tree(ReadAll(r.staging_folder / "recalibration-report.json"));
+        const auto& search = At(report, "wideSearch");
+        CHECK(At(search, "determined").boolean && At(search, "reason").string.empty() && NumberOf(At(search, "tilesAgreed")) == 21 && NumberOf(At(search, "correspondences")) == 14);
+        CHECK(NumberOf(At(search, "txMm")) == -3.5 && NumberOf(At(search, "tyMm")) == 4.3 && NumberOf(At(search, "rzDeg")) == -0.8 &&
+            NumberOf(At(search, "residualRmsMm")) == 1.25 && NumberOf(At(search, "residualMaxMm")) == 3.5);
+        CHECK(IsNull(At(report, "fineFitRaster")));
+        const auto& display = At(report, "display");
+        CHECK(!At(display, "hasMotion").boolean && At(display, "hasStartMotion").boolean);
+        CHECK(NumberOf(At(display, "startMotionRightMm")) == -3.5 && NumberOf(At(display, "startMotionDownMm")) == 4.3 && NumberOf(At(display, "startRotationClockwiseDeg")) == -0.8);
+        const auto& shortfall = At(display, "targetCoverShortfall");
+        CHECK(shortfall.kind == json::JsonKind::object && shortfall.object.size() == 5 && At(shortfall, "pose").string == "start" && NumberOf(At(shortfall, "rowsTop")) == 0 &&
+            NumberOf(At(shortfall, "rowsBottom")) == 26 && NumberOf(At(shortfall, "topMm")) == 0 && std::abs(NumberOf(At(shortfall, "bottomMm")) - 2.6) < 1e-9);
+        CHECK(!At(display, "hasNew").boolean && IsNull(At(display, "heightNewPx")) && IsNull(At(display, "topNewMm")) && IsNull(At(display, "bottomNewMm")) && IsNull(At(display, "widthNewPx")));
+        CHECK(NumberOf(At(display, "heightPreviousPx")) == 1600 && NumberOf(At(display, "topPreviousMm")) == 100 && NumberOf(At(display, "bottomPreviousMm")) == 260);
+        // The screen: the guide of the wide search stands in the place of the line that the fine stage's pose would have, and the rows are said.
+        CHECK(HasLine(o.screen_lines, "大まかな探索で見た、A に対する B の位置の変化（目安。傾きと高さは測っていません）: 図面の左へ約 3.5 mm、上下は下へ約 4.3 mm、回り 約 0.8°（画面で見て反時計回り）"));
+        CHECK(HasLine(o.screen_lines, "B が写っていない所: 合成の範囲の下の端から約 2.6 mm") && !HasLine(o.screen_lines, "求められませんでした") && !HasLine(o.screen_lines, "合成の画像の大きさ"));
+        CHECK(HasLine(o.screen_lines, "「位置の変化」の行"));   // the sentence points at the line above, which is there
+        // The same, with the cameras' own numbers, on the command line.
+        const std::vector<std::wstring> args{L"--camera-a", wide(pair.frames.a), L"--camera-b", wide(pair.frames.b), L"--settings-folder", wide(settings), L"--staging", wide(root / "staging-r-band-cli")};
+        std::ostringstream out;
+        CHECK(RunRecalibrationCommand(args, out, kHash, kNow, FakeComputation(Fake::band_uncovered)) == 1);
+        const auto text = out.str();
+        CHECK(Has(text, "finding class=no-candidate code=band-uncovered reason=bottom"));
+        CHECK(Has(text, "wide determined=1 reason=none tiles_agreed=21 correspondences=14 tx_mm=-3.5 ty_mm=4.3 rz_deg=-0.8 residual_rms_mm=1.25"));
+        CHECK(Has(text, "start_motion right_mm=-3.5 down_mm=4.3 rotation_clockwise_deg=-0.8"));
+        CHECK(Has(text, "target_cover_shortfall pose=start rows_top=0 rows_bottom=26 top_mm=0 bottom_mm=2.6"));
+        CHECK(!Has(text, "fine_fit_raster") && !Has(text, "seam previous_mm=") && !Has(text, "motion right_mm=-3.5 down_mm=4.3 rotation_clockwise_deg=-0.8 tilt"));
+        CHECK(Plain(text));
+    }
+    // A raster with no width: the same record without the rows.
+    {
+        auto r = Request(settings, pair, "staging-r-coll-report", FakeComputation(Fake::range_collapsed));
+        const auto o = RunRecalibrationJob(r);
+        const auto report = Tree(ReadAll(r.staging_folder / "recalibration-report.json"));
+        CHECK(At(At(report, "wideSearch"), "determined").boolean && IsNull(At(report, "fineFitRaster")) && IsNull(At(At(report, "display"), "targetCoverShortfall")));
+        CHECK(HasLine(o.screen_lines, "大まかな探索で見た、A に対する B の位置の変化") && !HasLine(o.screen_lines, "B が写っていない所"));
+    }
+    // The wide search that found nothing, on the command line.
+    {
+        const std::vector<std::wstring> args{L"--camera-a", wide(pair.frames.a), L"--camera-b", wide(pair.frames.b), L"--settings-folder", wide(settings), L"--staging", wide(root / "staging-r-noov-cli")};
+        std::ostringstream out;
+        CHECK(RunRecalibrationCommand(args, out, kHash, kNow, FakeComputation(Fake::no_overlap)) == 1);
+        const auto text = out.str();
+        CHECK(Has(text, "finding class=no-candidate code=no-overlap reason=insufficient-tiles"));
+        CHECK(Has(text, "wide determined=0 reason=insufficient-tiles tiles_agreed=0 correspondences=0 tx_mm=none ty_mm=none rz_deg=none residual_rms_mm=none"));
+        CHECK(!Has(text, "start_motion") && !Has(text, "target_cover_shortfall") && !Has(text, "fine_fit_raster") && Plain(text));
+    }
     CHECK(Snapshot(settings) == before);
 }
 
@@ -895,6 +1099,26 @@ void Reports(const RecalibrationJobOutcome& o, const fs::path& staging, const st
     // The report holds codes and numbers: no path, no machine identifier, no sentence.
     const auto text = ReadAll(staging / "recalibration-report.json");
     CHECK(PlainRecord(text) && !Has(text, "使えません") && !Has(text, "未確認"));
+    // The members that were there are where they were, in their order, and the new ones stand beside the ones they belong to.
+    CHECK(InOrder(text, {"\"schema\":", "\"pairId\":", "\"referenceCamera\":", "\"targetCamera\":", "\"verdict\":", "\"unverified\":", "\"unverifiedPolicy\":", "\"findings\":",
+        "\"originalSha256\":", "\"parent\":", "\"candidate\":", "\"wideSearch\":", "\"fineFitRaster\":", "\"estimate\":{", "\"sample\":", "\"display\":"}));
+    const auto display_at = text.find("\"display\":");
+    CHECK(display_at != std::string::npos && InOrder(text, {"\"hasMotion\":", "\"motionRightMm\":", "\"motionDownMm\":", "\"rotationClockwiseDeg\":", "\"tiltDeg\":", "\"heightPercent\":",
+        "\"hasStartMotion\":", "\"startMotionRightMm\":", "\"startMotionDownMm\":", "\"startRotationClockwiseDeg\":", "\"hasOverlap\":", "\"narrowestOverlapMm\":", "\"hasNew\":",
+        "\"seamXPreviousMm\":", "\"seamXNewMm\":", "\"widthPreviousPx\":", "\"widthNewPx\":", "\"heightPreviousPx\":", "\"heightNewPx\":", "\"rightPreviousMm\":", "\"rightNewMm\":",
+        "\"topPreviousMm\":", "\"bottomPreviousMm\":", "\"topNewMm\":", "\"bottomNewMm\":", "\"hasEdgeDistance\":", "\"edgeShare\":", "\"targetCoverShortfall\":"}, display_at));
+    // What the stand-in's computation left: the wide search, the raster of the fine stage, and the sizes and edges of the raster before and after.
+    const auto& wide = At(report, "wideSearch");
+    CHECK(wide.kind == json::JsonKind::object && At(wide, "determined").boolean && At(wide, "reason").string.empty() && NumberOf(At(wide, "tilesAgreed")) == 21 && NumberOf(At(wide, "correspondences")) == 14);
+    CHECK(NumberOf(At(wide, "txMm")) == 30 && NumberOf(At(wide, "tyMm")) == -1.7 && NumberOf(At(wide, "rzDeg")) == 0.8 && NumberOf(At(wide, "residualRmsMm")) == 1.25 && NumberOf(At(wide, "residualMaxMm")) == 3.5);
+    const auto& fine = At(report, "fineFitRaster");
+    CHECK(fine.kind == json::JsonKind::object && fine.object.size() == 5 && NumberOf(At(fine, "widthPx")) == 1800 && NumberOf(At(fine, "heightPx")) == 1600 &&
+        NumberOf(At(fine, "topMm")) == 100 && NumberOf(At(fine, "bottomMm")) == 260 && NumberOf(At(fine, "rightMm")) == 740);
+    const auto& display = At(report, "display");
+    CHECK(!At(display, "hasStartMotion").boolean && IsNull(At(display, "startMotionRightMm")) && IsNull(At(display, "startMotionDownMm")) && IsNull(At(display, "startRotationClockwiseDeg")));
+    CHECK(IsNull(At(display, "targetCoverShortfall")));
+    CHECK(At(display, "hasNew").boolean && NumberOf(At(display, "heightPreviousPx")) == 1600 && NumberOf(At(display, "heightNewPx")) == o.facts.display.height_new_px);
+    CHECK(NumberOf(At(display, "topPreviousMm")) == 100 && NumberOf(At(display, "bottomPreviousMm")) == 260 && NumberOf(At(display, "topNewMm")) == 100 && NumberOf(At(display, "bottomNewMm")) == 260);
 }
 
 void WholeJob(const Pair& pair) {
@@ -931,6 +1155,13 @@ void WholeJob(const Pair& pair) {
     CHECK(AllPlain(o.screen_lines) && AllPlain(o.log_lines));
     CHECK(HasLine(o.log_lines, "recalibration_verdict verdict=usable-unverified unverified=1") && HasLine(o.log_lines, "settings_written=0") && HasLine(o.log_lines, "camera_operations=0"));
     CHECK(HasLine(o.log_lines, "recalibration_finding class=unverified"));
+    // The raster that the candidate has, against the one in force: one line with the four numbers (the width follows B here, the height stays).
+    {
+        const auto& d = o.facts.display;
+        CHECK(d.has_new && d.width_new_px != d.width_previous_px && d.height_new_px == d.height_previous_px);
+        CHECK(HasLine(o.log_lines, "recalibration_raster width_px=" + std::to_string(d.width_previous_px) + "->" + std::to_string(d.width_new_px) +
+            " height_px=" + std::to_string(d.height_previous_px) + "->" + std::to_string(d.height_new_px) + " top_mm="));
+    }
     // The job read the settings and wrote nothing there.
     CHECK(Snapshot(settings) == before);
     // The record in the staging folder: what a confirmation would write, by its hashes; the sample; the report.
@@ -1156,6 +1387,9 @@ void CommandLine(const Pair& pair, const std::string& exe, bool on) {
         CHECK(code == 3);
         CHECK(Has(text, "recalibration_done=1 verdict=usable-unverified unverified=1 confirmed=0 camera_operations=0 settings_written=0"));
         CHECK(Has(text, "finding class=unverified code=gate-") && Has(text, "gate state=") && Has(text, "motion right_mm=") && Has(text, "screen この校正は使えます") == false);
+        CHECK(Has(text, "wide determined=1 reason=none tiles_agreed=21 correspondences=14 tx_mm=30 ty_mm=-1.7 rz_deg=0.8 residual_rms_mm=1.25"));
+        CHECK(Has(text, "fine_fit_raster width_px=1800 height_px=1600 top_mm=100 bottom_mm=260"));
+        CHECK(Has(text, "raster_height_px=1600->1600 raster_top_mm=100->100 raster_bottom_mm=260->260") && !Has(text, "start_motion") && !Has(text, "target_cover_shortfall"));
         CHECK(Has(text, "screen 未確認の校正です"));
         CHECK(Plain(text) && !Has(text, "staging-cli") && !Has(text, "pair-0042"));
         CHECK(Snapshot(settings) == before && fs::exists(root / "staging-cli" / "recalibration-report.json"));
@@ -1287,6 +1521,7 @@ int main(int argc, char** argv) {
         const auto pair = MakePair("pair");
         lap("frames");
         JobRefusals(pair); lap("refusals");
+        SeparateReasons(pair); lap("separate reasons");
         StopAfterTheComputation(pair); lap("stop after the computation");
         RefusedBeforeThePlan(pair); lap("refused before the plan");
         OutsideEnvelope(pair); lap("outside the envelope");

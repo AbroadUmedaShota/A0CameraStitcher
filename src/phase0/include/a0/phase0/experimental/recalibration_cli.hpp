@@ -117,13 +117,34 @@ inline std::string Number(double value){return recalibration_job_detail::Num(val
     const auto& g=outcome.facts.gate;
     out<<"recalibration_done=1 verdict="<<RecalibrationVerdictCode(outcome.verdict)<<" unverified="<<(outcome.unverified()?1:0)<<" confirmed=0 camera_operations=0 settings_written=0\n";
     for(const auto& f:outcome.findings)out<<"finding class="<<FindingClassCode(f.klass)<<" code="<<f.code<<(f.reason.empty()?std::string{}:" reason="+f.reason)<<'\n';
+    if(outcome.wide){
+        const auto& w=*outcome.wide;
+        const auto number=[&](double value){return w.determined?Number(value):std::string("none");};
+        out<<"wide determined="<<(w.determined?1:0)<<" reason="<<(w.reason.empty()?std::string("none"):w.reason)<<" tiles_agreed="<<w.tiles_agreed
+           <<" correspondences="<<w.correspondences<<" tx_mm="<<number(w.pose.tx_mm)<<" ty_mm="<<number(w.pose.ty_mm)<<" rz_deg="<<number(w.pose.rz_deg)
+           <<" residual_rms_mm="<<number(w.residual_rms_mm)<<'\n';
+    }
+    if(d.has_start_motion)
+        out<<"start_motion right_mm="<<Number(d.start_motion.camera_motion_mm.x)<<" down_mm="<<Number(d.start_motion.camera_motion_mm.y)
+           <<" rotation_clockwise_deg="<<Number(d.start_motion.rotation_clockwise_deg)<<'\n';
+    if(d.target_cover_shortfall.present){
+        const auto& f=d.target_cover_shortfall;
+        out<<"target_cover_shortfall pose="<<(f.at_estimate?"estimate":"start")<<" rows_top="<<f.rows_top<<" rows_bottom="<<f.rows_bottom
+           <<" top_mm="<<Number(f.top_mm)<<" bottom_mm="<<Number(f.bottom_mm)<<'\n';
+    }
+    if(outcome.fine_fit_raster){
+        const auto& r=*outcome.fine_fit_raster;
+        out<<"fine_fit_raster width_px="<<r.width_pixels<<" height_px="<<r.height_pixels<<" top_mm="<<Number(static_cast<double>(r.region_um.top)/1000.0)
+           <<" bottom_mm="<<Number(static_cast<double>(r.region_um.bottom)/1000.0)<<'\n';
+    }
     if(d.has_motion)
         out<<"motion right_mm="<<Number(d.motion.camera_motion_mm.x)<<" down_mm="<<Number(d.motion.camera_motion_mm.y)<<" rotation_clockwise_deg="<<Number(d.motion.rotation_clockwise_deg)
            <<" tilt_deg="<<Number(d.pose.tilt_deg)<<" height_percent="<<Number(d.pose.height_percent)<<'\n';
     if(d.has_overlap)out<<"overlap narrowest_mm="<<Number(d.narrowest_overlap_mm)<<'\n';
     if(d.has_new)
         out<<"seam previous_mm="<<Number(d.seam_x_previous_mm)<<" new_mm="<<Number(d.seam_x_new_mm)<<" raster_width_px="<<d.width_previous_px<<"->"<<d.width_new_px
-           <<" raster_height_px="<<d.height_previous_px<<"->"<<d.height_new_px<<'\n';
+           <<" raster_height_px="<<d.height_previous_px<<"->"<<d.height_new_px<<" raster_top_mm="<<Number(d.top_previous_mm)<<"->"<<Number(d.top_new_mm)
+           <<" raster_bottom_mm="<<Number(d.bottom_previous_mm)<<"->"<<Number(d.bottom_new_mm)<<'\n';
     if(d.has_edge_distance)out<<"edge_share a="<<Number(d.edge_share_a)<<" b="<<Number(d.edge_share_b)<<'\n';
     if(g.known)
         out<<"gate state="<<a0::m2::experimental::registration_gate::GateStateCode(g.state)<<" cause="<<a0::m2::experimental::registration_gate::GateCauseCode(g.cause)

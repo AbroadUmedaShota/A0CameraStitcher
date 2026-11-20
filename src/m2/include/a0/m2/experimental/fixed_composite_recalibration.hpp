@@ -7,10 +7,12 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace a0::m2::experimental::recalibration {
@@ -57,14 +59,17 @@ inline constexpr std::string_view kToolVersion="1.0.0";
 //  keep_previous  the column of the active revision, the same place on the drawing (origin operator).
 enum class SeamPlacement {band_center,keep_previous};
 // How big the composite's raster is (the owner's decision Q2).
-//  follow_camera_b  the left, top, bottom and DPI of the active revision; the right edge moves by the amount that the right edge
-//                   of B's cover (the smallest over the rows) moved. The default.
+//  follow_camera_b  the left and DPI of the active revision; the right edge moves by the amount that the right edge of B's cover moved,
+//                   and the top and the bottom edges move inwards over the rows that B no longer sees, by no more than B's ends on the
+//                   seam column moved (never outwards). The default.
 //  keep             the active revision's raster.
 enum class RasterPlacement {follow_camera_b,keep};
 
 // Why a proposal is not ready. More than one can be set.
 enum class Refusal {
-    no_overlap,              // R1 found no overlap, or the new profile has no overlap band
+    no_overlap,              // R1 found no overlap (the reason of the wide search is in Proposal::refusal_reason)
+    band_uncovered,          // the target camera does not see every row of the raster (the pose moved it up or down, or turned it)
+    range_collapsed,         // the raster that follows the target camera's cover would have no width
     estimate_failed,         // the estimator refused its settings or threw
     estimate_not_verified,   // R2 is not `verified` (the reasons are in the estimate)
     tilt_exceeded,           // |(rx, ry)| of the estimate is over registration.envelope.tiltDeg: the camera was turned, not moved
@@ -80,13 +85,16 @@ enum class Refusal {
 [[nodiscard]] std::string_view RefusalCode(Refusal refusal);
 
 // Thrown by the pieces that make part of a proposal (ProposeRaster, ProposeFromPose's helpers); the reason is the refusal that
-// the proposal gets. A std::invalid_argument, so a caller that does not tell the reasons apart treats it as any other bad input.
+// the proposal gets, and `sub_reason` the lower-level reason that goes with it (a code of the closed sets of Proposal::refusal_reason,
+// or empty). A std::invalid_argument, so a caller that does not tell the reasons apart treats it as any other bad input.
 class RecalibrationRefused : public std::invalid_argument {
 public:
-    RecalibrationRefused(Refusal reason,const std::string& what):std::invalid_argument(what),reason_(reason){}
+    RecalibrationRefused(Refusal reason,const std::string& what,std::string sub_reason={}):std::invalid_argument(what),reason_(reason),sub_reason_(std::move(sub_reason)){}
     [[nodiscard]] Refusal GetReason() const noexcept {return reason_;}
+    [[nodiscard]] const std::string& GetSubReason() const noexcept {return sub_reason_;}
 private:
     Refusal reason_;
+    std::string sub_reason_;
 };
 
 enum class Stage {wide_search,fine_fit,bake,check,verify};
@@ -164,10 +172,15 @@ struct Provenance {
     const Provenance& provenance);
 
 // The new output raster: the active revision's, with the right edge moved by the amount that B's cover moved (follow_camera_b), or
-// the same (keep). `parent` is the active revision's binding. Throws RecalibrationRefused (raster_too_large) when the result is
-// over the render limits.
+// the same (keep). With follow_camera_b the top and the bottom edges move inwards, never outwards, past the rows in which B no longer
+// covers the columns that the seam can reach over the creation check's range (B moved up or down), and by no more than B's upper and lower
+// ends on the seam column moved; the right edge then follows B's right side over the rows that are kept (B's turned upper or lower side
+// does not decide it). When the creation check's own conditions hold on the raster with the right edge moved alone, that raster is
+// returned as it is. `seam` says where the seam column of the new raster is taken to be; it has no default, so that every caller names
+// the seam placement it uses for the rows it gives up. `parent` is the active revision's binding.
+// Throws RecalibrationRefused (raster_too_large, range_collapsed, band_uncovered) as documented at Refusal.
 [[nodiscard]] render::OutputRaster ProposeRaster(const FixedCompositeConditionV3& active,const FixedCompositeProfileBinding& parent,
-    const content_registration::PoseParameters& p_hat,RasterPlacement placement);
+    const content_registration::PoseParameters& p_hat,RasterPlacement placement,SeamPlacement seam);
 
 // A candidate revision that passed the creation check, with the new profile it names. Nothing here is written anywhere.
 struct Candidate {
@@ -184,6 +197,10 @@ struct Display {
     bool has_motion{};
     OutputFrameDisplay motion;
     content_registration::PoseDisplay pose;
+    // The same for the start pose of the wide search (R1), which says nothing about the tilt or the height. Filled as soon as R1 has
+    // found a pose, so that a refusal after it can still show where the wide search saw B.
+    bool has_start_motion{};
+    OutputFrameDisplay start_motion;
     // The narrowest overlap of A and B over the rows of the new raster (mm), and where.
     // True when the active revision's hand adjustment is beyond the envelope (pose_outside_envelope): the raster and the motion above are
     // measured from the profile's own placement (pose 0), not from that base pose.
@@ -200,11 +217,22 @@ struct Display {
     bool has_new{};
     std::uint32_t width_previous_px{},height_previous_px{},width_new_px{},height_new_px{};
     double right_previous_mm{},right_new_mm{};
+    // The top and bottom edge of the raster on the drawing, before and after (mm).
+    double top_previous_mm{},bottom_previous_mm{},top_new_mm{},bottom_new_mm{};
     // How near the seam is to the edges of the photographs (the nearest over the rows), in camera pixels and as a share of the
     // width: A's right edge and B's left edge. A seam near an edge is where the calibrated lens model is least known.
     bool has_edge_distance{};
     double edge_distance_a_px{},edge_distance_b_px{};
     double edge_share_a{},edge_share_b{};
+    // Set when the target camera does not see every row of the raster (Refusal::band_uncovered): the rows at the top and at the bottom of
+    // the raster in which A and B do not both have a sample, counted from the edge inwards until the first row that has one. `all_rows`
+    // when no row has one. `at_estimate` is false for the start pose of the wide search, true for the estimate of the fine stage.
+    struct TargetCoverShortfall {
+        bool present{},at_estimate{},all_rows{};
+        std::uint32_t rows_top{},rows_bottom{};
+        double top_mm{},bottom_mm{};
+    };
+    TargetCoverShortfall target_cover_shortfall;
 };
 
 // The estimator on the new profile (the capture path's settings from the candidate), and where it leaves the seam.
@@ -229,8 +257,15 @@ struct Verification {
 struct Proposal {
     bool ready{};                           // every check passed; only then may anything be written
     std::vector<Refusal> refusals;
+    // The lower-level reason of a refusal, when it has one (a code, never a sentence or a path): no_overlap the reason of the wide search
+    // (WideStart::reason); band_uncovered top, bottom, top-and-bottom, all-rows or no-common-column; range_collapsed no-width. The first
+    // reason given for a refusal stays.
+    std::map<Refusal,std::string> refusal_reason;
     std::string detail;                     // English, for the log; no path
+    bool wide_performed{};                  // R1 ran (`wide` says what it found)
     WideStart wide;
+    // The raster that the fine stage (R2) ran on; set only when the fine stage was started.
+    std::optional<render::OutputRaster> fine_raster;
     content_registration::RegistrationResult estimate;   // R2
     bool has_pose{};
     content_registration::PoseParameters pose;           // p-hat of R2 against the active revision's profile
@@ -240,6 +275,12 @@ struct Proposal {
     Verification verification;
     Display display;
 };
+
+// The lower-level reason of a refusal (see Proposal::refusal_reason), or empty.
+[[nodiscard]] inline std::string RefusalReasonOf(const Proposal& proposal,Refusal refusal){
+    const auto found=proposal.refusal_reason.find(refusal);
+    return found==proposal.refusal_reason.end()?std::string{}:found->second;
+}
 
 // R1 to R4 and the verification. Reads no file and writes none; the images are not modified. Throws std::invalid_argument for a
 // programming error (missing images or hash, an invalid pair identity, a profile that the active revision does not name) and

@@ -442,6 +442,36 @@ void CreationCheckDirect(){
     };
     const auto c=make(request,options);
     CHECK(details.lift_cap_px>0 && details.maximum_strain>0 && details.maximum_strain<=0.5);
+    // The range that the check holds the seam over, for the callers that choose something so that the check holds (#439): the vertices
+    // (each disc by the octagon around it, each scalar by its two ends) and the two ends of every axis, from the condition's own ranges.
+    {
+        const auto vertices=m2::CreationRangeVerticesV3(c,true);
+        CHECK(vertices.size()==4096 && m2::CreationRangeVerticesV3(c,false).size()==256);
+        auto six=c;six.registration.surface_envelope=std::nullopt;
+        CHECK(m2::CreationRangeVerticesV3(six,true).size()==256);
+        const double outer=1.0/std::cos(3.14159265358979323846/8);
+        bool exact=true;
+        for(const auto& v:vertices){
+            exact=exact && std::abs(std::hypot(v.tx,v.ty)-5*outer)<1e-9 && std::abs(std::hypot(v.rx,v.ry)-2.5*outer)<1e-9 && std::abs(std::abs(v.rz)-1.5)<1e-12 &&
+                std::abs(std::abs(v.tz)-3)<1e-12 && std::abs(std::abs(v.h0)-10)<1e-12;
+        }
+        CHECK(exact);
+        const auto ends=m2::CreationRangeAxisEndsV3(c);
+        CHECK(ends.size()==18 && m2::CreationRangeAxisEndsV3(six).size()==12);
+        if(ends.size()==18){
+            CHECK(ends[0].tx==5 && ends[1].tx==-5 && ends[2].ty==5 && ends[3].ty==-5 && ends[4].rx==2.5 && ends[5].rx==-2.5 && ends[6].ry==2.5 && ends[7].ry==-2.5);
+            CHECK(ends[8].rz==1.5 && ends[9].rz==-1.5 && ends[10].tz==3 && ends[11].tz==-3 && ends[12].h0==10 && ends[13].h0==-10);
+            const double slope=std::tan(4*3.14159265358979323846/180);
+            CHECK(std::abs(ends[14].gx-slope)<1e-15 && ends[15].gx==-ends[14].gx && std::abs(ends[16].gy-slope)<1e-15 && ends[17].gy==-ends[16].gy);
+        }
+        // The pose and the paper plane of an offset: the base pose moved by the offset, the plane by its last three components.
+        const m2::content_registration::PoseParameters base{0.1,0.2,0.3,1.0,2.0,0.5};
+        const auto moved=m2::CreationOffsetPoseV3(base,m2::CreationOffsetV3{1,2,3,4,5,6,7,8,9});
+        CHECK(std::abs(moved.tx_mm-2)<1e-12 && std::abs(moved.ty_mm-4)<1e-12 && std::abs(moved.rx_deg-3.1)<1e-12 && std::abs(moved.ry_deg-4.2)<1e-12 &&
+            std::abs(moved.rz_deg-5.3)<1e-12 && std::abs(moved.tz_percent-6.5)<1e-12);
+        const auto plane=m2::CreationOffsetSurfaceV3(m2::CreationOffsetV3{1,2,3,4,5,6,7,8,9});
+        CHECK(plane.h0_mm==7 && plane.slope_x==8 && plane.slope_y==9);
+    }
     // k and the cap follow the design: cap = maxLiftMm x k; strain = (pi/2) cap / L.
     {
         const auto binding=m2::BindFixedCompositeProfileV3(c,draft,kHash);

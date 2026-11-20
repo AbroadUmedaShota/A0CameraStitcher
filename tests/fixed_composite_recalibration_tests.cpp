@@ -10,10 +10,12 @@
 #include "a0/m2/experimental/fixed_composite_condition_v2.hpp"
 #include "a0/m2/experimental/fixed_composite_condition_v3.hpp"
 #include "a0/m2/experimental/fixed_composite_creation.hpp"
+#include "a0/m2/experimental/fixed_composite_maps.hpp"
 #include "a0/m2/experimental/fixed_composite_recalibration.hpp"
 #include "a0/m2/experimental/fixed_composite_selection.hpp"
 #include "a0/m2/rig_profile_v2.hpp"
 #include "a0/phase0/experimental/fixed_composite_cli_v3.hpp"
+#include "a0/phase0/experimental/fixed_composite_preview.hpp"
 #include "a0/phase0/experimental/fixed_composite_tool_v3.hpp"
 #include "a0/phase0/experimental/pair_review_synthetic.hpp"
 #include "registration_fixtures.hpp"
@@ -21,11 +23,13 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <format>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -35,6 +39,8 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <utility>
+#include <variant>
 #include <vector>
 
 using namespace a0::m2::experimental;
@@ -293,6 +299,12 @@ std::string RigText(bool turned){
     if(turned)return WithMatrix(WithMatrix(fixture,0,{-10,0,7359-100.0,0,-10,4911-100.0}),1,{-10,0,7359+5660.0,0,-10,4911-100.0});
     return WithMatrix(WithMatrix(fixture,0,{10,0,100,0,10,100}),1,{10,0,-5660,0,10,100});
 }
+// The same rig with B moved `left_mm` to the left on the drawing, so that its right side lies on the sheet (at 1302 - left_mm).
+std::string RigTextMovedLeft(bool turned,double left_mm){
+    using ps::detail::WithMatrix;
+    if(turned)return WithMatrix(WithMatrix(fixture,0,{-10,0,7359-100.0,0,-10,4911-100.0}),1,{-10,0,7359+5660.0-10*left_mm,0,-10,4911-100.0});
+    return WithMatrix(WithMatrix(fixture,0,{10,0,100,0,10,100}),1,{10,0,-5660+10*left_mm,0,10,100});
+}
 render::Matrix3 MatrixOf(const render::CameraProjection& c){return c.document_to_image;}
 render::Point Project(const render::Matrix3& h,render::Point x){render::Point p{};if(!render::TryTransform(h,x,p))throw std::runtime_error("projection failed");return p;}
 
@@ -464,34 +476,34 @@ void GeometryFromPose(){
     // The raster follows B's cover: the right edge moves by the shift, in whole pixels; the other edges and the DPI stay.
     for(const double shift:{5.0,30.0,60.0,-30.0}){
         const auto pose=PoseForShift(parameters.camera_b,shift,false);
-        const auto grown=rc::ProposeRaster(active.condition,parent,pose,rc::RasterPlacement::follow_camera_b);
+        const auto grown=rc::ProposeRaster(active.condition,parent,pose,rc::RasterPlacement::follow_camera_b,rc::SeamPlacement::band_center);
         CHECK(grown.dpi==raster.dpi && grown.height_pixels==raster.height_pixels && grown.region_um.left==raster.region_um.left &&
             grown.region_um.top==raster.region_um.top && grown.region_um.bottom==raster.region_um.bottom);
         CHECK(std::abs(static_cast<long long>(grown.width_pixels)-static_cast<long long>(raster.width_pixels)-std::llround(shift*10))<=1);
         CHECK(Throws([&]{render::ValidateOutputRaster(grown);})==false);
-        const auto kept=rc::ProposeRaster(active.condition,parent,pose,rc::RasterPlacement::keep);
+        const auto kept=rc::ProposeRaster(active.condition,parent,pose,rc::RasterPlacement::keep,rc::SeamPlacement::band_center);
         CHECK(kept.width_pixels==raster.width_pixels && kept.region_um.right==raster.region_um.right);
     }
-    CHECK(rc::ProposeRaster(active.condition,parent,cr::PoseParameters{},rc::RasterPlacement::follow_camera_b).width_pixels==raster.width_pixels);
+    CHECK(rc::ProposeRaster(active.condition,parent,cr::PoseParameters{},rc::RasterPlacement::follow_camera_b,rc::SeamPlacement::band_center).width_pixels==raster.width_pixels);
 
     // A hand adjustment beyond the range (pose_outside_envelope, #434): the raster is counted from the profile's own placement, not from that
     // base pose. Beyond the range by a little, and by so much that camera B covers no row of the raster at that pose (the old measure threw).
     {
         const auto pose=PoseForShift(parameters.camera_b,30.0,false);
-        const auto from_profile=rc::ProposeRaster(active.condition,parent,pose,rc::RasterPlacement::follow_camera_b);
+        const auto from_profile=rc::ProposeRaster(active.condition,parent,pose,rc::RasterPlacement::follow_camera_b,rc::SeamPlacement::band_center);
         for(const double tx:{12.0,3000.0}){
             auto beyond=active.condition;
             beyond.base_pose=cr::PoseParameters{0,0,0,tx,0,0};
             CHECK(std::hypot(beyond.base_pose.tx_mm,beyond.base_pose.ty_mm)>beyond.registration.envelope.position_mm);
             std::optional<render::OutputRaster> counted;
-            CHECK(!Throws([&]{counted=rc::ProposeRaster(beyond,parent,pose,rc::RasterPlacement::follow_camera_b);}));
+            CHECK(!Throws([&]{counted=rc::ProposeRaster(beyond,parent,pose,rc::RasterPlacement::follow_camera_b,rc::SeamPlacement::band_center);}));
             CHECK(counted && counted->width_pixels==from_profile.width_pixels && counted->region_um.right==from_profile.region_um.right);
-            CHECK(rc::ProposeRaster(beyond,parent,pose,rc::RasterPlacement::keep).width_pixels==raster.width_pixels);
+            CHECK(rc::ProposeRaster(beyond,parent,pose,rc::RasterPlacement::keep,rc::SeamPlacement::band_center).width_pixels==raster.width_pixels);
         }
         // Inside the range the base pose still counts: the same pose from another base pose gives another raster.
         auto inside=active.condition;
         inside.base_pose=cr::PoseParameters{0,0,0,3.0,0,0};
-        CHECK(rc::ProposeRaster(inside,parent,pose,rc::RasterPlacement::follow_camera_b).width_pixels!=from_profile.width_pixels);
+        CHECK(rc::ProposeRaster(inside,parent,pose,rc::RasterPlacement::follow_camera_b,rc::SeamPlacement::band_center).width_pixels!=from_profile.width_pixels);
     }
 
     for(const double shift:{5.0,30.0,60.0}){
@@ -619,6 +631,528 @@ void GeometryFromPose(){
     std::error_code ignored;fs::remove_all(active.settings,ignored);
 }
 
+// ---- Frozen results of the scenes that move B along the baseline only ----------------------------------------------------------
+// What a recalibration of a pose that moves B along the sheet's x makes: the raster, the seam column, B's matrix (the bits of the nine
+// numbers), and the hashes of the candidate revision and of its profile. The strings below were taken from the code as it stood before
+// the vertical placement of the raster and the separate reasons of a refusal were added; any later change that moves one of them is a
+// change of what a left-right recalibration makes. A different compiler or math library can move the last bit of a matrix and with it
+// the hashes: a mismatch is then to be looked at, not simply replaced.
+std::string BitsOf(double value){return std::format("{:016x}",std::bit_cast<std::uint64_t>(value));}
+std::string FrozenOf(const rc::Candidate& candidate){
+    const auto& r=candidate.condition.raster;
+    std::string text="raster_um="+std::to_string(r.region_um.left)+","+std::to_string(r.region_um.top)+","+std::to_string(r.region_um.right)+","+std::to_string(r.region_um.bottom)+
+        " px="+std::to_string(r.width_pixels)+"x"+std::to_string(r.height_pixels)+" dpi="+std::to_string(r.dpi)+" seam="+std::to_string(candidate.condition.seam.column)+" b=";
+    const auto& h=candidate.binding.parameters.camera_b.document_to_image;
+    for(std::size_t i=0;i<h.size();++i)text+=(i?",":"")+BitsOf(h[i]);
+    return text+" revision="+HashOf(candidate.text)+" profile="+HashOf(candidate.profile_bytes);
+}
+
+void FrozenLeftRight(){
+    struct Scene {const char* name;bool turned;double shift;const char* frozen;};
+    const Scene scenes[]{
+        {"normal-5",false,5,"raster_um=560000,100000,745000,260000 px=1850x1600 dpi=254 seam=885 b=4024000000000000,0000000000000000,c0b64e0000000000,0000000000000000,4024000000000000,4059000000000000,0000000000000000,0000000000000000,3ff0000000000000 revision=c362750b13475bd27d8bf95c41f2c7f07f40720c8ff5cdfa50a1531076466326 profile=044e75dc2a3f7683461c614bfc21d25fb3ff98194c5730a46015577c5ab3bd9c"},
+        {"normal-30",false,30,"raster_um=560000,100000,770000,260000 px=2100x1600 dpi=254 seam=1010 b=4024000000000000,0000000000000000,c0b7480000000000,0000000000000000,4024000000000000,4059000000000000,0000000000000000,0000000000000000,3ff0000000000000 revision=1ec1147cbd6aa49e7d2e28745bced2e47aeaab64d29d3e4038c9008d2c15951c profile=d3338e5ba9fbdcee07c4e5fea4b36c4eb6175d5c78f045db00fc4637edfbf790"},
+        {"normal-60",false,60,"raster_um=560000,100000,800000,260000 px=2400x1600 dpi=254 seam=1160 b=4024000000000000,0000000000000000,c0b8740000000000,0000000000000000,4024000000000000,4059000000000000,0000000000000000,0000000000000000,3ff0000000000000 revision=e52a73ec03fd58d3a7724d47577020d1060c282255dda77b715ed98c8a884aa5 profile=4d2631cca824431b7f95b8026f3356bf3919446596c29f897c691d922179f02e"},
+        {"normal-minus-30",false,-30,"raster_um=560000,100000,710000,260000 px=1500x1600 dpi=254 seam=750 b=4024000000000000,0000000000000000,c0b4f00000000000,0000000000000000,4024000000000000,4059000000000000,0000000000000000,0000000000000000,3ff0000000000000 revision=68507a534286fb7444f1d3d56e0e7c933f4d334f900c3211c813967e474d183b profile=1e0ee1f6070850574e85529ef8299f1f82667b9d61fe9977ab25f9df350a0c65"},
+        {"half-turn-5",true,5,"raster_um=560000,100000,745000,260000 px=1850x1600 dpi=254 seam=884 b=c024000000000000,0000000000000000,40c9868000000000,0000000000000000,c024000000000000,40b2cb0000000000,0000000000000000,0000000000000000,3ff0000000000000 revision=836106830bbc29aaf4e97f7cce2c53dd863405d460bd7931d48d64d96545c117 profile=98d5f46a97795b241873c3bc38ae37d93e2554677e04c9b73ed5c3d8eee26563"},
+        {"half-turn-30",true,30,"raster_um=560000,100000,770000,260000 px=2100x1600 dpi=254 seam=1009 b=c024000000000000,0000000000000000,40ca038000000000,0000000000000000,c024000000000000,40b2cb0000000000,0000000000000000,0000000000000000,3ff0000000000000 revision=7b9b21d5c211dae3559e78ffe35999c88b3ff804ef25042eec10d26e37d7349b profile=0a4980a352483d8127e2d5a53f9a4eedec5cd4390072c42915005def52c7e884"},
+        {"half-turn-60",true,60,"raster_um=560000,100000,800000,260000 px=2400x1600 dpi=254 seam=1159 b=c024000000000000,0000000000000000,40ca998000000000,0000000000000000,c024000000000000,40b2cb0000000000,0000000000000000,0000000000000000,3ff0000000000000 revision=faadee3eab906ef8a4ebaaabfc2127037af99bcbb4aa07762d10f3845cbd987d profile=5de6f03e766e6c91dd510ed05166cf00396e1694b39d75ceafdd84c27c92b928"},
+    };
+    const render::OutputRaster raster=ps::Raster(560000,100000,740000,260000,254);
+    const rc::ProfileFit fit{0.1,0.3,50};
+    for(const auto& scene:scenes){
+        const auto profile=RigText(scene.turned);
+        const auto parameters=RigProfileV2::Parse(profile).ValidateCalibrationForEvaluation(raster,render::Resampling::bilinear);
+        auto active=MakeActive(std::string("frozen-")+scene.name,profile,scene.turned?MountOrientation::rotated_180:MountOrientation::normal,raster,TestRanges);
+        const auto pose=PoseForShift(parameters.camera_b,scene.shift,scene.turned);
+        const auto proposal=rc::ProposeFromPose(MakeInputs(active,nullptr,nullptr),pose,fit,"{\"schema\":\"test-record\"}");
+        CHECK(proposal.refusals.empty() && proposal.candidate);
+        if(proposal.candidate){
+            const auto actual=FrozenOf(*proposal.candidate);
+            if(actual!=scene.frozen)std::cerr<<"FROZEN "<<scene.name<<" "<<actual<<'\n';
+            CHECK(actual==scene.frozen);
+        }
+        std::error_code ignored;fs::remove_all(active.settings,ignored);
+    }
+    // Too far apart along the baseline (only 30 mm of the 160 are left): the creation check refuses, with its own sentence, and no other
+    // reason comes with it.
+    {
+        const auto profile=RigText(false);
+        const auto parameters=RigProfileV2::Parse(profile).ValidateCalibrationForEvaluation(raster,render::Resampling::bilinear);
+        auto active=MakeActive("frozen-apart",profile,MountOrientation::normal,raster,TestRanges);
+        const auto proposal=rc::ProposeFromPose(MakeInputs(active,nullptr,nullptr),PoseForShift(parameters.camera_b,130.0,false),fit,"{}");
+        CHECK(!proposal.candidate && proposal.refusals.size()==1 && proposal.refusals.front()==rc::Refusal::creation_check_failed && proposal.refusal_reason.empty());
+        CHECK(proposal.detail.rfind("fixed composite creation v3: row 0: the seam and half the blend width inside B's cover (left) does not hold over the range",0)==0);
+        CHECK(!proposal.display.target_cover_shortfall.present && proposal.display.has_new);   // the plan was whole; the check refused it
+        std::error_code ignored;fs::remove_all(active.settings,ignored);
+    }
+}
+
+// ---- Up and down: the rows that the target camera does not see ------------------------------------------------------------------
+// The pose of B for a camera moved by `move_mm` along the sheet's y (positive is down on the drawing), found on the model.
+cr::PoseParameters PoseForVertical(const render::CameraProjection& camera_b,double move_mm,bool turned){
+    const cr::PoseModel model(camera_b);
+    const render::Point x0{934,236};
+    const auto target=Project(MatrixOf(camera_b),{x0.x,x0.y-move_mm});
+    const auto at=[&](double ty){return Project(model.CameraHomography(cr::PoseParameters{0,0,0,0,ty,0}),x0).y-target.y;};
+    double a=0,b=turned?-1:1;
+    for(int i=0;i<6;++i){
+        const double fa=at(a),fb=at(b);
+        if(fa==fb)break;
+        const double c=b-fb*(b-a)/(fb-fa);a=b;b=c;
+    }
+    return cr::PoseParameters{0,0,0,0,b,0};
+}
+std::string ReasonOf(const rc::Proposal& p,rc::Refusal r){return rc::RefusalReasonOf(p,r);}
+bool HasRefusal(const rc::Proposal& p,rc::Refusal r){return std::find(p.refusals.begin(),p.refusals.end(),r)!=p.refusals.end();}
+
+// The synthetic rig sees 10 px per mm and its sensors end at 481.2 mm of the sheet's y (4912 px, the first at 10 mm); the pixel pitch of the
+// 254 DPI rasters below is 0.1 mm. The rows that B does not see below a raster that ends at `raster_bottom_mm` are what lies beyond B's
+// edge once B has moved by `move_mm`: the expectation is this arithmetic, not a run of the code under test.
+constexpr double kRigBottomMm=(4912.0-100.0)/10.0,kRigTopMm=-10.0,kPitchMm=0.1;
+// The rig with B moved to the left so that B's right side is on the sheet, that right side (the normal mounting's; the half turn's is
+// 0.1 mm short of it), and how far the creation check's range reaches beyond the
+// last column of a raster near it: the smallest margin at which the parent passes the check, found once by running it (a value of this test).
+constexpr double kRigMovedLeftMm=152.0,kRigRightMm=1302.0-kRigMovedLeftMm,kRightSideReachMm=2.25;
+// How far apart the columns on which an end of B is measured can be, in mm of the drawing's y, at a turn of 1 degree.
+constexpr double kColumnSlackMm=0.05;
+// The answers around gate 1, up by 4 to 8 mm in steps of 0.5 mm, the same in both mountings (run once and written down; see VerticalFromPose).
+constexpr const char* kGateOne="full,full,full,refused,refused,cut 65,cut 70,cut 75,cut 80";
+// The smallest move to the right, in whole mm, at which the turn of the range loses the seam column at the top and the bottom rows of the
+// tall raster below (run once and written down; see VerticalFromPose).
+constexpr double kSpreadShiftMm=139.0;
+// The rows at the bottom of the kept raster that B does not see at the wide search's pose of the pair moved up by 12 mm, in each mounting
+// (run once and written down; see VerticalPair).
+constexpr std::uint32_t kKeptRowsNormal=8,kKeptRowsHalfTurn=9;
+
+// Where B's sensor ends on the drawing for a document-to-image matrix of the synthetic rig (a plane without a lens), worked out from the
+// matrix and the sensor's size alone (not by the search of the code under test): the lowest y of the drawing at x whose image is inside the
+// sensor's height, and the rightmost x at y whose image is inside its width. Either side of the sensor can be the one on the drawing's
+// bottom (right) depending on the mounting: the larger of the two is.
+double LowestY(const render::Matrix3& h,double x){
+    const auto at=[&](double r){return (r*(h[6]*x+h[8])-h[3]*x-h[5])/(h[4]-r*h[7]);};
+    return std::max(at(0.0),at(static_cast<double>(ps::kHeight)));
+}
+double RightmostX(const render::Matrix3& h,double y){
+    const auto at=[&](double r){return (r*(h[7]*y+h[8])-h[1]*y-h[2])/(h[0]-r*h[6]);};
+    return std::max(at(0.0),at(static_cast<double>(ps::kWidth)));
+}
+// How far B's lower (upper) end on the drawing's column x moved up (down) between two placements, in mm: what may be given up at the bottom
+// (top) of the raster, the owner's decision 1.
+double LowerEndMovedUpMm(const render::CameraProjection& camera_b,const cr::PoseParameters& pose,double x){
+    const cr::PoseModel model(camera_b);
+    return LowestY(model.CameraHomography(cr::PoseParameters{}),x)-LowestY(model.CameraHomography(pose),x);
+}
+// The new width of a raster whose kept rows span the drawing's y from top_mm to bottom_mm (the row centres at the ends): the right edge moves
+// by how far the smallest of B's right side over those rows moved, in whole pixels of 0.1 mm.
+long long WidthFollowingRightSide(const render::CameraProjection& camera_b,const cr::PoseParameters& pose,long long width,double top_mm,double bottom_mm){
+    const cr::PoseModel model(camera_b);
+    const auto before=model.CameraHomography(cr::PoseParameters{}),after=model.CameraHomography(pose);
+    const double y0=top_mm+kPitchMm/2,y1=bottom_mm-kPitchMm/2;
+    const double moved=std::min(RightmostX(after,y0),RightmostX(after,y1))-std::min(RightmostX(before,y0),RightmostX(before,y1));
+    return width+std::llround(moved/kPitchMm);
+}
+bool SameRaster(const render::OutputRaster& a,const render::OutputRaster& b){
+    return a.region_um.left==b.region_um.left && a.region_um.top==b.region_um.top && a.region_um.right==b.region_um.right && a.region_um.bottom==b.region_um.bottom &&
+        a.dpi==b.dpi && a.width_pixels==b.width_pixels && a.height_pixels==b.height_pixels;
+}
+// The seam column of a raster on the drawing (mm), from its left edge and its pixel pitch.
+double SeamXMm(const FixedCompositeConditionV3& c){return static_cast<double>(c.raster.region_um.left)/1000.0+(static_cast<double>(c.seam.column)+0.5)*(25.4/c.raster.dpi);}
+
+void VerticalFromPose(){
+    const rc::ProfileFit fit{0.1,0.3,50};
+    for(const bool turned:{false,true}){
+        const auto profile=RigText(turned);
+        const auto orientation=turned?MountOrientation::rotated_180:MountOrientation::normal;
+        // A raster near the lower edge of what the cameras see: it passes the creation check at the profile's own placement.
+        const render::OutputRaster raster=ps::Raster(560000,300000,740000,470000,254);
+        const auto parameters=RigProfileV2::Parse(profile).ValidateCalibrationForEvaluation(raster,render::Resampling::bilinear);
+        auto active=MakeActive("vertical",profile,orientation,raster,TestRanges);
+        const auto parent=BindFixedCompositeProfileV3(active.condition,profile,kHash);
+        CHECK(rc::ProposeFromPose(MakeInputs(active,nullptr,nullptr),cr::PoseParameters{},fit,"{}").candidate.has_value());
+        const auto from=[&](double move){return rc::ProposeFromPose(MakeInputs(active,nullptr,nullptr),PoseForVertical(parameters.camera_b,move,turned),fit,"{}");};
+
+        // Up by a few mm, and by more: the rows at the bottom that B no longer sees are given up, by what B moved and no more (the owner's
+        // decision 1). The parent's raster ends 11.2 mm above B's lower edge, less than the vertices of the check's range reach (about 16.5 mm),
+        // so what B's move allows is what decides: the bottom edge moves up by the move, to within one row and never by more, and the new
+        // raster keeps the parent's 11.2 mm below it. The top edge, the left, the width and the DPI stay, and the new raster is inside the old
+        // one. The candidate's condition and its profile name the same raster.
+        for(const double move:{-8.0,-12.0,-16.0,-24.0,-40.0}){
+            const auto p=from(move);
+            CHECK(p.candidate && p.refusals.empty() && !p.ready && p.display.has_new && !p.display.target_cover_shortfall.present);
+            if(!p.candidate)continue;
+            const auto& r=p.candidate->condition.raster;
+            CHECK(r.region_um.top==raster.region_um.top && r.region_um.left==raster.region_um.left && r.region_um.right==raster.region_um.right && r.dpi==raster.dpi &&
+                r.width_pixels==raster.width_pixels);
+            CHECK(r.region_um.bottom<raster.region_um.bottom && r.height_pixels<raster.height_pixels && r.region_um.bottom>r.region_um.top);
+            CHECK(!Throws([&]{render::ValidateOutputRaster(r);}));
+            CHECK(SameRaster(r,p.candidate->binding.parameters.raster));
+            const double bottom_mm=static_cast<double>(r.region_um.bottom)/1000.0;
+            const double given_up=470.0-bottom_mm;
+            CHECK(given_up<=-move+1e-9 && given_up>=-move-kPitchMm-1e-9);
+            // What the screen and the report say: the height before and after, the bottom edge before and after, the top edge unchanged.
+            const auto& d=p.display;
+            CHECK(d.height_previous_px==raster.height_pixels && d.height_new_px==r.height_pixels && d.top_new_mm==d.top_previous_mm && d.bottom_new_mm<d.bottom_previous_mm);
+            CheckNear(d.bottom_new_mm,bottom_mm,1e-9,"the bottom edge on the screen");
+            CheckNear(d.motion.camera_motion_mm.y,move,0.2,"the move up is shown");
+        }
+        // Around gate 1: up by 0.5 mm at a time. While the check's own named conditions hold on the raster as it is, nothing is given up and the
+        // check decides; past that, the rows are given up by the move. The sequence of answers is pinned (`full` = a candidate on the whole
+        // raster, `refused` = creation-check-failed on the whole raster, `cut N` = a candidate N rows shorter).
+        {
+            std::string answers;
+            for(int step=8;step<=16;++step){
+                const double move=-0.5*step;
+                const auto p=from(move);
+                std::string answer;
+                if(p.candidate && p.refusals.empty()){
+                    const auto rows=static_cast<long long>(raster.height_pixels)-static_cast<long long>(p.candidate->condition.raster.height_pixels);
+                    answer=rows==0?"full":"cut "+std::to_string(rows);
+                    if(rows>0)CHECK(static_cast<double>(rows)*kPitchMm<=-move+1e-9 && static_cast<double>(rows)*kPitchMm>=-move-kPitchMm-1e-9);
+                }else if(p.refusals.size()==1 && p.refusals.front()==rc::Refusal::creation_check_failed && p.display.has_new && p.display.height_new_px==raster.height_pixels)answer="refused";
+                else answer="other";
+                answers+=(answers.empty()?"":",")+answer;
+            }
+            const std::string expected=kGateOne;
+            if(answers!=expected)std::cerr<<"GATE1 "<<(turned?"half-turn":"normal")<<" "<<answers<<'\n';
+            Check(answers==expected,"the answers around gate 1");
+        }
+        // Moved to the left as well as up (the overlap grows): the rows are given up by the move up and the right edge follows the move to
+        // the left. The seam column of the new raster lies left of the parent's, so nothing about the parent's column holds this back.
+        {
+            auto pose=PoseForShift(parameters.camera_b,-30.0,turned);pose.ty_mm=PoseForVertical(parameters.camera_b,-12.0,turned).ty_mm;
+            const auto p=rc::ProposeFromPose(MakeInputs(active,nullptr,nullptr),pose,fit,"{}");
+            CHECK(p.candidate && p.refusals.empty());
+            if(p.candidate){
+                const auto& r=p.candidate->condition.raster;
+                const double given_up=470.0-static_cast<double>(r.region_um.bottom)/1000.0;
+                CHECK(r.region_um.top==raster.region_um.top && r.region_um.left==raster.region_um.left && given_up<=12.0+1e-9 && given_up>=12.0-kPitchMm-1e-9);
+                CHECK(std::llabs(static_cast<long long>(r.width_pixels)-(static_cast<long long>(raster.width_pixels)-300))<=1);
+                CHECK(SameRaster(r,p.candidate->binding.parameters.raster));
+                CHECK(SeamXMm(p.candidate->condition)<SeamXMm(active.condition));
+            }
+        }
+        // The rows are given up for B's move up or down and not for a position that is out of range: the seam that cannot be held at the edge
+        // of the range is still refused by the check, with the check's own sentence, whether or not B also moved up.
+        {
+            auto pose=PoseForShift(parameters.camera_b,130.0,turned);pose.ty_mm=PoseForVertical(parameters.camera_b,-8.0,turned).ty_mm;
+            const auto p=rc::ProposeFromPose(MakeInputs(active,nullptr,nullptr),pose,fit,"{}");
+            CHECK(!p.candidate && p.refusals.size()==1 && p.refusals.front()==rc::Refusal::creation_check_failed && !p.display.target_cover_shortfall.present);
+            // Moved 100 mm apart and 8 mm up: the rows are given up by the 8 mm and no more, so the new raster keeps the parent's 11.2 mm below it
+            // on the seam column. The seam is now 50 mm further from B's centre, where the turn and the height of the range move B's lower edge
+            // further than at the parent's seam: the check refuses near the bottom, and the height is not traded for it.
+            auto closer=PoseForShift(parameters.camera_b,100.0,turned);closer.ty_mm=PoseForVertical(parameters.camera_b,-8.0,turned).ty_mm;
+            const auto q=rc::ProposeFromPose(MakeInputs(active,nullptr,nullptr),closer,fit,"{}");
+            if(q.candidate || q.refusals.size()!=1)std::cerr<<"apart and up: "<<q.detail<<'\n';
+            CHECK(!q.candidate && q.refusals.size()==1 && q.refusals.front()==rc::Refusal::creation_check_failed && !q.display.target_cover_shortfall.present);
+            CHECK(Contains(q.detail,"the seam and half the blend width inside B's cover (left) does not hold over the range"));
+            CHECK(q.display.has_new && q.display.top_new_mm==q.display.top_previous_mm);
+            const double given_up=470.0-q.display.bottom_new_mm;
+            CHECK(given_up<=8.0+1e-9 && given_up>=8.0-kPitchMm-1e-9 && std::llabs(static_cast<long long>(q.display.width_new_px)-static_cast<long long>(raster.width_pixels)-1000)<=1);
+        }
+        // A turn of B by 1 degree and a move up, in both mountings the same answer: a candidate, its width what B's right side over the rows
+        // that are kept gives (worked out from the matrices; B's turned lower side, which crosses those rows far right of the raster, does not
+        // decide it, and it used to leave no width), its bottom edge moved up by how far B's lower end moved on the seam column (the move and
+        // the turn's part of it), no more. Up by 8 mm the turn brings B's lower end on the seam column back down to 3 mm above where it was,
+        // the check's named conditions hold and nothing is given up; up by 12 mm (7 mm on the seam column) the rows are given up by that.
+        const auto turned_up=[&](const Active& on,const render::CameraProjection& camera_b,const render::OutputRaster& grid,double move,bool cut,const char* what){
+            auto pose=PoseForVertical(camera_b,move,turned);pose.rz_deg=1.0;
+            const auto p=rc::ProposeFromPose(MakeInputs(on,nullptr,nullptr),pose,fit,"{}");
+            Check(p.candidate.has_value() && p.refusals.empty(),what);
+            if(!p.candidate){std::cerr<<what<<": "<<p.detail<<'\n';return;}
+            const auto& r=p.candidate->condition.raster;
+            const double grid_bottom=static_cast<double>(grid.region_um.bottom)/1000.0,bottom_mm=static_cast<double>(r.region_um.bottom)/1000.0;
+            const double allowed=LowerEndMovedUpMm(camera_b,pose,SeamXMm(on.condition));
+            const double given_up=grid_bottom-bottom_mm;
+            const auto width=WidthFollowingRightSide(camera_b,pose,grid.width_pixels,static_cast<double>(grid.region_um.top)/1000.0,bottom_mm);
+            // The code measures the new end on the leftmost column the new seam can take, a few mm from the parent's: at a turn of 1 degree
+            // that is a few hundredths of a mm, inside kColumnSlackMm.
+            std::cerr<<what<<": given up "<<given_up<<" mm (allowed "<<allowed<<"), width "<<r.width_pixels<<" (expected "<<width<<")\n";
+            Check(r.region_um.top==grid.region_um.top && r.region_um.left==grid.region_um.left && r.dpi==grid.dpi,what);
+            if(cut)Check(given_up<=allowed+kColumnSlackMm && given_up>=allowed-kPitchMm-kColumnSlackMm,what);
+            else Check(given_up==0 && allowed>0,what);
+            Check(std::llabs(static_cast<long long>(r.width_pixels)-width)<=1,what);
+            Check(SameRaster(r,p.candidate->binding.parameters.raster),what);
+        };
+        turned_up(active,parameters.camera_b,raster,-8.0,false,turned?"a turn and a move up by 8 mm, half turn":"a turn and a move up by 8 mm, normal");
+        turned_up(active,parameters.camera_b,raster,-12.0,true,turned?"a turn and a move up by 12 mm, half turn":"a turn and a move up by 12 mm, normal");
+        // The same with the parent's right edge near B's right side, so that B's right side is what the right edge follows: B is moved to
+        // the left on the drawing (its right side has to be on the sheet), and the raster ends the check's reach and 1 mm short of it.
+        {
+            const auto moved_profile=RigTextMovedLeft(turned,kRigMovedLeftMm);
+            const render::OutputRaster near_right=ps::Raster(560000,300000,static_cast<long long>(std::llround((kRigRightMm-kRightSideReachMm-1.0)*1000.0)),470000,254);
+            const auto moved_parameters=RigProfileV2::Parse(moved_profile).ValidateCalibrationForEvaluation(near_right,render::Resampling::bilinear);
+            auto close=MakeActive("vertical-near-right",moved_profile,orientation,near_right,TestRanges);
+            CHECK(rc::ProposeFromPose(MakeInputs(close,nullptr,nullptr),cr::PoseParameters{},fit,"{}").candidate.has_value());   // the parent passes the check
+            const char* what=turned?"a turn and a move up near B's right side, half turn":"a turn and a move up near B's right side, normal";
+            auto pose=PoseForVertical(moved_parameters.camera_b,-12.0,turned);pose.rz_deg=1.0;   // past gate 1 on this raster
+            const auto close_parent=BindFixedCompositeProfileV3(close.condition,moved_profile,kHash);
+            const auto r=rc::ProposeRaster(close.condition,close_parent,pose,rc::RasterPlacement::follow_camera_b,rc::SeamPlacement::band_center);
+            const double bottom_mm=static_cast<double>(r.region_um.bottom)/1000.0,given_up=470.0-bottom_mm;
+            const double allowed=LowerEndMovedUpMm(moved_parameters.camera_b,pose,SeamXMm(close.condition));
+            const auto width=WidthFollowingRightSide(moved_parameters.camera_b,pose,near_right.width_pixels,300.0,bottom_mm);
+            std::cerr<<what<<": given up "<<given_up<<" mm (allowed "<<allowed<<"), width "<<near_right.width_pixels<<" -> "<<r.width_pixels<<" (expected "<<width<<")\n";
+            // On this rig B's centre is nearer the seam and the vertices of the range reach less far there: the rows they hold (95 rows, 9.5 mm)
+            // are fewer than B's move allows (9.66 mm), so they decide. Never more than the move.
+            Check(r.region_um.top==near_right.region_um.top && given_up<=allowed+kColumnSlackMm && std::abs(given_up-9.5)<1e-9,what);
+            Check(std::llabs(static_cast<long long>(r.width_pixels)-width)<=1,what);
+            // The whole proposal: the check, which places the paper surface's origin on the new raster's middle row and holds the seam on the
+            // candidate's own profile, finds a point of its range at which B's turned lower side ends B's cover right of the seam on a bottom
+            // row. It refuses, and no more rows are given up for it (the vertices and the check differ by this; the check decides last).
+            const auto p=rc::ProposeFromPose(MakeInputs(close,nullptr,nullptr),pose,fit,"{}");
+            if(p.candidate || p.refusals.size()!=1)std::cerr<<what<<": "<<p.detail<<'\n';
+            Check(!p.candidate && p.refusals.size()==1 && p.refusals.front()==rc::Refusal::creation_check_failed && p.display.has_new &&
+                p.display.height_new_px==r.height_pixels && p.display.width_new_px==r.width_pixels,what);
+            // Moved to the left by 30 mm and up by 40 mm, no turn: the right edge follows B's right side to the left (300 px), and the rows are
+            // given up by the move up (40 mm on the seam column) to within one row and no more. The last column of the new raster, which A does
+            // not see, is inside B's right side on the rows that are kept (worked out from B's matrix).
+            {
+                const char* named=turned?"left and far up near B's right side, half turn":"left and far up near B's right side, normal";
+                auto left_up=PoseForShift(moved_parameters.camera_b,-30.0,turned);left_up.ty_mm=PoseForVertical(moved_parameters.camera_b,-40.0,turned).ty_mm;
+                const auto q=rc::ProposeFromPose(MakeInputs(close,nullptr,nullptr),left_up,fit,"{}");
+                if(!q.candidate || !q.refusals.empty())std::cerr<<named<<": "<<q.detail<<'\n';
+                Check(q.candidate.has_value() && q.refusals.empty(),named);
+                if(q.candidate){
+                    const auto& got=q.candidate->condition.raster;
+                    const double got_bottom=static_cast<double>(got.region_um.bottom)/1000.0,got_given_up=470.0-got_bottom;
+                    const double got_allowed=LowerEndMovedUpMm(moved_parameters.camera_b,left_up,SeamXMm(close.condition));
+                    const auto got_width=WidthFollowingRightSide(moved_parameters.camera_b,left_up,near_right.width_pixels,300.0,got_bottom);
+                    std::cerr<<named<<": given up "<<got_given_up<<" mm (allowed "<<got_allowed<<"), width "<<near_right.width_pixels<<" -> "<<got.width_pixels<<" (expected "<<got_width<<")\n";
+                    Check(got.region_um.top==near_right.region_um.top && got.region_um.left==near_right.region_um.left && got.dpi==near_right.dpi,named);
+                    Check(got_given_up<=got_allowed+kColumnSlackMm && got_given_up>=got_allowed-kPitchMm-kColumnSlackMm && std::abs(got_allowed-40.0)<0.2,named);
+                    Check(std::llabs(static_cast<long long>(got.width_pixels)-got_width)<=1 &&
+                        std::llabs(static_cast<long long>(got.width_pixels)-(static_cast<long long>(near_right.width_pixels)-300))<=1,named);
+                    const auto b_after=cr::PoseModel(moved_parameters.camera_b).CameraHomography(left_up);
+                    const double last_column_mm=static_cast<double>(got.region_um.left)/1000.0+(static_cast<double>(got.width_pixels)-0.5)*kPitchMm;
+                    Check(last_column_mm<RightmostX(b_after,300.0+kPitchMm/2) && last_column_mm<RightmostX(b_after,got_bottom-kPitchMm/2),named);
+                    Check(SameRaster(got,q.candidate->binding.parameters.raster),named);
+                }
+            }
+            std::error_code ignored_close;fs::remove_all(close.settings,ignored_close);
+        }
+        // Far away: no row at all.
+        {
+            const auto p=from(-200.0);
+            const auto& s=p.display.target_cover_shortfall;
+            CHECK(!p.candidate && p.refusals.size()==1 && p.refusals.front()==rc::Refusal::band_uncovered && ReasonOf(p,rc::Refusal::band_uncovered)=="all-rows");
+            CHECK(s.present && s.all_rows && s.rows_top==raster.height_pixels && s.rows_bottom==raster.height_pixels);
+            CheckNear(s.top_mm,static_cast<double>(raster.height_pixels)*kPitchMm,1e-9,"all rows in mm");
+        }
+        // Down is away from the lower edge: nothing is missing there.
+        CHECK(from(8.0).candidate.has_value() && from(40.0).candidate.has_value());
+        // `keep` does not change the raster, so the rows are missing in the same way.
+        {
+            auto in=MakeInputs(active,nullptr,nullptr);in.raster=rc::RasterPlacement::keep;
+            const auto p=rc::ProposeFromPose(in,PoseForVertical(parameters.camera_b,-16.0,turned),fit,"{}");
+            CHECK(!p.candidate && p.refusals.size()==1 && p.refusals.front()==rc::Refusal::band_uncovered && ReasonOf(p,rc::Refusal::band_uncovered)=="bottom" &&
+                p.display.target_cover_shortfall.present && p.display.target_cover_shortfall.at_estimate);
+        }
+        std::error_code ignored;fs::remove_all(active.settings,ignored);
+    }
+    const auto profile=RigText(false);
+    // The top edge: a raster whose first rows B stops seeing when it moves down. Both mountings: the bound on what is given up holds at the
+    // top as it does at the bottom.
+    for(const bool turned:{false,true}){
+        const auto top_profile=RigText(turned);
+        const render::OutputRaster raster=ps::Raster(560000,5000,740000,165000,254);
+        const auto parameters=RigProfileV2::Parse(top_profile).ValidateCalibrationForEvaluation(raster,render::Resampling::bilinear);
+        auto active=MakeActive("vertical-top",top_profile,turned?MountOrientation::rotated_180:MountOrientation::normal,raster,TestRanges);
+        CHECK(rc::ProposeFromPose(MakeInputs(active,nullptr,nullptr),cr::PoseParameters{},fit,"{}").candidate.has_value());
+        const auto p=rc::ProposeFromPose(MakeInputs(active,nullptr,nullptr),PoseForVertical(parameters.camera_b,30.0,turned),fit,"{}");
+        if(!p.candidate)std::cerr<<"top edge "<<(turned?"half turn":"normal")<<": "<<p.detail<<'\n';
+        CHECK(p.candidate && p.refusals.empty() && !p.display.target_cover_shortfall.present);
+        if(p.candidate){
+            // The top edge moves down past the rows above B's upper edge and the reach of the range; the bottom edge stays.
+            const auto& r=p.candidate->condition.raster;
+            const double top_mm=static_cast<double>(r.region_um.top)/1000.0;
+            CHECK(r.region_um.bottom==raster.region_um.bottom && r.region_um.left==raster.region_um.left && r.region_um.right==raster.region_um.right && r.width_pixels==raster.width_pixels);
+            CHECK(r.region_um.top>raster.region_um.top && r.height_pixels<raster.height_pixels && !Throws([&]{render::ValidateOutputRaster(r);}));
+            // B's upper edge moved down by 30 mm, past the parent's 15 mm above the raster: the top edge moves down by the move, to within one
+            // row and never by more.
+            const double given_up=top_mm-5.0;
+            CHECK(given_up<=30.0+1e-9 && given_up>=30.0-kPitchMm-1e-9);
+            CHECK(SameRaster(r,p.candidate->binding.parameters.raster));
+            CHECK(p.display.top_new_mm>p.display.top_previous_mm && p.display.bottom_new_mm==p.display.bottom_previous_mm && p.display.height_new_px==r.height_pixels);
+        }
+        std::error_code ignored;fs::remove_all(active.settings,ignored);
+    }
+    // Spread too far apart on a tall raster with a wide range of turns: at the top and the bottom rows the turn of the range moves B's left side
+    // further than its position does, so the seam column is lost there first while the middle row is still held at every vertex. B did not
+    // move up or down, so no row is given up (the height is not traded for the spread): the check refuses on the whole raster, naming the turn.
+    {
+        const render::OutputRaster tall=ps::Raster(560000,20000,740000,450000,254);
+        const auto parameters=RigProfileV2::Parse(profile).ValidateCalibrationForEvaluation(tall,render::Resampling::bilinear);
+        const auto wide_turns=[](FixedCompositeConditionV3& c){TestRanges(c);c.registration.envelope.rotation_deg=3;};
+        auto active=MakeActive("spread-tall",profile,MountOrientation::normal,tall,wide_turns);
+        CHECK(rc::ProposeFromPose(MakeInputs(active,nullptr,nullptr),cr::PoseParameters{},fit,"{}").candidate.has_value());
+        const auto p=rc::ProposeFromPose(MakeInputs(active,nullptr,nullptr),PoseForShift(parameters.camera_b,kSpreadShiftMm,false),fit,"{}");
+        if(p.candidate || p.refusals.size()!=1 || !Contains(p.detail,"the rotation is at the"))std::cerr<<"SPREAD "<<p.detail<<'\n';
+        CHECK(!p.candidate && p.refusals.size()==1 && p.refusals.front()==rc::Refusal::creation_check_failed);
+        CHECK(p.display.has_new && p.display.height_new_px==tall.height_pixels && p.display.top_new_mm==p.display.top_previous_mm && p.display.bottom_new_mm==p.display.bottom_previous_mm);
+        CHECK(Contains(p.detail,"the seam column is not covered by both cameras when the rotation is at the"));
+        std::error_code ignored;fs::remove_all(active.settings,ignored);
+    }
+    // Both edges: a raster taller than what the cameras see (it never passed the creation check; a pose is all this needs), B moved down by
+    // 12 mm. Kept as it is, B misses the rows at the top and A and B the rows at the bottom. Following B, the top edge moves down by B's move
+    // (the 10 mm above the raster that B saw before are kept above it), and the rows at the bottom, which B's move did not cost, are not given
+    // up: the band is refused there alone.
+    {
+        const render::OutputRaster raster=ps::Raster(560000,0,740000,500000,254);
+        const auto parameters=RigProfileV2::Parse(profile).ValidateCalibrationForEvaluation(raster,render::Resampling::bilinear);
+        auto active=MakeActive("vertical-both",profile,MountOrientation::normal,raster,TestRanges);
+        const auto pose=PoseForVertical(parameters.camera_b,12.0,false);
+        {
+            auto in=MakeInputs(active,nullptr,nullptr);in.raster=rc::RasterPlacement::keep;
+            const auto p=rc::ProposeFromPose(in,pose,fit,"{}");
+            const auto& s=p.display.target_cover_shortfall;
+            CHECK(!p.candidate && p.refusals.size()==1 && p.refusals.front()==rc::Refusal::band_uncovered && ReasonOf(p,rc::Refusal::band_uncovered)=="top-and-bottom");
+            CHECK(s.present && !s.all_rows);
+            CheckNear(static_cast<double>(s.rows_top),(kRigTopMm+12.0)/kPitchMm,1.5,"the rows above what B sees");
+            CheckNear(static_cast<double>(s.rows_bottom),(500.0-kRigBottomMm)/kPitchMm,1.5,"the rows below what A and B see");
+        }
+        {
+            const auto parent=BindFixedCompositeProfileV3(active.condition,profile,kHash);
+            const auto r=rc::ProposeRaster(active.condition,parent,pose,rc::RasterPlacement::follow_camera_b,rc::SeamPlacement::band_center);
+            const double given_up=static_cast<double>(r.region_um.top)/1000.0;
+            CHECK(given_up<=12.0+1e-9 && given_up>=12.0-kPitchMm-1e-9 && r.region_um.bottom==raster.region_um.bottom);
+            const auto p=rc::ProposeFromPose(MakeInputs(active,nullptr,nullptr),pose,fit,"{}");
+            const auto& s=p.display.target_cover_shortfall;
+            CHECK(!p.candidate && p.refusals.size()==1 && p.refusals.front()==rc::Refusal::band_uncovered && ReasonOf(p,rc::Refusal::band_uncovered)=="bottom");
+            CHECK(s.present && !s.all_rows && s.rows_top==0);
+            CheckNear(static_cast<double>(s.rows_bottom),(500.0-kRigBottomMm)/kPitchMm,1.5,"the rows below what A and B see, following B");
+        }
+        std::error_code ignored;fs::remove_all(active.settings,ignored);
+    }
+    // The edges are whole micrometres that are not outside the rows that are kept: the top is the ceiling and the bottom the floor of the rows'
+    // extent (a DPI whose pixel is not a whole number of micrometres), and the height is the exact ceiling of what is left.
+    {
+        const render::OutputRaster raster=ps::Raster(560000,300000,740000,470000,180);
+        const auto parameters=RigProfileV2::Parse(profile).ValidateCalibrationForEvaluation(raster,render::Resampling::bilinear);
+        auto active=MakeActive("vertical-dpi",profile,MountOrientation::normal,raster,TestRanges);
+        const auto parent=BindFixedCompositeProfileV3(active.condition,profile,kHash);
+        const auto bottom_cut=rc::ProposeRaster(active.condition,parent,PoseForVertical(parameters.camera_b,-16.0,false),rc::RasterPlacement::follow_camera_b,rc::SeamPlacement::band_center);
+        const auto top_cut=[&]{
+            const render::OutputRaster tall=ps::Raster(560000,5000,740000,165000,180);
+            auto upper=MakeActive("vertical-dpi-top",profile,MountOrientation::normal,tall,TestRanges);
+            const auto upper_parent=BindFixedCompositeProfileV3(upper.condition,profile,kHash);
+            const auto cut=rc::ProposeRaster(upper.condition,upper_parent,PoseForVertical(parameters.camera_b,30.0,false),rc::RasterPlacement::follow_camera_b,rc::SeamPlacement::band_center);
+            std::error_code ignored_upper;fs::remove_all(upper.settings,ignored_upper);
+            return cut;
+        }();
+        CHECK(bottom_cut.region_um.top==raster.region_um.top && bottom_cut.region_um.bottom<raster.region_um.bottom && !Throws([&]{render::ValidateOutputRaster(bottom_cut);}));
+        {
+            // The bottom is the floor of j rows, j being the new height.
+            const std::int64_t extent=bottom_cut.region_um.bottom-bottom_cut.region_um.top;
+            CHECK(extent==static_cast<std::int64_t>(bottom_cut.height_pixels)*25400/180);
+        }
+        CHECK(top_cut.region_um.top>5000 && top_cut.region_um.bottom==165000 && !Throws([&]{render::ValidateOutputRaster(top_cut);}));
+        {
+            // The top is the ceiling of k rows for the k that is just below it: k = floor(shift / pitch), shift = ceil(k pitch).
+            const std::int64_t shift=top_cut.region_um.top-5000;
+            const std::int64_t k=shift*180/25400;
+            CHECK(k>0 && (k*25400+179)/180==shift);
+        }
+        std::error_code ignored;fs::remove_all(active.settings,ignored);
+    }
+    // The width that follows B's cover is gone: a different refusal, with no rows to count.
+    {
+        const render::OutputRaster raster=ps::Raster(560000,100000,740000,260000,254);
+        const auto parameters=RigProfileV2::Parse(profile).ValidateCalibrationForEvaluation(raster,render::Resampling::bilinear);
+        auto active=MakeActive("collapsed",profile,MountOrientation::normal,raster,TestRanges);
+        const auto p=rc::ProposeFromPose(MakeInputs(active,nullptr,nullptr),PoseForShift(parameters.camera_b,-190.0,false),fit,"{}");
+        CHECK(!p.candidate && !p.ready && p.refusals.size()==1 && p.refusals.front()==rc::Refusal::range_collapsed && ReasonOf(p,rc::Refusal::range_collapsed)=="no-width");
+        CHECK(!p.display.target_cover_shortfall.present && !p.display.has_new && p.display.has_motion);
+        CHECK(!HasRefusal(p,rc::Refusal::no_overlap) && !HasRefusal(p,rc::Refusal::band_uncovered));
+        // The first reason given for a refusal stays, and a refusal without one has none.
+        CHECK(ReasonOf(p,rc::Refusal::no_overlap).empty() && ReasonOf(p,rc::Refusal::creation_check_failed).empty());
+        std::error_code ignored;fs::remove_all(active.settings,ignored);
+    }
+    // The codes of the two new refusals, and that the old one is not one of them.
+    CHECK(rc::RefusalCode(rc::Refusal::band_uncovered)=="band-uncovered" && rc::RefusalCode(rc::Refusal::range_collapsed)=="range-collapsed" && rc::RefusalCode(rc::Refusal::no_overlap)=="no-overlap");
+}
+
+// ---- The live view and the JPEG on a recalibration's own candidate ---------------------------------------------------------------
+// The candidate of a pose moved up (its raster gave up rows at the bottom), read the way a sample composite reads it (SelectionOfCandidate),
+// through the live C and through the JPEG's maker. At the capture's scale C's mapping of camera B is the maker's, bit for bit; at the live
+// view's scale every point of C's grid is the JPEG's output at the same point of the drawing. The drawing's point of a grid pixel is worked
+// out here from the candidate's raster (its edges and DPI) and the view's scale, not from the grid that the code under test made.
+void CandidateLiveAndJpeg(){
+    const rc::ProfileFit fit{0.1,0.3,50};
+    // 1800 x 1100 samples: within the live grid's bound at the capture's scale (px::kFixedPreviewMaximumOutputPixels).
+    const render::OutputRaster raster=ps::Raster(560000,360000,740000,470000,254);
+    const std::vector<RegisteredMapping> mappings{
+        RegisteredMapping{cr::PoseParameters{},{},std::nullopt},
+        RegisteredMapping{cr::PoseParameters{0.15,-0.1,0.3,2.0,-1.5,0.4},{},std::nullopt},
+        RegisteredMapping{cr::PoseParameters{},SurfacePlane{6.0,0.004,-0.002},std::nullopt},
+        RegisteredMapping{cr::PoseParameters{0.15,-0.1,0.3,2.0,-1.5,0.4},SurfacePlane{9.0,0.005,-0.003},std::nullopt}};
+    const std::vector<std::pair<unsigned,unsigned>> views{{640,427},{400,267},{640,400}};
+    for(const bool turned:{false,true}){
+        const char* what=turned?"the live view and the JPEG on a candidate, half turn":"the live view and the JPEG on a candidate, normal";
+        const auto profile=RigText(turned);
+        const auto orientation=turned?MountOrientation::rotated_180:MountOrientation::normal;
+        const auto parameters=RigProfileV2::Parse(profile).ValidateCalibrationForEvaluation(raster,render::Resampling::bilinear);
+        auto active=MakeActive("live-jpeg",profile,orientation,raster,TestRanges);
+        const auto p=rc::ProposeFromPose(MakeInputs(active,nullptr,nullptr),PoseForVertical(parameters.camera_b,-12.0,turned),fit,"{}");
+        if(!p.candidate)std::cerr<<what<<": "<<p.detail<<'\n';
+        Check(p.candidate.has_value() && p.refusals.empty(),what);
+        const auto selection=p.candidate?rc::SelectionOfCandidate(*p.candidate):FixedCompositeSelection{};
+        const auto* v3=selection.loaded?std::get_if<LoadedFixedCompositeConditionV3>(&*selection.loaded):nullptr;
+        Check(v3!=nullptr,what);
+        if(!v3){std::error_code ignored;fs::remove_all(active.settings,ignored);continue;}
+        const auto& r=v3->condition.raster;
+        const auto& rendered=v3->profile.parameters;
+        const auto seam=v3->condition.seam.column;
+        // The candidate gave up rows at the bottom only; its edges are whole rows of 0.1 mm.
+        Check(r.region_um.top==raster.region_um.top && r.region_um.bottom<raster.region_um.bottom && r.height_pixels<raster.height_pixels &&
+            (r.region_um.bottom-r.region_um.top)%100==0 && SameRaster(r,rendered.raster),what);
+        const cr::PoseModel model(rendered.camera_b);
+        // At the capture's scale: every row, every fifth column.
+        {
+            const auto grid=px::MakeFixedPreviewGrid(r,1.0);
+            Check(grid.width==r.width_pixels && grid.height==r.height_pixels,what);
+            const RegisteredMapping fixed{cr::PoseParameters{},{},std::nullopt};
+            const px::LiveRegistrationContext context(rendered,r,seam,grid,1.0,1.0,7360,4912,false,fixed);
+            for(const auto& mapping:mappings){
+                const auto mine=px::LiveViewRegisteredOutputToCamera(context,mapping);
+                const auto theirs=RegisteredDocumentOutputToCamera(r,rendered.camera_a,rendered.camera_b,model,mapping,seam);
+                bool same=true;long long n=0;
+                for(std::uint32_t y=0;y<grid.height;++y)for(std::uint32_t x=0;x<grid.width;x+=5){
+                    render::Point a{},b{};
+                    const bool oa=mine({double(x),double(y)},a),ob=theirs({double(x),double(y)},b);
+                    same=same && oa==ob && (!oa || (a.x==b.x && a.y==b.y));++n;
+                }
+                Check(same && n==static_cast<long long>(grid.height)*((grid.width+4)/5),what);
+            }
+        }
+        // At the live view's scale: every point of C's grid, none passed over.
+        for(const auto& view:views){
+            const auto plan=px::PlanFixedPreviewV3(*v3,orientation,view.first,view.second);
+            Check(!plan.skip && plan.live!=nullptr,what);
+            if(plan.skip || !plan.live)continue;
+            const double s=plan.scale_x,pitch_jpeg=25.4/static_cast<double>(r.dpi),pitch_live=pitch_jpeg/s;
+            const double left=static_cast<double>(r.region_um.left)/1000.0,top=static_cast<double>(r.region_um.top)/1000.0;
+            for(const auto& mapping:{mappings[1],mappings[3]}){
+                const auto mine=px::LiveViewRegisteredOutputToCamera(*plan.live,mapping);
+                const auto jpeg=RegisteredDocumentOutputToCamera(r,rendered.camera_a,rendered.camera_b,model,mapping,seam);
+                double worst=0;long long n=0,picked=0;
+                for(std::uint32_t y=0;y<plan.output_height;++y)for(std::uint32_t x=0;x<plan.output_width;++x){
+                    ++picked;
+                    const render::Point drawing{left+(x+.5)*pitch_live,top+(y+.5)*pitch_live};
+                    const render::Point at{(drawing.x-left)/pitch_jpeg-.5,(drawing.y-top)/pitch_jpeg-.5};
+                    render::Point raw{},live{};
+                    if(!jpeg(at,raw) || !mine({double(x),double(y)},live))continue;
+                    render::Point want{raw.x*s,raw.y*plan.scale_y};
+                    if(turned)want={(view.first-1.0)-want.x,(view.second-1.0)-want.y};
+                    worst=std::max(worst,std::hypot(want.x-live.x,want.y-live.y));++n;
+                }
+                if(worst>=1e-6 || n!=picked)std::cerr<<what<<": view "<<view.first<<"x"<<view.second<<" worst "<<worst<<" px, compared "<<n<<" of "<<picked<<'\n';
+                Check(n==picked && picked==static_cast<long long>(plan.output_width)*plan.output_height && picked>0 && worst<1e-6,what);
+            }
+        }
+        std::error_code ignored;fs::remove_all(active.settings,ignored);
+    }
+}
+
 // ---- Section 4. The whole path on rendered pairs -------------------------------------------------------------------------------
 // The paper is a generated texture over the sheet (value noise of three scales, no repeat), seen by both cameras through their true
 // mappings; the stored frames are the full sensor size (7360 x 4912) that the profile fixes. Nothing here uses the code under test.
@@ -684,6 +1218,7 @@ struct Case {
     double rotation_deg;      // B turned about its optical axis
     double scale_error;       // the true lens against the profile's nominal one: the image scale about the principal point
     bool turned;              // the rig mounted a half turn
+    double shift_y_mm{};      // B moved along the sheet's y (positive is down on the drawing)
 };
 // The true document-to-image matrices of the two cameras for a case. The profile has the nominal ones.
 struct Truth {render::Matrix3 a,b;};
@@ -692,7 +1227,7 @@ Truth TruthOf(const Case& c){
     const render::Matrix3 b0=c.turned?render::Matrix3{-10,0,7359+5660.0,0,-10,4911-100.0,0,0,1}:render::Matrix3{10,0,-5660,0,10,100,0,0,1};
     // B moved by `shift`: the feature at X is seen where X - shift was seen; turned about the axis by the angle: about the middle of its view.
     const double t=c.rotation_deg*std::numbers::pi/180,cx=934.0,cy=236.0;
-    const render::Matrix3 move{1,0,-c.shift_mm,0,1,0,0,0,1};
+    const render::Matrix3 move{1,0,-c.shift_mm,0,1,-c.shift_y_mm,0,0,1};
     const render::Matrix3 to{1,0,-cx,0,1,-cy,0,0,1},from{1,0,cx,0,1,cy,0,0,1},turn{std::cos(t),-std::sin(t),0,std::sin(t),std::cos(t),0,0,0,1};
     const auto document=Multiply(from,Multiply(turn,Multiply(to,move)));
     Truth truth{a0,Multiply(b0,document)};
@@ -838,6 +1373,101 @@ void Pipeline(){
     }
 }
 
+// A pair on which B moved up, with a raster near the lower edge of what the cameras see. The wide search finds the move; the raster that
+// follows B's cover gives up the rows at the bottom that B no longer sees (it used to stop at "no overlap"), the fine stage runs on the rows
+// that are left, and the candidate is made, checked and verified on them. Both mountings: the same physical move up is up on the drawing.
+void VerticalPair(){
+    const Texture texture(7919317);
+    const std::function<double(double,double)> paper=[&](double x,double y){return texture(x,y);};
+    const render::OutputRaster raster=ps::Raster(560000,300000,740000,470000,254);
+    for(const bool turned:{false,true}){
+        const Case c{turned?"vertical-up-12-turn":"vertical-up-12",0,0,0,turned,-12.0};
+        if(!CaseWanted(c.name))continue;
+        const auto profile=RigText(turned);
+        auto active=MakeActive("pipeline-"+c.name,profile,turned?MountOrientation::rotated_180:MountOrientation::normal,raster,TestRanges);
+        const auto truth=TruthOf(c);
+        const auto image_a=RenderFrame(truth.a,paper);
+        const auto image_b=RenderFrame(truth.b,paper);
+        auto in=MakeInputs(active,&image_a,&image_b);
+        std::vector<std::string> stages;
+        in.progress=[&](rc::Stage s){stages.emplace_back(rc::StageCode(s));};
+        const auto p=rc::ProposeRecalibration(in);
+        CHECK(p.wide_performed && p.wide.determined && p.wide.reason.empty() && p.wide.tiles_agreed>0 && p.wide.correspondences>0);
+        CHECK(p.ready && p.refusals.empty() && p.candidate && p.verification.performed && p.verification.passed);
+        CHECK(stages.size()==5 && stages.front()=="wide-search" && stages.back()=="verify");
+        // The raster of the fine stage and the candidate's both gave up rows at the bottom and kept the top, the left and the DPI.
+        // Each gives up no more than B's lower end on the seam column moved at the pose it was chosen at (the wide search's, the fine stage's),
+        // to within one row: B moved up by 12 mm, so about 12 mm (it used to be about 17 mm, the reach of the range's vertices).
+        const auto parent_parameters=RigProfileV2::Parse(profile).ValidateCalibrationForEvaluation(raster,render::Resampling::bilinear);
+        const auto given_up_within=[&](const render::OutputRaster& r,const cr::PoseParameters& pose,const char* what){
+            const double given_up=470.0-static_cast<double>(r.region_um.bottom)/1000.0;
+            const double allowed=LowerEndMovedUpMm(parent_parameters.camera_b,pose,SeamXMm(active.condition));
+            std::cerr<<c.name<<": "<<what<<" gives up "<<given_up<<" mm, B's lower end moved up "<<allowed<<" mm, height "<<r.height_pixels<<" rows\n";
+            Check(given_up<=allowed+kColumnSlackMm && given_up>=allowed-kPitchMm-kColumnSlackMm,what);
+        };
+        CHECK(p.fine_raster.has_value());
+        if(p.fine_raster){
+            CHECK(p.fine_raster->region_um.top==raster.region_um.top && p.fine_raster->region_um.bottom<raster.region_um.bottom && p.fine_raster->height_pixels<raster.height_pixels);
+            CHECK(p.fine_raster->region_um.left==raster.region_um.left && p.fine_raster->dpi==raster.dpi);
+            given_up_within(*p.fine_raster,p.wide.pose,"the fine stage's raster");
+        }
+        const auto& d=p.display;
+        CHECK(d.has_new && d.has_start_motion && d.has_motion && !d.target_cover_shortfall.present);
+        CHECK(d.height_previous_px==raster.height_pixels && d.height_new_px<d.height_previous_px && d.bottom_new_mm<d.bottom_previous_mm && d.top_new_mm==d.top_previous_mm);
+        CheckNear(d.top_previous_mm,300.0,1e-9,"the raster's top edge");
+        CheckNear(d.bottom_previous_mm,470.0,1e-9,"the raster's bottom edge");
+        CheckNear(d.start_motion.camera_motion_mm.y,-12.0,2.0,"the wide search saw B up");
+        CheckNear(d.motion.camera_motion_mm.y,-12.0,1.0,"the fine stage saw B up");
+        CheckNear(d.motion.camera_motion_mm.x,0.0,1.0,"and not to the side");
+        if(p.candidate){
+            const auto& cand=*p.candidate;const auto& r=cand.condition.raster;
+            CHECK(r.region_um.top==raster.region_um.top && r.region_um.bottom<raster.region_um.bottom && r.height_pixels==d.height_new_px && r.width_pixels==raster.width_pixels);
+            given_up_within(r,p.pose,"the candidate's raster");
+            CheckNear(470.0-static_cast<double>(r.region_um.bottom)/1000.0,12.0,0.2,"the candidate gives up about the 12 mm that B moved up");
+            CHECK(SameRaster(r,cand.binding.parameters.raster));
+            // The new profile puts B where the pair says it is: the seam is aligned over the rows that are kept.
+            const auto a_nominal=MatrixOf(parent_parameters.camera_a);
+            const auto baked=MatrixOf(cand.binding.parameters.camera_b);
+            const double bottom_mm=static_cast<double>(r.region_um.bottom)/1000.0;
+            double after=0,before=0;
+            for(double x=626.0;x<=700.0;x+=74.0/12)for(const double y:{320.0,380.0,bottom_mm-10.0}){
+                after=std::max(after,AlignmentError(a_nominal,baked,truth,{x,y}));
+                before=std::max(before,AlignmentError(a_nominal,MatrixOf(parent_parameters.camera_b),truth,{x,y}));
+            }
+            CHECK(after<=0.5 && before>after);
+            // The condition says what the screen says: the log line of the raster's change would carry these four numbers.
+            CHECK(cand.condition.seam.column==FixedCompositeProvisionalSeamColumn(cand.binding.parameters));
+        }
+        // The same pair with the raster kept (`keep`): at the wide search's pose the rows at the bottom of the parent's raster are below B's
+        // lower edge, so the band is refused at the start pose, before the fine stage runs. The number of rows is pinned (run once and written
+        // down); it is what B's lower edge at the wide search's pose, worked out from B's matrix, leaves above the bottom edge.
+        {
+            auto kept=MakeInputs(active,&image_a,&image_b);kept.raster=rc::RasterPlacement::keep;
+            std::vector<std::string> kept_stages;
+            kept.progress=[&](rc::Stage s){kept_stages.emplace_back(rc::StageCode(s));};
+            const auto q=rc::ProposeRecalibration(kept);
+            const auto& s=q.display.target_cover_shortfall;
+            const std::uint32_t pinned=turned?kKeptRowsHalfTurn:kKeptRowsNormal;
+            const cr::PoseModel model_b(parent_parameters.camera_b);
+            const auto at_start=model_b.CameraHomography(q.wide.pose);
+            // A row is seen by B on the band when B's lower edge is below it on at least one column of the band (566 to 726 mm on this rig).
+            const double lowest=std::max(LowestY(at_start,566.0),LowestY(at_start,726.0));
+            std::cerr<<c.name<<" kept: refusals";
+            for(const auto r:q.refusals)std::cerr<<' '<<rc::RefusalCode(r);
+            std::cerr<<" reason "<<ReasonOf(q,rc::Refusal::band_uncovered)<<" rows_bottom "<<s.rows_bottom<<" bottom_mm "<<s.bottom_mm<<" B's lower edge "<<lowest<<" mm\n";
+            if(s.rows_bottom!=pinned)std::cerr<<"KEPT "<<c.name<<" rows_bottom="<<s.rows_bottom<<'\n';
+            CHECK(!q.candidate && !q.ready && q.refusals.size()==1 && q.refusals.front()==rc::Refusal::band_uncovered && ReasonOf(q,rc::Refusal::band_uncovered)=="bottom");
+            CHECK(q.wide.determined && kept_stages.size()==1 && kept_stages.front()=="wide-search" && !q.fine_raster && !q.verification.performed);
+            CHECK(s.present && !s.at_estimate && !s.all_rows && s.rows_top==0 && s.rows_bottom==pinned);
+            CheckNear(s.bottom_mm,static_cast<double>(pinned)*kPitchMm,1e-9,"the rows B does not see below the kept raster, in mm");
+            CheckNear(s.top_mm,0.0,1e-12,"no row is missing at the top");
+            CheckNear(static_cast<double>(pinned),(470.0-lowest)/kPitchMm,1.5,"the rows below B's lower edge at the wide search's pose");
+            CHECK(!q.display.has_new && q.display.has_start_motion && q.display.height_previous_px==raster.height_pixels);
+        }
+        std::error_code ignored;fs::remove_all(active.settings,ignored);
+    }
+}
+
 // What is refused, and why. The pairs are rendered like the ones above; only the paper or the pose of B is made to fail.
 void Refusals(){
     const Texture texture(7919317);
@@ -856,16 +1486,27 @@ void Refusals(){
     };
     const Truth moved=TruthOf(Case{"x",30,0,0,false});
 
-    // A white sheet and a sheet that is only a repeat: nothing is found, nothing is made.
+    // A white sheet and a sheet that is only a repeat: nothing is found, nothing is made. Each sheet has one answer (run once and written
+    // down): the wide search finds too few tiles that agree, so it stops there with `no-overlap` alone, its reason the wide search's own, and
+    // the fine stage does not run.
     if(CaseWanted("refuse-paper")){
-        const std::pair<const char*,const std::function<double(double,double)>*> sheets[]{{"white",&white},{"periodic",&periodic}};
-        for(const auto& [name,sheet]:sheets){
-            auto active=MakeActive(std::string("refuse-")+name,profile,MountOrientation::normal,raster,TestRanges);
-            const auto a=RenderFrame(moved.a,*sheet),b=RenderFrame(moved.b,*sheet);
-            const auto proposal=rc::ProposeRecalibration(MakeInputs(active,&a,&b));
-            describe(name,proposal);
-            CHECK(!proposal.ready && !proposal.refusals.empty() && !proposal.candidate && !proposal.verification.performed);
-            CHECK(has(proposal,rc::Refusal::no_overlap) || has(proposal,rc::Refusal::estimate_not_verified));
+        struct Sheet {const char* name;const std::function<double(double,double)>* paper;const char* reason;};
+        const Sheet sheets[]{{"white",&white,"insufficient-tiles"},{"periodic",&periodic,"insufficient-tiles"}};
+        for(const auto& sheet:sheets){
+            auto active=MakeActive(std::string("refuse-")+sheet.name,profile,MountOrientation::normal,raster,TestRanges);
+            const auto a=RenderFrame(moved.a,*sheet.paper),b=RenderFrame(moved.b,*sheet.paper);
+            auto in=MakeInputs(active,&a,&b);
+            std::vector<std::string> stages;
+            in.progress=[&](rc::Stage s){stages.emplace_back(rc::StageCode(s));};
+            const auto proposal=rc::ProposeRecalibration(in);
+            describe(sheet.name,proposal);
+            const auto reason=rc::RefusalReasonOf(proposal,rc::Refusal::no_overlap);
+            if(proposal.refusals.size()!=1 || reason!=sheet.reason)std::cerr<<"PAPER "<<sheet.name<<" reason "<<reason<<'\n';
+            CHECK(!proposal.ready && !proposal.candidate && !proposal.verification.performed);
+            CHECK(proposal.refusals.size()==1 && proposal.refusals.front()==rc::Refusal::no_overlap && reason==sheet.reason);
+            CHECK(proposal.wide_performed && !proposal.wide.determined && proposal.wide.reason==sheet.reason);
+            CHECK(!proposal.fine_raster && !proposal.display.has_start_motion && !proposal.display.target_cover_shortfall.present);
+            CHECK(stages.size()==1 && stages.front()=="wide-search");
             std::error_code ignored;fs::remove_all(active.settings,ignored);
         }
     }
@@ -974,8 +1615,12 @@ int main(int argc,char** argv){
         ProfileBake();lap("profile bake");
         FitUnits();lap("fit units");
         GeometryFromPose();lap("geometry from a pose");
+        FrozenLeftRight();lap("frozen left-right scenes");
+        VerticalFromPose();lap("up and down from a pose");
+        CandidateLiveAndJpeg();lap("the live view and the JPEG on a candidate");
         RefusalsFromPose();lap("refusals from a pose");
         Pipeline();lap("pipeline");
+        VerticalPair();lap("vertical pair");
         Refusals();lap("refusals");
     }catch(const std::exception& e){
         std::cerr<<"FAILED: an exception: "<<e.what()<<'\n';

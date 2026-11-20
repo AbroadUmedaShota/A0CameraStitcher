@@ -33,6 +33,19 @@ struct CreationCheckDetailsV3 {
 // `details` when it is not null.
 [[nodiscard]] FixedCompositeCreationCheckV3 MakeFixedCompositeCreationCheckV3(CreationCheckDetailsV3* details);
 
+// The range Theta of the check above, as offsets from the base pose, for the callers that have to choose something so that the check holds
+// over it (the recalibration's raster, #439). The check itself is made from these same pieces, so there is one definition of the range.
+//  Vertices        each disc by the regular octagon that contains it and each scalar by its two ends: 256 offsets, and 4096 with the paper
+//                  surface (`with_surface` and the condition has a surfaceEnvelope; without one it is 256 either way).
+//  AxisEnds        the two ends of every axis of the range (12, or 18 with a surfaceEnvelope): the points at which the check refuses a row
+//                  that has no cover of the seam column by name.
+struct CreationOffsetV3 {double tx{},ty{},rx{},ry{},rz{},tz{},h0{},gx{},gy{};};
+[[nodiscard]] std::vector<CreationOffsetV3> CreationRangeVerticesV3(const FixedCompositeConditionV3& c,bool with_surface);
+[[nodiscard]] std::vector<CreationOffsetV3> CreationRangeAxisEndsV3(const FixedCompositeConditionV3& c);
+// The pose and the paper plane of an offset (the pose is `base` moved by the offset's six components).
+[[nodiscard]] content_registration::PoseParameters CreationOffsetPoseV3(const content_registration::PoseParameters& base,const CreationOffsetV3& offset);
+[[nodiscard]] SurfacePlane CreationOffsetSurfaceV3(const CreationOffsetV3& offset);
+
 // Design constants of layer 2 that the strain bound (c) needs (ParallaxDesign::weight_falloff_px = L and ::maximum_strain = s_max,
 // parallax_correction.hpp). Not acceptance values and not defaulted: the caller takes them from the layer-2 lane's design. Without them
 // a condition that enables layer 2 (registration.parallax) cannot be checked, and the check refuses it (fail closed).
