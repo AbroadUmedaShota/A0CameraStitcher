@@ -1,6 +1,7 @@
 #pragma once
-// A registered composite review (report v8, #417) written by the real writer from synthetic frames: a condition v3 revision, the
-// profile it names, two full-size JPEG originals of a textured drawing and WriteUncalibratedStillReview. The same construction as
+// A registered composite review (#417) written by the real writer from synthetic frames: a condition v3 revision, the
+// profile it names, two full-size JPEG originals of a textured drawing and WriteUncalibratedStillReview. The writer's report is v9
+// (#437); without a confirmed position it is the v8 report plus the schema and two null members. The same construction as
 // tests/still_review_registration_tests.cpp (RequestFor + WriteUncalibratedStillReview), kept here so that the window and seam crop
 // tests open a review that the writer made, not a hand-built report. Camera free; nothing outside the folder it is given is written.
 #include "a0/m2/experimental/still_review.hpp"
@@ -167,5 +168,14 @@ inline StillReviewRequest RequestFor(const Frames& f,const char* output,const Se
     StillReviewRequest q{f.a,f.b,f.root/output,Sha(f.a),Sha(f.b),"synthetic-pair-registered",geometry,std::chrono::steady_clock::now()+std::chrono::seconds(900)};
     q.fixed_composite_registration=StillReviewRequest::FixedCompositeRegistration{&s.loaded.condition,&s.loaded.profile,s.loaded.file_sha256,threads};
     return q;
+}
+// A position of this condition that a person set by hand (the confirmed position the window gives a capture, #437): sample values of a
+// test, the same as the ones tests/still_review_registration_tests.cpp gives the writer. The hand sum is 12 px to the right, 4 px up and 0.05 degrees clockwise.
+inline ConfirmedPosition HandPosition(const Settings& s){
+    ConfirmedPosition p;
+    p.mapping=RegisteredMapping{content_registration::PoseParameters{0.1,0,0.05,0.5,0.25,0},SurfacePlane{0.5,0.001,0},std::nullopt};
+    p.source=ConfirmedPositionSource::manual;p.serial=4;p.condition_sha256=s.loaded.file_sha256;
+    p.base_source=ConfirmedPositionSource::auto_start;p.manual_entered=HandCounts{-3,1,-1};
+    return p;
 }
 }

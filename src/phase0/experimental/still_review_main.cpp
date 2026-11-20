@@ -8,6 +8,7 @@
 #include "a0/phase0/experimental/fixed_composite_text.hpp"
 #include "a0/phase0/experimental/fixed_composite_lens_text.hpp"
 #include "a0/phase0/experimental/pair_review_registration.hpp"
+#include "a0/phase0/experimental/live_registration_display.hpp"
 #include "a0/phase0/experimental/fixed_composite_tool.hpp"
 #include "a0/phase0/experimental/fixed_composite_tool_v2.hpp"
 #include "a0/phase0/experimental/fixed_composite_cli_v3.hpp"
@@ -40,7 +41,7 @@ std::wstring Number(double value){
 }
 struct Loaded {review::SavedStillReview record;a0::m2::render::BgrImage image;};
 Loaded Load(const fs::path& path){auto record=review::LoadSavedStillReview(path);auto image=review::LoadStillReviewImage(record);return {std::move(record),std::move(image)};}
-// A report whose mapping is fixed: the profile's (v7), or the profile's with that capture's registration (v8). Its picture is
+// A report whose mapping is fixed: the profile's (v7), or the profile's with that capture's registration (v8, v9). Its picture is
 // the saved JPEG alone. There is nothing to place by hand, so the manual tools are off and the two originals are not decoded.
 // This is the one place that decides it; anything specific to one version asks the record for that version itself.
 bool UsesFixedMapping(const review::SavedStillReview& record){return record.fixed_composite_lens.has_value() || record.fixed_composite_registration.has_value();}
@@ -53,13 +54,22 @@ std::array<a0::m2::render::BgrImage,2> DecodeSources(const review::SavedStillRev
 std::wstring ControlText(std::string_view utf8){
     std::wstring text;for(const auto c:a0::phase0::experimental::WidenUtf8(utf8)){if(c==L'\n')text+=L'\r';text+=c;}return text;
 }
-// The sentences of a v8 report: the ones the development preview shows after the shot, made by the same function from the
+// The sentences of a v8 or v9 report: the ones the development preview shows after the shot, made by the same function from the
 // report's values (level, pose, gate, assessment, warnings). Nothing is worded here.
 a0::phase0::experimental::RegistrationReviewLines RegistrationLines(const review::SavedFixedCompositeRegistration& record){
     review::StillReviewResult result;result.fixed_composite_registration=record;
     return a0::phase0::experimental::DescribeRegistrationReview(result);
 }
 std::string RegistrationGateSentence(const review::SavedFixedCompositeRegistration& record){return a0::phase0::experimental::RegistrationGateStateText(record.registration.gate);}
+// v9: the amounts of a position that was set by hand, when the JPEG was made with it (the sentence the live state row says). Empty for
+// every other report: no position given, a position of another condition, or one the JPEG did not use.
+std::string HandSumSentence(const review::SavedFixedCompositeRegistration& record){
+    const auto& capture=record.registration;
+    if(!capture.confirmed_position || !capture.confirmed_check || !capture.confirmed_check->used)return {};
+    const auto& position=*capture.confirmed_position;
+    if(position.source!=review::ConfirmedPositionSource::manual || position.condition_sha256!=record.condition_sha256 || !position.manual_entered)return {};
+    return a0::phase0::experimental::LiveHandSumText(position.manual_entered);
+}
 // The inspector's buttons in command order: button i is created with command id kFirstButtonId+i. To add a
 // button, append its label here, place it in Inspector::Layout and handle its id in Inspector::Command; the
 // button array, the WM_COMMAND range, the control-fit check and EnableChanges follow this list's size.
@@ -75,10 +85,10 @@ constexpr int kSummaryTop=218,kHelpTop=242,kPointHelpTop=266;
 struct Inspector {
     Loaded current;
     unsigned original_decodes{}; // the originals decoded for the manual tools (0 for a fixed-mapping report)
-    // The decoded A/B of the manual tools. A fixed-mapping report (v7, v8) has no manual tools, so none are decoded (#405 W4, #418).
+    // The decoded A/B of the manual tools. A fixed-mapping report (v7, v8, v9) has no manual tools, so none are decoded (#405 W4, #418).
     std::array<a0::m2::render::BgrImage,2> sources;
-    // lens: v7 only. registration: v8 only. fixed_mapping: either (UsesFixedMapping). Wording and values of one version are read
-    // only behind its own flag; a fixed_mapping branch holds what v7 and v8 share.
+    // lens: v7 only. registration: v8 and v9. fixed_mapping: any of them (UsesFixedMapping). Wording and values of one version are read
+    // only behind its own flag; a fixed_mapping branch holds what v7, v8 and v9 share.
     bool lens{},registration{},fixed_mapping{};unsigned lens_stage{};
     review::ReviewViewport viewport;
     std::array<HWND,kButtonLabels.size()> buttons{};
@@ -126,6 +136,8 @@ struct Inspector {
     // `layout_failed` is a layout check that did not hold (a screen narrower than the buttons need). It fails the run exactly as
     // before, but the crops smoke goes on, so that its output tells "the report did not open" from "the window is too narrow".
     bool fixed_tools_checked{},layout_failed{},v7_text_shown{},registration_text_shown{};
+    // The status lines of a registered report that the right-hand panel shows, the sentence of its confirmed position (v9) and that of the hand amounts.
+    unsigned status_lines{},status_lines_shown{};bool confirmed_text_expected{},confirmed_text_shown{},hand_sum_expected{},hand_sum_shown{};
     unsigned manual_tool_count{},manual_tools_enabled{},manual_refusals{};
     // #382 smoke: checked before the stages below, whose counters restart after it.
     unsigned draft_stage{},draft_saved{},draft_rejections{};bool draft_verified{};fs::path draft_parent;
@@ -155,9 +167,11 @@ struct Inspector {
     std::wstring BlendText() const {
         const auto& b=current.record.blend;
         if(registration){
-            // The preview's sentences of a v8 report, then the saved blend's brightness ratio as v6 and v7 show it.
+            // The preview's sentences of a v8 or v9 report, then the saved blend's brightness ratio as v6 and v7 show it.
             const auto lines=RegistrationLines(*current.record.fixed_composite_registration);
-            std::string text;for(const auto& line:lines.status)text+=line+"\n";text+="\n";for(const auto& line:lines.warnings)text+=line+"\n";
+            std::string text;for(const auto& line:lines.status)text+=line+"\n";
+            if(const auto hand=HandSumSentence(*current.record.fixed_composite_registration);!hand.empty())text+=hand+"\n";
+            text+="\n";for(const auto& line:lines.warnings)text+=line+"\n";
             return ControlText(text)+L"\r\n明るさの比 A/B: "+a0::phase0::experimental::StillFixed(b->ratio_minimum,3)+L"〜"+a0::phase0::experimental::StillFixed(b->ratio_maximum,3)+L"\r\n"+ColorText()+
                 a0::phase0::experimental::kFixedMappingNoManualTools+L"\r\n\r\n";
         }
@@ -180,10 +194,12 @@ struct Inspector {
     // The crops' own stages hold apart from the window layout, so that the output can say which of the two failed.
     bool CropsStagesPassed() const {return crop_stage==4 && crop_paints>=2 && !crop_pixel_failures && crop_seam_pixels && crop_returns==4 && crop_guarded==1 && FixedToolsPassed();}
     bool CropsSmokePassed() const {return CropsStagesPassed() && layout_verified;}
+    // Every status line of the report is in the panel; the confirmed position's sentence and the hand amounts are there exactly when the report has them.
+    bool RegistrationSentencesShown() const {return status_lines && status_lines_shown==status_lines && confirmed_text_shown==confirmed_text_expected && hand_sum_shown==hand_sum_expected;}
     // A fixed-mapping report: every manual tool off and refused, no original decoded, its own sentences shown and not another version's.
     bool FixedToolsPassed() const {
         if(!fixed_mapping)return true;
-        return fixed_tools_checked && !original_decodes && manual_tool_count==manual_refusals && !manual_tools_enabled && !(registration && (v7_text_shown || !registration_text_shown));
+        return fixed_tools_checked && !original_decodes && manual_tool_count==manual_refusals && !manual_tools_enabled && !(registration && (v7_text_shown || !registration_text_shown || !RegistrationSentencesShown()));
     }
     bool LensSmokePassed() const {return lens_stage==2 && seam_pixels && layout_verified && FixedToolsPassed();}
     bool ResumeSmokePassed() const {return resume_verified && layout_verified;}
@@ -196,7 +212,7 @@ struct Inspector {
         return crops_smoke?CropsSmokePassed():fixed_mapping?LensSmokePassed():resume_smoke?ResumeSmokePassed():ManualSmokePassed();
     }
     void EnableChanges(bool enabled){
-        if(fixed_mapping){ // only the seam line is a tool of a fixed-mapping report (v7, v8)
+        if(fixed_mapping){ // only the seam line is a tool of a fixed-mapping report (v7, v8, v9)
             for(size_t i=4;i<buttons.size();++i)EnableWindow(buttons[i],FALSE);for(auto edit:edits)EnableWindow(edit,FALSE);
             EnableWindow(buttons[30],enabled);EnableWindow(buttons[kSeamCropsButton],TRUE);return;
         }
@@ -533,7 +549,7 @@ struct Inspector {
         if(Clock::now()-started>std::chrono::seconds(210) || failed){failed=true;SendMessageW(window,WM_CLOSE,0,0);return;}
         if(fixed_mapping && !fixed_tools_checked){
             // #418: the window of a fixed-mapping report. The manual tools are off and each is refused by its command; the
-            // sentences are the report's own (v8) and not another version's. Nothing is started by the refusals.
+            // sentences are the report's own (v8, v9) and not another version's. Nothing is started by the refusals.
             if(!zoom_paints[0])return;
             fixed_tools_checked=true;
             const auto is_manual=[](size_t i){return i>=4 && i!=30 && i!=static_cast<size_t>(kSeamCropsButton);};
@@ -547,12 +563,20 @@ struct Inspector {
             if(registration){
                 wchar_t metrics[16384]{};GetWindowTextW(residual_text,metrics,static_cast<int>(std::size(metrics)));
                 const std::wstring panel=metrics,summary=SummaryText(0);
-                // The sentences of the v7 report are about its scale correction and its turned originals; v8 has neither.
+                // The sentences of the v7 report are about its scale correction and its turned originals; v8 and v9 have neither.
                 v7_text_shown=panel.find(L"倍率の補正")!=std::wstring::npos || summary.find(L"倍率の補正")!=std::wstring::npos || summary.find(L"A/Bを回して")!=std::wstring::npos;
-                registration_text_shown=panel.find(a0::phase0::experimental::WidenUtf8(RegistrationGateSentence(*current.record.fixed_composite_registration)))!=std::wstring::npos;
+                const auto& f=*current.record.fixed_composite_registration;
+                registration_text_shown=panel.find(a0::phase0::experimental::WidenUtf8(RegistrationGateSentence(f)))!=std::wstring::npos;
+                const auto in_panel=[&](const std::string& sentence){return panel.find(a0::phase0::experimental::WidenUtf8(sentence))!=std::wstring::npos;};
+                for(const auto& line:RegistrationLines(f).status){++status_lines;if(in_panel(line))++status_lines_shown;}
+                const auto confirmed=a0::phase0::experimental::ConfirmedPositionText(f),hand=HandSumSentence(f);
+                confirmed_text_expected=!confirmed.empty();confirmed_text_shown=confirmed_text_expected && in_panel(confirmed);
+                hand_sum_expected=!hand.empty();hand_sum_shown=hand_sum_expected && in_panel(hand);
             }
             std::cout<<"fixed_mapping_window=1 registration="<<registration<<" original_decodes="<<original_decodes<<" manual_tools="<<manual_tool_count<<" manual_tools_enabled="<<manual_tools_enabled
-                <<" manual_tools_refused="<<manual_refusals<<" v7_text_shown="<<v7_text_shown<<" registration_text_shown="<<registration_text_shown<<'\n'<<std::flush;
+                <<" manual_tools_refused="<<manual_refusals<<" v7_text_shown="<<v7_text_shown<<" registration_text_shown="<<registration_text_shown
+                <<" status_lines="<<status_lines<<" status_lines_shown="<<status_lines_shown<<" confirmed_position_text_expected="<<confirmed_text_expected<<" confirmed_position_text_shown="<<confirmed_text_shown
+                <<" hand_sum_expected="<<hand_sum_expected<<" hand_sum_shown="<<hand_sum_shown<<'\n'<<std::flush;
             if(!FixedToolsPassed())failed=true;
             return;
         }
@@ -744,7 +768,7 @@ struct Inspector {
         if(registration)summary=L"保存JPEG（校正の写像） / "+size+L"  / "+a0::phase0::experimental::WidenUtf8(a0::phase0::experimental::GeometryLevelName(current.record.fixed_composite_registration->registration.level.level));
         else if(lens)summary=L"保存JPEG（校正の写像） / "+size+L"  / 倍率の補正 ×"+a0::phase0::experimental::StillFixed(current.record.fixed_composite_lens->scale.applied_scale,5);
         else summary=std::wstring(view_mode?L"調整プレビュー（未保存） / ":L"保存JPEG / ")+size+L"  / B位置="+std::to_wstring(view_mode?draft_x:displayed_x)+L", "+std::to_wstring(view_mode?draft_y:displayed_y)+L"  回転="+std::to_wstring(degrees)+L"° 倍率="+std::to_wstring(scale*100)+L"%";
-        // v8 keeps the originals in their saved orientation (the profile's mapping turns them); v1 to v7 turn them before drawing.
+        // v8 and v9 keep the originals in their saved orientation (the profile's mapping turns them); v1 to v7 turn them before drawing.
         if(current.record.geometry.orientation==review::MountOrientation::rotated_180)summary+=registration?L"  取付: 180°回転":L"  取付: 180°回転（A/Bを回して表示・合成）";
         else summary+=L"  取付: 通常";
         return summary;

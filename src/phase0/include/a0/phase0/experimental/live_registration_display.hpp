@@ -367,9 +367,15 @@ inline std::string Amount(double value, const char* positive, const char* negati
     return "ライブの合成は、まだ確定した位置で描けていません。描き終わるまで、撮影と手の操作は少し待ってください";
 }
 
+// The amounts of a position that a person set by hand, in one sentence. The state row says it and so does the window that opens a saved review
+// (the record's manual amounts are the same counts).
+[[nodiscard]] inline std::string LiveHandSumText(const std::optional<a0::m2::experimental::HandCounts>& entered) {
+    return "手で直しました（Bの絵の動き " + (entered ? LiveHandMovesText(*entered) : std::string("合計は不明")) + "、撮影の画素。合計）。";
+}
+
 // What the state row says of a position that a person set by hand: the amounts, what the shot did with it, and the way back to an estimate.
 [[nodiscard]] inline std::string LiveManualStateText(const LivePlacementView& view) {
-    std::string text = "手で直しました（Bの絵の動き " + (view.hand_entered ? LiveHandMovesText(*view.hand_entered) : std::string("合計は不明")) + "、撮影の画素。合計）。";
+    std::string text = LiveHandSumText(view.hand_entered);
     if (view.capture && view.capture->level == kLiveCaptureConfirmedLevel)
         text += "手で直した位置で JPEG を作りました。ライブは手で直した位置のままです";
     else if (view.capture && view.capture->level == "G4")

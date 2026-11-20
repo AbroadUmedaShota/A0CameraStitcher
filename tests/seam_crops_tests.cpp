@@ -2,10 +2,13 @@
 // Pure decisions (rows, columns), the pixels of the crops against the composite, the PNG
 // record, a real seam-cut review written and read back, and the inspector itself
 // (--export-seam-crops, and the window's own check with --seam-crops-smoke).
-// With the rig profile v2 fixture (argument 2) it also writes registered reviews (report v8, upright and mounted a half turn) with
-// the real writer and opens them: the window, the export, and a JPEG changed by one byte (#418).
+// With the rig profile v2 fixture (argument 2) it also writes registered reviews (upright and mounted a half turn) with the real
+// writer and opens them: the window, the export, and a JPEG changed by one byte (#418). The writer's report is v9; the cases are a v9
+// report without a position, a v9 report with a position set by hand (level confirmed), and the first of them in the v8 form (what a
+// capture made before v9 saved).
 #include "a0/m2/experimental/seam_crops.hpp"
 #include "a0/phase0/experimental/seam_crops_export.hpp"
+#include "a0/phase0/experimental/live_registration_display.hpp"
 #include "a0/phase0/phase0.hpp"
 #include "registered_review_fixture.hpp"
 #include <Windows.h>
@@ -296,16 +299,36 @@ BgrImage Cut(const BgrImage& image,std::uint32_t left,std::uint32_t width){
 }
 std::set<std::string> Entries(const fs::path& folder){std::set<std::string> names;for(const auto& e:fs::directory_iterator(folder))names.insert(e.path().filename().string());return names;}
 
-// A registered review (report v8) that the real writer made, in the window and in the export. The window and the export show the
-// saved JPEG alone: what they show is compared with the JPEG decoded here. The window does not decode the originals, and each manual
-// tool is off and refused. A narrow screen (the window's buttons need 1175 pixels) fails the window's layout check and nothing else;
-// the checks of "it opened" and of what the window did are read from the output, so they hold on any screen width.
-void OneRegistered(const fs::path& root,const fs::path& inspector,const StillReviewResult& made,bool turned,const char* label){
+// A registered review (report v8 or v9) in the window and in the export. The window and the export show the saved JPEG alone: what
+// they show is compared with the JPEG decoded here. The window does not decode the originals, and each manual tool is off and
+// refused. A narrow screen (the window's buttons need 1175 pixels) fails the window's layout check and nothing else; the checks of
+// "it opened" and of what the window did are read from the output, so they hold on any screen width.
+// `schema`: the report's version. `by_hand`: the JPEG was made with a position set by hand (v9, level confirmed). Every other report
+// has no position, so the sentences of the position and of the hand amounts are not on the window.
+struct Expect {const char* schema;bool by_hand;};
+void OneRegistered(const fs::path& root,const fs::path& inspector,const fs::path& report,bool turned,const std::string& label,const Expect& expect){
     std::cout<<"registered review: "<<label<<'\n';
-    const auto record=LoadSavedStillReview(made.report);
+    const auto record=LoadSavedStillReview(report);
     Check(record.fixed_composite_registration && !record.fixed_composite_lens && record.blend && !record.blend->seam_x.empty());
     Check((record.geometry.orientation==MountOrientation::rotated_180)==turned);
+    {
+        std::ifstream in(report,std::ios::binary);const std::string text{std::istreambuf_iterator<char>(in),{}};
+        Check(text.find(std::string("\"a0.uncalibrated-still-review.")+expect.schema+"\"")!=std::string::npos);
+    }
     if(!record.fixed_composite_registration)return;
+    {
+        const auto& capture=record.fixed_composite_registration->registration;
+        Check((capture.level.level==GeometryLevel::confirmed)==expect.by_hand);
+        if(expect.by_hand){
+            Check(capture.confirmed_position && capture.confirmed_check && capture.confirmed_check->used && capture.confirmed_position->source==ConfirmedPositionSource::manual);
+            // What a person is told, from the report's values alone; the window shows these two sentences (read from its output below).
+            Check(px::ConfirmedPositionText(*record.fixed_composite_registration).rfind("手で直した位置で JPEG を作りました（",0)==0);
+            Check(capture.confirmed_position && px::LiveHandSumText(capture.confirmed_position->manual_entered)==
+                "手で直しました（Bの絵の動き 左右 右へ 12 px・上下 上へ 4 px・回り 時計回りに 0.05°、撮影の画素。合計）。");
+        }else{
+            Check(!capture.confirmed_position && !capture.confirmed_check && px::ConfirmedPositionText(*record.fixed_composite_registration).empty());
+        }
+    }
     const auto seam=record.fixed_composite_registration->seam_column;
     const auto jpeg=ReadJpeg(record.jpeg);
     Check(jpeg.width==record.width && jpeg.height==record.height && record.height>=px::kSeamCropExportHeight && (record.height-px::kSeamCropExportHeight)%2==0);
@@ -313,7 +336,7 @@ void OneRegistered(const fs::path& root,const fs::path& inspector,const StillRev
     Check(LoadStillReviewImage(record).bgr==jpeg.bgr);
 
     // The export, from the report's folder: every pixel of the three crops is the JPEG's pixel at the same place; the centre is the seam column.
-    const auto review_folder=made.report.parent_path();
+    const auto review_folder=report.parent_path();
     const auto png=root/(std::string("registered-")+label+".png");
     const auto exported=RunCaptured(inspector,L"--export-seam-crops \""+review_folder.wstring()+L"\" \""+png.wstring()+L"\"",120000,root);
     Check(exported.code==0 && Has(exported.out,"seam_crops_exported=1") && fs::exists(png));
@@ -336,60 +359,89 @@ void OneRegistered(const fs::path& root,const fs::path& inspector,const StillRev
 
     // The window, with the seam crops smoke. The report opens, whatever the screen width.
     const auto before=Entries(review_folder.parent_path());
-    const auto crops=RunCaptured(inspector,L"--report \""+made.report.wstring()+L"\" --seam-crops-smoke",240000,root);
+    const auto crops=RunCaptured(inspector,L"--report \""+report.wstring()+L"\" --seam-crops-smoke",240000,root);
     Check(Has(crops.out,"review_loaded=1 ui_window_visible=1"));
     Check(!Has(crops.err,"invalid review similarity") && !Has(crops.err,"still review failed"));
     Check(Has(crops.out,"fixed_mapping_window=1 registration=1 original_decodes=0")); // the originals are not decoded
     const auto tools=Field(crops.out,"manual_tools=");
     Check(tools && *tools>0 && Field(crops.out,"manual_tools_refused=")==tools && Field(crops.out,"manual_tools_enabled=")==0); // each tool is off and refused (the re-Merge too)
     Check(Field(crops.out,"v7_text_shown=")==0 && Field(crops.out,"registration_text_shown=")==1);                                // the report's own sentences, not v7's
+    // Every status line of the report is on the panel; the position's sentence and the hand amounts are there exactly when the report has them.
+    const auto lines=Field(crops.out,"status_lines=");
+    Check(lines && *lines>0 && Field(crops.out,"status_lines_shown=")==lines);
+    const long long hand=expect.by_hand?1:0;
+    Check(Field(crops.out,"confirmed_position_text_expected=")==hand && Field(crops.out,"confirmed_position_text_shown=")==hand);
+    Check(Field(crops.out,"hand_sum_expected=")==hand && Field(crops.out,"hand_sum_shown=")==hand);
     Check(Field(crops.out,"crops_stages_passed=")==1 && Field(crops.out,"crop_pixel_failures=")==0 && Field(crops.out,"crop_stage=")==4 && Field(crops.out,"stage_failed=")==0);
     Check(Entries(review_folder.parent_path())==before);                                                                             // the refusals wrote nothing
     // The window's whole verdict, as before: the layout check stays. Only a screen too narrow for the buttons may fail it.
     if(Has(crops.out,"button_layout_failure="))std::cout<<"note: the screen is too narrow for the window's buttons; its layout check fails and the run exits 1 (it did the same for every report)\n";
     Check(crops.code==0);
     // The plain --smoke, the one the lens contract uses.
-    const auto plain=RunCaptured(inspector,L"--report \""+made.report.wstring()+L"\" --smoke",240000,root);
+    const auto plain=RunCaptured(inspector,L"--report \""+report.wstring()+L"\" --smoke",240000,root);
     Check(Has(plain.out,"review_loaded=1 ui_window_visible=1") && !Has(plain.err,"invalid review similarity"));
     Check(plain.code==0);
     Check(Entries(review_folder.parent_path())==before);
 }
 // The JPEG changed by one byte: the report no longer opens, in the window or in the export, and no PNG is made.
-void ChangedJpeg(const fs::path& root,const fs::path& inspector,const StillReviewResult& made){
-    std::cout<<"registered review: one byte of the JPEG changed\n";
-    const auto folder=root/"damaged";fs::create_directories(folder);
+void ChangedJpeg(const fs::path& root,const fs::path& inspector,const StillReviewResult& made,const std::string& label){
+    std::cout<<"registered review: one byte of the JPEG changed ("<<label<<")\n";
+    const auto folder=root/("damaged-"+label);fs::create_directories(folder);
     fs::copy_file(made.report,folder/"uncalibrated-review.json",fs::copy_options::overwrite_existing);
     fs::copy_file(made.jpeg,folder/"uncalibrated-review.jpg",fs::copy_options::overwrite_existing);
     // The copy as it is opens (so that the refusals below are for the byte).
-    const auto control=RunCaptured(inspector,L"--export-seam-crops \""+folder.wstring()+L"\" \""+(root/"damaged-control.png").wstring()+L"\"",120000,root);
-    Check(control.code==0 && fs::exists(root/"damaged-control.png"));
+    const auto control=RunCaptured(inspector,L"--export-seam-crops \""+folder.wstring()+L"\" \""+(root/("damaged-control-"+label+".png")).wstring()+L"\"",120000,root);
+    Check(control.code==0 && fs::exists(root/("damaged-control-"+label+".png")));
     auto bytes=ReadBytes(folder/"uncalibrated-review.jpg");
     Check(bytes.size()>1000);
     bytes[bytes.size()/2]=static_cast<char>(bytes[bytes.size()/2]^0x01);
     { std::ofstream out(folder/"uncalibrated-review.jpg",std::ios::binary|std::ios::trunc);out.write(bytes.data(),static_cast<std::streamsize>(bytes.size())); }
     Check(Throws([&]{const auto record=LoadSavedStillReview(folder/"uncalibrated-review.json");(void)LoadStillReviewImage(record);}));
-    const auto exported=RunCaptured(inspector,L"--export-seam-crops \""+folder.wstring()+L"\" \""+(root/"damaged.png").wstring()+L"\"",120000,root);
-    Check(exported.code!=0 && !fs::exists(root/"damaged.png") && !Has(exported.out,"seam_crops_exported=1"));
+    const auto exported=RunCaptured(inspector,L"--export-seam-crops \""+folder.wstring()+L"\" \""+(root/("damaged-"+label+".png")).wstring()+L"\"",120000,root);
+    Check(exported.code!=0 && !fs::exists(root/("damaged-"+label+".png")) && !Has(exported.out,"seam_crops_exported=1"));
     for(const auto* mode:{L"--seam-crops-smoke",L"--smoke"}){
         const auto window=RunCaptured(inspector,L"--report \""+(folder/"uncalibrated-review.json").wstring()+L"\" "+mode,240000,root);
         Check(window.code!=0 && !Has(window.out,"review_loaded=1"));
     }
+}
+// What a capture made before v9 saved: the v9 report of a capture without a position is, apart from its schema, the v8 report plus
+// two null members. Written back to the v8 form beside the same JPEG, in a folder of its own.
+fs::path AsV8(const fs::path& root,const StillReviewResult& made,const std::string& label){
+    const auto folder=root/("v8-"+label)/"review";fs::create_directories(folder);
+    std::string text;{std::ifstream in(made.report,std::ios::binary);text.assign(std::istreambuf_iterator<char>(in),{});}
+    const std::string nulls=",\"confirmedPosition\":null,\"confirmedPositionCheck\":null",v9="a0.uncalibrated-still-review.v9";
+    const auto at=text.find(nulls),schema=text.find(v9);
+    Check(at!=std::string::npos && text.find(nulls,at+1)==std::string::npos && schema!=std::string::npos && text.find(v9,schema+1)==std::string::npos);
+    if(at==std::string::npos || schema==std::string::npos)return folder/"uncalibrated-review.json";
+    text.erase(at,nulls.size());
+    text.replace(text.find(v9),v9.size(),"a0.uncalibrated-still-review.v8");
+    { std::ofstream out(folder/"uncalibrated-review.json",std::ios::binary|std::ios::trunc);out.write(text.data(),static_cast<std::streamsize>(text.size())); }
+    fs::copy_file(made.jpeg,folder/"uncalibrated-review.jpg",fs::copy_options::overwrite_existing);
+    return folder/"uncalibrated-review.json";
 }
 void Registered(const fs::path& root,const fs::path& inspector,const fs::path& fixture){
     namespace rf=registered_review_fixture;
     fs::create_directories(root);
     const auto base_profile=rf::ReadText(fixture/"calibrated-draft.json");
     const rf::World world(17);
-    std::optional<StillReviewResult> upright;
+    std::optional<StillReviewResult> upright,upright_hand;
     for(const bool turned:{false,true}){
         const auto name=std::string(turned?"turned":"upright");
         const auto settings=rf::MakeSettings(root/("settings-"+name),rf::ProfileText(base_profile,turned),turned?MountOrientation::rotated_180:MountOrientation::normal,rf::TallRaster());
         const auto frames=rf::TexturedFrames(root,"frames-"+name,settings,turned,world);
+        // A capture without a position (v9), the same capture with a position set by hand (v9, level confirmed), the first in the v8 form.
         const auto made=WriteUncalibratedStillReview(rf::RequestFor(frames,"review",settings,4));
-        OneRegistered(root,inspector,made,turned,name.c_str());
-        if(!turned)upright=made;
+        auto hand_request=rf::RequestFor(frames,"review-hand",settings,4);
+        hand_request.fixed_composite_registration->confirmed_position=rf::HandPosition(settings);
+        const auto by_hand=WriteUncalibratedStillReview(hand_request);
+        Check(ReadBytes(made.jpeg)!=ReadBytes(by_hand.jpeg));   // the position changed the saved JPEG: the two cases do not show the same picture
+        OneRegistered(root,inspector,made.report,turned,name,{"v9",false});
+        OneRegistered(root,inspector,by_hand.report,turned,name+"-hand",{"v9",true});
+        OneRegistered(root,inspector,AsV8(root,made,name),turned,name+"-v8",{"v8",false});
+        if(!turned){upright=made;upright_hand=by_hand;}
     }
-    if(upright)ChangedJpeg(root,inspector,*upright);
+    if(upright)ChangedJpeg(root,inspector,*upright,"v9");
+    if(upright_hand)ChangedJpeg(root,inspector,*upright_hand,"v9-hand");
 }
 
 // A real seam-cut review of a small synthetic pair, written and read back.
