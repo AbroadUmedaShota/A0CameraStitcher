@@ -15,10 +15,25 @@
       (owner, serials, dates, unique ID, maker note), read only
     - the registry (Nikon USB / WPD device keys, registered owner)
     - the environment (PC name, user profile paths)
-    - the local list leak-check-needles.txt in the same folder (not tracked by git; UTF-8, one value
-      per line, lines that start with '#' and empty lines are skipped, surrounding spaces removed):
-      values that no record holds, such as the names of the other PCs. Optional: without the file
-      nothing is added and the result does not change.
+    - the local list leak-check-needles.txt in the same folder (not tracked by git; UTF-8, or UTF-16
+      with a byte order mark; one value per line, lines that start with '#' or with the full-width
+      number sign (U+FF03) and empty lines are skipped, surrounding spaces removed; a comment after a
+      value is not supported, so a value cannot hold a space followed by '#', nor the full-width
+      number sign anywhere; a '#' with no space before it, as in a device name, is a value):
+      values that no record holds, such as the names of the other PCs. The run prints whether the
+      list was not found, is empty, or holds values (read, added, dropped as too short or as repeated
+      within the list, ignoring case). A line that cannot be read as a value (a control or invisible
+      character, including the tag characters of the supplementary planes; a '#' after a space of
+      any width, or U+FF03 anywhere in the value; a file that is not valid text in its encoding; a
+      UTF-32 file, which is not read) would otherwise drop out of the comparison
+      unnoticed, so the check stops instead (exit 2); for an invisible character the line is to be
+      typed again by hand, because a copied name can carry one. When the records exist but the list adds not a
+      single value (not found, empty, only comments, only values shorter than 4 characters), the
+      check cannot verify (exit 2) unless -MissingLocalList Warn is given, which goes on with a
+      warning that is repeated after the summary (the default is set once, in
+      DefaultMissingLocalList; what a list that exists but adds nothing does is set once, in
+      EmptyLocalListAction). Values shorter than 4 characters are not compared and are reported with
+      a warning after the summary.
   Nothing is written to disk and no value or hash of one is stored in the repository. Output has
   only labels (category#number) and locations (commit, file, line). Values are never printed;
   neither are absolute paths or the messages of exceptions.
@@ -49,7 +64,9 @@
   Exit codes: 0 = no hits, 1 = hits (judge each: a hit may be a false positive such as a real date
   that also appears in prose, but a real value must not be pushed), 2 = could not verify
   (no local source data, no body serial number to compare, a photograph folder that was too large
-  to read completely, a merge commit that cannot be inspected, or an error). Treat 2 as "do not push".
+  to read completely, a merge commit that cannot be inspected, a range <Base>..<Head> that holds no
+  commit, a local list that cannot be read in full, a local list that is missing or adds no value
+  when it is required, or an error). Treat 2 as "do not push".
 
   The check refuses to call a push clean when it has no body serial number to look for (neither
   from the EXIF of a photograph nor from the Nikon USB / WPD registry entries of this PC): a PC
@@ -73,6 +90,16 @@
   Only valid together with -SelfTest. In a normal run it is refused (exit 2): skipping the real
   values is not a way to get a clean result.
 
+.PARAMETER MissingLocalList
+  What to do when the records exist but the local list (leak-check-needles.txt) is missing or adds no
+  value: Require stops with exit 2, Warn goes on with a warning (the values that no record holds are
+  then not compared). Only the exact text Require or Warn is accepted; any other text is exit 2.
+  Without the parameter, DefaultMissingLocalList at the top of the script decides. Order of
+  precedence: an explicit Require always stops (EmptyLocalListAction cannot loosen it); an explicit
+  Warn goes on; without the parameter, a list that exists but adds no value goes on with a warning
+  if EmptyLocalListAction is Warn, and otherwise the default decides. Use Warn only with
+  the owner's approval, on a PC that has no other PC.
+
 .PARAMETER SelfTest
   Runs the check against a throw-away repository with invented values and reports PASS or FAIL.
   Needs no local source data.
@@ -91,6 +118,7 @@ param(
     [string[]]$ExtraPhotoRoot = @(),
     [switch]$IncludeChangedFiles,
     [switch]$NoLocalSources,
+    [string]$MissingLocalList = '',
     [switch]$SelfTest
 )
 
@@ -102,6 +130,19 @@ $script:Utf16 = [Text.Encoding]::Unicode
 $script:MaxPhotosPerRoot = 2000
 # The local list of extra values in the source folder (not tracked by git; see .DESCRIPTION).
 $script:LocalNeedleListName = 'leak-check-needles.txt'
+# What a run does when the records exist but the local list does not, or the list adds no value (see
+# EmptyLocalListAction below): 'Require' = exit 2 (cannot verify), 'Warn' = print a conspicuous warning and
+# go on. Only the exact text Require or Warn is accepted here and in -MissingLocalList; any other text is
+# exit 2. -MissingLocalList overrides it for one run. This is the only place that sets the default.
+$script:DefaultMissingLocalList = 'Require'
+# What a run does when the local list exists but adds no value (empty, comments only, only values shorter
+# than 4 characters): 'Stop' = the same as a missing list (exit 2 under Require, a warning under Warn);
+# 'Warn' = go on with a warning after the summary, unless -MissingLocalList Require is given on the
+# command line (an explicit Require always stops). Only the exact text 'Warn' goes on; any other text
+# stops. This is the only place that sets it.
+$script:EmptyLocalListAction = 'Stop'
+# The full-width number sign (U+FF03): a line that starts with it is a comment line, like one that starts with '#'.
+$script:FullWidthNumberSign = [string][char]0xFF03
 # The notice the fixture dummy images carry (the self test builds its invented dummies with it; the
 # check itself does not accept an image because of the notice).
 $script:SyntheticImageNotice = 'A0 replay fixture: synthetic image, not a photograph'
@@ -330,6 +371,49 @@ function Get-PhotoFiles {
     return [pscustomobject]@{ Files = $files; Capped = $capped }
 }
 
+# Reads the local list as bytes and checks every value line. Returns the value lines (trimmed; lines that
+# start with '#' or with the full-width number sign, and empty lines, skipped) and the parts that cannot be
+# read as a value. A problem holds the line number (0 = the whole file) and a fixed kind, never the text of
+# the line.
+#   - a UTF-32 byte order mark, or bytes that are not valid in the encoding the file starts with
+#     (UTF-8, with or without a byte order mark; UTF-16 with one): the whole file
+#   - a control or invisible character in a line (a UTF-16 file without a byte order mark shows up as NUL;
+#     the classes are control, format, line and paragraph separators, the replacement character, and the
+#     tag characters of the supplementary planes, which the regular expression sees as a surrogate pair)
+#   - '#' after a space of any width, or the full-width number sign anywhere in a value: a comment after a
+#     value is not supported, so the line would be compared as one long value that no push contains
+#     ('#' without a space before it stays a value: names of devices hold one)
+function Read-LocalNeedleList {
+    param([string]$ListPath)
+    $values = [System.Collections.Generic.List[string]]::new()
+    $problems = [System.Collections.Generic.List[object]]::new()
+    $bytes = [IO.File]::ReadAllBytes($ListPath)
+    $offset = 0
+    $encoding = [Text.UTF8Encoding]::new($false, $true)
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { $offset = 3 }
+    elseif ($bytes.Length -ge 4 -and (($bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE -and $bytes[2] -eq 0 -and $bytes[3] -eq 0) -or ($bytes[0] -eq 0 -and $bytes[1] -eq 0 -and $bytes[2] -eq 0xFE -and $bytes[3] -eq 0xFF))) {
+        $problems.Add([pscustomobject]@{ Line = 0; Kind = 'UTF-32 byte order mark' })
+        return [pscustomobject]@{ Values = $values; Problems = $problems }
+    }
+    elseif ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) { $offset = 2; $encoding = [Text.UnicodeEncoding]::new($false, $false, $true) }
+    elseif ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFE -and $bytes[1] -eq 0xFF) { $offset = 2; $encoding = [Text.UnicodeEncoding]::new($true, $false, $true) }
+    try { $text = $encoding.GetString($bytes, $offset, $bytes.Length - $offset) }
+    catch {
+        $problems.Add([pscustomobject]@{ Line = 0; Kind = 'not valid text in its encoding' })
+        return [pscustomobject]@{ Values = $values; Problems = $problems }
+    }
+    $lineNumber = 0
+    foreach ($line in [regex]::Split($text, '\r\n|\n|\r')) {
+        $lineNumber++
+        $v = $line.Trim()
+        if ($v.Length -eq 0 -or $v.StartsWith('#', [StringComparison]::Ordinal) -or $v.StartsWith($script:FullWidthNumberSign, [StringComparison]::Ordinal)) { continue }
+        if ($v -match '[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\uFFFD]|\uDB40[\uDC00-\uDC7F]') { $problems.Add([pscustomobject]@{ Line = $lineNumber; Kind = 'invisible or control character' }); continue }
+        if ($v -match '\s#|\uFF03') { $problems.Add([pscustomobject]@{ Line = $lineNumber; Kind = 'comment after a value' }); continue }
+        $values.Add($v)
+    }
+    return [pscustomobject]@{ Values = $values; Problems = $problems }
+}
+
 function Get-LocalNeedles {
     # NoRegistry and NoEnvironment exist for the self test only: it must not depend on this PC.
     param([string]$SourceRoot, [string[]]$ExtraPhotoRoot, [bool]$NoRegistry = $false, [bool]$NoEnvironment = $false)
@@ -341,15 +425,25 @@ function Get-LocalNeedles {
         $sourceFiles = @(Get-ChildItem -LiteralPath $SourceRoot -Recurse -File | Where-Object { $_.FullName -ne $listPath })
     }
 
-    # The local list (optional): one value per line; '#' lines and empty lines are skipped.
-    $listValues = 0
+    # The local list: one value per line; lines that start with '#' or with the full-width number sign, and
+    # empty lines, are skipped. The result tells not found / empty / present apart, counts the values it read
+    # and the ones Add-Needle dropped (shorter than 4 characters, or repeated in the list, ignoring case),
+    # and lists the lines that cannot be read.
+    $listState = 'not-found'
+    $listValues = 0; $listAdded = 0; $listShort = 0; $listDuplicate = 0
+    $listProblems = @()
     if (Test-Path -LiteralPath $listPath -PathType Leaf) {
-        foreach ($line in [IO.File]::ReadAllLines($listPath, $script:Utf8)) {
-            $v = $line.Trim()
-            if ($v.Length -eq 0 -or $v.StartsWith('#')) { continue }
+        $read = Read-LocalNeedleList $listPath
+        $listProblems = @($read.Problems)
+        foreach ($v in $read.Values) {
             $listValues++
+            $before = $set.List.Count
             Add-Needle $set $v 'local-list'
+            if ($set.List.Count -gt $before) { $listAdded++ }
+            elseif ($v.Length -lt 4) { $listShort++ }
+            else { $listDuplicate++ }
         }
+        $listState = if ($listValues -eq 0 -and $listProblems.Count -eq 0) { 'empty' } else { 'present' }
     }
 
     # Records: relative paths and text content (read only).
@@ -438,7 +532,8 @@ function Get-LocalNeedles {
     }
     [pscustomobject]@{
         Set = $set; SourceFiles = $sourceFiles.Count; Photos = $photoFiles.Count; UsbInstances = $usbCount; WpdKeys = $wpdCount
-        ExportDirs = $exportDirCount; ExportPhotos = $exportPhotoCount; Capped = $capped; RecordBodies = $aliases.Count; ListValues = $listValues
+        ExportDirs = $exportDirCount; ExportPhotos = $exportPhotoCount; Capped = $capped; RecordBodies = $aliases.Count
+        ListState = $listState; ListValues = $listValues; ListAdded = $listAdded; ListShort = $listShort; ListDuplicate = $listDuplicate; ListProblems = $listProblems
     }
 }
 
@@ -784,6 +879,9 @@ function Get-PublishTargets {
             $ids[0]
         })
     Write-Host "commits in range $Base..$Head : $($commits.Count)"
+    # A range with no commit compares nothing (-Base given the same commit as -Head, say): that is
+    # not a clean push.
+    if ($commits.Count -eq 0) { throw (New-SafeError 'the range to publish holds no commit, so nothing was compared (check -Base and -Head)') }
 
     foreach ($c in $commits) {
         $short = $c.Substring(0, 7)
@@ -976,7 +1074,21 @@ function Invoke-LeakCheck {
     param(
         [string]$Root, [string]$Base, [string]$Head, [string]$SourceRoot, [string[]]$ExtraNeedle,
         [string[]]$ExtraPhotoRoot, [bool]$IncludeChangedFiles, [bool]$NoLocalSources,
-        [bool]$SelfTestIsolation = $false)
+        [bool]$SelfTestIsolation = $false, [string]$MissingLocalList = '')
+
+    # What to do when the records exist but the local list does not (or adds no value): one default, set at the top.
+    # The default and the parameter must be exactly Require or Warn. Anything else could not be trusted to mean
+    # "go on", so the check stops (exit 2) instead of choosing a side.
+    if ($script:DefaultMissingLocalList -cnotin 'Require', 'Warn') {
+        Write-Host 'CANNOT VERIFY: the default of -MissingLocalList in this script is neither Require nor Warn. Do not push.'
+        return [pscustomobject]@{ Exit = 2; Hits = @(); Needles = 0; BodySerials = 0 }
+    }
+    if ($MissingLocalList -cnotin '', 'Require', 'Warn') {
+        Write-Host 'CANNOT VERIFY: -MissingLocalList accepts only Require or Warn, spelled exactly. Do not push.'
+        return [pscustomobject]@{ Exit = 2; Hits = @(); Needles = 0; BodySerials = 0 }
+    }
+    $missingListPolicy = if ([string]::IsNullOrEmpty($MissingLocalList)) { $script:DefaultMissingLocalList } else { $MissingLocalList }
+    $warnings = [System.Collections.Generic.List[string]]::new()
 
     # Without the pinned image hashes every image would be a hit or, worse, none could be judged.
     if (@($script:PinnedImageSha256).Count -eq 0 -or @($script:PinnedImageSha256 | Where-Object { $_ -cnotmatch '^[0-9a-f]{64}$' }).Count -gt 0) {
@@ -997,12 +1109,52 @@ function Invoke-LeakCheck {
             $local = Get-LocalNeedles $SourceRoot $ExtraPhotoRoot $SelfTestIsolation $SelfTestIsolation
             $set = $local.Set
             $recordBodies = $local.RecordBodies
-            Write-Host "local sources: record files=$($local.SourceFiles), photographs=$($local.Photos) (export folders=$($local.ExportDirs), photographs there=$($local.ExportPhotos)), nikon usb instances=$($local.UsbInstances), wpd keys=$($local.WpdKeys), camera bodies named in the records=$recordBodies, local list values=$($local.ListValues)"
+            Write-Host "local sources: record files=$($local.SourceFiles), photographs=$($local.Photos) (export folders=$($local.ExportDirs), photographs there=$($local.ExportPhotos)), nikon usb instances=$($local.UsbInstances), wpd keys=$($local.WpdKeys), camera bodies named in the records=$recordBodies"
+            $listUnreadable = @($local.ListProblems).Count
+            switch ($local.ListState) {
+                'not-found' { Write-Host "local list ($($script:LocalNeedleListName)): not found" }
+                'empty' { Write-Host "local list ($($script:LocalNeedleListName)): empty (no value lines)" }
+                default {
+                    Write-Host "local list ($($script:LocalNeedleListName)): values=$($local.ListValues) added=$($local.ListAdded) dropped=$($local.ListValues - $local.ListAdded) (too short=$($local.ListShort), repeated in the list=$($local.ListDuplicate)), unreadable=$listUnreadable"
+                }
+            }
             if ($local.SourceFiles -eq 0) { $cannotVerify = 'The local source data folder holds no files.' }
             elseif ($local.Capped) { $cannotVerify = "A photograph folder holds more than $($script:MaxPhotosPerRoot) photographs and was not read completely." }
             elseif ((Get-RecordIdCount $set) -eq 0) {
                 # Without any ID from the records the comparison would cover only the PC and the photographs.
                 $cannotVerify = 'No ID (32 or 64 digit hex, run ID, approval reference) could be read from the records.'
+            }
+            elseif ($listUnreadable -gt 0) {
+                # A line that cannot be read would be left out of the comparison without a word.
+                $kinds = (@($local.ListProblems | Group-Object Kind | Sort-Object Name | ForEach-Object { "$($_.Name) x$($_.Count)" })) -join ', '
+                $lineNumbers = @($local.ListProblems | Where-Object { $_.Line -gt 0 } | Select-Object -First 20 | ForEach-Object { $_.Line })
+                $where = if (@($local.ListProblems | Where-Object { $_.Line -eq 0 }).Count -gt 0) { '; the whole file' } elseif ($lineNumbers.Count -gt 0) { "; line $($lineNumbers -join ', ')" } else { '' }
+                $advice = [System.Collections.Generic.List[string]]::new()
+                $problemKinds = @($local.ListProblems | ForEach-Object { $_.Kind })
+                if ($problemKinds -ccontains 'invisible or control character') { $advice.Add('Type the line again by hand: a copied name can carry an invisible character, and saving the file again does not remove it. For a name that holds an emoji, write the part without the emoji.') }
+                if ($problemKinds -ccontains 'comment after a value') { $advice.Add('Move the comment to a line of its own that starts with #.') }
+                if (($problemKinds -ccontains 'not valid text in its encoding') -or ($problemKinds -ccontains 'UTF-32 byte order mark')) { $advice.Add('A file that is not UTF-8 should be saved again as UTF-8.') }
+                $cannotVerify = "The local list ($($script:LocalNeedleListName)) has $listUnreadable part(s) that cannot be read as a value ($kinds$where). Fix or remove them. $($advice -join ' ')".TrimEnd()
+            }
+            elseif ($local.ListAdded -eq 0) {
+                # The list adds no value: not found, empty, comments only, or only values shorter than 4 characters.
+                # Only an explicit Warn goes on; anything else stops.
+                $why = switch ($local.ListState) { 'not-found' { 'was not found' } 'empty' { 'is empty' } default { 'holds no value of 4 or more characters' } }
+                $missingText = "The local list ($($script:LocalNeedleListName)) $why while the records exist: values that no record holds, such as the names of other PCs, are not compared"
+                # An explicit -MissingLocalList Require on the command line is never loosened by EmptyLocalListAction.
+                $mayGoOn = ($missingListPolicy -ceq 'Warn') -or ($local.ListState -ne 'not-found' -and $script:EmptyLocalListAction -ceq 'Warn' -and $MissingLocalList -cne 'Require')
+                if ($mayGoOn) {
+                    $warnings.Add("$missingText; a clean result does not cover them.")
+                    Write-Host "WARNING: $($warnings[-1])"
+                }
+                else {
+                    $cannotVerify = "$missingText. Write the names of the other PCs in the list, one per line (a list without a value stops the check as well). If this PC has no other PC, run with -MissingLocalList Warn, with the owner's approval."
+                }
+            }
+            if (-not $cannotVerify -and $local.ListShort -gt 0) {
+                # A value shorter than 4 characters is not compared; it does not stop the check.
+                $warnings.Add("$($local.ListShort) value(s) of the local list ($($script:LocalNeedleListName)) are shorter than 4 characters and are not compared; a clean result does not cover them.")
+                Write-Host "WARNING: $($warnings[-1])"
             }
         }
     }
@@ -1050,7 +1202,9 @@ function Invoke-LeakCheck {
     }
     if ($hits.Count -eq 0) { Write-Host 'NO HITS in the content this push would publish.' }
     Write-Host "=== SUMMARY: hits in content this push would publish = $($hits.Count)"
-    return [pscustomobject]@{ Exit = $(if ($hits.Count -eq 0) { 0 } else { 1 }); Hits = $hits; Needles = $set.List.Count; BodySerials = $bodySerials }
+    # The warnings come last, so that the end of a long output still says what was not compared.
+    foreach ($w in $warnings) { Write-Host "WARNING: $w" }
+    return [pscustomobject]@{ Exit = $(if ($hits.Count -eq 0) { 0 } else { 1 }); Hits = $hits; Needles = $set.List.Count; BodySerials = $bodySerials; Warnings = $warnings.Count }
 }
 
 # One run of the check as the command line asks for it. Returns the exit code; never throws, and
@@ -1058,7 +1212,7 @@ function Invoke-LeakCheck {
 function Invoke-Entry {
     param(
         [string]$Base, [string]$Head, [string]$RepositoryRoot, [string]$SourceRoot, [string[]]$ExtraNeedle,
-        [string[]]$ExtraPhotoRoot, [bool]$IncludeChangedFiles, [bool]$NoLocalSources, [bool]$InSelfTest)
+        [string[]]$ExtraPhotoRoot, [bool]$IncludeChangedFiles, [bool]$NoLocalSources, [bool]$InSelfTest, [string]$MissingLocalList = '')
     try {
         if ($NoLocalSources -and -not $InSelfTest) {
             Write-Host 'CANNOT VERIFY: -NoLocalSources is only valid together with -SelfTest. Do not push.'
@@ -1070,7 +1224,7 @@ function Invoke-Entry {
         }
         Write-Host "base=$Base head=$Head"
         $result = Invoke-LeakCheck -Root $RepositoryRoot -Base $Base -Head $Head -SourceRoot $SourceRoot -ExtraNeedle $ExtraNeedle `
-            -ExtraPhotoRoot $ExtraPhotoRoot -IncludeChangedFiles $IncludeChangedFiles -NoLocalSources $NoLocalSources
+            -ExtraPhotoRoot $ExtraPhotoRoot -IncludeChangedFiles $IncludeChangedFiles -NoLocalSources $NoLocalSources -MissingLocalList $MissingLocalList
         return $result.Exit
     }
     catch {
@@ -1184,6 +1338,8 @@ function Invoke-SelfTest {
     # The pinned image hashes are those of the real fixture dummies, which an invented image cannot
     # match. The self test replaces them with the hash of its own invented dummy and puts them back.
     $savedPinned = $script:PinnedImageSha256
+    $savedDefaultPolicy = $script:DefaultMissingLocalList
+    $savedEmptyAction = $script:EmptyLocalListAction
     $pinnedDir = $script:PinnedImageDirectory.TrimEnd('/')
     try {
         $git = { $o = & git -C $tmp @args 2>&1; if ($LASTEXITCODE -ne 0) { throw "git $($args[0]) failed: $($o -join ' ')" } }
@@ -1410,7 +1566,9 @@ function Invoke-SelfTest {
         $recordId = '0f1e2d3c4b5a69788796a5b4c3d2e1f0'   # invented
         $clean = ($scenarios | Where-Object { $_.Name -eq 'clean commit' })
         $localArgs = @{ Root = $tmp; Base = $clean.Base; Head = $clean.Head; SourceRoot = $source; ExtraNeedle = @(); ExtraPhotoRoot = @()
-                        IncludeChangedFiles = $false; NoLocalSources = $false; SelfTestIsolation = $true }
+                        IncludeChangedFiles = $false; NoLocalSources = $false; SelfTestIsolation = $true
+                        # Most of these cases have no local list; the cases about a missing list set the policy themselves.
+                        MissingLocalList = 'Warn' }
 
         # L1 (a): records without any ID of their own (hex32 / hex64 / run ID / approval reference) cannot be verified.
         # (The export folder path holds the random name of this temporary folder, so the photograph sits in the source folder here.)
@@ -1461,12 +1619,179 @@ function Invoke-SelfTest {
         if ($commentHits.Count -ne 0) { $failures.Add('the words of a comment line of the local list must not be found') }
         $cap = Invoke-CheckCaptured $listArgs
         if ($cap.Result.Exit -ne 1 -or @($cap.Result.Hits | Where-Object { $_.Label -like 'local-list#*' }).Count -eq 0) { $failures.Add("a value of the local list in an added line must be a hit (got exit $($cap.Result.Exit))") }
-        if ($cap.Text.Contains($needle) -or $cap.Text -notmatch 'local list values=1') { $failures.Add('the local list must be counted in the output without its value') }
+        if ($cap.Text.Contains($needle) -or $cap.Text -notmatch 'local list \([^)]*\): values=1 added=1 dropped=0 ') { $failures.Add('the local list must be counted in the output without its value') }
         $cap = Invoke-CheckCaptured $localArgs
         if ($cap.Result.Exit -ne $withoutList[0]) { $failures.Add("the local list must not change the result of a clean range (got exit $($cap.Result.Exit))") }
         Remove-Item -LiteralPath $localListFile
         $cap = Invoke-CheckCaptured $listArgs
-        if ($cap.Result.Exit -ne $withoutList[1] -or $cap.Text -notmatch 'local list values=0') { $failures.Add("without the local list the exit must be as before (got $($cap.Result.Exit))") }
+        if ($cap.Result.Exit -ne $withoutList[1] -or $cap.Text -notmatch 'local list \([^)]*\): not found') { $failures.Add("without the local list the exit must be as before (got $($cap.Result.Exit))") }
+
+        # #304 (empty range): a range with no commit compares nothing, so it is no clean result (exit 2, a fixed sentence).
+        $emptyOut = @(& { Invoke-Entry -Base $clean.Head -Head $clean.Head -RepositoryRoot $tmp -SourceRoot '' -ExtraNeedle @($needle) -ExtraPhotoRoot @() `
+                    -IncludeChangedFiles $false -NoLocalSources $true -InSelfTest $true } 6>&1)
+        $emptyText = ($emptyOut | Out-String)
+        if ($emptyOut[-1] -ne 2 -or $emptyText -notmatch 'CANNOT VERIFY: the range to publish holds no commit' -or $emptyText.Contains($tmp)) { $failures.Add("a range with no commit must give exit 2 with a fixed sentence (got $($emptyOut[-1]))") }
+        $oneOut = @(& { Invoke-Entry -Base $clean.Base -Head $clean.Head -RepositoryRoot $tmp -SourceRoot '' -ExtraNeedle @($needle) -ExtraPhotoRoot @() `
+                    -IncludeChangedFiles $false -NoLocalSources $true -InSelfTest $true } 6>&1)
+        if ($oneOut[-1] -ne 0) { $failures.Add("a range with one clean commit must still give exit 0 (got $($oneOut[-1]))") }
+
+        # #304 (missing local list): the records exist but the list does not. The default stops (exit 2); only an
+        # explicit Warn goes on, with a warning that is repeated after the summary. A default or a value that is not
+        # exactly Require or Warn stops the check.
+        $warnedAfterSummary = {
+            param($Captured)
+            $at = $Captured.Text.IndexOf('=== SUMMARY')
+            return ($at -ge 0 -and $Captured.Text.LastIndexOf('WARNING:') -gt $at)
+        }
+        $requireArgs = $localArgs.Clone(); $requireArgs.MissingLocalList = 'Require'
+        $defaultArgs = $localArgs.Clone(); $defaultArgs.Remove('MissingLocalList')
+        $cap = Invoke-CheckCaptured $requireArgs
+        if ($cap.Result.Exit -ne 2 -or $cap.Text -notmatch 'CANNOT VERIFY: The local list \([^)]*\) was not found while the records exist' -or $cap.Text.Contains($tmp) -or $cap.Text -match 'Create the list') { $failures.Add("a missing local list with -MissingLocalList Require must give exit 2 with a fixed sentence that does not advise an empty file (got $($cap.Result.Exit))") }
+        if ($script:DefaultMissingLocalList -cne 'Require') { $failures.Add("the default for a missing local list must be Require (got $($script:DefaultMissingLocalList))") }
+        if ($savedEmptyAction -cne 'Stop') { $failures.Add("the action for a list that adds no value must be Stop (got $savedEmptyAction)") }
+        $cap = Invoke-CheckCaptured $defaultArgs
+        if ($cap.Result.Exit -ne 2) { $failures.Add("a missing local list without -MissingLocalList must give exit 2 (got exit $($cap.Result.Exit))") }
+        foreach ($badDefault in @('Required', 'Require ', 'warn', '', $null)) {
+            $script:DefaultMissingLocalList = $badDefault
+            try { $cap = Invoke-CheckCaptured $defaultArgs } finally { $script:DefaultMissingLocalList = $savedDefaultPolicy }
+            if ($cap.Result.Exit -ne 2 -or $cap.Text -notmatch 'neither Require nor Warn') { $failures.Add("a default that is not exactly Require or Warn must give exit 2 (got exit $($cap.Result.Exit))") }
+        }
+        $script:DefaultMissingLocalList = 'Warn'
+        try { $cap = Invoke-CheckCaptured $defaultArgs } finally { $script:DefaultMissingLocalList = $savedDefaultPolicy }
+        if ($cap.Result.Exit -ne 0 -or -not (& $warnedAfterSummary $cap)) { $failures.Add("a default of Warn must go on with a warning after the summary (got exit $($cap.Result.Exit))") }
+        foreach ($badValue in @('zz-bad-policy', 'warn', 'Warn ', 'WARN')) {
+            $badArgs = $localArgs.Clone(); $badArgs.MissingLocalList = $badValue
+            $cap = Invoke-CheckCaptured $badArgs
+            if ($cap.Result.Exit -ne 2 -or $cap.Text -notmatch 'accepts only Require or Warn' -or $cap.Text.Contains('zz-bad-policy')) { $failures.Add("a -MissingLocalList value that is not exactly Require or Warn must give exit 2, not a parameter error (got exit $($cap.Result.Exit))") }
+        }
+        $badOut = @(& { Invoke-Entry -Base $clean.Base -Head $clean.Head -RepositoryRoot $tmp -SourceRoot '' -ExtraNeedle @($needle) -ExtraPhotoRoot @() `
+                    -IncludeChangedFiles $false -NoLocalSources $true -InSelfTest $true -MissingLocalList 'zz-bad-policy' } 6>&1)
+        if ($badOut[-1] -ne 2 -or ($badOut | Out-String) -notmatch 'accepts only Require or Warn') { $failures.Add("an unknown -MissingLocalList value given to the entry must give exit 2 (got $($badOut[-1]))") }
+        $cap = Invoke-CheckCaptured $localArgs
+        if ($cap.Result.Exit -ne 0 -or $cap.Result.Warnings -ne 1 -or -not (& $warnedAfterSummary $cap)) { $failures.Add("a missing local list with -MissingLocalList Warn must go on with one warning after the summary (got exit $($cap.Result.Exit))") }
+
+        # #304 (values counted): the list tells not found, empty and present apart, and counts the values it dropped.
+        $u8 = [Text.UTF8Encoding]::new($false)
+        $listOther = 'zz-other-pc-0001'   # invented
+        $local = Get-LocalNeedles $source @() $true $true
+        if ($local.ListState -ne 'not-found') { $failures.Add("without the file the local list must be 'not-found' (got $($local.ListState))") }
+
+        # A list that adds no value (empty, comments only, only values shorter than 4 characters) compares nothing that
+        # the records do not already hold: it stops the check just as a missing list does. What it does is set in one
+        # place ($script:EmptyLocalListAction); this run pins 'Stop' so that the cases do not depend on that setting.
+        $noValueCases = @(
+            @{ Name = 'an empty file'; Bytes = [byte[]]@(); State = 'empty'; Why = 'is empty'; Line = 'local list \([^)]*\): empty \(no value lines\)'; Warnings = 1 }
+            @{ Name = 'comment lines only'; Bytes = $u8.GetBytes("# only a comment`r`n`r`n"); State = 'empty'; Why = 'is empty'; Line = 'local list \([^)]*\): empty \(no value lines\)'; Warnings = 1 }
+            @{ Name = 'a full-width comment line only'; Bytes = $u8.GetBytes("$([char]0xFF03) only a comment`r`n"); State = 'empty'; Why = 'is empty'; Line = 'local list \([^)]*\): empty \(no value lines\)'; Warnings = 1 }
+            @{ Name = 'values shorter than 4 characters only'; Bytes = $u8.GetBytes("ab`r`nabc`r`n"); State = 'present'; Why = 'holds no value of 4 or more characters'; Line = 'values=2 added=0 dropped=2 \(too short=2, repeated in the list=0\), unreadable=0'; Warnings = 2 }
+        )
+        $script:EmptyLocalListAction = 'Stop'
+        try {
+            foreach ($case in $noValueCases) {
+                [IO.File]::WriteAllBytes($localListFile, $case.Bytes)
+                $local = Get-LocalNeedles $source @() $true $true
+                $cap = Invoke-CheckCaptured $requireArgs
+                if ($local.ListState -ne $case.State -or $local.ListAdded -ne 0 -or $cap.Result.Exit -ne 2 -or $cap.Text -notmatch $case.Line -or $cap.Text -notmatch ('CANNOT VERIFY: The local list \([^)]*\) ' + [regex]::Escape($case.Why) + ' while the records exist') -or $cap.Text -match 'Create the list' -or $cap.Text.Contains($tmp)) {
+                    $failures.Add("$($case.Name) must stop a run with -MissingLocalList Require, with a sentence that does not advise an empty file (got state $($local.ListState), exit $($cap.Result.Exit))")
+                }
+                $cap = Invoke-CheckCaptured $defaultArgs
+                if ($cap.Result.Exit -ne 2) { $failures.Add("$($case.Name) must stop a run without -MissingLocalList (got exit $($cap.Result.Exit))") }
+                $cap = Invoke-CheckCaptured $localArgs
+                if ($cap.Result.Exit -ne 0 -or $cap.Result.Warnings -ne $case.Warnings -or -not (& $warnedAfterSummary $cap)) { $failures.Add("$($case.Name) with -MissingLocalList Warn must go on with $($case.Warnings) warning(s) after the summary (got exit $($cap.Result.Exit), $($cap.Result.Warnings) warning(s))") }
+            }
+            # The other setting: a list that exists but adds nothing goes on with a warning when -MissingLocalList is not
+            # given. An explicit -MissingLocalList Require on the command line still stops. A list that does not exist
+            # still stops, and a setting that is not exactly 'Warn' stops.
+            [IO.File]::WriteAllBytes($localListFile, [byte[]]@())
+            $script:EmptyLocalListAction = 'Warn'
+            $cap = Invoke-CheckCaptured $defaultArgs
+            if ($cap.Result.Exit -ne 0 -or $cap.Result.Warnings -ne 1 -or -not (& $warnedAfterSummary $cap)) { $failures.Add("an empty list with EmptyLocalListAction Warn and no -MissingLocalList must go on with a warning after the summary (got exit $($cap.Result.Exit))") }
+            $cap = Invoke-CheckCaptured $requireArgs
+            if ($cap.Result.Exit -ne 2) { $failures.Add("an explicit -MissingLocalList Require must stop an empty list even if EmptyLocalListAction is Warn (got exit $($cap.Result.Exit))") }
+            Remove-Item -LiteralPath $localListFile
+            $cap = Invoke-CheckCaptured $defaultArgs
+            if ($cap.Result.Exit -ne 2) { $failures.Add("a missing list must stop whatever EmptyLocalListAction says (got exit $($cap.Result.Exit))") }
+            [IO.File]::WriteAllBytes($localListFile, [byte[]]@())
+            $script:EmptyLocalListAction = 'zz-unknown'
+            $cap = Invoke-CheckCaptured $defaultArgs
+            if ($cap.Result.Exit -ne 2) { $failures.Add("an EmptyLocalListAction that is not exactly Warn must stop (got exit $($cap.Result.Exit))") }
+        }
+        finally { $script:EmptyLocalListAction = $savedEmptyAction }
+
+        [IO.File]::WriteAllBytes($localListFile, $u8.GetBytes("$listOther`r`nab`r`n$listOther`r`n$($listOther.ToUpperInvariant())`r`n# comment`r`n"))
+        $local = Get-LocalNeedles $source @() $true $true
+        if ($local.ListState -ne 'present' -or $local.ListValues -ne 4 -or $local.ListAdded -ne 1 -or $local.ListShort -ne 1 -or $local.ListDuplicate -ne 2 -or @($local.ListProblems).Count -ne 0) { $failures.Add("the local list must count the values it read (4), added (1), too short (1) and repeated in the list (2) (got $($local.ListValues), $($local.ListAdded), $($local.ListShort), $($local.ListDuplicate))") }
+        $cap = Invoke-CheckCaptured $requireArgs
+        if ($cap.Result.Exit -ne 0 -or $cap.Text -notmatch 'values=4 added=1 dropped=3 \(too short=1, repeated in the list=2\), unreadable=0' -or $cap.Text.Contains($listOther)) { $failures.Add("the output must say the values read, added and dropped, without a value (got exit $($cap.Result.Exit))") }
+        if ($cap.Result.Warnings -ne 1 -or $cap.Text -notmatch 'WARNING: 1 value\(s\) of the local list \([^)]*\) are shorter than 4 characters' -or -not (& $warnedAfterSummary $cap)) { $failures.Add("a value shorter than 4 characters must be reported with a warning after the summary, without stopping (got $($cap.Result.Warnings) warning(s))") }
+
+        # #304 (unreadable lines): a line that would be left out without a word makes the check unable to verify (exit 2).
+        # Counts, kinds and line numbers are printed, never a value.
+        $unreadableCases = @(
+            @{ Name = 'a comment after a value'; Bytes = $u8.GetBytes("$listOther`r`n$listOther-2 # the other PC`r`n"); Kind = 'comment after a value x1; line 2' }
+            @{ Name = 'a comment after a full-width space'; Bytes = $u8.GetBytes("$listOther`r`n$listOther-2$([char]0x3000)# the other PC`r`n"); Kind = 'comment after a value x1; line 2' }
+            @{ Name = 'a comment after a no-break space'; Bytes = $u8.GetBytes("$listOther`r`n$listOther-2$([char]0xA0)# the other PC`r`n"); Kind = 'comment after a value x1; line 2' }
+            @{ Name = 'a full-width number sign after a space'; Bytes = $u8.GetBytes("$listOther`r`n$listOther-2 $([char]0xFF03) the other PC`r`n"); Kind = 'comment after a value x1; line 2' }
+            @{ Name = 'a full-width number sign right after a value'; Bytes = $u8.GetBytes("$listOther`r`n$listOther-2$([char]0xFF03)the other PC`r`n"); Kind = 'comment after a value x1; line 2' }
+            @{ Name = 'a full-width number sign inside a value'; Bytes = $u8.GetBytes("$listOther`r`n$listOther$([char]0xFF03)2-pc`r`n"); Kind = 'comment after a value x1; line 2' }
+            @{ Name = 'a tag character (U+E0041) inside a value'; Bytes = $u8.GetBytes("zz-other$([char]::ConvertFromUtf32(0xE0041))pc-0001`r`n"); Kind = 'invisible or control character x1; line 1' }
+            @{ Name = 'a cancel tag (U+E007F) after a value'; Bytes = $u8.GetBytes("zz-other-pc-0001$([char]::ConvertFromUtf32(0xE007F))`r`n"); Kind = 'invisible or control character x1; line 1' }
+            @{ Name = 'a control character (UTF-16 without a byte order mark)'; Bytes = [Text.UnicodeEncoding]::new($false, $false).GetBytes("$listOther`r`n"); Kind = 'invisible or control character' }
+            @{ Name = 'a tab inside a value'; Bytes = $u8.GetBytes("zz-other`tpc-0001`r`n"); Kind = 'invisible or control character x1; line 1' }
+            @{ Name = 'a next-line character (U+0085) inside a value'; Bytes = $u8.GetBytes("zz-other$([char]0x85)pc-0001`r`n"); Kind = 'invisible or control character x1; line 1' }
+            @{ Name = 'a zero-width space inside a value'; Bytes = $u8.GetBytes("zz-other$([char]0x200B)pc-0001`r`n"); Kind = 'invisible or control character x1; line 1' }
+            @{ Name = 'a line separator (U+2028) inside a value'; Bytes = $u8.GetBytes("zz-other$([char]0x2028)pc-0001`r`n"); Kind = 'invisible or control character x1; line 1' }
+            @{ Name = 'a byte order mark inside a value'; Bytes = $u8.GetBytes("zz-other$([char]0xFEFF)pc-0001`r`n"); Kind = 'invisible or control character x1; line 1' }
+            @{ Name = 'a replacement character inside a value'; Bytes = $u8.GetBytes("zz-other$([char]0xFFFD)pc-0001`r`n"); Kind = 'invisible or control character x1; line 1' }
+            @{ Name = 'an invisible character before a #'; Bytes = $u8.GetBytes("$([char]0x200B)# zz-other-pc-0001`r`n"); Kind = 'invisible or control character x1; line 1' }
+            @{ Name = 'a NUL before a #'; Bytes = $u8.GetBytes("$([char]0)# zz-other-pc-0001`r`n"); Kind = 'invisible or control character x1; line 1' }
+            @{ Name = 'bytes that are not UTF-8'; Bytes = [byte[]](0x7A, 0x7A, 0xC3, 0x28, 0x0D, 0x0A); Kind = 'not valid text in its encoding x1; the whole file' }
+            @{ Name = 'a UTF-32 byte order mark'; Bytes = [byte[]](0xFF, 0xFE, 0, 0, 0x7A, 0, 0, 0); Kind = 'UTF-32 byte order mark x1; the whole file' }
+        )
+        foreach ($case in $unreadableCases) {
+            [IO.File]::WriteAllBytes($localListFile, $case.Bytes)
+            $cap = Invoke-CheckCaptured $requireArgs
+            if ($cap.Result.Exit -ne 2 -or $cap.Text -notmatch ('CANNOT VERIFY: The local list \([^)]*\) has \d+ part\(s\) that cannot be read as a value \(' + [regex]::Escape($case.Kind)) -or $cap.Text.Contains('zz-other') -or $cap.Text.Contains($tmp)) {
+                $failures.Add("a local list with $($case.Name) must give exit 2 with counts only (got exit $($cap.Result.Exit))")
+            }
+        }
+        # The advice that comes with the stop must fit the kind: an invisible character is typed again by hand (saving the
+        # file again does not remove it); a file that is not UTF-8 is saved again as UTF-8.
+        [IO.File]::WriteAllBytes($localListFile, $u8.GetBytes("zz-other$([char]0x200B)pc-0001`r`n"))
+        $cap = Invoke-CheckCaptured $requireArgs
+        if ($cap.Result.Exit -ne 2 -or $cap.Text -notmatch 'Type the line again by hand' -or $cap.Text -notmatch 'part without the emoji' -or $cap.Text -match 'saved again as UTF-8') { $failures.Add("a line with an invisible character must be answered with the advice to type it again by hand, not to save the file again (got exit $($cap.Result.Exit))") }
+        [IO.File]::WriteAllBytes($localListFile, [byte[]](0x7A, 0x7A, 0xC3, 0x28, 0x0D, 0x0A))
+        $cap = Invoke-CheckCaptured $requireArgs
+        if ($cap.Result.Exit -ne 2 -or $cap.Text -notmatch 'saved again as UTF-8' -or $cap.Text -match 'Type the line again by hand') { $failures.Add("a file that is not UTF-8 must be answered with the advice to save it again as UTF-8 (got exit $($cap.Result.Exit))") }
+        # What is readable stays readable: a '#' with no space before it, characters of the supplementary planes that are
+        # not tag characters (variation selectors, a kanji, an emoji), and UTF-16 with a byte order mark (as Windows PowerShell 5.1 writes it).
+        $readableCases = @(
+            @{ Name = "a '#' with no space before it (PC-#2)"; Text = "$listOther`r`nzz-pc-#2`r`n"; Added = 2 }
+            @{ Name = "a '#' with no space before the rest (name#note)"; Text = "$listOther`r`n$listOther-2#note`r`n"; Added = 2 }
+            @{ Name = 'a variation selector (U+FE0F)'; Text = "$listOther`r`nzz-pc-$([char]0xFE0F)0002`r`n"; Added = 2 }
+            @{ Name = 'a variation selector of the supplementary plane (U+E0100)'; Text = "$listOther`r`nzz-pc-$([char]::ConvertFromUtf32(0xE0100))0002`r`n"; Added = 2 }
+            @{ Name = 'a kanji of the supplementary plane (U+20BB7)'; Text = "$listOther`r`nzz-pc-$([char]::ConvertFromUtf32(0x20BB7))0002`r`n"; Added = 2 }
+            @{ Name = 'an emoji (U+1F600)'; Text = "$listOther`r`nzz-pc-$([char]::ConvertFromUtf32(0x1F600))0002`r`n"; Added = 2 }
+        )
+        foreach ($case in $readableCases) {
+            [IO.File]::WriteAllBytes($localListFile, $u8.GetBytes($case.Text))
+            $local = Get-LocalNeedles $source @() $true $true
+            if (@($local.ListProblems).Count -ne 0 -or $local.ListAdded -ne $case.Added) { $failures.Add("$($case.Name) must stay readable (got $(@($local.ListProblems).Count) problems, $($local.ListAdded) added)") }
+        }
+        # What is readable stays readable: a '#' inside a value, and UTF-16 with a byte order mark (as Windows PowerShell 5.1 writes it).
+        $usbLike = 'usb#vid_04b0&pid_0000#0012345'   # invented
+        [IO.File]::WriteAllBytes($localListFile, $u8.GetBytes("$listOther`r`n$usbLike`r`n"))
+        $local = Get-LocalNeedles $source @() $true $true
+        if (@($local.ListProblems).Count -ne 0 -or $local.ListAdded -ne 2) { $failures.Add("a '#' inside a value must stay readable (got $(@($local.ListProblems).Count) problems, $($local.ListAdded) added)") }
+        [IO.File]::WriteAllText($localListFile, "$listOther`r`n$usbLike`r`n", [Text.UnicodeEncoding]::new($false, $true))
+        $local = Get-LocalNeedles $source @() $true $true
+        $cap = Invoke-CheckCaptured $requireArgs
+        if (@($local.ListProblems).Count -ne 0 -or $local.ListAdded -ne 2 -or $cap.Result.Exit -ne 0) { $failures.Add("a UTF-16 list with a byte order mark must stay readable (got $(@($local.ListProblems).Count) problems, $($local.ListAdded) added, exit $($cap.Result.Exit))") }
+        # A line that starts with the full-width number sign is a comment line, like one that starts with '#'.
+        [IO.File]::WriteAllBytes($localListFile, $u8.GetBytes("$([char]0xFF03) the other PCs`r`n$listOther`r`n"))
+        $local = Get-LocalNeedles $source @() $true $true
+        if (@($local.ListProblems).Count -ne 0 -or $local.ListValues -ne 1 -or $local.ListAdded -ne 1) { $failures.Add("a line that starts with the full-width number sign must be a comment line (got $(@($local.ListProblems).Count) problems, $($local.ListValues) values)") }
+        Remove-Item -LiteralPath $localListFile
 
         # L1 (c): records that name two camera bodies need two distinct body serials.
         [IO.File]::WriteAllText($record, ('{' + $exportJson + ', "transactionId": "' + $recordId + '", "legs": ["CAM-A", "CAM-B"]}'), $script:Utf8)
@@ -1745,6 +2070,8 @@ function Invoke-SelfTest {
     }
     finally {
         $script:PinnedImageSha256 = $savedPinned
+        $script:DefaultMissingLocalList = $savedDefaultPolicy
+        $script:EmptyLocalListAction = $savedEmptyAction
         if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
         foreach ($extra in "$tmp-r2", "$tmp-l7", "$tmp-m1", "$tmp-l3", "$tmp-mg", "$tmp-mgobj") {
             if (Test-Path -LiteralPath $extra) { Remove-Item -LiteralPath $extra -Recurse -Force -ErrorAction SilentlyContinue }
@@ -1763,7 +2090,7 @@ try {
     $OutputEncoding = [Text.UTF8Encoding]::new($false)
     if ($SelfTest) { exit (Invoke-SelfTest) }
     $exitCode = Invoke-Entry -Base $Base -Head $Head -RepositoryRoot $RepositoryRoot -SourceRoot $SourceRoot -ExtraNeedle $ExtraNeedle `
-        -ExtraPhotoRoot $ExtraPhotoRoot -IncludeChangedFiles $IncludeChangedFiles.IsPresent -NoLocalSources $NoLocalSources.IsPresent -InSelfTest $false
+        -ExtraPhotoRoot $ExtraPhotoRoot -IncludeChangedFiles $IncludeChangedFiles.IsPresent -NoLocalSources $NoLocalSources.IsPresent -InSelfTest $false -MissingLocalList $MissingLocalList
     exit $exitCode
 }
 catch {
