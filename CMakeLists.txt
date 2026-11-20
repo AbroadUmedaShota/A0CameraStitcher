@@ -489,24 +489,32 @@ endif()
 
 # Tilt of a camera against a flat square-grid sheet (#440 stage 2, docs/design/grid-sheet-tilt.md): a measurement for a person to read. Pure
 # computation: no camera, file, clock, OpenCV or Win32. It calls content_registration::OrientationOf (one definition of tilt and direction) and
-# is never called by the registration, the composite, the confirmed position or the capture: the assertion below fails the configure step when
-# any of those libraries reaches it.
+# is never called by the registration, the composite, the confirmed position, the capture or a calibration: only the targets named in
+# A0_GRID_SHEET_TILT_ALLOWED_USERS may reach it, and the check below fails the configure step when any other target does.
 add_library(a0_m2_grid_sheet_tilt
     src/m2/grid_sheet_tilt.cpp
     src/m2/grid_sheet_tilt_lattice.cpp
     src/m2/grid_sheet_tilt_ridge.cpp
 )
 target_include_directories(a0_m2_grid_sheet_tilt PUBLIC src/m2/include PRIVATE src/m2)
-target_link_libraries(a0_m2_grid_sheet_tilt PUBLIC a0_m2_content_registration a0_m2_render)
+target_link_libraries(a0_m2_grid_sheet_tilt PUBLIC a0_m2_render PRIVATE a0_m2_content_registration)
 a0_defer_to_end_of_configure(a0_assert_no_link_dependency a0_m2_grid_sheet_tilt)
-foreach(a0_grid_sheet_tilt_forbidden_user
-        a0_m2_content_registration a0_m2_registration_pose a0_m2_registration_gate a0_m2_registration_probe a0_m2_capture_registration
-        a0_m2_parallax_correction a0_m2_fast_seam_measurer a0_m2_fixed_composite a0_m2_fixed_composite_v2 a0_m2_fixed_composite_maps
-        a0_m2_fixed_composite_recalibration a0_m2_confirmed_position a0_m2_offline_stitcher a0_m2_seam_gate a0_m2_seam_blend a0_m2_render)
-    if(TARGET ${a0_grid_sheet_tilt_forbidden_user})
-        a0_defer_to_end_of_configure(a0_assert_no_link_dependency ${a0_grid_sheet_tilt_forbidden_user} FORBIDDEN_LIBRARIES a0_m2_grid_sheet_tilt)
+# An allow-list, checked at the end of the configure step over every target of the top-level directory: a target defined further down this
+# file, or added later, is covered without being named here. A target that is to show the tilt is added to this list by name.
+set(A0_GRID_SHEET_TILT_ALLOWED_USERS a0_m2_grid_sheet_tilt m2_grid_sheet_tilt_contracts)
+function(a0_assert_grid_sheet_tilt_reached_only_by)
+    if(NOT TARGET a0_m2_grid_sheet_tilt)
+        message(FATAL_ERROR "a0_m2_grid_sheet_tilt is checked but not defined")
     endif()
-endforeach()
+    get_property(a0_all_targets DIRECTORY "${CMAKE_SOURCE_DIR}" PROPERTY BUILDSYSTEM_TARGETS)
+    foreach(a0_target IN LISTS a0_all_targets)
+        if("${a0_target}" IN_LIST ARGN)
+            continue()
+        endif()
+        a0_assert_no_link_dependency("${a0_target}" FORBIDDEN_LIBRARIES a0_m2_grid_sheet_tilt)
+    endforeach()
+endfunction()
+a0_defer_to_end_of_configure(a0_assert_grid_sheet_tilt_reached_only_by ${A0_GRID_SHEET_TILT_ALLOWED_USERS})
 if(MSVC)
     target_compile_options(a0_m2_grid_sheet_tilt PRIVATE /W4 /permissive- /EHsc /fp:precise /utf-8)
 else()
@@ -2130,7 +2138,8 @@ if(BUILD_TESTING)
         target_compile_options(m2_grid_sheet_tilt_contracts PRIVATE /W4 /permissive- /EHsc /fp:precise /utf-8)
     endif()
     add_test(NAME m2_grid_sheet_tilt_contracts COMMAND m2_grid_sheet_tilt_contracts)
-    set_tests_properties(m2_grid_sheet_tilt_contracts PROPERTIES TIMEOUT 1800)
+    # Several minutes: it draws and measures many pictures, some at full size. `ctest -LE slow` leaves it out.
+    set_tests_properties(m2_grid_sheet_tilt_contracts PROPERTIES TIMEOUT 1800 LABELS slow)
     # The lanes of #417 after the contracts commit (docs/design/fixed-composite-registration.md 11.12, 11.27). Each test source is
     # an empty stub that returns 77 (Skipped) until the lane that owns it writes the tests; the lane edits only its own source file
     # and, if it needs another library, its own target_link_libraries line below. tests/parallax_scene_tests.cpp is registered by
