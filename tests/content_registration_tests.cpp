@@ -1220,18 +1220,19 @@ void Evidence() {
     limits.brown_lowe_beta = 0.3;
     limits.minimum_unique_blocks = 3;
     const auto counts = [](std::uint32_t inliers, std::uint32_t points, std::uint32_t unique, std::uint32_t consistent, std::uint32_t anchors,
-                           std::uint32_t consistent_anchors, std::uint32_t rival = kNotCarried) {
+                           std::uint32_t consistent_anchors, std::uint32_t rival = kNotCarried, std::uint32_t outer = kNotCarried) {
         cr::EvidenceCounts c;
         c.inliers = inliers; c.points = points;
         c.unique_blocks = unique; c.consistent_blocks = consistent; c.anchor_blocks = anchors; c.consistent_anchor_blocks = consistent_anchors;
         c.rival_anchor_support = rival;   // the default is "not carried": the value that EvidenceCounts itself starts with
+        c.outer_iterations = outer;       // the same
         return c;
     };
     // The counts of an estimate whose fine stage stopped for want of points (too-few-points) on its first measurement, with the block
     // counts and the vote's rival anchors as given.
     const auto stopped_first = [&](std::uint32_t unique, std::uint32_t consistent, std::uint32_t anchors, std::uint32_t consistent_anchors,
                                    std::uint32_t rival, std::uint32_t inliers = 0, std::uint32_t points = 0) {
-        return counts(inliers, points, unique, consistent, anchors, consistent_anchors, rival);
+        return counts(inliers, points, unique, consistent, anchors, consistent_anchors, rival, 1);
     };
     // The reasons on the counts of an estimate that stopped on its first measurement with nothing counted and no vote (R = 0): too-few-points
     // is a shortage on them (T0), and unique-blocks, the other reason that reads the block counts, is a doubt.
@@ -1239,8 +1240,9 @@ void Evidence() {
         return cr::AssessEvidenceShortage(reasons, stopped_first(0, 0, 0, 0, 0, inliers, points), limits);
     };
     // The block counts of a unique-blocks estimate that V2 failed on the number of anchors alone (6 blocks used, all consistent, 1 anchor,
-    // and every anchor voted: no rival anchor).
-    const auto few_anchors = counts(0, 0, 6, 6, 1, 1, 0);
+    // and every anchor voted: no rival anchor). The same counts with too-few-points stopped on the first measurement (the outer iteration
+    // is read for too-few-points only).
+    const auto few_anchors = stopped_first(6, 6, 1, 1, 0);
     const auto assess_blocks = [&](std::vector<std::string> reasons, const cr::EvidenceCounts& c) {
         return cr::AssessEvidenceShortage(reasons, c, limits);
     };
@@ -1389,7 +1391,7 @@ void Evidence() {
         brown.rival_anchor_support = 1;
         Check(!assess_blocks({"unique-blocks", "brown-lowe"}, brown).shortage_only, "unique-blocks + brown-lowe (5 of 9): a doubt when an anchor pointed elsewhere");
         // {unique-blocks, too-few-points} in the other order: the first reason that is not a shortage is the one named.
-        const auto rival_first = assess_blocks({"too-few-points", "unique-blocks"}, counts(0, 0, 6, 6, 2, 2, 1));
+        const auto rival_first = assess_blocks({"too-few-points", "unique-blocks"}, stopped_first(6, 6, 2, 2, 1));
         Check(!rival_first.shortage_only && rival_first.doubt == "too-few-points", "too-few-points + unique-blocks: a doubt named by the first reason");
         Check(assess_blocks({"too-few-points", "unique-blocks"}, few_anchors).shortage_only, "too-few-points + unique-blocks: a shortage on S2");
         Check(assess({"too-few-points", "prediction-uncertain"}).shortage_only, "too-few-points + prediction-uncertain: nothing counted is a shortage");
@@ -1436,18 +1438,68 @@ void Evidence() {
         auto unset_minimum = limits;
         unset_minimum.minimum_unique_blocks = 0;
         Check(cr::AssessEvidenceShortage({"too-few-points"}, stopped_first(0, 0, 0, 0, 0), unset_minimum).shortage_only, "too-few-points: nothing counted needs no minimum");
-        Check(!cr::AssessEvidenceShortage({"too-few-points"}, counts(0, 0, 6, 6, 1, 1, 0), unset_minimum).shortage_only, "too-few-points: no minimum is a doubt for counted blocks");
+        Check(!cr::AssessEvidenceShortage({"too-few-points"}, stopped_first(6, 6, 1, 1, 0), unset_minimum).shortage_only, "too-few-points: no minimum is a doubt for counted blocks");
         auto four = limits;
         four.minimum_unique_blocks = 4;
-        Check(cr::AssessEvidenceShortage({"too-few-points"}, counts(0, 0, 6, 6, 3, 3, 0), four).shortage_only, "too-few-points: the line follows the minimum (3 anchors under 4 is S2)");
-        Check(!cr::AssessEvidenceShortage({"too-few-points"}, counts(0, 0, 6, 6, 3, 3, 1), four).shortage_only, "too-few-points: at 4, a rival anchor under the minimum is a doubt");
-        Check(cr::AssessEvidenceShortage({"too-few-points"}, counts(0, 0, 6, 6, 3, 3, 1), limits).shortage_only, "too-few-points: at 3, the same counts pass V2 and a rival is allowed");
+        Check(cr::AssessEvidenceShortage({"too-few-points"}, stopped_first(6, 6, 3, 3, 0), four).shortage_only, "too-few-points: the line follows the minimum (3 anchors under 4 is S2)");
+        Check(!cr::AssessEvidenceShortage({"too-few-points"}, stopped_first(6, 6, 3, 3, 1), four).shortage_only, "too-few-points: at 4, a rival anchor under the minimum is a doubt");
+        Check(cr::AssessEvidenceShortage({"too-few-points"}, stopped_first(6, 6, 3, 3, 1), limits).shortage_only, "too-few-points: at 3, the same counts pass V2 and a rival is allowed");
         // Only whether R is 0 matters, and only below the minimum of anchors.
         for (const std::uint32_t r : {1u, 2u, 1000u})
-            Check(!assess_blocks({"too-few-points"}, counts(0, 0, 6, 6, 2, 2, r)).shortage_only, "too-few-points: fewer anchors than the minimum with a rival of " + std::to_string(r) + " is a doubt");
+            Check(!assess_blocks({"too-few-points"}, stopped_first(6, 6, 2, 2, r)).shortage_only, "too-few-points: fewer anchors than the minimum with a rival of " + std::to_string(r) + " is a doubt");
         // The estimator gives unique-blocks and too-few-points from different places and never both; the two together are a job's own input.
         Check(assess_blocks({"unique-blocks", "too-few-points"}, few_anchors).shortage_only && assess_blocks({"too-few-points", "unique-blocks"}, few_anchors).shortage_only,
             "too-few-points with unique-blocks on S2: a shortage in either order");
+    }
+    // too-few-points and the outer iteration in which the fine stage stopped: only the first measurement can be a lack of marks. A stop in
+    // a later iteration comes after a fit on enough points; an iteration that was not carried, or 0 (the diagnostics' own default), is a
+    // doubt. Only whether it is 1 is read.
+    {
+        Check(cr::EvidenceCounts{}.outer_iterations == kNotCarried, "EvidenceCounts: an outer iteration that was not carried is the largest value");
+        {
+            cr::EvidenceCounts only_rival;   // every other count as EvidenceCounts starts it
+            only_rival.rival_anchor_support = 0;
+            Check(!cr::AssessEvidenceShortage({"too-few-points"}, only_rival, limits).shortage_only,
+                "too-few-points: EvidenceCounts with only the rival set to 0 is a doubt (the outer iteration's default is not carried)");
+        }
+        struct Row { std::uint32_t u, c, a, ca, r, outer; bool shortage; const char* what; };
+        const Row rows[] = {
+            {0, 0, 0, 0, 0, 1, true,  "T0 on the first measurement"},
+            {8, 8, 8, 8, 0, 1, true,  "T1 on the first measurement"},
+            {6, 6, 1, 1, 0, 1, true,  "T1 in the form of S2 on the first measurement"},
+            {0, 0, 0, 0, 0, 2, false, "T0's counts, stopped on the second measurement"},
+            {8, 8, 8, 8, 0, 2, false, "T1's counts, stopped on the second measurement"},
+            {6, 6, 1, 1, 0, 2, false, "S2's counts, stopped on the second measurement"},
+            {8, 8, 8, 8, 0, 5, false, "T1's counts, stopped on a later measurement"},
+            {8, 8, 8, 8, 0, kNotCarried, false, "T1's counts, the outer iteration not carried"},
+            {0, 0, 0, 0, 0, kNotCarried, false, "T0's counts, the outer iteration not carried"},
+            {8, 8, 8, 8, 0, 0, false, "T1's counts, outer iteration 0 (the diagnostics' default: no fine stage ran)"},
+        };
+        for (const auto& row : rows) {
+            const auto v = assess_blocks({"too-few-points"}, counts(0, 0, row.u, row.c, row.a, row.ca, row.r, row.outer));
+            const std::string name = std::string("too-few-points (") + std::to_string(row.u) + "," + std::to_string(row.c) + "," +
+                std::to_string(row.a) + "," + std::to_string(row.ca) + "," + std::to_string(row.r) + ", outer " +
+                (row.outer == kNotCarried ? std::string("not carried") : std::to_string(row.outer)) + "): " + row.what;
+            Check(v.shortage_only == row.shortage, name + (row.shortage ? " is a shortage" : " is a doubt"));
+            Check(row.shortage ? v.doubt.empty() : v.doubt == "too-few-points", name + ": the doubt is " + (row.shortage ? "empty" : "too-few-points"));
+        }
+        // The outer iteration is read for too-few-points only: unique-blocks (S1, S2) and brown-lowe keep their rules when it was not carried.
+        Check(assess_blocks({"unique-blocks"}, counts(0, 0, 2, 0, 1, 0, 0, kNotCarried)).shortage_only, "unique-blocks: S1 with the outer iteration not carried is a shortage");
+        Check(assess_blocks({"unique-blocks"}, counts(0, 0, 6, 6, 1, 1, 0, kNotCarried)).shortage_only, "unique-blocks: S2 with the outer iteration not carried is a shortage");
+        Check(assess_blocks({"unique-blocks"}, counts(0, 0, 6, 6, 1, 1, 0, 2)).shortage_only, "unique-blocks: S2 with outer iteration 2 is a shortage");
+        Check(assess_blocks({"brown-lowe"}, counts(11, 11, 0, 0, 0, 0, kNotCarried, kNotCarried)).shortage_only, "brown-lowe: 11 of 11 with the outer iteration not carried is a shortage");
+        // The result form: the outer iteration goes through EvidenceCountsOf.
+        cr::RegistrationResult r;
+        r.reasons = {"too-few-points"};
+        r.diagnostics.unique_blocks = 8; r.diagnostics.consistent_blocks = 8; r.diagnostics.anchor_blocks = 8; r.diagnostics.consistent_anchor_blocks = 8;
+        r.diagnostics.coarse_vote.rival_anchor_support = 0;
+        r.diagnostics.outer_iterations = 1;
+        Check(cr::AssessEvidenceShortage(r, limits).shortage_only, "the result form: too-few-points on the first measurement is a shortage");
+        r.diagnostics.outer_iterations = 2;
+        const auto second = cr::AssessEvidenceShortage(r, limits);
+        Check(!second.shortage_only && second.doubt == "too-few-points", "the result form: too-few-points on the second measurement is a doubt");
+        r.diagnostics.outer_iterations = 0;
+        Check(!cr::AssessEvidenceShortage(r, limits).shortage_only, "the result form: too-few-points with the diagnostics' default outer iteration (0) is a doubt");
     }
     // The result form gives the same answer as the three numbers.
     {
@@ -1471,11 +1523,13 @@ void Evidence() {
         cr::RegistrationDiagnostics d;
         d.inliers = 11; d.points = 22; d.unique_blocks = 33; d.consistent_blocks = 44; d.anchor_blocks = 55; d.consistent_anchor_blocks = 66;
         d.coarse_vote.rival_anchor_support = 77;
+        d.outer_iterations = 88;
         const auto copied = cr::EvidenceCountsOf(d);
         Check(copied.inliers == 11 && copied.points == 22 && copied.unique_blocks == 33 && copied.consistent_blocks == 44 &&
-                copied.anchor_blocks == 55 && copied.consistent_anchor_blocks == 66 && copied.rival_anchor_support == 77,
-            "EvidenceCountsOf copies the seven counts");
+                copied.anchor_blocks == 55 && copied.consistent_anchor_blocks == 66 && copied.rival_anchor_support == 77 && copied.outer_iterations == 88,
+            "EvidenceCountsOf copies the eight counts");
         Check(cr::EvidenceCountsOf(cr::RegistrationDiagnostics{}).rival_anchor_support == 0, "EvidenceCountsOf: no vote is no rival (0)");
+        Check(cr::EvidenceCountsOf(cr::RegistrationDiagnostics{}).outer_iterations == 0, "EvidenceCountsOf: no fine stage is outer iteration 0 (a doubt for too-few-points)");
     }
 }
 }

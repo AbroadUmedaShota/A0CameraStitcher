@@ -1511,6 +1511,7 @@ EvidenceCounts EvidenceCountsOf(const RegistrationDiagnostics& diagnostics) {
     counts.anchor_blocks = diagnostics.anchor_blocks;
     counts.consistent_anchor_blocks = diagnostics.consistent_anchor_blocks;
     counts.rival_anchor_support = diagnostics.coarse_vote.rival_anchor_support;
+    counts.outer_iterations = diagnostics.outer_iterations;
     return counts;
 }
 EvidenceShortage AssessEvidenceShortage(const std::vector<std::string>& reasons, const EvidenceCounts& counts,
@@ -1529,6 +1530,8 @@ EvidenceShortage AssessEvidenceShortage(const std::vector<std::string>& reasons,
             // T1: the counts are those V2 passes (the consistent blocks reach the minimum and are at least half of the blocks used, and
             // the anchors that agree reach it too), or those that V2 fails on the number of anchors alone (S2). Anything else is a
             // disagreement that V2 would have named, and it is a doubt whatever the number of points.
+            // Both only when the fine stage stopped on its first measurement: a stop in a later outer iteration comes after a fit on enough
+            // points, which is not a lack of marks. An iteration count that was not carried (or 0) is a doubt.
             const std::uint32_t m = limits.minimum_unique_blocks;
             const std::uint32_t u = counts.unique_blocks, c = counts.consistent_blocks;
             const std::uint32_t a = counts.anchor_blocks, ca = counts.consistent_anchor_blocks;
@@ -1537,7 +1540,8 @@ EvidenceShortage AssessEvidenceShortage(const std::vector<std::string>& reasons,
             const bool nothing_counted = u == 0 && c == 0 && a == 0 && ca == 0;                                      // T0
             const bool v2_would_pass = sane && c >= m && 2ull*c >= u &&                                               // T1
                 (ca >= m || (a >= 1 && a < m && ca == a && no_rival));
-            shortage = (nothing_counted && no_rival) || v2_would_pass;
+            const bool first_measurement = counts.outer_iterations == 1;
+            shortage = first_measurement && ((nothing_counted && no_rival) || v2_would_pass);
         }
         if (reason == "unique-blocks") {
             // One code, two places of the estimator: the coarse stage (too few unique blocks, nothing counted as consistent yet) and
@@ -2128,7 +2132,10 @@ RegistrationResult EstimateOn(const BgrImage& camera_a, const BgrImage& camera_b
     diag.fit_window = first.window;
     // A fine stage that stops (too-few-points) returns here, before V2 runs, so V2 does not name a disagreement among the blocks it counted.
     // AssessEvidenceShortage (T) reads the coarse stage's counts in V2's place; a new early return with a code that it counts as a shortage
-    // needs the same, and a change to the early returns means reviewing T in the same commit.
+    // needs the same, and a change to the early returns means reviewing T in the same commit. T also reads outer_iterations (written
+    // above) to keep a stop after the first measurement out of "too few marks". A commit that changes the fine stage's early returns, the
+    // number of outer iterations, how the second start runs, alpha, beta or the minimum number of points reviews T in the same commit
+    // and goes through a security check.
     if (!first.ok) { result.reasons.push_back(first.reason); return result; }
     const State fitted = first.state;
     const PoseParameters pose = fitted.pose;
