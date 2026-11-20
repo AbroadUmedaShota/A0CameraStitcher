@@ -439,6 +439,15 @@ void LatticeFitRobust() {
         for (int j = -60; j <= 60; j += 10) worst = std::max(worst, Dist(PlaneOf(h, i, j), PlaneOf(known.h, i, j)) * known.focal);
     std::cout << "fit: " << moved << " of " << pts.size() << " points moved 1.5 px; worst node error " << worst << " px\n";
     CheckNear(worst, 0, 0.05, "points off their line by 1.5 px do not pull the lattice (px)");
+    // The settle line decides: the last step's movement is reported, and a fit whose last step moved more than the line
+    // is not converged.
+    Check(std::isfinite(fit.last_step_px) && fit.last_step_px <= gst::GridSheetDetectionSettings{}.fit_settle_px, "the last step of the fit is reported");
+    auto strict = gst::GridSheetDetectionSettings{};
+    strict.fit_settle_px = 1e-300;
+    const auto unsettled = det::FitLattice(pts, known.focal, start, strict);
+    std::cout << "fit: last step " << fit.last_step_px << " px; with a settle line of 1e-300 px the last step was " << unsettled.last_step_px << " px\n";
+    Check(unsettled.ok && (unsettled.last_step_px > strict.fit_settle_px) == !unsettled.converged, "the settle line decides whether the fit converged");
+    Check(unsettled.last_step_px == 0 || !unsettled.converged, "a fit still moving above the settle line is not converged");
 }
 
 // ---- the decomposition: the lattice matrix of a known pose, no picture -----------------------------------------------------------
@@ -670,6 +679,12 @@ void Refusals() {
         Check(change([](gst::GridSheetAcceptance& a) { a.max_method_spread_deg = 1e-9; }).refusal == gst::GridSheetRefusal::methods_disagree, "method spread line");
         Check(change([](gst::GridSheetAcceptance& a) { a.max_lattice_aspect_deviation = 0; }).refusal == gst::GridSheetRefusal::grid_not_square, "lattice aspect line");
         Check(change([](gst::GridSheetAcceptance& a) { a.max_lattice_skew_deg = 0; }).refusal == gst::GridSheetRefusal::grid_not_square, "lattice skew line");
+        auto unsettled = settings;
+        unsettled.detection.fit_settle_px = 1e-300;
+        const auto not_settled = run(unsettled);
+        Check(good.evidence.fit_converged && good.evidence.fit_last_step_px <= settings.detection.fit_settle_px, "the settled fit is reported");
+        Check(not_settled.evidence.fit_last_step_px == 0 || not_settled.refusal == gst::GridSheetRefusal::fit_failed,
+            "a fit whose last step moved more than the settle line is refused");
         auto unjudged = settings;
         unjudged.detection.flat_cell_min_points = 100000000;
         Check(run(unjudged).refusal == gst::GridSheetRefusal::flatness_not_judged, "a flatness that cannot be judged is refused, not passed");
