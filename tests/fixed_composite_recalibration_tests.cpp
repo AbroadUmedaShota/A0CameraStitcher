@@ -631,6 +631,420 @@ void GeometryFromPose(){
     std::error_code ignored;fs::remove_all(active.settings,ignored);
 }
 
+// ---- Section 3b. The raster of a recalibration, worked out from the sides of the sensors ------------------------------------------
+// A second working of what ProposeRaster gives with RasterPlacement::follow_camera_b (docs/design/recalibration-from-pair.md 3.2), for the
+// synthetic rig, whose lens coefficients are all 0, and for poses without a paper surface. Without a lens, the stored position of the output
+// sample (x, y) is a ratio of linear forms of (x, y): the samples that a camera sees are those on the inner side of the lines that its
+// sensor's four sides make on the output raster. An end of a camera's cover on a column or on a row is where that column or row crosses one
+// of the lines, and is solved here in closed form. The steps are those of the design's text: gate 1, the rows that every vertex of the
+// creation check's range keeps on the columns the seam can take, the last column, the bring-back to what B's move allows, and the right
+// edge that follows B's right side. From the code under test this takes the mappings (the pose model, the paper's homography and its
+// origin, the camera matrices), the range's vertices and axis ends, and the answer it is compared with (ProposeRaster); none of its
+// searches for an end.
+namespace sides {
+constexpr double kInf=std::numeric_limits<double>::infinity();
+constexpr double kSensorWidth=ps::kWidth,kSensorHeight=ps::kHeight;
+using Form=std::array<double,3>;   // a x + b y + c over the output sample (x, y)
+double Eval(const Form& f,double x,double y){return f[0]*x+f[1]*y+f[2];}
+Form Sum(double a,const Form& p,double b,const Form& q,double c,const Form& r){
+    return {a*p[0]+b*q[0]+c*r[0],a*p[1]+b*q[1]+c*r[1],a*p[2]+b*q[2]+c*r[2]};
+}
+// One camera over one raster: the stored position of the sample (x, y) is (u / w, v / w), where the denominator g of the document
+// homography (when there is one) and w are both positive.
+struct Cover {Form u,v,w,g;};
+Cover CoverOf(const render::OutputRaster& raster,const render::Matrix3& camera,const std::optional<render::Matrix3>& document=std::nullopt){
+    const double p=25.4/raster.dpi,left=static_cast<double>(raster.region_um.left)/1000.0,top=static_cast<double>(raster.region_um.top)/1000.0;
+    const Form x{p,0,left+0.5*p},y{0,p,top+0.5*p},one{0,0,1};
+    Form gx=x,gy=y,gw=one;
+    if(document){
+        const auto& d=*document;
+        gx=Sum(d[0],x,d[1],y,d[2],one);gy=Sum(d[3],x,d[4],y,d[5],one);gw=Sum(d[6],x,d[7],y,d[8],one);
+    }
+    const auto& h=camera;
+    return {Sum(h[0],gx,h[1],gy,h[2],gw),Sum(h[3],gx,h[4],gy,h[5],gw),Sum(h[6],gx,h[7],gy,h[8],gw),gw};
+}
+// The half planes of the cover: g > 0, w > 0, u >= 0, u < W w and, for the whole sensor, v >= 0, v < H w. `whole` false is the stored x
+// only (the two sides that run across the rows in both mountings of the rig).
+std::vector<Form> HalfPlanes(const Cover& c,bool whole){
+    std::vector<Form> s{c.g,c.w,c.u,Sum(kSensorWidth,c.w,-1,c.u,0,c.u)};
+    if(whole){s.push_back(c.v);s.push_back(Sum(kSensorHeight,c.w,-1,c.v,0,c.v));}
+    return s;
+}
+bool Sees(const Cover& c,double x,double y,bool whole){
+    const double g=Eval(c.g,x,y),w=Eval(c.w,x,y);
+    if(!(g>0) || !(w>0))return false;
+    const double u=Eval(c.u,x,y)/w,v=Eval(c.v,x,y)/w;
+    return u>=0 && u<kSensorWidth && (!whole || (v>=0 && v<kSensorHeight));
+}
+// The samples of a column (x = fixed) or of a row (y = fixed) that the camera sees: one interval of the other coordinate.
+struct Line {bool any{};double first{},last{};};
+Line On(const Cover& c,bool whole,bool column,double fixed){
+    double first=-kInf,last=kInf;
+    for(const auto& f:HalfPlanes(c,whole)){
+        const double a=column?f[1]:f[0],b=(column?f[0]:f[1])*fixed+f[2];
+        if(a>0)first=std::max(first,-b/a);
+        else if(a<0)last=std::min(last,-b/a);
+        else if(!(b>0))return {};
+    }
+    return {first<=last,first,last};
+}
+// The whole numbers of that interval inside [low, high]. The closed form and the sample's own arithmetic can differ in the last bit at a
+// side; the ends are settled on the samples themselves.
+using Span=std::pair<long long,long long>;
+std::optional<Span> Integers(const Cover& c,bool whole,bool column,double fixed,long long low,long long high){
+    const auto line=On(c,whole,column,fixed);
+    if(!line.any || low>high)return std::nullopt;
+    const auto sees=[&](long long n){return column?Sees(c,fixed,static_cast<double>(n),whole):Sees(c,static_cast<double>(n),fixed,whole);};
+    long long first=std::max(low,static_cast<long long>(std::ceil(std::max(line.first,static_cast<double>(low)-1.0))));
+    long long last=std::min(high,static_cast<long long>(std::floor(std::min(line.last,static_cast<double>(high)+1.0))));
+    for(int i=0;i<2 && first<=last && !sees(first);++i)++first;
+    for(int i=0;i<2 && last>=first && !sees(last);++i)--last;
+    for(int i=0;i<2 && first>low && sees(first-1);++i)--first;
+    for(int i=0;i<2 && last<high && sees(last+1);++i)++last;
+    if(first>last || !sees(first) || !sees(last))return std::nullopt;
+    return Span{first,last};
+}
+
+// The raster with the rows first..last of `old`: both edges move inwards to a whole micrometre (design 3.2), the height is the ceiling.
+render::OutputRaster OfRows(const render::OutputRaster& old,long long first,long long last){
+    const long long dpi=old.dpi,top0=old.region_um.top;
+    const long long top=top0+(first*25400+dpi-1)/dpi;
+    const long long bottom=std::min<long long>(old.region_um.bottom,top0+((last+1)*25400)/dpi);
+    return render::OutputRaster{render::DocumentRegionUm{old.region_um.left,top,old.region_um.right,bottom},old.dpi,old.width_pixels,
+        static_cast<std::uint32_t>(((bottom-top)*dpi+25399)/25400)};
+}
+// The raster with `width` pixels from the same left edge: the right edge is the largest whole micrometre whose ceiling is that width.
+render::OutputRaster OfWidth(const render::OutputRaster& old,long long width){
+    return render::OutputRaster{render::DocumentRegionUm{old.region_um.left,old.region_um.top,old.region_um.left+width*25400/static_cast<long long>(old.dpi),
+        old.region_um.bottom},old.dpi,static_cast<std::uint32_t>(width),old.height_pixels};
+}
+bool SameRegion(const render::OutputRaster& a,const render::OutputRaster& b){
+    return a.region_um.left==b.region_um.left && a.region_um.top==b.region_um.top && a.region_um.right==b.region_um.right && a.region_um.bottom==b.region_um.bottom &&
+        a.dpi==b.dpi && a.width_pixels==b.width_pixels && a.height_pixels==b.height_pixels;
+}
+std::string Text(const render::OutputRaster& r){
+    return std::to_string(r.region_um.left)+","+std::to_string(r.region_um.top)+","+std::to_string(r.region_um.right)+","+std::to_string(r.region_um.bottom)+" "+
+        std::to_string(r.width_pixels)+"x"+std::to_string(r.height_pixels);
+}
+
+struct Answer {
+    // False when the scene's numbers sit on a rounding boundary of the code's own searches, or on a rule that is not worked out here
+    // (then the scene does not decide anything and has to be changed).
+    bool decisive{true};
+    std::string undecided;
+    render::OutputRaster raster{render::DocumentRegionUm{0,0,0,0},0,0,0};   // what ProposeRaster has to give (set first thing)
+    // What decided each end of the rows: gate (nothing given up, gate 1 holds), none (nothing given up otherwise), edge (the raster's own
+    // edge), seam vertices, overlap, last column, move (brought back to what B's move allows).
+    std::string top_by,bottom_by;
+    long long first{},last{};        // the rows kept (the whole raster when nothing is given up)
+    // B's ends on the seam columns: before at the parent's column, after at the leftmost column the new seam can take (rows, unclamped).
+    bool has_ends{};
+    double column_before{},column_after{};
+    Line ends_before,ends_after;
+    long long allowed_top{},allowed_bottom{};
+    double right_moved{};            // how far the smallest of B's right side moved over the rows that decide the width (pixels)
+    std::optional<std::size_t> top_vertex,bottom_vertex;   // the vertex that last narrowed each end in the seam columns' step
+    std::string stopped;             // why no row is given up after gate 1 (for the messages)
+    long long low{-1},high{-1};      // the leftmost and the rightmost column the new seam can take (for the messages)
+};
+void Undecided(Answer& a,const std::string& why){a.decisive=false;a.undecided+=(a.undecided.empty()?"":"; ")+why;}
+// Whether a value that the code rounds is far enough from the rounding's boundary that its own search (doubling and bisection, a few
+// thousandths of a pixel) cannot land on the other side.
+bool FarFromHalf(double v){const double f=v-std::floor(v);return std::abs(f-0.5)>=0.05;}
+bool FarFromWhole(double v){const double f=v-std::floor(v);return f>=0.02 && f<=0.98;}
+
+Answer RasterBySides(const FixedCompositeConditionV3& active,const FixedCompositeProfileBinding& parent,const cr::PoseParameters& pose,rc::SeamPlacement seam,
+    const std::vector<CreationOffsetV3>& vertices,const std::vector<CreationOffsetV3>& pose_vertices){
+    Answer out;
+    const auto& old=active.raster;
+    const long long height=old.height_pixels,width=old.width_pixels,last_row=height-1,middle=last_row/2;
+    out.raster=old;out.first=0;out.last=last_row;
+    // The scenes' parents are at the profile's own placement and have no paper lift (no layer 2): what follows takes the parent's
+    // placement as the calibrated mapping and the columns the seam can take without a lift cap.
+    if(!active.base_pose.IsZero() || active.registration.parallax){Undecided(out,"a base pose or layer 2 in the parent");return out;}
+    const bool keep=seam==rc::SeamPlacement::keep_previous;
+    const auto& camera_a=parent.parameters.camera_a;const auto& camera_b=parent.parameters.camera_b;
+    const cr::PoseModel model_b(camera_b);
+    const Cover a=CoverOf(old,camera_a.document_to_image);
+    const Cover before=CoverOf(old,camera_b.document_to_image);
+    const Cover after=pose.IsZero()?before:CoverOf(old,camera_b.document_to_image,model_b.Homography(pose));
+    // The moved B as the new profile names it, and the range's offsets around it.
+    const render::CameraProjection moved_b(camera_b.intrinsics,camera_b.distortion,model_b.CameraHomography(pose));
+    const cr::PoseModel model_moved(moved_b);
+    const Cover moved=CoverOf(old,moved_b.document_to_image);
+    const auto centre_a=cr::PoseModel(camera_a).Centre({});
+    const auto at_offset=[&](const render::OutputRaster& raster,const CreationOffsetV3& o,std::uint32_t origin_column){
+        const auto p=CreationOffsetPoseV3(cr::PoseParameters{},o);
+        const auto s=CreationOffsetSurfaceV3(o);
+        if(!s.IsZero())return CoverOf(raster,moved_b.document_to_image,cr::RegisteredHomography(model_moved,centre_a,cr::SurfaceOriginMm(raster,origin_column),p,s));
+        if(!p.IsZero())return CoverOf(raster,moved_b.document_to_image,model_moved.Homography(p));
+        return CoverOf(raster,moved_b.document_to_image);
+    };
+    // Half the blend width, as the creation check counts it: the columns of the blend beyond the seam column.
+    const long long half=(static_cast<long long>(kSeamBlendDesign.width_pixels)+1)/2-1;
+
+    // ---- The right edge: by B's right side alone, when on the parent's middle row the whole cover ends there ----
+    const auto right_side=[&](const Cover& c,long long y,bool whole){const auto l=On(c,whole,false,static_cast<double>(y));return l.any && l.last>=0?l.last:kInf;};
+    const auto smallest=[&](const Cover& c,long long first,long long last,bool whole){double s=kInf;for(long long y=first;y<=last;++y)s=std::min(s,right_side(c,y,whole));return s;};
+    bool by_sides{};
+    {
+        const auto whole=On(before,true,false,static_cast<double>(middle)),across=On(before,false,false,static_cast<double>(middle));
+        by_sides=whole.any && across.any && whole.last==across.last;
+        if(whole.any && across.any && whole.last<across.last && across.last-whole.last<1)Undecided(out,"the parent's middle row ends near a corner of B");
+    }
+    const auto right_move=[&](long long first,long long last,bool whole)->std::optional<long long>{
+        const double moved_by=smallest(after,first,last,whole)-smallest(before,first,last,whole);
+        if(!std::isfinite(moved_by))return std::nullopt;
+        out.right_moved=moved_by;
+        if(!FarFromHalf(moved_by))Undecided(out,"the right edge moves by half a pixel off a whole one");
+        return std::llround(moved_by);
+    };
+    const auto delta=by_sides?right_move(0,last_row,false):right_move(0,last_row,true);
+    if(!delta){Undecided(out,"B has no right side on the raster");return out;}
+    const auto by_width=OfWidth(old,width+*delta);
+    out.raster=by_width;out.top_by=out.bottom_by="none";
+
+    // ---- Gate 1: the creation check's named conditions on the raster that the right edge alone gives ----
+    {
+        auto points=CreationRangeAxisEndsV3(active);
+        points.insert(points.begin(),CreationOffsetV3{});
+        const Cover a_wide=CoverOf(by_width,camera_a.document_to_image);
+        if(keep){
+            const auto column=active.seam.column;
+            bool holds=column<by_width.width_pixels;
+            for(const auto& o:points){
+                if(!holds)break;
+                const auto b=at_offset(by_width,o,column);
+                const double x=static_cast<double>(column);
+                for(long long y=0;y<height && holds;++y){
+                    const double r=static_cast<double>(y);
+                    holds=Sees(b,x,r,true) && Sees(a_wide,x,r,true) && Sees(a_wide,x+static_cast<double>(half),r,true);
+                }
+            }
+            if(holds){out.top_by=out.bottom_by="gate";return out;}
+        }else{
+            // The candidate's seam column is the middle of its band. Gate 1 is taken here only where it fails for every column of the raster at
+            // the ends of the pose's own axes (without a paper surface B's cover does not depend on the seam column).
+            long long low=0,high=static_cast<long long>(by_width.width_pixels)-1;
+            for(const auto& o:points){
+                if(!CreationOffsetSurfaceV3(o).IsZero())continue;
+                const auto b=at_offset(by_width,o,0);
+                for(long long y=0;y<height && low<=high;++y){
+                    const auto rb=Integers(b,true,false,static_cast<double>(y),0,static_cast<long long>(by_width.width_pixels)-1);
+                    const auto ra=Integers(a_wide,true,false,static_cast<double>(y),0,static_cast<long long>(by_width.width_pixels)-1+half);
+                    if(!rb || !ra){low=high+1;break;}
+                    low=std::max({low,rb->first,ra->first});high=std::min({high,rb->second,ra->second-half});
+                }
+                if(low>high)break;
+            }
+            if(low<=high){Undecided(out,"gate 1 is not decided by the ends of the pose's axes alone");return out;}
+        }
+    }
+
+    // ---- The rows: the overlap of A and B on every row, then the range's vertices on the columns the seam can take ----
+    // A row "has an overlap" in the code when its search finds the run; that search is not worked out here, so the rows are taken both
+    // ways the search can end (a run of any length, a run of at least 8 columns), and the scene decides only when both give the same.
+    std::vector<char> any(static_cast<std::size_t>(height)),eight(static_cast<std::size_t>(height));
+    std::vector<long long> run_first(static_cast<std::size_t>(height)),run_end(static_cast<std::size_t>(height));
+    for(long long y=0;y<height;++y){
+        const auto ra=Integers(a,true,false,static_cast<double>(y),0,width-1),rb=Integers(moved,true,false,static_cast<double>(y),0,width-1);
+        if(!ra || !rb)continue;
+        const long long f=std::max(ra->first,rb->first),l=std::min(ra->second,rb->second);
+        if(f>l)continue;
+        const auto k=static_cast<std::size_t>(y);
+        any[k]=1;eight[k]=l-f+1>=8;run_first[k]=f;run_end[k]=l+1;
+    }
+    const auto clamp_column=[&](long long c){return static_cast<std::uint32_t>(std::clamp<long long>(c,0,width-1));};
+    const auto rows_with=[&](const std::vector<char>& ok)->Answer{
+        Answer r=out;
+        long long smallest_first=std::numeric_limits<long long>::max(),smallest_end=smallest_first;
+        bool any_row=false;
+        for(long long y=0;y<height;++y){
+            const auto k=static_cast<std::size_t>(y);
+            if(!ok[k])continue;
+            any_row=true;smallest_first=std::min(smallest_first,run_first[k]);smallest_end=std::min(smallest_end,run_end[k]);
+        }
+        if(!any_row){r.stopped="no row has an overlap";return r;}
+        const long long low=keep?static_cast<long long>(active.seam.column):(smallest_first+smallest_end)/2;
+        r.low=low;
+        long long f=0,l=last_row;
+        std::string top_by="edge",bottom_by="edge";
+        // The rows in which B covers `column` at every one of `offsets`, from the middle row; false when one of them does not cover the
+        // column on the middle row (then nothing is given up).
+        const auto narrow=[&](const std::vector<CreationOffsetV3>& offsets,std::uint32_t origin_column,double column,const char* name,bool record)->bool{
+            if(middle<f || middle>l)return false;
+            long long nf=f,nl=l;
+            std::optional<std::size_t> top_i,bottom_i;
+            for(std::size_t i=0;i<offsets.size();++i){
+                const auto c=at_offset(old,offsets[i],origin_column);
+                if(!Sees(c,column,static_cast<double>(middle),true))return false;
+                const auto s=Integers(c,true,true,column,nf,nl);
+                if(!s)return false;
+                if(s->first>nf){nf=s->first;top_i=i;}
+                if(s->second<nl){nl=s->second;bottom_i=i;}
+            }
+            if(nf>f){f=nf;top_by=name;if(record)r.top_vertex=top_i;}
+            if(nl<l){l=nl;bottom_by=name;if(record)r.bottom_vertex=bottom_i;}
+            return true;
+        };
+        if(!narrow(vertices,clamp_column(low),static_cast<double>(low-half),"seam vertices",true)){r.stopped="a vertex misses the left seam column on the middle row";return r;}
+        if(!ok[static_cast<std::size_t>(middle)]){r.stopped="the middle row has no overlap";return r;}
+        {
+            long long cf=middle,cl=middle;
+            while(cf>f && ok[static_cast<std::size_t>(cf-1)])--cf;
+            while(cl<l && ok[static_cast<std::size_t>(cl+1)])++cl;
+            if(cf>f){f=cf;top_by="overlap";}
+            if(cl<l){l=cl;bottom_by="overlap";}
+        }
+        long long high=low;
+        if(!keep){
+            long long largest_first=0,largest_end=0;
+            for(long long y=f;y<=l;++y){largest_first=std::max(largest_first,run_first[static_cast<std::size_t>(y)]);largest_end=std::max(largest_end,run_end[static_cast<std::size_t>(y)]);}
+            high=(largest_first+largest_end)/2;
+        }
+        r.high=high;
+        if(!narrow(vertices,clamp_column(high),static_cast<double>(high+half),"seam vertices",true)){r.stopped="a vertex misses the right seam column on the middle row";return r;}
+        if(!by_sides){r.stopped="B's sides do not end the parent's middle row";return r;}
+        // The last column of the new raster: when A does not see it on every row kept, the rows in which B sees it at every vertex of the
+        // pose's range (once; when B does not see it on the middle row at one of them, the rows stay).
+        const auto first_move=right_move(f,l,false);
+        if(!first_move){r.stopped="no right side over the rows";return r;}
+        {
+            const double last_column=static_cast<double>(width+*first_move)-1.0;
+            bool a_all=true;
+            for(long long y=f;y<=l && a_all;++y)a_all=Sees(a,last_column,static_cast<double>(y),true);
+            if(!a_all){
+                const long long keep_f=f,keep_l=l;const std::string keep_top=top_by,keep_bottom=bottom_by;
+                if(!narrow(pose_vertices,clamp_column(high),last_column,"last column",false)){f=keep_f;l=keep_l;top_by=keep_top;bottom_by=keep_bottom;}
+            }
+        }
+        // What B's move allows: how far B's upper and lower ends on the seam column moved, the parent's at its column and the new one at
+        // the leftmost column the new seam can take, each looked for up to one raster height beyond the raster.
+        r.column_before=static_cast<double>(active.seam.column);r.column_after=static_cast<double>(low);
+        if(!Sees(before,r.column_before,static_cast<double>(middle),true) || !Sees(after,r.column_after,static_cast<double>(middle),true)){r.stopped="B misses a seam column on the middle row";return r;}
+        r.ends_before=On(before,true,true,r.column_before);r.ends_after=On(after,true,true,r.column_after);r.has_ends=true;
+        const auto top_of=[&](const Line& e){return std::max(e.first,-static_cast<double>(height));};
+        const auto bottom_of=[&](const Line& e){return std::min(e.last,2.0*static_cast<double>(height)-1.0);};
+        const double up=top_of(r.ends_after)-top_of(r.ends_before),down=bottom_of(r.ends_before)-bottom_of(r.ends_after);
+        r.allowed_top=static_cast<long long>(std::floor(std::max(0.0,up)));r.allowed_bottom=static_cast<long long>(std::floor(std::max(0.0,down)));
+        const long long kf=std::min(f,r.allowed_top),kl=std::max(l,last_row-r.allowed_bottom);
+        if(kf<f){top_by="move";if(!FarFromWhole(up))Undecided(r,"B's upper end moved by a whole number of rows");}
+        if(kl>l){bottom_by="move";if(!FarFromWhole(down))Undecided(r,"B's lower end moved by a whole number of rows");}
+        if(kf==0 && kl==last_row){r.stopped="the move allows no row to be given up";return r;}
+        const auto move=right_move(kf,kl,false);
+        if(!move){r.stopped="no right side over the rows kept";return r;}
+        r.right_moved=out.right_moved;
+        r.first=kf;r.last=kl;r.top_by=top_by;r.bottom_by=bottom_by;
+        const auto rows=OfRows(old,kf,kl);
+        r.raster=*move==0?rows:OfWidth(rows,static_cast<long long>(rows.width_pixels)+*move);
+        return r;
+    };
+    const auto by_any=rows_with(any),by_eight=rows_with(eight);
+    auto answer=by_any;
+    if(!SameRegion(by_any.raster,by_eight.raster) || by_any.top_by!=by_eight.top_by || by_any.bottom_by!=by_eight.bottom_by)
+        Undecided(answer,"the rows that have an overlap decide by the rule of the code's search");
+    if(!out.decisive)Undecided(answer,out.undecided);
+    return answer;
+}
+
+// The product's own mapping, at a point: whether the sample is inside the sensor (the whole sensor, or the stored x only).
+bool MappingSees(const render::OutputToCamera& map,double x,double y,bool whole){
+    render::Point raw{};
+    try{if(!map({x,y},raw))return false;}
+    catch(const std::invalid_argument&){return false;}
+    return std::isfinite(raw.x) && std::isfinite(raw.y) && raw.x>=0 && raw.x<kSensorWidth && (!whole || (raw.y>=0 && raw.y<kSensorHeight));
+}
+}
+
+void RasterFromSensorSides(){
+    // Six scenes of the synthetic rig: B moved along the baseline and up or down, turned, in both mountings, with the paper range of the
+    // condition and without it, and with the seam in the middle of the band and at the previous column. Each is meant for one rule of the
+    // design: what decides an end of the rows kept is named, and the working above has to agree with it before the code is compared.
+    const auto ranges=[](bool surface){
+        return std::function<void(FixedCompositeConditionV3&)>([surface](FixedCompositeConditionV3& c){
+            TestRanges(c);c.registration.parallax.reset();
+            if(!surface)c.registration.surface_envelope.reset();
+        });
+    };
+    struct Scene {
+        const char* name;bool turned;double moved_left_mm;render::OutputRaster raster;cr::PoseParameters pose;rc::SeamPlacement seam;bool surface;
+        const char* top_by;const char* bottom_by;
+    };
+    const auto band=rc::SeamPlacement::band_center,previous=rc::SeamPlacement::keep_previous;
+    const Scene scenes[]{
+        // Up by 12 mm, to the left by 15 mm, turned 0.3 degree: the vertices reach past what the move allows at the bottom.
+        {"up-left-turned",false,0,ps::Raster(560000,300000,740000,470000,254),{0,0,0.3,15,12,0},band,true,"edge","move"},
+        // Down by 30 mm, apart by 10 mm, turned: the same at the top. (Turned the other way, B's upper side would cross the rows just under it
+        // near A's right edge, a row there would have an overlap of a few columns, and the leftmost column the seam can take would fall near
+        // B's left side, where a vertex does not cover it: no row is given up then.)
+        {"down-apart-turned",false,0,ps::Raster(560000,5000,740000,165000,254),{0,0,0.5,-10,-30,0},band,true,"move","edge"},
+        // Up by 20 mm, tilted, on a raster that ends far above B's lower edge: the vertices keep more rows than the move would give up.
+        {"up-tilted-vertices",false,0,ps::Raster(560000,290000,740000,460000,254),{0.2,0,0.4,8,20,0},band,false,"edge","seam vertices"},
+        // Half turn, to the right by 20 mm, up by 3 mm, turned: gate 1 holds at the previous seam column and only the right edge moves.
+        {"half-turn-gate",true,0,ps::Raster(560000,100000,740000,260000,254),{0,0,0.6,20,-3,0},previous,true,"gate","gate"},
+        // Half turn, up by 10 mm, to the left by 25 mm, turned: the move decides at the bottom.
+        {"half-turn-up-left",true,0,ps::Raster(560000,300000,740000,470000,254),{0,0,-0.4,-25,-10,0},band,true,"edge","move"},
+        // B moved left on the drawing so that the raster reaches near its right side, A not seeing the last column: up by 29 mm and turned so
+        // that B's lower side rises towards the right, B's lower side at the last column decides the bottom.
+        {"near-right-last-column",false,152.0,ps::Raster(560000,280000,1127000,450000,254),{0,0,0.8,0,29,0},previous,true,"edge","last column"},
+    };
+    for(const auto& scene:scenes){
+        const std::string name=std::string("sides ")+scene.name;
+        const auto profile=scene.moved_left_mm>0?RigTextMovedLeft(scene.turned,scene.moved_left_mm):RigText(scene.turned);
+        auto active=MakeActive(std::string("sides-")+scene.name,profile,scene.turned?MountOrientation::rotated_180:MountOrientation::normal,scene.raster,ranges(scene.surface));
+        const auto parent=BindFixedCompositeProfileV3(active.condition,profile,kHash);
+        const auto vertices=CreationRangeVerticesV3(active.condition,true),pose_vertices=CreationRangeVerticesV3(active.condition,false);
+        const auto want=sides::RasterBySides(active.condition,parent,scene.pose,scene.seam,vertices,pose_vertices);
+        std::optional<render::OutputRaster> got;
+        try{got=rc::ProposeRaster(active.condition,parent,scene.pose,rc::RasterPlacement::follow_camera_b,scene.seam);}
+        catch(const std::exception& e){std::cerr<<name<<": ProposeRaster threw: "<<e.what()<<'\n';}
+        std::cerr<<name<<": rows "<<want.first<<".."<<want.last<<" (top "<<want.top_by<<", bottom "<<want.bottom_by<<"), allowed "<<want.allowed_top<<"/"<<want.allowed_bottom<<
+            ", right "<<want.right_moved<<" px, seam columns "<<want.low<<".."<<want.high<<", vertex "<<(want.top_vertex?std::to_string(*want.top_vertex):"-")<<"/"<<(want.bottom_vertex?std::to_string(*want.bottom_vertex):"-")<<
+            ", worked out "<<sides::Text(want.raster)<<", code "<<(got?sides::Text(*got):std::string("none"))<<(want.stopped.empty()?"":", stopped: "+want.stopped)<<(want.decisive?"":" (not decided: "+want.undecided+")")<<'\n';
+        Check(want.decisive,(name+": the scene's numbers are away from every rounding boundary of the code's searches").c_str());
+        Check(want.top_by==scene.top_by && want.bottom_by==scene.bottom_by,(name+": the rule the scene is for decides the rows").c_str());
+        Check(got.has_value() && sides::SameRegion(*got,want.raster),(name+": ProposeRaster gives the raster worked out from the sides").c_str());
+
+        // The lines are the product's own mappings to 1e-6 mm on the drawing: just inside an end of B's cover the mapping sees the sample,
+        // just outside it does not. B's upper and lower ends on the seam columns (where they are inside what is looked at), and B's right
+        // side on the first, the middle and the last row kept.
+        const double probe=1e-6/(25.4/scene.raster.dpi);
+        const cr::PoseModel model_b(parent.parameters.camera_b);
+        const auto map_before=PoseCorrectedDocumentOutputToCamera(scene.raster,parent.parameters.camera_b,model_b,cr::PoseParameters{});
+        const auto map_after=PoseCorrectedDocumentOutputToCamera(scene.raster,parent.parameters.camera_b,model_b,scene.pose);
+        const double h=static_cast<double>(scene.raster.height_pixels);
+        const sides::Cover cover_before=sides::CoverOf(scene.raster,parent.parameters.camera_b.document_to_image);
+        const sides::Cover cover_after=sides::CoverOf(scene.raster,parent.parameters.camera_b.document_to_image,model_b.Homography(scene.pose));
+        struct Placement {const render::OutputToCamera* map;const sides::Cover* cover;double column;sides::Line ends;};
+        const Placement placements[]{{&map_before,&cover_before,want.column_before,want.ends_before},{&map_after,&cover_after,want.column_after,want.ends_after}};
+        for(const auto& at:placements){
+            if(want.has_ends){
+                if(at.ends.first>-h)
+                    Check(sides::MappingSees(*at.map,at.column,at.ends.first+probe,true) && !sides::MappingSees(*at.map,at.column,at.ends.first-probe,true),(name+": B's upper end on the seam column").c_str());
+                if(at.ends.last<2*h-1)
+                    Check(sides::MappingSees(*at.map,at.column,at.ends.last-probe,true) && !sides::MappingSees(*at.map,at.column,at.ends.last+probe,true),(name+": B's lower end on the seam column").c_str());
+            }
+            for(const long long y:{want.first,(want.first+want.last)/2,want.last}){
+                const auto side=sides::On(*at.cover,false,false,static_cast<double>(y));
+                Check(side.any && sides::MappingSees(*at.map,side.last-probe,static_cast<double>(y),false) && !sides::MappingSees(*at.map,side.last+probe,static_cast<double>(y),false),
+                    (name+": B's right side on a row").c_str());
+            }
+        }
+        // In the scene of the vertices, the end is decided by one vertex alone: without it the working gives another raster (a vertex that
+        // the code dropped would be seen).
+        if(std::string(scene.bottom_by)=="seam vertices"){
+            Check(want.bottom_vertex.has_value(),(name+": a vertex decides the bottom").c_str());
+            if(want.bottom_vertex){
+                auto fewer=vertices;fewer.erase(fewer.begin()+static_cast<std::ptrdiff_t>(*want.bottom_vertex));
+                const auto without=sides::RasterBySides(active.condition,parent,scene.pose,scene.seam,fewer,pose_vertices);
+                std::cerr<<name<<": without vertex "<<*want.bottom_vertex<<" "<<sides::Text(without.raster)<<'\n';
+                Check(!sides::SameRegion(without.raster,want.raster),(name+": the vertex that decides the bottom is the only one").c_str());
+            }
+        }
+        std::error_code ignored;fs::remove_all(active.settings,ignored);
+    }
+}
+
 // ---- Frozen results of the scenes that move B along the baseline only ----------------------------------------------------------
 // What a recalibration of a pose that moves B along the sheet's x makes: the raster, the seam column, B's matrix (the bits of the nine
 // numbers), and the hashes of the candidate revision and of its profile. The strings below were taken from the code as it stood before
@@ -1615,6 +2029,7 @@ int main(int argc,char** argv){
         ProfileBake();lap("profile bake");
         FitUnits();lap("fit units");
         GeometryFromPose();lap("geometry from a pose");
+        RasterFromSensorSides();lap("the raster from the sides of the sensors");
         FrozenLeftRight();lap("frozen left-right scenes");
         VerticalFromPose();lap("up and down from a pose");
         CandidateLiveAndJpeg();lap("the live view and the JPEG on a candidate");
