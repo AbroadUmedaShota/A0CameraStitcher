@@ -386,6 +386,8 @@ struct ReportInput {
     const rc::Verification* verification{};
     std::string original_a_sha,original_b_sha;
     std::optional<std::string> level;
+    // Whether the sample's capture applied a registration beyond the condition's ranges (the level's `beyond_envelope_applied`); empty when the sample was not composed.
+    std::optional<bool> sample_beyond_envelope_applied;
 };
 inline std::string ReportJson(const ReportInput& in){
     const auto& o=*in.outcome;
@@ -437,6 +439,7 @@ inline std::string ReportJson(const ReportInput& in){
         s<<",\"gateState\":"<<Esc(m2e::registration_gate::GateStateCode(g.state))<<",\"gateCause\":"<<Esc(m2e::registration_gate::GateCauseCode(g.cause))
          <<",\"gateMaximumPx\":"<<Num(g.maximum_px)<<",\"gateLimitPx\":"<<Num(g.limit_px)<<",\"measuredRowShare\":"<<Num(g.measured_share);
     if(in.level)s<<",\"level\":"<<Esc(*in.level);
+    s<<",\"beyondEnvelopeApplied\":"<<(in.sample_beyond_envelope_applied?Bool(*in.sample_beyond_envelope_applied):std::string("null"));
     s<<"}";
     s<<",\"display\":{\"hasMotion\":"<<Bool(d.has_motion)<<",\"motionRightMm\":"<<Num(d.motion.camera_motion_mm.x)<<",\"motionDownMm\":"<<Num(d.motion.camera_motion_mm.y)
      <<",\"rotationClockwiseDeg\":"<<Num(d.motion.rotation_clockwise_deg)<<",\"tiltDeg\":"<<Num(d.pose.tilt_deg)<<",\"heightPercent\":"<<Num(d.pose.height_percent)
@@ -693,6 +696,7 @@ inline bool IsCanonicalOriginal(const fs::path& file,const wchar_t* alias){
             gate_facts.measured_share=capture.gate.rows.rows_with_content?
                 static_cast<double>(capture.gate.rows.rows_measured)/static_cast<double>(capture.gate.rows.rows_with_content):std::numeric_limits<double>::quiet_NaN();
             report.level=std::string(m2e::GeometryLevelCode(capture.level.level));
+            report.sample_beyond_envelope_applied=capture.level.beyond_envelope_applied;
             out.thumbnail=composed.review->thumbnail;
             for(auto& line:DescribeRegistrationReview(*composed.review).log)out.log_lines.push_back(std::move(line));
         }

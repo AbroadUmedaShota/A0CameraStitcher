@@ -166,6 +166,7 @@ p_b に大きな値を入れずに profile を作り直す理由: p_b は「校�
 | `display.heightPreviousPx`・`heightNewPx` | int、int か null | 範囲の高さの前と後。後は `hasNew` が false の時 null |
 | `display.topPreviousMm`・`bottomPreviousMm`・`topNewMm`・`bottomNewMm` | number、number か null | 範囲の上端と下端の前と後。後は `hasNew` が false の時 null |
 | `display.targetCoverShortfall` | null か object | `band-uncovered` の時だけ。`pose`（`start` か `estimate`）・`rowsTop`・`rowsBottom`・`topMm`・`bottomMm` |
+| `sample.beyondEnvelopeApplied` | bool か null | 見本の撮影が条件の範囲の外の補正を当てた時 true、当てなかった時 false。見本を合成できなかった時 null。判定は変えない。範囲の外の補正の理由の内訳（推定・紙面・層 2）は撮影の記録に欄が無いので出さない |
 
 所見（`findings`）の `reason` には、`no-overlap`・`band-uncovered`・`range-collapsed` の下位の理由が入る（5 節）。CLI（版の決まりの無い開発用の出力）には、同じ値の `wide`・`start_motion`・`target_cover_shortfall`・`fine_fit_raster` の行と、`seam` の行の上下の端の前後が出る。ログには、範囲の幅・高さ・上下の端が今の改訂と違う候補で `recalibration_raster width_px=a->b height_px=a->b top_mm=a->b bottom_mm=a->b` の行が付く。
 
