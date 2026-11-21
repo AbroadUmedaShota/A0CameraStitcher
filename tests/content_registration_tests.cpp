@@ -965,6 +965,14 @@ void Repeating() {
                 Check(r.state == cr::RegistrationState::undetermined && r.reasons.size() == 1 && r.reasons.front() == "unique-blocks", name + ": the one reason is unique-blocks (" + Describe(r) + ")");
                 const auto verdict = cr::AssessEvidenceShortage(r, settings.limits);
                 Check(!verdict.shortage_only && verdict.doubt == "unique-blocks", name + ": classified as a doubt, not a shortage of marks (" + describe_counts(r) + ")");
+                // The rest of the form S2 holds too (the consistent blocks reach the minimum and at least half of the blocks used), so
+                // the rival is the only thing that makes it a doubt: the same counts with R set to 0 are a shortage.
+                Check(r.diagnostics.consistent_blocks >= settings.limits.minimum_unique_blocks && 2ull*r.diagnostics.consistent_blocks >= r.diagnostics.unique_blocks,
+                    name + ": the consistent blocks reach the minimum and half of the blocks used (" + describe_counts(r) + ")");
+                auto without_rival = cr::EvidenceCountsOf(r.diagnostics);
+                without_rival.rival_anchor_support = 0;
+                Check(cr::AssessEvidenceShortage(r.reasons, without_rival, settings.limits).shortage_only,
+                    name + ": the same counts with no rival anchor are a shortage of marks (" + describe_counts(r) + ")");
             }
         }
     }
@@ -1123,6 +1131,21 @@ void Ruled() {
     Check(periodic_before >= 2*periodic_after && periodic_before > 20, "ruled: the table is judged periodic at the legacy radius and not at the draft's");
     Check(before.state == cr::RegistrationState::undetermined && !before.has_estimate && !before.reasons.empty() && before.reasons.front() == "too-few-points",
         "ruled: the legacy radius leaves too few points (" + Describe(before) + ")");
+    // The estimator's own too-few-points through the classification. The coarse stage counted two blocks, both anchors, all consistent,
+    // and every anchor voted; the fine stage stopped on its first measurement. With this condition's minimum of 2 blocks these are the
+    // counts V2 passes (T1), so it is a lack of marks. Surface mode does not run the second start beside the first.
+    {
+        const auto& d = before.diagnostics;
+        const std::string counts = std::to_string(d.unique_blocks) + "," + std::to_string(d.consistent_blocks) + "," + std::to_string(d.anchor_blocks) + "," +
+            std::to_string(d.consistent_anchor_blocks) + ", rival " + std::to_string(d.coarse_vote.rival_anchor_support) + ", outer " + std::to_string(d.outer_iterations);
+        Check(legacy.limits.minimum_unique_blocks == 2, "ruled: the condition's minimum of blocks is 2");
+        Check(d.unique_blocks == 2 && d.consistent_blocks == 2 && d.anchor_blocks == 2 && d.consistent_anchor_blocks == 2,
+            "ruled: the coarse stage counted two blocks, both anchors that agree (" + counts + ")");
+        Check(d.coarse_vote.rival_anchor_support == 0 && d.outer_iterations == 1, "ruled: no rival anchor, and the fine stage stopped on its first measurement (" + counts + ")");
+        Check(d.second_start == cr::RegistrationDiagnostics::SecondStart::not_run, "ruled: the second start did not run beside the first");
+        const auto verdict = cr::AssessEvidenceShortage(before, legacy.limits);
+        Check(verdict.shortage_only && verdict.doubt.empty(), "ruled: too-few-points on these counts is classified as a lack of marks (" + counts + ")");
+    }
     Check(after.state == cr::RegistrationState::verified, "ruled: the draft's radius gives a verified estimate (" + Describe(after) + ")");
     Check(after.diagnostics.points >= 4*std::max<std::uint32_t>(before.diagnostics.points, 1), "ruled: the table's points are fitted");
     CheckNear(after.surface.plane.h0_mm, 3.0, 0.2, "ruled: h0 from the table and the text (mm)");
@@ -1220,19 +1243,29 @@ void Evidence() {
     limits.brown_lowe_beta = 0.3;
     limits.minimum_unique_blocks = 3;
     const auto counts = [](std::uint32_t inliers, std::uint32_t points, std::uint32_t unique, std::uint32_t consistent, std::uint32_t anchors,
-                           std::uint32_t consistent_anchors, std::uint32_t rival = kNotCarried) {
+                           std::uint32_t consistent_anchors, std::uint32_t rival = kNotCarried, std::uint32_t outer = kNotCarried) {
         cr::EvidenceCounts c;
         c.inliers = inliers; c.points = points;
         c.unique_blocks = unique; c.consistent_blocks = consistent; c.anchor_blocks = anchors; c.consistent_anchor_blocks = consistent_anchors;
         c.rival_anchor_support = rival;   // the default is "not carried": the value that EvidenceCounts itself starts with
+        c.outer_iterations = outer;       // the same
         return c;
     };
+    // The counts of an estimate whose fine stage stopped for want of points (too-few-points) on its first measurement, with the block
+    // counts and the vote's rival anchors as given.
+    const auto stopped_first = [&](std::uint32_t unique, std::uint32_t consistent, std::uint32_t anchors, std::uint32_t consistent_anchors,
+                                   std::uint32_t rival, std::uint32_t inliers = 0, std::uint32_t points = 0) {
+        return counts(inliers, points, unique, consistent, anchors, consistent_anchors, rival, 1);
+    };
+    // The reasons on the counts of an estimate that stopped on its first measurement with nothing counted and no vote (R = 0): too-few-points
+    // is a shortage on them (T0), and unique-blocks, the other reason that reads the block counts, is a doubt.
     const auto assess = [&](std::vector<std::string> reasons, std::uint32_t inliers = 0, std::uint32_t points = 0) {
-        return cr::AssessEvidenceShortage(reasons, counts(inliers, points, 0, 0, 0, 0), limits);
+        return cr::AssessEvidenceShortage(reasons, stopped_first(0, 0, 0, 0, 0, inliers, points), limits);
     };
     // The block counts of a unique-blocks estimate that V2 failed on the number of anchors alone (6 blocks used, all consistent, 1 anchor,
-    // and every anchor voted: no rival anchor).
-    const auto few_anchors = counts(0, 0, 6, 6, 1, 1, 0);
+    // and every anchor voted: no rival anchor). The same counts with too-few-points stopped on the first measurement (the outer iteration
+    // is read for too-few-points only).
+    const auto few_anchors = stopped_first(6, 6, 1, 1, 0);
     const auto assess_blocks = [&](std::vector<std::string> reasons, const cr::EvidenceCounts& c) {
         return cr::AssessEvidenceShortage(reasons, c, limits);
     };
@@ -1301,7 +1334,7 @@ void Evidence() {
         auto not_a_number = limits;
         not_a_number.brown_lowe_beta = std::nan("");
         Check(!cr::AssessEvidenceShortage({"brown-lowe"}, counts(1, 1, 0, 0, 0, 0), not_a_number).shortage_only, "brown-lowe: a beta that is not a number is a doubt");
-        Check(cr::AssessEvidenceShortage({"too-few-points"}, counts(0, 0, 0, 0, 0, 0), unset).shortage_only, "too-few-points on nothing counted does not need the limits");
+        Check(cr::AssessEvidenceShortage({"too-few-points"}, stopped_first(0, 0, 0, 0, 0), unset).shortage_only, "too-few-points on nothing counted does not need the limits");
         Check(cr::AssessEvidenceShortage({"prediction-uncertain", "too-dark", "repeating-only", "coarse-no-unique-blocks"}, counts(0, 0, 0, 0, 0, 0), unset).shortage_only, "the other reasons do not need the limits");
     }
     // unique-blocks (#434): one code for two places of the estimator, told by the counts (U unique, C consistent, A anchors, CA consistent
@@ -1320,7 +1353,8 @@ void Evidence() {
             {2, 0, 2, 0, kNotCarried, false, "S1, and the rival was not carried"},
             {1, 0, 2, 0, 0, false, "A above U"},
             {2, 0, 3, 0, 0, false, "A above U"},
-            {0, 0, 0, 0, 0, false, "no counts carried"},
+            {0, 0, 0, 0, 0, false, "nothing counted and R = 0"},
+            {0, 0, 0, 0, kNotCarried, false, "nothing counted and the rival not carried"},
             {2, 1, 1, 0, 0, false, "stopped, yet a consistent block is counted"},
             {3, 0, 3, 0, 0, false, "as many blocks as the minimum, none consistent"},
             {8, 3, 8, 3, 0, false, "pose only: more than half of the blocks disagree"},
@@ -1381,18 +1415,21 @@ void Evidence() {
         brown.rival_anchor_support = 1;
         Check(!assess_blocks({"unique-blocks", "brown-lowe"}, brown).shortage_only, "unique-blocks + brown-lowe (5 of 9): a doubt when an anchor pointed elsewhere");
         // {unique-blocks, too-few-points} in the other order: the first reason that is not a shortage is the one named.
-        const auto rival_first = assess_blocks({"too-few-points", "unique-blocks"}, counts(0, 0, 6, 6, 2, 2, 1));
+        const auto rival_first = assess_blocks({"too-few-points", "unique-blocks"}, stopped_first(6, 6, 2, 2, 1));
         Check(!rival_first.shortage_only && rival_first.doubt == "too-few-points", "too-few-points + unique-blocks: a doubt named by the first reason");
         Check(assess_blocks({"too-few-points", "unique-blocks"}, few_anchors).shortage_only, "too-few-points + unique-blocks: a shortage on S2");
         Check(assess({"too-few-points", "prediction-uncertain"}).shortage_only, "too-few-points + prediction-uncertain: nothing counted is a shortage");
     }
     // too-few-points (#434): the fine stage stopped for want of points, so V2 did not run; the coarse stage's counts decide in its place.
-    // T0: nothing was counted. T1: the counts V2 passes, or the ones it fails on the number of anchors alone (S2). Else a doubt named too-few-points.
+    // T0: nothing was counted, and no anchor pointed to another place. T1: the counts V2 passes, or the ones it fails on the number of
+    // anchors alone (S2). Else a doubt named too-few-points.
     {
         struct Row { std::uint32_t u, c, a, ca, r; bool shortage; const char* what; };
         const Row rows[] = {
-            {0, 0, 0, 0, 0, true,  "T0: nothing counted (a follow-up estimate, or counts that were not carried)"},
-            {0, 0, 0, 0, kNotCarried, true, "T0: nothing counted, the rival not carried"},
+            {0, 0, 0, 0, 0, true,  "T0: nothing counted and no vote (the form of a follow job's result)"},
+            {0, 0, 0, 0, kNotCarried, false, "nothing counted, the rival not carried (counts that were not carried)"},
+            {0, 0, 0, 0, 1, false, "nothing counted, and an anchor pointed to another place"},
+            {0, 0, 0, 0, 1000, false, "nothing counted, and many anchors pointed to another place (only whether R is 0 is read)"},
             {8, 8, 8, 8, 0, true,  "T1, pose only: every block consistent"},
             {8, 5, 8, 5, 0, true,  "T1, pose only: the blocks dropped are within the half line"},
             {6, 6, 4, 4, 0, true,  "T1: the anchors that agree reach the minimum"},
@@ -1412,9 +1449,15 @@ void Evidence() {
             {6, 6, 2, 3, 0, false, "CA above A"},
             {4294967295u, 2147483648u, 1, 1, 0, true,  "2C does not overflow 32 bits (2C = U + 1)"},
             {4294967295u, 2147483647u, 1, 1, 0, false, "2C = 2^32 - 2 is below U"},
+            {4, 2, 1, 1, 0, false, "C below the minimum, on the half line (only C >= m keeps it out)"},
+            {3, 2, 1, 1, 0, false, "C below the minimum, above the half line (only C >= m keeps it out)"},
+            {6, 3, 3, 3, 0, true,  "T1 on both lines: 2C = U and C = CA = m"},
+            {0, 0, 1, 0, 0, false, "U = C = 0 with an anchor (A above U)"},
+            {6, 6, 7, 7, 0, false, "A above U"},
+            {6, 3, 4, 4, 0, false, "CA above C"},
         };
         for (const auto& row : rows) {
-            const auto v = assess_blocks({"too-few-points"}, counts(0, 0, row.u, row.c, row.a, row.ca, row.r));
+            const auto v = assess_blocks({"too-few-points"}, stopped_first(row.u, row.c, row.a, row.ca, row.r));
             const std::string name = std::string("too-few-points (") + std::to_string(row.u) + "," + std::to_string(row.c) + "," +
                 std::to_string(row.a) + "," + std::to_string(row.ca) + "," + (row.r == kNotCarried ? std::string("not carried") : std::to_string(row.r)) +
                 "): " + row.what;
@@ -1424,19 +1467,77 @@ void Evidence() {
         // Nothing counted is a shortage whatever the minimum; any other count needs the condition's minimum.
         auto unset_minimum = limits;
         unset_minimum.minimum_unique_blocks = 0;
-        Check(cr::AssessEvidenceShortage({"too-few-points"}, counts(0, 0, 0, 0, 0, 0), unset_minimum).shortage_only, "too-few-points: nothing counted needs no minimum");
-        Check(!cr::AssessEvidenceShortage({"too-few-points"}, counts(0, 0, 6, 6, 1, 1, 0), unset_minimum).shortage_only, "too-few-points: no minimum is a doubt for counted blocks");
+        Check(cr::AssessEvidenceShortage({"too-few-points"}, stopped_first(0, 0, 0, 0, 0), unset_minimum).shortage_only, "too-few-points: nothing counted needs no minimum");
+        Check(!cr::AssessEvidenceShortage({"too-few-points"}, stopped_first(6, 6, 1, 1, 0), unset_minimum).shortage_only, "too-few-points: no minimum is a doubt for counted blocks");
         auto four = limits;
         four.minimum_unique_blocks = 4;
-        Check(cr::AssessEvidenceShortage({"too-few-points"}, counts(0, 0, 6, 6, 3, 3, 0), four).shortage_only, "too-few-points: the line follows the minimum (3 anchors under 4 is S2)");
-        Check(!cr::AssessEvidenceShortage({"too-few-points"}, counts(0, 0, 6, 6, 3, 3, 1), four).shortage_only, "too-few-points: at 4, a rival anchor under the minimum is a doubt");
-        Check(cr::AssessEvidenceShortage({"too-few-points"}, counts(0, 0, 6, 6, 3, 3, 1), limits).shortage_only, "too-few-points: at 3, the same counts pass V2 and a rival is allowed");
+        Check(cr::AssessEvidenceShortage({"too-few-points"}, stopped_first(6, 6, 3, 3, 0), four).shortage_only, "too-few-points: the line follows the minimum (3 anchors under 4 is S2)");
+        Check(!cr::AssessEvidenceShortage({"too-few-points"}, stopped_first(6, 6, 3, 3, 1), four).shortage_only, "too-few-points: at 4, a rival anchor under the minimum is a doubt");
+        Check(cr::AssessEvidenceShortage({"too-few-points"}, stopped_first(6, 6, 3, 3, 1), limits).shortage_only, "too-few-points: at 3, the same counts pass V2 and a rival is allowed");
         // Only whether R is 0 matters, and only below the minimum of anchors.
         for (const std::uint32_t r : {1u, 2u, 1000u})
-            Check(!assess_blocks({"too-few-points"}, counts(0, 0, 6, 6, 2, 2, r)).shortage_only, "too-few-points: fewer anchors than the minimum with a rival of " + std::to_string(r) + " is a doubt");
+            Check(!assess_blocks({"too-few-points"}, stopped_first(6, 6, 2, 2, r)).shortage_only, "too-few-points: fewer anchors than the minimum with a rival of " + std::to_string(r) + " is a doubt");
         // The estimator gives unique-blocks and too-few-points from different places and never both; the two together are a job's own input.
         Check(assess_blocks({"unique-blocks", "too-few-points"}, few_anchors).shortage_only && assess_blocks({"too-few-points", "unique-blocks"}, few_anchors).shortage_only,
             "too-few-points with unique-blocks on S2: a shortage in either order");
+    }
+    // too-few-points and the outer iteration in which the fine stage stopped: only the first measurement can be a lack of marks. A stop in
+    // a later iteration comes after a fit on enough points; an iteration that was not carried, or 0 (the diagnostics' own default), is a
+    // doubt. Only whether it is 1 is read.
+    {
+        Check(cr::EvidenceCounts{}.outer_iterations == kNotCarried, "EvidenceCounts: an outer iteration that was not carried is the largest value");
+        {
+            cr::EvidenceCounts only_rival;   // every other count as EvidenceCounts starts it
+            only_rival.rival_anchor_support = 0;
+            Check(!cr::AssessEvidenceShortage({"too-few-points"}, only_rival, limits).shortage_only,
+                "too-few-points: EvidenceCounts with only the rival set to 0 is a doubt (the outer iteration's default is not carried)");
+        }
+        struct Row { std::uint32_t u, c, a, ca, r, outer; bool shortage; const char* what; };
+        const Row rows[] = {
+            {0, 0, 0, 0, 0, 1, true,  "T0 on the first measurement"},
+            {8, 8, 8, 8, 0, 1, true,  "T1 on the first measurement"},
+            {6, 6, 1, 1, 0, 1, true,  "T1 in the form of S2 on the first measurement"},
+            {0, 0, 0, 0, 0, 2, false, "T0's counts, stopped on the second measurement"},
+            {8, 8, 8, 8, 0, 2, false, "T1's counts, stopped on the second measurement"},
+            {6, 6, 1, 1, 0, 2, false, "S2's counts, stopped on the second measurement"},
+            {8, 8, 8, 8, 0, 5, false, "T1's counts, stopped on a later measurement"},
+            {8, 8, 8, 8, 0, kNotCarried, false, "T1's counts, the outer iteration not carried"},
+            {0, 0, 0, 0, 0, kNotCarried, false, "T0's counts, the outer iteration not carried"},
+            {8, 8, 8, 8, 0, 0, false, "T1's counts, outer iteration 0 (the diagnostics' default: no fine stage ran)"},
+        };
+        for (const auto& row : rows) {
+            const auto v = assess_blocks({"too-few-points"}, counts(0, 0, row.u, row.c, row.a, row.ca, row.r, row.outer));
+            const std::string name = std::string("too-few-points (") + std::to_string(row.u) + "," + std::to_string(row.c) + "," +
+                std::to_string(row.a) + "," + std::to_string(row.ca) + "," + std::to_string(row.r) + ", outer " +
+                (row.outer == kNotCarried ? std::string("not carried") : std::to_string(row.outer)) + "): " + row.what;
+            Check(v.shortage_only == row.shortage, name + (row.shortage ? " is a shortage" : " is a doubt"));
+            Check(row.shortage ? v.doubt.empty() : v.doubt == "too-few-points", name + ": the doubt is " + (row.shortage ? "empty" : "too-few-points"));
+        }
+        // The outer iteration is read for too-few-points only: unique-blocks (S1, S2) and brown-lowe keep their rules when it was not carried.
+        Check(assess_blocks({"unique-blocks"}, counts(0, 0, 2, 0, 1, 0, 0, kNotCarried)).shortage_only, "unique-blocks: S1 with the outer iteration not carried is a shortage");
+        Check(assess_blocks({"unique-blocks"}, counts(0, 0, 6, 6, 1, 1, 0, kNotCarried)).shortage_only, "unique-blocks: S2 with the outer iteration not carried is a shortage");
+        Check(assess_blocks({"unique-blocks"}, counts(0, 0, 6, 6, 1, 1, 0, 2)).shortage_only, "unique-blocks: S2 with outer iteration 2 is a shortage");
+        Check(assess_blocks({"brown-lowe"}, counts(11, 11, 0, 0, 0, 0, kNotCarried, kNotCarried)).shortage_only, "brown-lowe: 11 of 11 with the outer iteration not carried is a shortage");
+        // The result form: the outer iteration goes through EvidenceCountsOf.
+        cr::RegistrationResult r;
+        r.reasons = {"too-few-points"};
+        r.diagnostics.unique_blocks = 8; r.diagnostics.consistent_blocks = 8; r.diagnostics.anchor_blocks = 8; r.diagnostics.consistent_anchor_blocks = 8;
+        r.diagnostics.coarse_vote.rival_anchor_support = 0;
+        r.diagnostics.outer_iterations = 1;
+        Check(cr::AssessEvidenceShortage(r, limits).shortage_only, "the result form: too-few-points on the first measurement is a shortage");
+        r.diagnostics.outer_iterations = 2;
+        const auto second = cr::AssessEvidenceShortage(r, limits);
+        Check(!second.shortage_only && second.doubt == "too-few-points", "the result form: too-few-points on the second measurement is a doubt");
+        r.diagnostics.outer_iterations = 0;
+        Check(!cr::AssessEvidenceShortage(r, limits).shortage_only, "the result form: too-few-points with the diagnostics' default outer iteration (0) is a doubt");
+    }
+    // Counts that were never copied (EvidenceCounts as it starts) make both reasons that read them a doubt: a caller that forgets to copy
+    // the counts falls to the safe side.
+    {
+        const auto too_few = cr::AssessEvidenceShortage({"too-few-points"}, cr::EvidenceCounts{}, limits);
+        Check(!too_few.shortage_only && too_few.doubt == "too-few-points", "too-few-points on counts that were never copied is a doubt");
+        const auto blocks = cr::AssessEvidenceShortage({"unique-blocks"}, cr::EvidenceCounts{}, limits);
+        Check(!blocks.shortage_only && blocks.doubt == "unique-blocks", "unique-blocks on counts that were never copied is a doubt");
     }
     // The result form gives the same answer as the three numbers.
     {
@@ -1460,11 +1561,13 @@ void Evidence() {
         cr::RegistrationDiagnostics d;
         d.inliers = 11; d.points = 22; d.unique_blocks = 33; d.consistent_blocks = 44; d.anchor_blocks = 55; d.consistent_anchor_blocks = 66;
         d.coarse_vote.rival_anchor_support = 77;
+        d.outer_iterations = 88;
         const auto copied = cr::EvidenceCountsOf(d);
         Check(copied.inliers == 11 && copied.points == 22 && copied.unique_blocks == 33 && copied.consistent_blocks == 44 &&
-                copied.anchor_blocks == 55 && copied.consistent_anchor_blocks == 66 && copied.rival_anchor_support == 77,
-            "EvidenceCountsOf copies the seven counts");
+                copied.anchor_blocks == 55 && copied.consistent_anchor_blocks == 66 && copied.rival_anchor_support == 77 && copied.outer_iterations == 88,
+            "EvidenceCountsOf copies the eight counts");
         Check(cr::EvidenceCountsOf(cr::RegistrationDiagnostics{}).rival_anchor_support == 0, "EvidenceCountsOf: no vote is no rival (0)");
+        Check(cr::EvidenceCountsOf(cr::RegistrationDiagnostics{}).outer_iterations == 0, "EvidenceCountsOf: no fine stage is outer iteration 0 (a doubt for too-few-points)");
     }
 }
 }

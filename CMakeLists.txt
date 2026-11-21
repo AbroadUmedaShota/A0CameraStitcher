@@ -487,6 +487,40 @@ else()
     target_compile_options(a0_m2_confirmed_position PRIVATE -Wall -Wextra -Wpedantic -ffp-contract=off)
 endif()
 
+# Tilt of a camera against a flat square-grid sheet (#440 stage 2, docs/design/grid-sheet-tilt.md): a measurement for a person to read. Pure
+# computation: no camera, file, clock, OpenCV or Win32. It calls content_registration::OrientationOf (one definition of tilt and direction) and
+# is never called by the registration, the composite, the confirmed position, the capture or a calibration: only the targets named in
+# A0_GRID_SHEET_TILT_ALLOWED_USERS may reach it, and the check below fails the configure step when any other target does.
+add_library(a0_m2_grid_sheet_tilt
+    src/m2/grid_sheet_tilt.cpp
+    src/m2/grid_sheet_tilt_lattice.cpp
+    src/m2/grid_sheet_tilt_ridge.cpp
+)
+target_include_directories(a0_m2_grid_sheet_tilt PUBLIC src/m2/include PRIVATE src/m2)
+target_link_libraries(a0_m2_grid_sheet_tilt PUBLIC a0_m2_render PRIVATE a0_m2_content_registration)
+a0_defer_to_end_of_configure(a0_assert_no_link_dependency a0_m2_grid_sheet_tilt)
+# An allow-list, checked at the end of the configure step over every target of the top-level directory: a target defined further down this
+# file, or added later, is covered without being named here. A target that is to show the tilt is added to this list by name.
+set(A0_GRID_SHEET_TILT_ALLOWED_USERS a0_m2_grid_sheet_tilt m2_grid_sheet_tilt_contracts)
+function(a0_assert_grid_sheet_tilt_reached_only_by)
+    if(NOT TARGET a0_m2_grid_sheet_tilt)
+        message(FATAL_ERROR "a0_m2_grid_sheet_tilt is checked but not defined")
+    endif()
+    get_property(a0_all_targets DIRECTORY "${CMAKE_SOURCE_DIR}" PROPERTY BUILDSYSTEM_TARGETS)
+    foreach(a0_target IN LISTS a0_all_targets)
+        if("${a0_target}" IN_LIST ARGN)
+            continue()
+        endif()
+        a0_assert_no_link_dependency("${a0_target}" FORBIDDEN_LIBRARIES a0_m2_grid_sheet_tilt)
+    endforeach()
+endfunction()
+a0_defer_to_end_of_configure(a0_assert_grid_sheet_tilt_reached_only_by ${A0_GRID_SHEET_TILT_ALLOWED_USERS})
+if(MSVC)
+    target_compile_options(a0_m2_grid_sheet_tilt PRIVATE /W4 /permissive- /EHsc /fp:precise /utf-8)
+else()
+    target_compile_options(a0_m2_grid_sheet_tilt PRIVATE -Wall -Wextra -Wpedantic -ffp-contract=off)
+endif()
+
 # Development-only probe of #417 (P0): reads a saved pair and a fixed composite condition v2, measures the
 # B-minus-A displacement field over the overlap band and fits registration models to it. Never part of the
 # product; it composes nothing and uses no camera.
@@ -2096,6 +2130,18 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME m2_content_registration_contracts COMMAND m2_content_registration_contracts)
     set_tests_properties(m2_content_registration_contracts PROPERTIES TIMEOUT 1800)
+    # Tilt against a flat square-grid sheet (#440 stage 2): the stages and the result on pictures drawn from known poses, and the cases that must
+    # be refused. Camera and file free; the test sources draw their own pictures and read nothing.
+    add_executable(m2_grid_sheet_tilt_contracts tests/grid_sheet_tilt_tests.cpp)
+    target_include_directories(m2_grid_sheet_tilt_contracts PRIVATE src/m2)
+    target_link_libraries(m2_grid_sheet_tilt_contracts PRIVATE a0_m2_grid_sheet_tilt a0_m2_content_registration a0_m2_render)
+    a0_defer_to_end_of_configure(a0_assert_no_link_dependency m2_grid_sheet_tilt_contracts)
+    if(MSVC)
+        target_compile_options(m2_grid_sheet_tilt_contracts PRIVATE /W4 /permissive- /EHsc /fp:precise /utf-8)
+    endif()
+    add_test(NAME m2_grid_sheet_tilt_contracts COMMAND m2_grid_sheet_tilt_contracts)
+    # Several minutes: it draws and measures many pictures, some at full size. `ctest -LE slow` leaves it out.
+    set_tests_properties(m2_grid_sheet_tilt_contracts PROPERTIES TIMEOUT 1800 LABELS slow)
     # The lanes of #417 after the contracts commit (docs/design/fixed-composite-registration.md 11.12, 11.27). Each test source is
     # an empty stub that returns 77 (Skipped) until the lane that owns it writes the tests; the lane edits only its own source file
     # and, if it needs another library, its own target_link_libraries line below. tests/parallax_scene_tests.cpp is registered by
