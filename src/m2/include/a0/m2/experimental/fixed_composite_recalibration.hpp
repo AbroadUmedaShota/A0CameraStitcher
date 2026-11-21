@@ -253,6 +253,14 @@ struct Verification {
     double seam_displacement_px{},seam_displacement_pose_only_px{};
     double limit_px{};                               // registration.limits.convergencePx of the candidate
     bool passed{};
+    // The estimator's account of how the check's estimate ended, copied from its diagnostics (the defaults when no estimate ran). They explain
+    // a check that did not verify; no decision reads them and they are not part of a candidate. The number of outer iterations is in `evidence`.
+    bool converged{};
+    double last_change_px{};                         // the change of the pose's displacement along the seam column in the last outer iteration
+    std::vector<double> change_history_px;           // the same for every outer iteration (one shorter than the iterations when the fit stopped early)
+    content_registration::RegistrationDiagnostics::SecondStart second_start{content_registration::RegistrationDiagnostics::SecondStart::not_run};
+    double second_start_difference_px{};             // how far apart the two starts ended
+    content_registration::FitWindow fit_window;
 };
 
 struct Proposal {

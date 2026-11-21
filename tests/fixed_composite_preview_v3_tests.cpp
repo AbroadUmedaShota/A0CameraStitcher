@@ -288,6 +288,8 @@ void SameConventionAsTheJpeg(const char* label,const LoadedFixedCompositeConditi
         const auto plan=PlanFixedPreviewV3(v3,orientation,view.first,view.second);
         Check(!plan.skip && plan.live,label);
         if(plan.skip || !plan.live)continue;
+        // The scale of the live view against the stored frame is the view's size over the sensor's, worked out here and not read from the plan.
+        Check(plan.scale_x==view.first/7360.0 && plan.scale_y==view.second/4912.0,label);
         // The drawing's point of C's pixel is worked out from the condition's raster (its edges and DPI) and the view's scale, not from the
         // grid that the plan made: a grid that is off the raster by any amount is a failure here.
         const double s=plan.scale_x,pitch_jpeg=25.4/raster.dpi,pitch_live=pitch_jpeg/s;
