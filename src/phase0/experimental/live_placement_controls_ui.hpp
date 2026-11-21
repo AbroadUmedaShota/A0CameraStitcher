@@ -9,8 +9,18 @@
 // A press never runs the check on the window's thread: the check of a full-size position scans the full-size output and takes a moment. One check
 // runs at a time on a thread of its own, holding no lock. A press that comes while it runs is not dropped: its counts are added to the
 // ones that wait, and when the check ends, the sum is checked once (so a burst of presses moves by as many steps as were pressed and costs one
-// check more). A check that refuses takes what waited with it, and the position stays as it was. A capture that is requested while a check
-// runs does not wait for it: it takes the position that is drawn, and what waited is dropped (the machine refuses the check's result).
+// check more). The same holds while the position that a check of the window was given (hand_undrawn) is not on the screen yet (it waits to be drawn,
+// or it is P and the picture was not drawn with it): the machine refuses a check made against a picture that is not drawn with P, so such a press
+// waits too, and the sum is checked once the screen is drawn with P (RouteLiveHandPress). A picture that is not drawn with P for another reason (an
+// estimate's position, a shot's, a session that began) is not waited for: the machine refuses the press and the sentence says so, so that a press made
+// against the picture before it is never added on top of a position it did not see. A check that refuses takes what waited with it, and the position
+// stays as it was.
+// The button of the automatic estimate is not accepted while a check runs, presses wait, or the position that a check of the window was given is not on the
+// screen yet (AskLiveEstimate says so, and the sentence stays until the hand has stopped moving): what was pressed goes in first.
+// A capture that is requested while a check runs does not wait for it: it takes the position that is drawn, and what waited is not in it (the machine
+// refuses the check's result); the rows of the capture say how many presses that was. One camera's capture does not hold P: what waited is dropped and
+// said in its rows the same way, and the check that runs goes on. What waited is also dropped, with a sentence and a log line
+// (C ui_live_hand_presses_dropped), when Live stops, a session begins, or the position is not drawn in time.
 inline constexpr int kHandButtonFirstId=320;   // 320 left, 321 right, 322 up, 323 down, 324 counter-clockwise, 325 clockwise, 326 the step switch
 inline constexpr int kHandStepButtonId=kHandButtonFirstId+6;
 std::array<HWND,kPreviewHandButtonCount> hand_buttons{};
@@ -19,6 +29,9 @@ bool hand_fine=false;   // the step switch: false is the coarse step
 // with the position yet goes once it is (live_notice_until_drawn); every notice goes when a session begins.
 std::string live_notice;
 bool live_notice_until_drawn=false;
+// While the refusal of the estimate button (LiveEstimateRefusedByHandText) is shown, what an accepted check of a hand press would have said instead: it is
+// said once the hand has stopped moving (LiveEstimateRefusalEndsWhenStill).
+std::string live_notice_after_hand;
 // A check in flight and what waits behind it. Only the UI thread touches these; the thread of the check returns its result by the future.
 std::future<LiveHandResult> hand_future;
 std::shared_ptr<LiveRegistrationRuntime> hand_runtime;     // the runtime that the check runs on (kept alive until its result is taken)
@@ -27,8 +40,24 @@ unsigned hand_queued_presses{};
 // What was checked last (the sum of the presses of that run) and the run that waits: a run starts only once the position of the run before is drawn (the
 // machine refuses a check that the drawing of the position before it overtook), and a check that was overtaken is run again, a few times.
 a0::m2::experimental::HandCounts hand_last_delta;
+unsigned hand_last_presses{};   // how many presses the check in flight (or the one that was overtaken) holds: 1 for a press, more for a run of presses that waited
 bool hand_run_waits=false;
 Clock::time_point hand_run_waits_since{};
+// A check of the window was accepted and the screen is not drawn with its position yet: set when a check is accepted, taken down once the screen is drawn
+// with P and nothing waits to be drawn, and when a capture, the button of the estimate or a session begins. Only while it is set does a press wait for the
+// screen (RouteLiveHandPress); every other picture that is not drawn with P is refused by the machine.
+bool hand_undrawn=false;
+// How the check in flight began (for LiveHandCheckIsEnteredAgain): the screen was drawn with P, and P's serial.
+bool hand_began_drawn=false;
+std::uint64_t hand_began_serial=0;
+// Presses that a capture did not take in (a pair: a check ran, they waited, or their position was not drawn; one camera: they waited): said in the rows of
+// the capture until its result row is written. Presses that Live's stop dropped: said in the row of the stop, or in the result row of a capture.
+unsigned capture_unentered_presses=0;
+bool capture_unentered_one_camera=false;   // the capture is one camera's: it does not hold P, so only the first sentence of the result row is true
+unsigned live_stop_lost_presses=0;
+// Smokes only: the lines of the hand buttons (C ui_live_hand*, C ui_live_estimate_requested) are copied here as well.
+std::vector<std::string>* live_hand_log_tap=nullptr;
+void LiveHandLog(const std::string& line){if(live_hand_log_tap)live_hand_log_tap->push_back(line);Log(line);}
 inline constexpr std::chrono::seconds kHandRunWaitLimit{5};
 unsigned hand_stale_retries{};
 inline constexpr unsigned kHandStaleRetries=3;
@@ -124,7 +153,7 @@ std::optional<bool> layout_force_hand;
 bool HandControlsInLayout(){return layout_force_hand?*layout_force_hand:live_runtime!=nullptr;}
 void RefreshHandLayout();   // lays the buttons out again after the runtime came or went (defined with the layout)
 bool merge_buttons_hidden_for_hand=false;
-void SetLiveNotice(const std::string& text,bool until_drawn=false){live_notice=text;live_notice_until_drawn=until_drawn && !text.empty();}
+void SetLiveNotice(const std::string& text,bool until_drawn=false){live_notice=text;live_notice_until_drawn=until_drawn && !text.empty();live_notice_after_hand.clear();}
 bool LiveHandBusy(){return hand_future.valid() || hand_run_waits;}
 // The live pixel in the JPEG's pixels (the grid's pitch over the raster's pitch), from the plan that C is drawn with; 0 when there is none.
 double LivePixelInOutputPx(const std::shared_ptr<const FixedPreviewPlan>& plan){
@@ -134,9 +163,52 @@ double LivePixelInOutputPx(const std::shared_ptr<const FixedPreviewPlan>& plan){
 std::shared_ptr<const FixedPreviewPlan> DrawnPlanSnapshot(){std::lock_guard lock(merged.mutex);return merged.drawn_plan;}
 
 // ---- The press ------------------------------------------------------------------------------------------------------------------------
-void StartLiveHand(const a0::m2::experimental::HandCounts& delta){
-    hand_runtime=live_runtime;hand_last_delta=delta;
+// Presses that are lost without a press of theirs being refused by a check, or that go with a refused check: how many, and why (a code). The screen says
+// it in its own words.
+void LogLiveHandPressesDropped(const char* reason,unsigned presses){
+    if(!presses)return;
+    LiveHandLog(std::string("C ui_live_hand_presses_dropped reason=")+reason+" presses="+std::to_string(presses)+" quality_accepted=0");
+}
+// Presses that Live's stop dropped are said in the row of the stop (the state row is not drawn while Live is stopped): at once when the stop is complete,
+// otherwise when the row of the stop is written (AdvanceCapture). During a capture they are said in the result row of the capture (PutCaptureUnenteredFirst).
+void AppendStopLostPresses(unsigned presses){
+    if(presses)capture_status+=L"\n"+WidenUtf8(LiveHandQueueLostText(presses,true));
+}
+void NoteLiveStopLostPresses(unsigned presses){
+    if(!presses)return;
+    if(preview_joined && !capture_future.valid() && !capture_pending)AppendStopLostPresses(presses);
+    else live_stop_lost_presses+=presses;
+}
+// The mark of a position that a check of the window was given comes down once the screen is drawn with P and nothing waits to be drawn.
+void UpdateHandUndrawnMark(){
+    if(!hand_undrawn)return;
+    if(!live_runtime){hand_undrawn=false;return;}
+    if(!live_runtime->Status().placement.hand_wanted && live_runtime->DrawnWithPlacement(DrawnPlanSnapshot()))hand_undrawn=false;
+}
+// The hand has stopped moving: no check runs, nothing waits, no accepted position waits to be drawn, and the screen is drawn with P (or the bake of P failed,
+// and the screen will not be).
+bool LiveHandStill(){
+    if(LiveHandBusy() || hand_queued_presses)return false;
+    if(!live_runtime)return true;
+    const auto status=live_runtime->Status();
+    if(status.bake_failed)return true;
+    return !status.placement.hand_wanted && live_runtime->DrawnWithPlacement(DrawnPlanSnapshot());
+}
+// The refusal of the estimate button is said until the hand has stopped moving; then what the checks meanwhile would have said is said (often nothing).
+void LiveEstimateRefusalEndsWhenStill(){
+    if(live_notice!=LiveEstimateRefusedByHandText() || !LiveHandStill())return;
+    const auto after=live_notice_after_hand;
+    SetLiveNotice(after);
+}
+// What an accepted check (or a run that adds up to nothing) says: in place of the notice, or, while the refusal of the estimate button is shown, after it.
+void SayAfterHandStep(const std::string& text){
+    if(live_notice==LiveEstimateRefusedByHandText())live_notice_after_hand=text;
+    else SetLiveNotice(text);
+}
+void StartLiveHand(const a0::m2::experimental::HandCounts& delta,unsigned presses=1){
+    hand_runtime=live_runtime;hand_last_delta=delta;hand_last_presses=presses;
     const auto drawn=DrawnPlanSnapshot();
+    hand_began_drawn=hand_runtime->DrawnWithPlacement(drawn);hand_began_serial=hand_runtime->Status().placement.serial;
     const bool running=!stopping && !closing;
     hand_future=std::async(std::launch::async,[runtime=hand_runtime,delta,drawn,running]{
         try{return runtime->HandStep(delta,drawn,running);}
@@ -147,52 +219,95 @@ void StartLiveHand(const a0::m2::experimental::HandCounts& delta){
         }
     });
 }
-// One press of a hand button (the UI thread). The check is never run here.
+// One press of a hand button (the UI thread). The check is never run here. RouteLiveHandPress says whether it starts a check now or waits with the
+// others: it waits while a check runs or a run waits, and while the position that a check of the window was given is not on the screen yet (a press
+// that came then used to be refused as "not drawn" and was lost).
 void PressLiveHand(LiveHandButton button){
     namespace m2x=a0::m2::experimental;
     if(!live_runtime){Log("C ui_live_hand refused=no-session");return;}
     const auto delta=LiveHandCountsOf(button,hand_fine);
+    UpdateHandUndrawnMark();
+    const auto status=live_runtime->Status();
+    LiveHandPressContext context;
+    context.busy=LiveHandBusy();
+    context.hand_wanted=status.placement.hand_wanted.has_value();
+    context.drawn=live_runtime->DrawnWithPlacement(DrawnPlanSnapshot());
+    context.hand_undrawn=hand_undrawn;
+    context.bake_failed=status.bake_failed;
+    context.capturing=status.placement.capturing;
+    context.live_running=!stopping && !closing;
+    const auto route=RouteLiveHandPress(context);
     static constexpr const char* names[]{"left","right","up","down","turn-counter-clockwise","turn-clockwise"};
     std::ostringstream line;line.imbue(std::locale::classic());
     line<<"C ui_live_hand button="<<names[static_cast<int>(button)]<<" step="<<(hand_fine?"fine":"coarse")<<" delta_seam_dx_counts="<<delta.seam_dx<<" delta_seam_dy_counts="<<delta.seam_dy
-        <<" delta_rotation_counts="<<delta.rotation<<" check_running="<<(LiveHandBusy()?1:0);
-    if(LiveHandBusy()){
-        // A check is running: the press waits with the others (their sum is checked once, when this check ends).
-        try{hand_queued=m2x::AddHandCounts(hand_queued,delta);++hand_queued_presses;line<<" queued="<<hand_queued_presses;}
-        catch(const std::out_of_range&){line<<" queued=refused-range";}
-        line<<" quality_accepted=0";Log(line.str());
+        <<" delta_rotation_counts="<<delta.rotation<<" check_running="<<(context.busy?1:0)<<" awaiting_draw="<<((context.hand_wanted || (!context.drawn && context.hand_undrawn))?1:0)
+        <<" route="<<LiveHandPressRouteCode(route);
+    if(route==LiveHandPressRoute::refuse_capturing){
+        // A capture holds P while a check still runs: the press cannot start and would only be dropped later, so it is refused now, with its sentence.
+        LiveHandResult refused;refused.outcome=LiveHandOutcome::refused_capturing;
+        SetLiveNotice(LiveHandRefusalText(refused));
+        line<<" queued=refused-capturing quality_accepted=0";LiveHandLog(line.str());
         return;
     }
-    line<<" queued=0 quality_accepted=0";Log(line.str());
+    if(route==LiveHandPressRoute::queue){
+        // The press waits with the others (their sum is checked once: when this check ends, or when the screen is drawn with P).
+        try{
+            hand_queued=m2x::AddHandCounts(hand_queued,delta);++hand_queued_presses;line<<" queued="<<hand_queued_presses;
+            if(!hand_future.valid() && !hand_run_waits){hand_run_waits=true;hand_run_waits_since=Clock::now();}   // started by AdvanceLiveHand, once drawn
+        }catch(const std::out_of_range&){
+            line<<" queued=refused-range";
+            LiveHandResult refused;refused.outcome=LiveHandOutcome::refused_range;
+            SetLiveNotice(LiveHandRefusalText(refused));
+        }
+        line<<" quality_accepted=0";LiveHandLog(line.str());
+        return;
+    }
+    line<<" queued=0 quality_accepted=0";LiveHandLog(line.str());
     SetLiveNotice({});
     StartLiveHand(delta);
+}
+// The sum of the presses that waited is checked as one run (or, when it is 0, not checked): one line for both, in the same shape.
+void LogLiveHandQueueRun(unsigned presses,const a0::m2::experimental::HandCounts& sum){
+    std::ostringstream run;run.imbue(std::locale::classic());
+    run<<"C ui_live_hand_queue_run presses="<<presses<<" delta_seam_dx_counts="<<sum.seam_dx<<" delta_seam_dy_counts="<<sum.seam_dy<<" delta_rotation_counts="<<sum.rotation
+        <<" sum_is_zero="<<(sum.IsZero()?1:0)<<" quality_accepted=0";
+    LiveHandLog(run.str());
 }
 // The result of the check that ran (the UI thread, from the timer and before the capture's own steps). An accepted press with a sum that waited
 // starts the next check; a refused one takes the waiting sum with it.
 void AdvanceLiveHand(){
     // A notice that the screen was not drawn with the position goes once it is.
     if(live_notice_until_drawn && live_runtime && live_runtime->DrawnWithPlacement(DrawnPlanSnapshot()))SetLiveNotice({});
+    UpdateHandUndrawnMark();
+    LiveEstimateRefusalEndsWhenStill();
     // A run that waits starts when the position that the run before it accepted has been drawn (nothing waits to be drawn any more).
     if(!hand_future.valid() && hand_run_waits){
         if(!live_runtime || closing || stopping || live_runtime->Status().placement.capturing){
             // the position of the run before will not be drawn now (Live stopped, a capture holds it): what waited is not checked
-            if(hand_queued_presses)SetLiveNotice(LiveHandQueueDroppedText(hand_queued_presses));
+            if(hand_queued_presses){
+                const bool live_stopped=!live_runtime || closing || stopping;
+                SetLiveNotice(LiveHandQueueLostText(hand_queued_presses,live_stopped));
+                LogLiveHandPressesDropped(live_stopped?"live-stopped":"capture",hand_queued_presses);
+                if(live_stopped)NoteLiveStopLostPresses(hand_queued_presses);
+            }
             hand_run_waits=false;hand_queued={};hand_queued_presses=0;hand_capture_dropped=false;hand_stale_retries=0;return;
         }
         // Drawn: the machine has taken the position (nothing waits) and the picture on the screen was drawn with its table (the check of the next run is
         // made against that picture).
         const auto status=live_runtime->Status();
         if(!status.placement.hand_wanted && live_runtime->DrawnWithPlacement(DrawnPlanSnapshot())){
-            const auto next=hand_queued;
+            const auto next=hand_queued;const unsigned presses=hand_queued_presses;
             hand_queued={};hand_queued_presses=0;hand_run_waits=false;
-            if(!next.IsZero())StartLiveHand(next);
+            if(presses)LogLiveHandQueueRun(presses,next);
+            if(!next.IsZero())StartLiveHand(next,presses);
+            else if(presses)SayAfterHandStep({});   // the presses add up to nothing (left and right): no check runs, and what said that they waited goes
         }else if(Clock::now()-hand_run_waits_since>kHandRunWaitLimit){
             // the position is not drawn in time (a bake that fails): what waited is not checked, and the sentence says what to do
             LiveHandResult not_drawn;not_drawn.outcome=LiveHandOutcome::refused_not_drawn;
             auto text=LiveHandRefusalText(not_drawn,false,status.bake_failed);
-            const auto queue=LiveHandQueueDroppedText(hand_queued_presses);
-            if(!queue.empty())text+=" "+queue;
+            if(hand_queued_presses)text+="。"+LiveHandQueueLostText(hand_queued_presses);
             SetLiveNotice(text,!status.bake_failed);
+            LogLiveHandPressesDropped("not-drawn-in-time",hand_queued_presses);
             hand_run_waits=false;hand_queued={};hand_queued_presses=0;hand_stale_retries=0;
         }
         return;
@@ -207,32 +322,54 @@ void AdvanceLiveHand(){
     const unsigned waiting=hand_queued_presses;
     const bool dropped_by_capture=hand_capture_dropped;hand_capture_dropped=false;
     if(result.outcome==LiveHandOutcome::accepted){
-        if(!dropped_by_capture)SetLiveNotice(result.withdrew_estimate?LiveHandWithdrewEstimateText():result.became_condition_position?LiveHandBecameConditionText():std::string());
+        if(!dropped_by_capture)SayAfterHandStep(result.withdrew_estimate?LiveHandWithdrewEstimateText():result.became_condition_position?LiveHandBecameConditionText():std::string());
         hand_stale_retries=0;
+        if(!dropped_by_capture)hand_undrawn=true;   // the position of this check is on its way to the screen: a press that comes before it is drawn waits
         if(waiting && !hand_queued.IsZero() && runtime==live_runtime && !closing && !dropped_by_capture){hand_run_waits=true;hand_run_waits_since=Clock::now();}   // started by the next call, once drawn
-        else{hand_queued={};hand_queued_presses=0;}
+        else{
+            if(waiting && hand_queued.IsZero() && !dropped_by_capture)LogLiveHandQueueRun(waiting,hand_queued);   // what waited adds up to nothing: no check for it
+            hand_queued={};hand_queued_presses=0;
+        }
         return;
     }
-    // Overtaken while it was checked (the position before it was drawn meanwhile): its amount is not lost, it is checked again with what waits.
-    if(result.outcome==LiveHandOutcome::refused_stale && !dropped_by_capture && runtime==live_runtime && !closing && hand_stale_retries<kHandStaleRetries){
-        try{hand_queued=a0::m2::experimental::AddHandCounts(hand_queued,hand_last_delta);++hand_stale_retries;hand_run_waits=true;hand_run_waits_since=Clock::now();return;}
+    // Overtaken while it was checked (P or the hand position that waits changed meanwhile, or the table was laid again under the picture that the check
+    // began with): its amount is not lost, it is checked again with what waits, once the screen is drawn with P. A check that began against a picture that was
+    // not drawn with P, or with another P than now, is refused with its sentence instead (LiveHandCheckIsEnteredAgain).
+    LiveHandRetryContext retry;
+    retry.outcome=result.outcome;retry.bake_failed=bake_failed;retry.began_drawn=hand_began_drawn;retry.serial_at_begin=hand_began_serial;
+    retry.serial_now=runtime?runtime->Status().placement.serial:0;
+    const bool overtaken=LiveHandCheckIsEnteredAgain(retry);
+    if(overtaken && !dropped_by_capture && runtime==live_runtime && !closing && hand_stale_retries<kHandStaleRetries){
+        try{
+            hand_queued=a0::m2::experimental::AddHandCounts(hand_queued,hand_last_delta);hand_queued_presses+=hand_last_presses;
+            ++hand_stale_retries;hand_run_waits=true;hand_run_waits_since=Clock::now();
+            LiveHandLog(std::string("C ui_live_hand_overtaken result=")+std::string(LiveHandOutcomeCode(result.outcome))+" presses="+std::to_string(hand_queued_presses)+" retry="+std::to_string(hand_stale_retries)+" quality_accepted=0");
+            return;
+        }
         catch(const std::out_of_range&){}
     }
     hand_stale_retries=0;
+    // The presses that this check held beyond the first, and the ones that waited behind it, go with it.
+    const unsigned run_extra=hand_last_presses>1?hand_last_presses-1:0;
     if(!dropped_by_capture){
-        auto text=LiveHandRefusalText(result,beyond,bake_failed);
-        const auto queue=LiveHandQueueDroppedText(waiting);
-        if(!queue.empty())text+=" "+queue;
+        const auto text=LiveHandRefusalWithQueueText(LiveHandRefusalText(result,beyond,bake_failed),waiting+run_extra);
         SetLiveNotice(text,result.outcome==LiveHandOutcome::refused_not_drawn && !bake_failed);
+        if(run_extra || waiting)LogLiveHandPressesDropped(std::string(LiveHandOutcomeCode(result.outcome)).c_str(),hand_last_presses+waiting);
     }
     hand_queued={};hand_queued_presses=0;
 }
 // A session begins or the window closes: the check that is running is waited for (it holds no lock, and the runtime that it ran on is the one
-// whose machine the next session carries over), and what waited behind it is dropped.
-void DrainLiveHand(){
-    hand_queued={};hand_queued_presses=0;hand_run_waits=false;
+// whose machine the next session carries over), and then what waited is dropped. The result of the check is taken first: a check that comes back
+// stale or not drawn puts its amount back among the ones that wait, and that must be dropped with the others, not carried into the next session.
+// Returns how many presses were dropped without a check refusing them.
+unsigned DrainLiveHand(){
     if(hand_future.valid()){hand_future.wait();AdvanceLiveHand();}
+    const unsigned dropped=hand_queued_presses;
+    LogLiveHandPressesDropped("session-begin",dropped);
+    hand_queued={};hand_queued_presses=0;hand_run_waits=false;
     hand_capture_dropped=false;hand_stale_retries=0;   // nothing of a press is carried into the next session
+    hand_undrawn=false;live_stop_lost_presses=0;
+    return dropped;
 }
 
 // ---- The capture ----------------------------------------------------------------------------------------------------------------------
@@ -277,13 +414,28 @@ bool BeginLiveCapture(const std::shared_ptr<const FixedPreviewPlan>& drawn){
     catch(...){live_runtime->EndCapture();throw;}
     live_capture_held=true;
     pending_confirmed=std::move(position);
+    hand_undrawn=false;live_stop_lost_presses=0;capture_unentered_presses=0;capture_unentered_one_camera=false;
     if(LiveHandBusy() || hand_queued_presses || (begin.dropped_pending && hand_waited)){
-        // Only a check that still runs has a result to come; a run that waited to be drawn, or a press that waited, is simply dropped.
+        // Only a check that still runs has a result to come; a run that waited to be drawn, or a press that waited, is simply dropped. The capture is taken
+        // with the position that is drawn, and these presses are not in it: how many, is said in the rows of the capture (they outlive the state row, which
+        // is not drawn while Live is stopped).
         hand_capture_dropped=hand_future.valid();
+        // the check that runs holds hand_last_presses presses; so does a position that was accepted and waits to be drawn (at least the one press)
+        const unsigned held=(hand_future.valid() || hand_waited)?std::max(hand_last_presses,1u):0;
+        capture_unentered_presses=hand_queued_presses+held;
+        LogLiveHandPressesDropped("capture",capture_unentered_presses);
         hand_queued={};hand_queued_presses=0;hand_run_waits=false;hand_stale_retries=0;
         SetLiveNotice(LiveHandDroppedByCaptureText());
     }else SetLiveNotice({});
     return true;
+}
+// One camera's capture is asked for (RequestCapture(0|1)): it does not hold P, so the check that runs goes on and its press is entered, but the presses that
+// wait (and a run that waits to be drawn) are not checked while Live is stopped: they are dropped now and counted for the rows of the capture, as for a pair.
+void DropWaitingHandPressesForOneCamera(){
+    capture_unentered_presses=hand_queued_presses;capture_unentered_one_camera=true;live_stop_lost_presses=0;
+    if(!hand_queued_presses)return;
+    LogLiveHandPressesDropped("capture",hand_queued_presses);
+    hand_queued={};hand_queued_presses=0;hand_run_waits=false;hand_stale_retries=0;
 }
 
 // ---- The buttons ----------------------------------------------------------------------------------------------------------------------

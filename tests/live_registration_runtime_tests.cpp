@@ -1198,6 +1198,123 @@ void OldTableAfterTheCaptureIsNotDrawn(){
     CHECK(rig.runtime->HandStep(H(3,0,0),new_table,true).outcome==LiveHandOutcome::accepted && rig.hand_checks.size()==1);
 }
 
+// Fourteen presses of the buttons (the two step sizes, along, across and about the axis) that come in every phase of the drawing of the position before
+// them, on the real runtime: the window's rule (RouteLiveHandPress) holds a press while the position that a check of the window was given is not on the
+// screen, and the sum of what was held is checked once the screen is drawn with P. Every press is in, in the order it was pressed or not (the sum does not
+// depend on it), and P is the position that the sum of all fourteen gives from the position before the first press, to the bit. Without the rule, the presses
+// that come after P was replaced and before the picture was drawn with it are refused as not drawn and are lost.
+void BurstAcrossTheDrawWindowsOnTheRuntime(){
+    struct Press {LiveHandButton button;bool fine;};
+    const std::vector<Press> presses{{LiveHandButton::right,false},{LiveHandButton::right,false},{LiveHandButton::up,false},{LiveHandButton::left,false},
+        {LiveHandButton::turn_clockwise,false},{LiveHandButton::down,true},{LiveHandButton::right,true},{LiveHandButton::turn_counter_clockwise,true},
+        {LiveHandButton::up,true},{LiveHandButton::up,false},{LiveHandButton::left,true},{LiveHandButton::right,false},{LiveHandButton::down,false},
+        {LiveHandButton::turn_counter_clockwise,false}};
+    ex::HandCounts total{};
+    for(const auto& press:presses)total=ex::AddHandCounts(total,LiveHandCountsOf(press.button,press.fine));
+    // b = the worker's pass (bakes the position that waits, and P is replaced by it), w = the window draws with the plan in force and the next tick enters what was held
+    const std::string script="p" "p" "b" "p" "w" "p" "p" "b" "p" "b" "w" "p" "b" "p" "p" "w" "p" "b" "p" "w" "p" "b" "p" "p" "b" "w";
+    struct Result {unsigned refused_not_drawn{0},held{0},starts{0};std::optional<ex::HandCounts> entered;ex::RegisteredMapping placement;bool bases_were_the_estimate{true};std::string log;};
+    const auto run=[&](bool hold)->std::pair<Result,ex::RegisteredMapping>{
+        Rig rig;
+        Result out;
+        if(!Usable(rig)){Check(false,"plan");return {out,{}};}
+        ConnectTestChecks(rig);
+        rig.PlaceFirst(Pose{0.3,-0.2,0.5,1.5,-1.0,0.0});
+        const auto estimate=rig.runtime->Status().placement.mapping;
+        auto drawn=Drawn(rig);
+        ex::HandCounts held{};unsigned held_presses=0;size_t next=0;
+        bool mark=false;   // the window's mark: a check of the window was accepted and the screen is not drawn with its position yet
+        const auto enter=[&](const ex::HandCounts& delta){
+            ++out.starts;
+            const auto outcome=rig.runtime->HandStep(delta,drawn,true).outcome;
+            if(outcome==LiveHandOutcome::accepted)mark=true;
+            if(outcome==LiveHandOutcome::refused_not_drawn)++out.refused_not_drawn;
+        };
+        const auto tick=[&]{   // AdvanceLiveHand: a run that waits starts once nothing waits to be drawn and the screen is drawn with P
+            const auto status=rig.runtime->Status();
+            if(!status.placement.hand_wanted && rig.runtime->DrawnWithPlacement(drawn))mark=false;
+            if(held_presses && !status.placement.hand_wanted && rig.runtime->DrawnWithPlacement(drawn)){
+                const auto sum=held;held={};held_presses=0;
+                if(!sum.IsZero())enter(sum);
+            }
+        };
+        for(const char step:script){
+            if(step=='p' && next<presses.size()){
+                const auto delta=LiveHandCountsOf(presses[next].button,presses[next].fine);++next;
+                const auto status=rig.runtime->Status();
+                LiveHandPressContext context;
+                context.busy=false;context.hand_wanted=status.placement.hand_wanted.has_value();context.drawn=rig.runtime->DrawnWithPlacement(drawn);
+                if(context.drawn && !context.hand_wanted)mark=false;
+                context.hand_undrawn=mark;
+                context.bake_failed=status.bake_failed;context.capturing=status.placement.capturing;context.live_running=true;
+                if(hold && RouteLiveHandPress(context)==LiveHandPressRoute::queue){held=ex::AddHandCounts(held,delta);++held_presses;++out.held;}
+                else enter(delta);
+            }else if(step=='b')(void)rig.Pass();
+            else if(step=='w'){drawn=Drawn(rig);tick();}
+        }
+        for(int i=0;i<4 && (held_presses || rig.runtime->Status().placement.hand_wanted || !rig.runtime->DrawnWithPlacement(drawn));++i){
+            (void)rig.Pass();drawn=Drawn(rig);tick();
+        }
+        const auto status=rig.runtime->Status();
+        out.entered=status.placement.hand_entered;out.placement=status.placement.mapping;out.log=rig.LogText();
+        for(const auto& call:rig.hand_checks)if(!SameNine(call.first,estimate))out.bases_were_the_estimate=false;
+        return {out,SolvedByHand(estimate,total)};
+    };
+    {
+        const auto result=run(true);
+        const auto& out=result.first;
+        CHECK(out.held>0 && out.refused_not_drawn==0 && !Contains(out.log,"C live_hand_step result=not-drawn"));
+        CHECK(out.entered && *out.entered==total);                   // every press is in the sum
+        CHECK(SameNine(out.placement,result.second));                // P is what the sum gives from the position before the first press, to the bit
+        CHECK(out.bases_were_the_estimate);                          // no press built on the result of the one before
+        CHECK(Contains(out.log,"source=manual") && Contains(out.log,"C live_hand_step result=accepted"));
+    }
+    {
+        const auto result=run(false);   // the window that starts a check at once
+        const auto& out=result.first;
+        CHECK(out.refused_not_drawn>0 && Contains(out.log,"C live_hand_step result=not-drawn"));
+        CHECK(!out.entered || !(*out.entered==total));
+        CHECK(!SameNine(out.placement,result.second));
+    }
+}
+
+// An estimate's position is drawn (the machine took it as P) and a press comes before the picture is drawn with it: the press was made against the picture
+// before the estimate, so the window does not wait for it (no check of the window gave P this position; RouteLiveHandPress says start): the machine refuses it as
+// not drawn, nothing is held, and once the picture is drawn nothing of the press is applied on top of the estimate.
+void PressBeforeAnEstimateIsDrawnIsNotStackedOnIt(){
+    Rig rig;
+    if(!Usable(rig)){Check(false,"plan");return;}
+    ConnectTestChecks(rig);
+    rig.PlaceFirst(Pose{0.3,-0.2,0.5,1.5,-1.0,0.0});
+    const auto old_table=rig.runtime->CurrentPlan();
+    CHECK(rig.runtime->DrawnWithPlacement(old_table));
+    CHECK(rig.runtime->RequestEstimate(LiveEstimateAsk::button)==LiveAskResult::accepted);
+    const Pose second{0.31,-0.2,0.5,1.0,-1.0,0.0};
+    rig.script={Estimate(second)};
+    const auto pass=rig.Pass();
+    CHECK(pass.job_ran && pass.rebaked);
+    const auto placed=rig.runtime->Status().placement;
+    CHECK(placed.source==LivePlacementSource::auto_button && SameNine(placed.mapping,ex::RegisteredMapping{second,{},std::nullopt}));
+    // the screen is still drawn with the table of the position before the estimate
+    CHECK(!rig.runtime->DrawnWithPlacement(old_table));
+    LiveHandPressContext context;
+    context.busy=false;context.hand_wanted=placed.hand_wanted.has_value();context.drawn=rig.runtime->DrawnWithPlacement(old_table);
+    context.hand_undrawn=false;   // no check of the window was accepted: the window did not give P this position
+    context.bake_failed=rig.runtime->Status().bake_failed;context.capturing=placed.capturing;context.live_running=true;
+    CHECK(RouteLiveHandPress(context)==LiveHandPressRoute::start);   // not queue: the press is not held to be added on top of the estimate
+    CHECK(rig.runtime->HandStep(H(3,0,0),old_table,true).outcome==LiveHandOutcome::refused_not_drawn);
+    CHECK(rig.hand_checks.empty() && Contains(rig.LogText(),"C live_hand_step result=not-drawn"));
+    // the picture is drawn with the estimate: P is the estimate, with no hand mark, and the press left nothing behind
+    const auto drawn=Drawn(rig);
+    CHECK(rig.runtime->DrawnWithPlacement(drawn));
+    const auto after=rig.runtime->Status().placement;
+    CHECK(after.source==LivePlacementSource::auto_button && !after.hand_entered && !after.hand_wanted && SameNine(after.mapping,placed.mapping) && after.serial==placed.serial);
+    for(int k=0;k<5;++k)(void)rig.Pass();
+    CHECK(rig.hand_checks.empty() && !rig.runtime->Status().placement.hand_entered && SameNine(rig.runtime->Status().placement.mapping,placed.mapping));
+    // a press made against the picture that is drawn now is entered, on the estimate
+    CHECK(rig.runtime->HandStep(H(3,0,0),drawn,true).outcome==LiveHandOutcome::accepted && rig.hand_checks.size()==1 && SameNine(rig.hand_checks.back().first,placed.mapping));
+}
+
 // A stop that comes while a job runs: the job did not estimate anything for this session (the request stays, and the next start continues it once),
 // so its position is not checked (the check of a full-size position takes a moment) and nothing is decided, even when the estimator returned a position.
 void StopDuringTheJobSkipsTheCheck(){
@@ -1393,6 +1510,8 @@ int main(){
         CaptureDuringTheBakeKeepsP();
         BakeOfPFailedRefusesHandAndCapture();
         OldTableAfterTheCaptureIsNotDrawn();
+        BurstAcrossTheDrawWindowsOnTheRuntime();
+        PressBeforeAnEstimateIsDrawnIsNotStackedOnIt();
         StopDuringTheJobSkipsTheCheck();
         Determinism();
         Thread();
