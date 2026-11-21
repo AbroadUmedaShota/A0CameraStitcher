@@ -151,6 +151,51 @@ void Tamper(const Outcome& o){
 #undef REJECTED
 }
 
+// The loader opens a v10 report (the surface rule of the G1 and G2 mappings): this capture's record with the seam line's lambda of its profile's
+// camera A and its raster, the G1 or G2 plane turned about the seam line by it, written as v10 in place of the v9 members.
+void ReadsV10(const Outcome& o,const Settings& s){
+    std::cout<<"the loader reads v10\n";
+    const auto folder=root/"v10";fs::create_directories(folder);
+    fs::copy_file(o.saved.jpeg,folder/"uncalibrated-review.jpg",fs::copy_options::overwrite_existing);
+    const auto report=folder/"uncalibrated-review.json";
+    const auto& f=*o.saved.fixed_composite_registration;
+    auto record=f;
+    const double lambda=content_registration::SeamLineLambda(content_registration::PoseModel(s.loaded.profile.parameters.camera_a).Centre({}),
+        content_registration::SurfaceOriginMm(record.raster,record.seam_column));
+    record.registration.seam_line_lambda=lambda;
+    const auto level=record.registration.level.level;
+    if(level==GeometryLevel::g1 || level==GeometryLevel::g2){
+        const auto estimated=record.registration.surface.state==SurfaceState::estimated?record.registration.surface.plane:SurfacePlane{};
+        record.registration.level.mapping.surface=content_registration::SurfaceAppliedAcrossWidthOfLambda(estimated,lambda);
+    }
+    DeriveSavedFixedCompositeRegistration(record,kHash);
+    const auto replaced=[&](std::string text,const std::string& from,const std::string& to){
+        const auto at=text.find(from);
+        Check(at!=std::string::npos && text.find(from,at+1)==std::string::npos,("one occurrence: "+from.substr(0,40)).c_str(),__LINE__);
+        if(at!=std::string::npos)text.replace(at,from.size(),to);
+        return text;
+    };
+    auto text=replaced(o.text,"\"a0.uncalibrated-still-review.v9\"","\"a0.uncalibrated-still-review.v10\"");
+    text=replaced(text,"\"fixedCompositeRegistration\":"+FixedCompositeRegistrationJson(f,RegistrationReportFormat::v9),
+        "\"fixedCompositeRegistration\":"+FixedCompositeRegistrationJson(record,RegistrationReportFormat::v10));
+    text=replaced(text,"\"warnings\":"+RegistrationWarningsJson(f.warnings)+",\"assessment\":"+RegistrationAssessmentJson(f.assessment),
+        "\"warnings\":"+RegistrationWarningsJson(record.warnings)+",\"assessment\":"+RegistrationAssessmentJson(record.assessment));
+    WriteText(report,text);
+    try{
+        const auto read=LoadSavedStillReview(report);
+        CHECK(read.fixed_composite_registration && read.fixed_composite_registration->registration.seam_line_lambda &&
+            *read.fixed_composite_registration->registration.seam_line_lambda==lambda && read.fixed_composite_registration->registration.level.level==level);
+        if(read.fixed_composite_registration)
+            CHECK(FixedCompositeRegistrationJson(*read.fixed_composite_registration,RegistrationReportFormat::v10)==FixedCompositeRegistrationJson(record,RegistrationReportFormat::v10));
+    }catch(const std::exception& error){Check(false,("the v10 file is read: "+std::string(error.what())).c_str(),__LINE__);}
+    // The same file without its surface rule, or named v9, is refused.
+    const auto rule=",\"surfaceRule\":{\"rule\":\"level-through-seam-line\",\"lambda\":"+FormatRecordNumber(lambda)+"}";
+    const auto loads=[&](const std::string& t){WriteText(report,t);try{(void)LoadSavedStillReview(report);}catch(const std::exception&){return false;}return true;};
+    CHECK(!loads(replaced(text,rule,"")));
+    CHECK(!loads(replaced(text,"\"a0.uncalibrated-still-review.v10\"","\"a0.uncalibrated-still-review.v9\"")));
+    CHECK(loads(text));
+}
+
 void Refusals(const Outcome& o,const Settings& s,const Frames& frames){
     std::cout<<"tools that place B by a similarity refuse v8\n";
     REJECT(MakeFixedCompositeCondition(o.saved,kCreated,1.0));
@@ -304,6 +349,7 @@ int main(int argc,char** argv){
         CHECK(turned.saved.geometry.orientation==MountOrientation::rotated_180 && turned.text.find("\"mountOrientation\":\"rotated-180\"")!=std::string::npos);
         CHECK(turned.saved.fixed_composite_registration->registration.level.level==four.saved.fixed_composite_registration->registration.level.level);
         Tamper(four);
+        ReadsV10(four,upright);
         Refusals(four,upright,frames);
         SameAsV7(upright);
         ConfirmedThroughTheWriter(upright,frames,four);

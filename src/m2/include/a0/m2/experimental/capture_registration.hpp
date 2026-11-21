@@ -396,6 +396,11 @@ struct CaptureRegistration {
     // neither (the position was not given: a calibration's sample, a window that has none). Never an input of the estimate.
     std::optional<ConfirmedPosition> confirmed_position;
     std::optional<ConfirmedPositionCheck> confirmed_check;
+    // Report v10: the seam line's lambda (content_registration::SeamLineLambda of camera A's calibrated centre and the plane origin of the
+    // raster and the seam column) that turns the estimated plane into the plane the G1 and G2 mappings apply
+    // (content_registration::SurfaceAppliedAcrossWidthOfLambda). It depends on the calibration only, so it is set at every level. Empty: not
+    // set; a v10 writer refuses that, and the v8 and v9 writers do not write it.
+    std::optional<double> seam_line_lambda;
 };
 
 // The four range components of p-hat - p_b (11.19.2): |(dtx, dty)| mm, |drz| deg, |(drx, dry)| deg, |dtz| percent, each against
@@ -462,12 +467,22 @@ struct SavedFixedCompositeRegistration {
 // fixedCompositeRegistration.confirmedPosition and .confirmedPositionCheck (before geometryLevel), the geometry level confirmed, and the
 // warning codes position-by-hand, position-from-live and estimate-beyond-envelope with the component confirmed-position. Everything
 // else is v8's, name for name.
-enum class RegistrationReportFormat {v8,v9};
+// v10 (schema a0.uncalibrated-still-review.v10) is v9 with fixedCompositeRegistration.geometryLevel.surfaceRule
+// {"rule":"level-through-seam-line","lambda":<the record's seam_line_lambda>}, written at every level: the G1 and G2 mappings apply the
+// estimated plane turned about the seam line (SurfaceAppliedAcrossWidthOfLambda of the estimated plane, all zero when none was estimated,
+// and the lambda), never the estimated plane itself. A v10 confirmed position has no slope across the width (ConfirmedPositionV10Fault).
+// Everything else is v9's, name for name.
+enum class RegistrationReportFormat {v8,v9,v10};
+// What a v10 report cannot carry of a confirmed position (empty: it can): a slope across the width that is not 0, compared by value (-0 is
+// 0). The v10 writer, the v10 reader and the capture's entrance that writes v10 call this one function; PositionFault (all versions) is
+// not changed by it.
+[[nodiscard]] const char* ConfirmedPositionV10Fault(const ConfirmedPosition& position);
 // The JSON values of the three members the registered composite owns: fixedCompositeRegistration (object), warnings (array),
 // assessment (object). No spaces, members in the formats document's order, numbers with 17 significant digits in the classic
 // locale, -0 written as 0. The record must be consistent (its derived fields equal to their derivation); the writer checks it
 // and throws std::logic_error otherwise, so a report it writes is one the reader accepts. A record with a confirmed position, the level
-// confirmed or a v9 warning cannot be written as v8 (std::logic_error).
+// confirmed or a v9 warning cannot be written as v8 (std::logic_error). A record without a seam line lambda, or one that breaks the v10
+// rules above, cannot be written as v10 (std::logic_error); the v8 and v9 writers do not read the lambda.
 [[nodiscard]] std::string FixedCompositeRegistrationJson(const SavedFixedCompositeRegistration& record,RegistrationReportFormat format=RegistrationReportFormat::v8);
 [[nodiscard]] std::string RegistrationWarningsJson(const std::vector<RegistrationWarning>& warnings);
 [[nodiscard]] std::string RegistrationAssessmentJson(const RegistrationAssessment& assessment);
@@ -605,11 +620,13 @@ struct RegistrationRecordIdentity {
 [[nodiscard]] SavedFixedCompositeRegistration RecordOfCapture(const RegistrationRecordIdentity& identity,const CaptureRegistrationRequest& request,
     const PreparedCaptureRegistration& prepared,const FixedCompositeSha256& hash);
 
-// The strict reader of a whole v8 or v9 report text's three members above (the rest of the report is the caller's; the report's schema
-// names the version, and any other schema is refused). Rejects a missing, extra or duplicated member, a value of the wrong kind or out
-// of range, an unknown code, any derived field that differs from its derivation (components, applied flags, warnings, assessment, both
+// The strict reader of a whole v8, v9 or v10 report text's three members above (the rest of the report is the caller's; the report's
+// schema names the version, and any other schema is refused). Rejects a missing, extra or duplicated member, a value of the wrong kind or
+// out of range, an unknown code, any derived field that differs from its derivation (components, applied flags, warnings, assessment, both
 // geometry hashes), and any text that the writer would not write for the values read. A v8 text that has anything of v9 is refused: the
 // v8 reader reads a v8 report as it always did. A v9 text whose level confirmed has a mapping that is not its confirmed position, or whose
-// position and check disagree with the rest of the record, is refused. Every failure is std::invalid_argument.
+// position and check disagree with the rest of the record, is refused. A v8 or v9 text with a surfaceRule is refused, and so is a v10 text
+// without one, with an unknown rule, a G1 or G2 mapping whose plane is not the turned plane of its estimate and lambda (or whose plane
+// cannot be turned), or a confirmed position with a slope across the width. Every failure is std::invalid_argument.
 [[nodiscard]] SavedFixedCompositeRegistration ReadFixedCompositeRegistrationReport(std::string_view report_text,const FixedCompositeSha256& hash);
 }

@@ -1839,6 +1839,159 @@ void ConfirmedCapture(){
     }
 }
 
+// ---- The report v10: the surface rule (the plane the G1 and G2 mappings apply) ----
+// The seam line's lambda of a synthetic camera A centre over the record's raster and seam column: a_x_mm 60 gives a lambda below -0.1, 200
+// one above +0.1 (the record's seam column is at about 127 mm, the centre 600 mm high).
+double LambdaOf(const ex::SavedFixedCompositeRegistration& r,double a_x_mm){
+    return cr::SeamLineLambda(cr::CameraCentre{a_x_mm,60,600},cr::SurfaceOriginMm(r.raster,r.seam_column));
+}
+// The record a v10 writer takes: the lambda set and, at G1 and G2, the mapping's plane the estimated one turned about the seam line by it.
+ex::SavedFixedCompositeRegistration AsV10(ex::SavedFixedCompositeRegistration r,double lambda){
+    r.registration.seam_line_lambda=lambda;
+    if(r.registration.level.level==ex::GeometryLevel::g1 || r.registration.level.level==ex::GeometryLevel::g2){
+        const auto estimated=r.registration.surface.state==ex::SurfaceState::estimated?r.registration.surface.plane:ex::SurfacePlane{};
+        r.registration.level.mapping.surface=cr::SurfaceAppliedAcrossWidthOfLambda(estimated,lambda);
+    }
+    ex::DeriveSavedFixedCompositeRegistration(r,kHash);
+    return r;
+}
+std::string ReportTextV10(const ex::SavedFixedCompositeRegistration& r){
+    return "{\"schema\":\"a0.uncalibrated-still-review.v10\",\"fixedCompositeRegistration\":"+ex::FixedCompositeRegistrationJson(r,ex::RegistrationReportFormat::v10)+
+        ",\"warnings\":"+ex::RegistrationWarningsJson(r.warnings)+",\"assessment\":"+ex::RegistrationAssessmentJson(r.assessment)+"}";
+}
+bool SameValues(const ex::SurfacePlane& a,const ex::SurfacePlane& b){return a.h0_mm==b.h0_mm && a.slope_x==b.slope_x && a.slope_y==b.slope_y;}
+std::string ReadRefusal(const std::string& text){
+    try{(void)ex::ReadFixedCompositeRegistrationReport(text,kHash);}catch(const std::invalid_argument& e){return e.what();}
+    return {};
+}
+// The one occurrence of `from` in `text` replaced by `to` (a second occurrence or none fails the check and leaves the text as it was).
+std::string ReplacedOnce(const std::string& text,const std::string& from,const std::string& to,int line){
+    const auto at=text.find(from);
+    const bool once=at!=std::string::npos && text.find(from,at+1)==std::string::npos;
+    Check(once,("one occurrence of "+from).c_str(),line);
+    if(!once)return text;
+    auto t=text;t.replace(at,from.size(),to);return t;
+}
+#define REPLACED(text,from,to) ReplacedOnce((text),(from),(to),__LINE__)
+// A v8 or v9 text given another schema and a surfaceRule member at the end of geometryLevel (where the v10 writer puts it).
+std::string WithRule(const std::string& text,const std::string& schema_from,const std::string& schema_to,const std::string& rule,int line){
+    auto t=schema_from==schema_to?text:ReplacedOnce(text,schema_from,schema_to,line);
+    return ReplacedOnce(t,"},\"gate\":{\"state\"",rule+"},\"gate\":{\"state\"",line);
+}
+std::string RuleMember(const std::string& lambda_text){return ",\"surfaceRule\":{\"rule\":\"level-through-seam-line\",\"lambda\":"+lambda_text+"}";}
+
+void ReportV10(){
+    std::cout<<"report v10\n";
+    const std::string v8="a0.uncalibrated-still-review.v8",v9="a0.uncalibrated-still-review.v9",v10="a0.uncalibrated-still-review.v10";
+    // 1. Every level round trips, with a lambda below and above 0. The lambda and the mapping come back by value; the rule is written at every level.
+    for(const double a_x:{60.0,200.0}){
+        for(const auto level:{ex::GeometryLevel::g1,ex::GeometryLevel::g2,ex::GeometryLevel::g3,ex::GeometryLevel::g4}){
+            const auto plain=Record(level);
+            const double lambda=LambdaOf(plain,a_x);
+            CHECK(std::abs(lambda)>=0.1 && (a_x<100)==(lambda<0));
+            const auto r=AsV10(plain,lambda);
+            const auto text=ReportTextV10(r);
+            CHECK(Reads(text));
+            if(!Reads(text))std::cerr<<"  "<<ReadRefusal(text)<<'\n';
+            const auto back=ex::ReadFixedCompositeRegistrationReport(text,kHash);
+            CHECK(ReportTextV10(back)==text && back.registration.level.level==level);
+            CHECK(back.registration.seam_line_lambda && *back.registration.seam_line_lambda==lambda);
+            CHECK(SameValues(back.registration.level.mapping.surface,r.registration.level.mapping.surface));
+            CHECK(text.find(RuleMember(ex::FormatRecordNumber(lambda))+"},\"gate\":{")!=std::string::npos);
+            if(level==ex::GeometryLevel::g1 || level==ex::GeometryLevel::g2){
+                // The turned plane: no slope across the width (+0), and not the estimated plane (its slope across the width is not 0).
+                const auto& s=r.registration.level.mapping.surface;
+                CHECK(s.slope_x==0 && !std::signbit(s.slope_x) && plain.registration.surface.plane.slope_x!=0 && s.h0_mm!=plain.registration.surface.plane.h0_mm);
+                CHECK(r.registration.geometry_hash!=plain.registration.geometry_hash);
+            }else CHECK(r.registration.geometry_hash==plain.registration.geometry_hash);
+        }
+    }
+    const auto g1=Record(ex::GeometryLevel::g1);
+    const double lambda=LambdaOf(g1,60);
+    const auto turned=AsV10(g1,lambda);
+    const auto turned_text=ReportTextV10(turned);
+    // 2. v9 reads the estimated plane (as it always did) and refuses the turned one; v10 refuses the estimated one, in the writer and in the reader.
+    CHECK(Reads(ReportTextV9(g1)));
+    CHECK(!Reads(ReportTextV9(turned)));
+    {
+        auto estimated=g1;estimated.registration.seam_line_lambda=lambda;
+        CHECK(Throws([&]{(void)ex::FixedCompositeRegistrationJson(estimated,ex::RegistrationReportFormat::v10);}));
+        const auto text=WithRule(ReportTextV9(g1),v9,v10,RuleMember(ex::FormatRecordNumber(lambda)),__LINE__);
+        CHECK(!Reads(text) && ReadRefusal(text).rfind("report v10: ",0)==0);
+    }
+    // The surgery itself writes what the v10 writer writes (a record whose mapping the rule does not change).
+    {
+        const auto g4=Record(ex::GeometryLevel::g4);
+        const double l4=LambdaOf(g4,200);
+        const auto text=WithRule(ReportTextV9(g4),v9,v10,RuleMember(ex::FormatRecordNumber(l4)),__LINE__);
+        CHECK(Reads(text) && text==ReportTextV10(AsV10(g4,l4)));
+        // A v8 or v9 text with a surfaceRule is refused; so is a v10 text without one.
+        CHECK(!Reads(WithRule(ReportTextV9(g4),v9,v9,RuleMember(ex::FormatRecordNumber(l4)),__LINE__)));
+        CHECK(!Reads(WithRule(ReportText(g4),v8,v8,RuleMember(ex::FormatRecordNumber(l4)),__LINE__)));
+        CHECK(!Reads(REPLACED(ReportTextV10(AsV10(g4,l4)),RuleMember(ex::FormatRecordNumber(l4)),"")));
+        CHECK(!Reads(REPLACED(ReportTextV9(g4),v9,v10)));
+        // Below G1 and G2 the rule does not draw anything: a lambda that cannot turn the estimated plane is still a record (a capture that passed over G1 and
+        // G2 for it writes one).
+        for(const auto level:{ex::GeometryLevel::g3,ex::GeometryLevel::g4}){
+            auto far=Record(level);far.registration.seam_line_lambda=1000.0;
+            CHECK(!Throws([&]{(void)ex::FixedCompositeRegistrationJson(far,ex::RegistrationReportFormat::v10);}) && Reads(ReportTextV10(far)));
+        }
+    }
+    // 3. The rule's members: an unknown rule, a lambda that is not a finite number, a member too many or too few.
+    {
+        const auto rule=RuleMember(ex::FormatRecordNumber(lambda));
+        CHECK(!Reads(REPLACED(turned_text,"\"rule\":\"level-through-seam-line\"","\"rule\":\"level-through-seam\"")));
+        CHECK(!Reads(REPLACED(turned_text,"\"rule\":\"level-through-seam-line\"","\"rule\":\"baked\"")));
+        CHECK(!Reads(REPLACED(turned_text,"\"rule\":\"level-through-seam-line\"","\"rule\":null")));
+        CHECK(!Reads(REPLACED(turned_text,rule,",\"surfaceRule\":{\"rule\":\"level-through-seam-line\",\"lambda\":1e999}")));
+        CHECK(!Reads(REPLACED(turned_text,rule,",\"surfaceRule\":{\"rule\":\"level-through-seam-line\",\"lambda\":\""+ex::FormatRecordNumber(lambda)+"\"}")));
+        CHECK(!Reads(REPLACED(turned_text,rule,",\"surfaceRule\":{\"rule\":\"level-through-seam-line\",\"lambda\":null}")));
+        CHECK(!Reads(REPLACED(turned_text,rule,",\"surfaceRule\":{\"rule\":\"level-through-seam-line\"}")));
+        CHECK(!Reads(REPLACED(turned_text,rule,",\"surfaceRule\":{\"rule\":\"level-through-seam-line\",\"lambda\":"+ex::FormatRecordNumber(lambda)+",\"extra\":0}")));
+        CHECK(!Reads(REPLACED(turned_text,rule,",\"surfaceRule\":null")));
+        // Another lambda than the one the plane was turned with.
+        CHECK(!Reads(REPLACED(turned_text,rule,RuleMember(ex::FormatRecordNumber(LambdaOf(g1,200))))));
+    }
+    // 4. A lambda that cannot turn the plane at G1 (f = 1 - slope_x lambda <= 0): the writer and the reader refuse it.
+    {
+        auto broken=turned;broken.registration.seam_line_lambda=100.0;   // the estimated slope across the width is 0.01
+        CHECK(Throws([&]{(void)cr::SurfaceAppliedAcrossWidthOfLambda(g1.registration.surface.plane,100.0);}));
+        CHECK(Throws([&]{(void)ex::FixedCompositeRegistrationJson(broken,ex::RegistrationReportFormat::v10);}));
+        CHECK(!Reads(REPLACED(turned_text,RuleMember(ex::FormatRecordNumber(lambda)),RuleMember("100"))));
+    }
+    // 5. No lambda: the v10 writer refuses the record (std::logic_error naming v10); the v8 and v9 writers do not read the lambda.
+    {
+        std::string what;bool logic=false;
+        try{(void)ex::FixedCompositeRegistrationJson(g1,ex::RegistrationReportFormat::v10);}
+        catch(const std::invalid_argument&){}catch(const std::logic_error& e){logic=true;what=e.what();}
+        CHECK(logic && what.rfind("report v10 ",0)==0);
+        auto with_lambda=g1;with_lambda.registration.seam_line_lambda=lambda;
+        CHECK(ex::FixedCompositeRegistrationJson(with_lambda,ex::RegistrationReportFormat::v9)==ex::FixedCompositeRegistrationJson(g1,ex::RegistrationReportFormat::v9));
+        CHECK(ex::FixedCompositeRegistrationJson(with_lambda)==ex::FixedCompositeRegistrationJson(g1));
+        CHECK(ex::FixedCompositeRegistrationJson(with_lambda).find("surfaceRule")==std::string::npos);
+    }
+    // 6. The confirmed position: v10 refuses one with a slope across the width (by value: -0 is 0), in the writer and in the reader; the level confirmed
+    // with a level position round trips.
+    {
+        const auto sloped=Position(ex::ConfirmedPositionSource::auto_button,kPositionPose,ex::SurfacePlane{1,0.002,0},fx::Hex64('8'));
+        const auto level=Position(ex::ConfirmedPositionSource::auto_button,kPositionPose,ex::SurfacePlane{1,-0.0,-0.00390625},fx::Hex64('8'));
+        CHECK(*ex::ConfirmedPositionV10Fault(sloped)!=0 && *ex::ConfirmedPositionV10Fault(level)==0);
+        auto tiny=sloped;tiny.mapping.surface.slope_x=std::numeric_limits<double>::denorm_min();CHECK(*ex::ConfirmedPositionV10Fault(tiny)!=0);
+        for(const bool slope:{true,false}){
+            const auto r=WithPosition(ex::GeometryLevel::g4,slope?sloped:level,false);   // a position of another condition: recorded, not used
+            const double l=LambdaOf(r,200);
+            const auto text=WithRule(ReportTextV9(r),v9,v10,RuleMember(ex::FormatRecordNumber(l)),__LINE__);
+            CHECK(Reads(text)!=slope);
+            CHECK(Throws([&]{(void)ex::FixedCompositeRegistrationJson(AsV10(r,l),ex::RegistrationReportFormat::v10);})==slope);
+            CHECK(Reads(ReportTextV9(r)));   // v9 carries either
+        }
+        const auto used=Position(ex::ConfirmedPositionSource::auto_button,kPositionPose,ex::SurfacePlane{1,0,-0.00390625});
+        const auto r=AsV10(WithPosition(ex::GeometryLevel::confirmed,used,true),LambdaOf(Record(ex::GeometryLevel::g4),60));
+        const auto text=ReportTextV10(r);
+        CHECK(Reads(text) && ReportTextV10(ex::ReadFixedCompositeRegistrationReport(text,kHash))==text);
+    }
+}
+
 int main(){
     try{
         RoundTrip();
@@ -1862,6 +2015,7 @@ int main(){
         ConfirmedReport();
         ConfirmedWarnings();
         ConfirmedCapture();
+        ReportV10();
     }catch(const std::exception& error){std::cerr<<"unexpected exception: "<<error.what()<<'\n';return 1;}
     std::cout<<checks<<" checks, "<<failures<<" failures\n";
     return failures?1:0;
