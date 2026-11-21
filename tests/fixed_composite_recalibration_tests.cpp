@@ -710,6 +710,8 @@ bool HasRefusal(const rc::Proposal& p,rc::Refusal r){return std::find(p.refusals
 // 254 DPI rasters below is 0.1 mm. The rows that B does not see below a raster that ends at `raster_bottom_mm` are what lies beyond B's
 // edge once B has moved by `move_mm`: the expectation is this arithmetic, not a run of the code under test.
 constexpr double kRigBottomMm=(4912.0-100.0)/10.0,kRigTopMm=-10.0,kPitchMm=0.1;
+// The sensor of the synthetic rig in pixels (the D810's): the live view's scale against the stored frame is the view's size over these.
+constexpr double kSensorWidthPx=7360.0,kSensorHeightPx=4912.0;
 // The rig with B moved to the left so that B's right side is on the sheet, that right side (the normal mounting's; the half turn's is
 // 0.1 mm short of it), and how far the creation check's range reaches beyond the
 // last column of a raster near it: the smallest margin at which the parent passes the check, found once by running it (a value of this test).
@@ -1129,6 +1131,8 @@ void CandidateLiveAndJpeg(){
             const auto plan=px::PlanFixedPreviewV3(*v3,orientation,view.first,view.second);
             Check(!plan.skip && plan.live!=nullptr,what);
             if(plan.skip || !plan.live)continue;
+            // The scale of the live view against the stored frame is the view's size over the sensor's, worked out here and not read from the plan.
+            Check(plan.scale_x==static_cast<double>(view.first)/kSensorWidthPx && plan.scale_y==static_cast<double>(view.second)/kSensorHeightPx,what);
             const double s=plan.scale_x,pitch_jpeg=25.4/static_cast<double>(r.dpi),pitch_live=pitch_jpeg/s;
             const double left=static_cast<double>(r.region_um.left)/1000.0,top=static_cast<double>(r.region_um.top)/1000.0;
             for(const auto& mapping:{mappings[1],mappings[3]}){
@@ -1634,6 +1638,136 @@ void RefusalsFromPose(){
     std::error_code ignored;fs::remove_all(active.settings,ignored);
 }
 
+
+// ---- A candidate read back from its text ------------------------------------------------------------------------------------------
+// The capture path does not hold the candidate in memory: it reads the revision file that a confirmation wrote. The text of a candidate, written
+// beside its profile and read by the condition's reader, gives the range and the seam column of the candidate, and the live view and the JPEG
+// agree on what is read back as they do on the candidate in memory: at the capture's scale bit for bit, at the live view's scales to 1e-6
+// live pixels.
+LoadedFixedCompositeConditionV3 ReadBack(const rc::Candidate& candidate,const std::string& name){
+    const auto settings=NewFolder(name);
+    const auto revisions=settings/std::string(kFixedCompositeRevisionFolderName);
+    fs::create_directories(revisions);
+    CopyFixedCompositeProfile(settings,candidate.profile_bytes,kHash);
+    const auto file=revisions/FixedCompositeRevisionFileName(candidate.condition.revision.sequence);
+    WriteAll(file,candidate.text);
+    auto loaded=LoadFixedCompositeConditionV3(file,kHash);
+    std::error_code ignored;fs::remove_all(settings,ignored);
+    return loaded;
+}
+// Which edges of the parent's raster the candidate's raster moved in.
+enum class EdgesMoved {bottom,right_and_bottom,top};
+void LiveAndJpegOnReadBack(const rc::Candidate& candidate,const render::OutputRaster& parent,EdgesMoved moved,const std::string& name){
+    const char* what=name.c_str();
+    const auto read=ReadBack(candidate,"read-back-files");
+    const auto& r=read.condition.raster;
+    const auto& rendered=read.profile.parameters;
+    const auto seam=read.condition.seam.column;
+    const auto orientation=read.condition.orientation;
+    const bool turned=orientation==MountOrientation::rotated_180;
+    // What was written is what is read: the revision's hash, the range, the seam column and the raster that the profile is bound to.
+    CHECK(read.file_sha256==candidate.sha256 && SameRaster(r,candidate.condition.raster) && seam==candidate.condition.seam.column && SameRaster(r,rendered.raster));
+    // The scene is one in which the range's top, bottom or right edge differs from the parent's.
+    CHECK(r.region_um.left==parent.region_um.left && r.dpi==parent.dpi);
+    switch(moved){
+    case EdgesMoved::bottom:CHECK(r.region_um.top==parent.region_um.top && r.region_um.bottom<parent.region_um.bottom && r.region_um.right==parent.region_um.right);break;
+    case EdgesMoved::right_and_bottom:CHECK(r.region_um.top==parent.region_um.top && r.region_um.bottom<parent.region_um.bottom && r.region_um.right<parent.region_um.right);break;
+    case EdgesMoved::top:CHECK(r.region_um.top>parent.region_um.top && r.region_um.bottom==parent.region_um.bottom && r.region_um.right==parent.region_um.right);break;
+    }
+    const cr::PoseModel model(rendered.camera_b);
+    const std::vector<RegisteredMapping> mappings{
+        RegisteredMapping{cr::PoseParameters{},{},std::nullopt},
+        RegisteredMapping{cr::PoseParameters{0.15,-0.1,0.3,2.0,-1.5,0.4},{},std::nullopt},
+        RegisteredMapping{cr::PoseParameters{},SurfacePlane{6.0,0.004,-0.002},std::nullopt},
+        RegisteredMapping{cr::PoseParameters{0.15,-0.1,0.3,2.0,-1.5,0.4},SurfacePlane{9.0,0.005,-0.003},std::nullopt}};
+    // At the capture's scale: every row, every fifth column.
+    {
+        const auto grid=px::MakeFixedPreviewGrid(r,1.0);
+        CHECK(grid.width==r.width_pixels && grid.height==r.height_pixels);
+        const RegisteredMapping fixed{cr::PoseParameters{},{},std::nullopt};
+        const px::LiveRegistrationContext context(rendered,r,seam,grid,1.0,1.0,7360,4912,false,fixed);
+        for(const auto& mapping:mappings){
+            const auto mine=px::LiveViewRegisteredOutputToCamera(context,mapping);
+            const auto theirs=RegisteredDocumentOutputToCamera(r,rendered.camera_a,rendered.camera_b,model,mapping,seam);
+            bool same=true;long long n=0;
+            for(std::uint32_t y=0;y<grid.height;++y)for(std::uint32_t x=0;x<grid.width;x+=5){
+                render::Point a{},b{};
+                const bool oa=mine({double(x),double(y)},a),ob=theirs({double(x),double(y)},b);
+                same=same && oa==ob && (!oa || (a.x==b.x && a.y==b.y));++n;
+            }
+            CHECK(same && n==static_cast<long long>(grid.height)*((grid.width+4)/5));
+        }
+    }
+    // At the live view's scales: every point of C's grid, none passed over.
+    const std::vector<std::pair<unsigned,unsigned>> views{{640,427},{400,267},{640,400}};
+    for(const auto& view:views){
+        const auto plan=px::PlanFixedPreviewV3(read,orientation,view.first,view.second);
+        if(plan.skip)std::cerr<<what<<": view "<<view.first<<"x"<<view.second<<" skipped: "<<plan.detail<<'\n';
+        CHECK(!plan.skip && plan.live!=nullptr);
+        if(plan.skip || !plan.live)continue;
+        const double s=static_cast<double>(view.first)/kSensorWidthPx,sy=static_cast<double>(view.second)/kSensorHeightPx;
+        CHECK(plan.scale_x==s && plan.scale_y==sy);
+        const double pitch_jpeg=25.4/static_cast<double>(r.dpi),pitch_live=pitch_jpeg/s;
+        const double left=static_cast<double>(r.region_um.left)/1000.0,top=static_cast<double>(r.region_um.top)/1000.0;
+        for(const auto& mapping:{mappings[1],mappings[3]}){
+            const auto mine=px::LiveViewRegisteredOutputToCamera(*plan.live,mapping);
+            const auto jpeg=RegisteredDocumentOutputToCamera(r,rendered.camera_a,rendered.camera_b,model,mapping,seam);
+            double worst=0;long long n=0,picked=0;
+            for(std::uint32_t y=0;y<plan.output_height;++y)for(std::uint32_t x=0;x<plan.output_width;++x){
+                ++picked;
+                const render::Point drawing{left+(x+.5)*pitch_live,top+(y+.5)*pitch_live};
+                const render::Point at{(drawing.x-left)/pitch_jpeg-.5,(drawing.y-top)/pitch_jpeg-.5};
+                render::Point raw{},live{};
+                if(!jpeg(at,raw) || !mine({double(x),double(y)},live))continue;
+                render::Point want{raw.x*s,raw.y*sy};
+                if(turned)want={(view.first-1.0)-want.x,(view.second-1.0)-want.y};
+                worst=std::max(worst,std::hypot(want.x-live.x,want.y-live.y));++n;
+            }
+            if(worst>=1e-6 || n!=picked)std::cerr<<what<<": view "<<view.first<<"x"<<view.second<<" worst "<<worst<<" px, compared "<<n<<" of "<<picked<<'\n';
+            CHECK(n==picked && picked==static_cast<long long>(plan.output_width)*plan.output_height && picked>0 && worst<1e-6);
+        }
+    }
+}
+void ReadBackOf(const std::string& name,const std::string& profile,MountOrientation orientation,const render::OutputRaster& raster,const cr::PoseParameters& pose,EdgesMoved moved){
+    const rc::ProfileFit fit{0.1,0.3,50};
+    auto active=MakeActive("read-back-"+name,profile,orientation,raster,TestRanges);
+    const auto p=rc::ProposeFromPose(MakeInputs(active,nullptr,nullptr),pose,fit,"{}");
+    if(!p.candidate)std::cerr<<name<<": "<<p.detail<<'\n';
+    Check(p.candidate.has_value() && p.refusals.empty(),name.c_str());
+    if(p.candidate)LiveAndJpegOnReadBack(*p.candidate,raster,moved,name);
+    std::error_code ignored;fs::remove_all(active.settings,ignored);
+}
+void CandidateReadBack(){
+    for(const bool turned:{false,true}){
+        const std::string mount=turned?"half turn":"normal";
+        const auto orientation=turned?MountOrientation::rotated_180:MountOrientation::normal;
+        // B moved up: the rows at the bottom are given up.
+        {
+            const auto profile=RigText(turned);
+            const render::OutputRaster raster=ps::Raster(560000,360000,740000,470000,254);
+            const auto parameters=RigProfileV2::Parse(profile).ValidateCalibrationForEvaluation(raster,render::Resampling::bilinear);
+            ReadBackOf("up, "+mount,profile,orientation,raster,PoseForVertical(parameters.camera_b,-12.0,turned),EdgesMoved::bottom);
+        }
+        // B moved to the left and up, the raster's right edge near B's right side: the right edge follows B's right side and the rows at the
+        // bottom are given up. A coarse raster keeps the grid of the capture's scale small.
+        {
+            const auto profile=RigTextMovedLeft(turned,kRigMovedLeftMm);
+            const render::OutputRaster raster=ps::Raster(560000,300000,static_cast<long long>(std::llround((kRigRightMm-kRightSideReachMm-1.0)*1000.0)),470000,100);
+            const auto parameters=RigProfileV2::Parse(profile).ValidateCalibrationForEvaluation(raster,render::Resampling::bilinear);
+            auto pose=PoseForShift(parameters.camera_b,-30.0,turned);
+            pose.ty_mm=PoseForVertical(parameters.camera_b,-40.0,turned).ty_mm;
+            ReadBackOf("left and up near the right side, "+mount,profile,orientation,raster,pose,EdgesMoved::right_and_bottom);
+        }
+        // B moved down, the raster near the top of what B sees: the rows at the top are given up. The raster is short, so that what is left keeps
+        // the grid of the capture's scale within its bound.
+        {
+            const auto profile=RigText(turned);
+            const render::OutputRaster raster=ps::Raster(560000,5000,740000,125000,254);
+            const auto parameters=RigProfileV2::Parse(profile).ValidateCalibrationForEvaluation(raster,render::Resampling::bilinear);
+            ReadBackOf("down near the top, "+mount,profile,orientation,raster,PoseForVertical(parameters.camera_b,30.0,turned),EdgesMoved::top);
+        }
+    }
+}
 }
 
 int main(int argc,char** argv){
@@ -1658,6 +1792,7 @@ int main(int argc,char** argv){
         Pipeline();lap("pipeline");
         VerticalPair();lap("vertical pair");
         Refusals();lap("refusals");
+        CandidateReadBack();lap("candidates read back from their text");
     }catch(const std::exception& e){
         std::cerr<<"FAILED: an exception: "<<e.what()<<'\n';
         return 1;
