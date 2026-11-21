@@ -326,12 +326,94 @@ inline std::string Amount(double value, const char* positive, const char* negati
     if (queued_presses) text += "（続けて押した " + std::to_string(queued_presses) + " 回分は、確かめが終わってからまとめて入れます）";
     return text;
 }
+// While no check runs and a run of waiting presses waits for the screen to be drawn with the position before them: what the state row says.
+[[nodiscard]] inline std::string LiveHandWaitingText(unsigned queued_presses) {
+    return "押したことを受け付けました。前の位置を描き終えてから、まとめて入れます（" + std::to_string(queued_presses) + " 回分）";
+}
 // A check refused the press: what was waiting behind it goes too, and the position stays as it was.
 [[nodiscard]] inline std::string LiveHandQueueDroppedText(unsigned queued_presses) {
-    return queued_presses ? "続けて押した " + std::to_string(queued_presses) + " 回分も入れていません" : std::string();
+    return queued_presses ? "続けて押した " + std::to_string(queued_presses) + " 回分も反映していません" : std::string();
+}
+// The notice after a refusal, and the sentence about the presses that waited behind it, as two sentences.
+[[nodiscard]] inline std::string LiveHandRefusalWithQueueText(const std::string& refusal, unsigned queued_presses) {
+    const auto queue = LiveHandQueueDroppedText(queued_presses);
+    return queue.empty() ? refusal : refusal + "。" + queue;
 }
 [[nodiscard]] inline std::string LiveHandDroppedByCaptureText() {
     return "撮影を頼んだので、確かめの途中だった手の押下は捨てました。位置は撮影の前のままです";
+}
+// Presses that waited to be checked were dropped without a check refusing them (Live stopped, the position was not drawn in time, a new session began):
+// how many, and where the position stays. When Live stopped, what to do next is said too.
+[[nodiscard]] inline std::string LiveHandQueueLostText(unsigned presses, bool live_stopped = false) {
+    std::string text = "押した " + std::to_string(presses) + " 回分は反映していません。この分では位置を変えていません";
+    if (live_stopped) text += "。「ライブ再開」を押してから、もう一度押してください";
+    return text;
+}
+// A pair capture was asked for while presses were not in the position yet (a check ran, they waited, or their position was not drawn): the capture is
+// taken with the position that is drawn, and they are not in it. Said when it is asked for, and in the row of the capture's result. One camera's capture
+// does not hold the position (a check that runs goes on and its press is entered): its result row says the first sentence only.
+[[nodiscard]] inline std::string LiveCaptureUnenteredAskText(unsigned presses) {
+    return "（撮影の直前に押した手の押下 " + std::to_string(presses) + " 回分は、入れずに撮ります）";
+}
+[[nodiscard]] inline std::string LiveCaptureUnenteredResultText(unsigned presses, bool pair = true) {
+    std::string text = "撮影の直前に押した手の押下 " + std::to_string(presses) + " 回分は入っていません";
+    if (pair) text += "。JPEG とライブは、撮影の前の位置のままです";
+    return text;
+}
+// The button of the automatic estimate while a hand check runs or presses wait: it is not accepted (what was pressed goes in first).
+[[nodiscard]] inline std::string LiveEstimateRefusedByHandText() {
+    return "手で動かしている途中です。動き終わってから押してください";
+}
+
+// How a press of a hand button is taken (the window's thread). One check runs at a time, and a check is made against the picture that is on the screen
+// (the machine refuses one made against a picture that is not drawn with P), so a press is checked at once only when nothing is in the way:
+//  - start: nothing runs, nothing waits, and the screen is drawn with P (or Live is stopped, a capture holds P, the bake of P failed, or the picture is
+//    not drawn with a P that the window did not get from a hand press: the machine refuses it and the sentence says why);
+//  - queue: a check runs or a run waits, or the position that a hand press of the window was given is not on the screen yet (it waits to be drawn, or it
+//    is P but the picture was not drawn with it). The press is added to the ones that wait, and their sum is checked once the screen is drawn with P;
+//  - refuse_capturing: a capture holds P while a check still runs: the press is refused here (it cannot be started and would only be dropped later).
+// A picture that is not drawn with P for any other reason (an estimate's position, a shot's, a session that began, a table that was laid again) is
+// refused by the machine with "drawing now": a press made against the picture before it must not be added on top of a position that it did not see.
+enum class LiveHandPressRoute { start, queue, refuse_capturing };
+struct LiveHandPressContext {
+    bool busy{false};            // a check runs, or a run waits to be started
+    bool hand_wanted{false};     // an accepted position waits to be drawn
+    bool drawn{false};           // the picture on the screen was drawn with a table baked for P
+    bool hand_undrawn{false};    // a check of the window was accepted and the screen was not drawn with its position yet (the window's mark)
+    bool bake_failed{false};     // the last bake of P failed (a wait would not end)
+    bool capturing{false};       // a pair capture holds P
+    bool live_running{false};    // Live runs and is not stopping
+};
+[[nodiscard]] inline LiveHandPressRoute RouteLiveHandPress(const LiveHandPressContext& context) {
+    if (context.busy) return context.capturing ? LiveHandPressRoute::refuse_capturing : LiveHandPressRoute::queue;
+    if (!context.live_running || context.capturing || context.bake_failed) return LiveHandPressRoute::start;
+    if (context.hand_wanted || (!context.drawn && context.hand_undrawn)) return LiveHandPressRoute::queue;
+    return LiveHandPressRoute::start;
+}
+[[nodiscard]] inline std::string_view LiveHandPressRouteCode(LiveHandPressRoute route) {
+    switch (route) {
+    case LiveHandPressRoute::start: return "start";
+    case LiveHandPressRoute::queue: return "queue";
+    case LiveHandPressRoute::refuse_capturing: return "refuse-capturing";
+    }
+    return {};
+}
+// A check that was refused because something moved while it ran: is its amount checked again (with what waits) or is it refused with the sentence?
+// Stale (P or the hand position that waits changed): again. Not drawn: again only when the check began with the screen drawn with P and P is the same
+// one now (the table was laid again), never when it began against a picture that was not drawn with P (an estimate's or a shot's position came in
+// between) or when P is another one (what the press saw is gone).
+struct LiveHandRetryContext {
+    LiveHandOutcome outcome{LiveHandOutcome::accepted};
+    bool bake_failed{false};
+    bool began_drawn{false};           // the screen was drawn with P when the check began
+    std::uint64_t serial_at_begin{0};  // P's serial when it began
+    std::uint64_t serial_now{0};
+};
+[[nodiscard]] inline bool LiveHandCheckIsEnteredAgain(const LiveHandRetryContext& context) {
+    if (context.outcome == LiveHandOutcome::refused_stale) return true;
+    if (context.outcome == LiveHandOutcome::refused_not_drawn)
+        return !context.bake_failed && context.began_drawn && context.serial_at_begin == context.serial_now;
+    return false;
 }
 [[nodiscard]] inline std::string LiveHandWithdrewEstimateText() {
     return "自動調整の途中だったので、その結果は使いません。手で直した位置を優先します";

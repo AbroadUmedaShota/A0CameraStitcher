@@ -474,8 +474,67 @@ void HandTexts(){
     // The check of a press that takes a moment, the presses that came meanwhile, and what happens to them.
     CHECK(LiveHandBusyText(0)=="押したことを受け付けました。位置を確かめています…");
     CHECK(Contains(LiveHandBusyText(3),"押したことを受け付けました。位置を確かめています…") && Contains(LiveHandBusyText(3),"3 回分は、確かめが終わってからまとめて入れます"));
-    CHECK(LiveHandQueueDroppedText(0).empty() && Contains(LiveHandQueueDroppedText(2),"2 回分も入れていません"));
+    CHECK(LiveHandQueueDroppedText(0).empty() && LiveHandQueueDroppedText(2)=="続けて押した 2 回分も反映していません");
     CHECK(Contains(LiveHandDroppedByCaptureText(),"撮影を頼んだので") && Contains(LiveHandDroppedByCaptureText(),"位置は撮影の前のまま"));
+    // The refusal and the presses that waited behind it are two sentences, ended with the full stop between them.
+    CHECK(LiveHandRefusalWithQueueText("この位置では継ぎ目が重なりの外に出るため、動かせません。位置は変えていません",2)==
+        "この位置では継ぎ目が重なりの外に出るため、動かせません。位置は変えていません。続けて押した 2 回分も反映していません");
+    CHECK(LiveHandRefusalWithQueueText("位置を画面に描いている途中です",0)=="位置を画面に描いている途中です");
+    // A press that is not checked at once is not lost silently: the sentences say how many presses went and where the position stays.
+    CHECK(LiveHandQueueLostText(4)=="押した 4 回分は反映していません。この分では位置を変えていません");
+    CHECK(LiveHandQueueLostText(2,true)=="押した 2 回分は反映していません。この分では位置を変えていません。「ライブ再開」を押してから、もう一度押してください");
+    CHECK(LiveHandQueueLostText(2)!=LiveHandQueueLostText(2,true) && LiveHandQueueLostText(2)!=LiveHandDroppedByCaptureText());
+    // The presses that were waiting for the screen, while no check runs, and the presses that a pair capture did not take in.
+    CHECK(LiveHandWaitingText(3)=="押したことを受け付けました。前の位置を描き終えてから、まとめて入れます（3 回分）" && !Contains(LiveHandWaitingText(3),"確かめています"));
+    CHECK(LiveCaptureUnenteredAskText(3)=="（撮影の直前に押した手の押下 3 回分は、入れずに撮ります）");
+    CHECK(LiveCaptureUnenteredResultText(3)=="撮影の直前に押した手の押下 3 回分は入っていません。JPEG とライブは、撮影の前の位置のままです");
+    // one camera's capture does not hold the position: the first sentence only
+    CHECK(LiveCaptureUnenteredResultText(3,false)=="撮影の直前に押した手の押下 3 回分は入っていません");
+    // The button of the estimate while a check runs or presses wait: not accepted, and what to do.
+    CHECK(LiveEstimateRefusedByHandText()=="手で動かしている途中です。動き終わってから押してください");
+
+    // How a press is taken (RouteLiveHandPress): it waits while a check runs, and while the position that a check of the window was given is not on the
+    // screen yet. A picture that is not drawn with P for any other reason is not waited for.
+    {
+        LiveHandPressContext idle;idle.drawn=true;idle.live_running=true;
+        const auto with=[&](auto change){auto context=idle;change(context);return RouteLiveHandPress(context);};
+        CHECK(RouteLiveHandPress(idle)==LiveHandPressRoute::start);   // nothing runs and the screen is drawn with P
+        CHECK(with([](LiveHandPressContext& c){c.busy=true;})==LiveHandPressRoute::queue);                        // a check runs, or a run waits
+        CHECK(with([](LiveHandPressContext& c){c.hand_wanted=true;})==LiveHandPressRoute::queue);                 // an earlier press waits to be drawn
+        CHECK(with([](LiveHandPressContext& c){c.drawn=false;c.hand_undrawn=true;})==LiveHandPressRoute::queue);  // P is the position of a press and the picture is not drawn with it
+        CHECK(with([](LiveHandPressContext& c){c.hand_wanted=true;c.drawn=false;c.hand_undrawn=true;})==LiveHandPressRoute::queue);
+        // A picture that is not drawn with P and no press of the window is the reason (an estimate's position, a shot's, a session that began, a table laid
+        // again): the machine refuses the press with "drawing now", and it is never added on top of a position that it did not see
+        CHECK(with([](LiveHandPressContext& c){c.drawn=false;})==LiveHandPressRoute::start);
+        CHECK(with([](LiveHandPressContext& c){c.drawn=true;c.hand_undrawn=true;})==LiveHandPressRoute::start);   // the mark of a position that is drawn now: nothing to wait for
+        // Nothing to wait for: the machine refuses these with its own sentence
+        CHECK(with([](LiveHandPressContext& c){c.drawn=false;c.hand_undrawn=true;c.bake_failed=true;})==LiveHandPressRoute::start);   // a wait would not end
+        CHECK(with([](LiveHandPressContext& c){c.drawn=false;c.hand_undrawn=true;c.live_running=false;})==LiveHandPressRoute::start);
+        CHECK(with([](LiveHandPressContext& c){c.drawn=false;c.hand_undrawn=true;c.capturing=true;})==LiveHandPressRoute::start);
+        CHECK(with([](LiveHandPressContext& c){c.hand_wanted=true;c.capturing=true;})==LiveHandPressRoute::start);
+        // A capture holds P while a check still runs: the press cannot start and is refused now (it would only be dropped later)
+        CHECK(with([](LiveHandPressContext& c){c.busy=true;c.capturing=true;})==LiveHandPressRoute::refuse_capturing);
+        // A check that runs and a Live that is stopping: the press still waits (the stop drops what waits, with its sentence)
+        CHECK(with([](LiveHandPressContext& c){c.busy=true;c.live_running=false;})==LiveHandPressRoute::queue);
+        // every route has its own code
+        CHECK(LiveHandPressRouteCode(LiveHandPressRoute::start)=="start" && LiveHandPressRouteCode(LiveHandPressRoute::queue)=="queue" &&
+            LiveHandPressRouteCode(LiveHandPressRoute::refuse_capturing)=="refuse-capturing");
+    }
+    // A check that was refused because something moved while it ran: stale is entered again; not drawn only when it began with the screen drawn with the same P.
+    {
+        LiveHandRetryContext retry;retry.began_drawn=true;retry.serial_at_begin=7;retry.serial_now=7;
+        const auto with=[&](LiveHandOutcome outcome,auto change){auto context=retry;context.outcome=outcome;change(context);return LiveHandCheckIsEnteredAgain(context);};
+        const auto same=[](LiveHandRetryContext&){};
+        CHECK(with(LiveHandOutcome::refused_stale,same));
+        CHECK(with(LiveHandOutcome::refused_stale,[](LiveHandRetryContext& c){c.began_drawn=false;c.serial_now=9;}));   // stale is entered again whatever the picture was
+        CHECK(with(LiveHandOutcome::refused_not_drawn,same));                                                         // the table was laid again under the same P
+        CHECK(!with(LiveHandOutcome::refused_not_drawn,[](LiveHandRetryContext& c){c.began_drawn=false;}));            // it began against a picture that was not drawn with P
+        CHECK(!with(LiveHandOutcome::refused_not_drawn,[](LiveHandRetryContext& c){c.serial_now=8;}));                // P is another one now: what the press saw is gone
+        CHECK(!with(LiveHandOutcome::refused_not_drawn,[](LiveHandRetryContext& c){c.bake_failed=true;}));             // a wait would not end
+        for(const auto outcome:{LiveHandOutcome::accepted,LiveHandOutcome::refused_cover,LiveHandOutcome::refused_envelope,LiveHandOutcome::refused_capturing,LiveHandOutcome::refused_stopped,
+            LiveHandOutcome::refused_range,LiveHandOutcome::refused_unsolvable,LiveHandOutcome::refused_error,LiveHandOutcome::refused_zero})
+            CHECK(!with(outcome,same));
+    }
     CHECK(Contains(LiveHandWithdrewEstimateText(),"自動調整の途中だった"));
     CHECK(Contains(LiveHandBecameConditionText(),"条件の位置に戻った"));
     CHECK(LiveEstimateRefusedText(LiveAskResult::accepted).empty() && Contains(LiveEstimateRefusedText(LiveAskResult::capturing),"撮影中は「自動調整」を押せません") &&
@@ -566,7 +625,8 @@ void HandTexts(){
         CHECK(Contains(LiveNotDrawnYetText(),"まだ確定した位置で描けていません") && Contains(LiveNotDrawnYetText(),"少し待って") && LiveNotDrawnYetText().find('\n')==std::string::npos);
     }
     // No sentence of the hand steps calls the picture within a criterion or says that a composite cannot be saved.
-    for(const auto& sentence:{LiveHandBusyText(2),LiveHandDroppedByCaptureText(),LiveHandWithdrewEstimateText(),LiveHandBecameConditionText(),LiveHandScaleText(11.5)})
+    for(const auto& sentence:{LiveHandBusyText(2),LiveHandWaitingText(2),LiveHandDroppedByCaptureText(),LiveHandWithdrewEstimateText(),LiveHandBecameConditionText(),LiveHandScaleText(11.5),
+            LiveHandQueueLostText(2,true),LiveCaptureUnenteredAskText(2),LiveCaptureUnenteredResultText(2),LiveEstimateRefusedByHandText()})
         CHECK(!Contains(sentence,"基準内") && !Contains(sentence,"合格") && !Contains(sentence,"書き出せません") && !Contains(sentence,"保存できません"));
 }
 
