@@ -378,6 +378,17 @@ inline std::string Num(double value){
 inline std::string Num(const std::optional<double>& value){return value?Num(*value):"null";}
 inline std::string Bool(bool value){return value?"true":"false";}
 
+// The outer iterations of the check's estimate: the count that the estimate carried, or null (the log: "-") when it was not passed on (the
+// default of EvidenceCounts). The default is not shown as a number.
+inline bool OuterIterationsCarried(const rc::Verification& v){return v.evidence.outer_iterations!=cr::EvidenceCounts{}.outer_iterations;}
+inline std::string OuterIterationsJson(const rc::Verification& v){return OuterIterationsCarried(v)?std::to_string(v.evidence.outer_iterations):std::string("null");}
+// The change of the pose's displacement in each outer iteration, the numbers with `separator` between them.
+inline std::string ChangeHistoryText(const rc::Verification& v,const char* separator){
+    std::string text;
+    for(std::size_t i=0;i<v.change_history_px.size();++i)text+=(i?std::string(separator):std::string{})+Num(v.change_history_px[i]);
+    return text;
+}
+
 struct ReportInput {
     const RecalibrationJobOutcome* outcome{};
     std::string policy;
@@ -431,7 +442,13 @@ inline std::string ReportJson(const ReportInput& in){
     if(in.verification){
         const auto& v=*in.verification;
         s<<",\"verification\":{\"performed\":"<<Bool(v.performed)<<",\"state\":"<<Esc(cr::RegistrationStateCode(v.state))<<",\"inliers\":"<<v.inliers<<",\"points\":"<<v.points<<",\"seamDisplacementPx\":"<<Num(v.seam_displacement_px)
-         <<",\"limitPx\":"<<Num(v.limit_px)<<",\"passed\":"<<Bool(v.passed)<<"}";
+         <<",\"limitPx\":"<<Num(v.limit_px)<<",\"passed\":"<<Bool(v.passed)<<",\"diagnostics\":{\"outerIterations\":"<<OuterIterationsJson(v)
+         <<",\"converged\":"<<Bool(v.converged)<<",\"lastChangePx\":"<<Num(v.last_change_px)<<",\"changeHistoryPx\":"<<"["<<ChangeHistoryText(v,",")<<"]"
+         <<",\"secondStart\":"<<Esc(cr::SecondStartCode(v.second_start))<<",\"secondStartDifferencePx\":"<<Num(v.second_start_difference_px)
+         <<",\"fitWindow\":{\"grown\":"<<Bool(v.fit_window.grown)<<",\"leftPx\":"<<Num(v.fit_window.left_px)<<",\"rightPx\":"<<Num(v.fit_window.right_px)
+         <<",\"leftAvailablePx\":"<<Num(v.fit_window.left_available_px)<<",\"rightAvailablePx\":"<<Num(v.fit_window.right_available_px)
+         <<",\"leftCut\":"<<Bool(v.fit_window.left_cut)<<",\"rightCut\":"<<Bool(v.fit_window.right_cut)
+         <<",\"corePoints\":"<<v.fit_window.core_points<<",\"refusedPoints\":"<<v.fit_window.refused_points<<"}}}";
     }
     const auto& g=o.facts.gate;
     s<<",\"sample\":{\"gateKnown\":"<<Bool(g.known);
@@ -539,6 +556,13 @@ inline bool IsCanonicalOriginal(const fs::path& file,const wchar_t* alias){
             out.log_lines.push_back("recalibration_raster width_px="+std::to_string(d.width_previous_px)+"->"+std::to_string(d.width_new_px)+
                 " height_px="+std::to_string(d.height_previous_px)+"->"+std::to_string(d.height_new_px)+
                 " top_mm="+Num(d.top_previous_mm)+"->"+Num(d.top_new_mm)+" bottom_mm="+Num(d.bottom_previous_mm)+"->"+Num(d.bottom_new_mm));
+        if(verification.performed)
+            out.log_lines.push_back("recalibration_verification state="+std::string(cr::RegistrationStateCode(verification.state))+" passed="+(verification.passed?"1":"0")+
+                " seam_displacement_px="+Num(verification.seam_displacement_px)+" limit_px="+Num(verification.limit_px)+
+                " outer_iterations="+(OuterIterationsCarried(verification)?std::to_string(verification.evidence.outer_iterations):std::string("-"))+
+                " converged="+(verification.converged?"1":"0")+" last_change_px="+Num(verification.last_change_px)+" change_history_px="+ChangeHistoryText(verification,";")+
+                " second_start="+std::string(cr::SecondStartCode(verification.second_start))+" second_start_difference_px="+Num(verification.second_start_difference_px)+
+                " fit_window_grown="+(verification.fit_window.grown?"1":"0"));
         for(const auto& f:out.findings)
             out.log_lines.push_back("recalibration_finding class="+std::string(FindingClassCode(f.klass))+" code="+f.code+(f.reason.empty()?std::string{}:" reason="+f.reason));
         if(staging_created){

@@ -1639,6 +1639,52 @@ void RefusalsFromPose(){
 }
 
 
+// ---- The diagnostics that the check on the new profile leaves -------------------------------------------------------------------
+// The check copies the estimator's diagnostics of its own estimate. The candidate of a move along the baseline is checked against its pair, and
+// the same estimate is run here with the settings that the check takes from the candidate: each copied field is compared with the field it was
+// copied from, and none of them is a default.
+void VerificationDiagnostics(){
+    if(!CaseWanted("verification-diagnostics"))return;
+    const Texture texture(7919317);
+    const std::function<double(double,double)> paper=[&](double x,double y){return texture(x,y);};
+    const render::OutputRaster raster=ps::Raster(560000,100000,740000,260000,254);
+    const Case c{"verification-diagnostics",30,0,0,false};
+    const auto profile=RigText(false);
+    auto active=MakeActive("verification-diagnostics",profile,MountOrientation::normal,raster,TestRanges);
+    const auto parameters=RigProfileV2::Parse(profile).ValidateCalibrationForEvaluation(raster,render::Resampling::bilinear);
+    const auto truth=TruthOf(c);
+    const auto image_a=RenderFrame(truth.a,paper);
+    const auto image_b=RenderFrame(truth.b,paper);
+    const auto in=MakeInputs(active,&image_a,&image_b);
+    const auto made=rc::ProposeFromPose(in,PoseForShift(parameters.camera_b,30.0,false),rc::ProfileFit{0.1,0.3,50},"{}");
+    CHECK(made.candidate.has_value());
+    if(made.candidate){
+        const auto& candidate=*made.candidate;
+        const auto v=rc::VerifyCandidate(in,candidate);
+        const auto& condition=candidate.condition;
+        cr::RegistrationSettings settings;
+        settings.geometry={condition.seam.column,kSeamBlendDesign.width_pixels,condition.registration.geometry.omega_margin_px,condition.registration.geometry.guard_px,
+            condition.registration.geometry.band_half_width_px};
+        settings.envelope=condition.registration.envelope;settings.limits=condition.registration.limits;settings.design=in.design;
+        settings.surface_envelope=condition.registration.surface_envelope;settings.base_pose=condition.base_pose;
+        const auto r=cr::EstimateRegistration(image_a,image_b,candidate.binding.parameters,settings,in.thread_count,in.control);
+        const auto& d=r.diagnostics;
+        CHECK(v.performed && v.state==r.state);
+        // The fields are not left at their defaults here, so that a copy that is missing cannot pass for one that is equal.
+        CHECK(d.outer_iterations>0 && d.outer_iterations!=cr::EvidenceCounts{}.outer_iterations && !d.change_history_px.empty());
+        CHECK(v.evidence.outer_iterations==d.outer_iterations);
+        CHECK(v.converged==d.converged && v.last_change_px==d.last_change_px && v.change_history_px==d.change_history_px);
+        CHECK(v.second_start==d.second_start && v.second_start_difference_px==d.second_start_difference_px);
+        const auto& a=v.fit_window;const auto& b=d.fit_window;
+        CHECK(a.grown==b.grown && a.left_px==b.left_px && a.right_px==b.right_px && a.left_available_px==b.left_available_px && a.right_available_px==b.right_available_px &&
+            a.left_cut==b.left_cut && a.right_cut==b.right_cut && a.core_points==b.core_points && a.refused_points==b.refused_points);
+        CHECK(b.core_points>0 && v.fit_window.core_points>0);
+        std::cerr<<"verification diagnostics: "<<d.outer_iterations<<" iterations, converged "<<d.converged<<", last change "<<d.last_change_px<<" px, second start "
+            <<cr::SecondStartCode(d.second_start)<<", fit window "<<b.core_points<<" points\n";
+    }
+    std::error_code ignored;fs::remove_all(active.settings,ignored);
+}
+
 // ---- A candidate read back from its text ------------------------------------------------------------------------------------------
 // The capture path does not hold the candidate in memory: it reads the revision file that a confirmation wrote. The text of a candidate, written
 // beside its profile and read by the condition's reader, gives the range and the seam column of the candidate, and the live view and the JPEG
@@ -1793,6 +1839,7 @@ int main(int argc,char** argv){
         VerticalPair();lap("vertical pair");
         Refusals();lap("refusals");
         CandidateReadBack();lap("candidates read back from their text");
+        VerificationDiagnostics();lap("the diagnostics of the check on the new profile");
     }catch(const std::exception& e){
         std::cerr<<"FAILED: an exception: "<<e.what()<<'\n';
         return 1;

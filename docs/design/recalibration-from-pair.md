@@ -168,9 +168,10 @@ p_b に大きな値を入れずに profile を作り直す理由: p_b は「校�
 | `display.heightPreviousPx`・`heightNewPx` | int、int か null | 範囲の高さの前と後。後は `hasNew` が false の時 null |
 | `display.topPreviousMm`・`bottomPreviousMm`・`topNewMm`・`bottomNewMm` | number、number か null | 範囲の上端と下端の前と後。後は `hasNew` が false の時 null |
 | `display.targetCoverShortfall` | null か object | `band-uncovered` の時だけ。`pose`（`start` か `estimate`）・`rowsTop`・`rowsBottom`・`topMm`・`bottomMm` |
+| `verification.diagnostics` | object | 確かめの再推定が終わった時の推定器の診断の写し。`outerIterations`（渡されていない時 null）・`converged`・`lastChangePx`・`changeHistoryPx`（反復ごとの変化。当てはめが早く止まった時は反復の数より 1 つ短い）・`secondStart`（二つ目の始めの結果の符号）・`secondStartDifferencePx`・`fitWindow`（`grown`・`leftPx`・`rightPx`・`leftAvailablePx`・`rightAvailablePx`・`leftCut`・`rightCut`・`corePoints`・`refusedPoints`）。当てはめが走らなかった時は既定の値。判定・候補のバイト・推定の記録には入らない |
 | `sample.beyondEnvelopeApplied` | bool か null | 見本の撮影が条件の範囲の外の補正を当てた時 true、当てなかった時 false。見本を合成できなかった時 null。判定は変えない。範囲の外の補正の理由の内訳（推定・紙面・層 2）は撮影の記録に欄が無いので出さない |
 
-所見（`findings`）の `reason` には、`no-overlap`・`band-uncovered`・`range-collapsed` の下位の理由が入る（5 節）。CLI（版の決まりの無い開発用の出力）には、同じ値の `wide`・`start_motion`・`target_cover_shortfall`・`fine_fit_raster` の行と、`seam` の行の上下の端の前後が出る。ログには、範囲の幅・高さ・上下の端が今の改訂と違う候補で `recalibration_raster width_px=a->b height_px=a->b top_mm=a->b bottom_mm=a->b` の行が付く。
+所見（`findings`）の `reason` には、`no-overlap`・`band-uncovered`・`range-collapsed` の下位の理由が入る（5 節）。CLI（版の決まりの無い開発用の出力）には、同じ値の `wide`・`start_motion`・`target_cover_shortfall`・`fine_fit_raster` の行と、`seam` の行の上下の端の前後が出る。ログには、範囲の幅・高さ・上下の端が今の改訂と違う候補で `recalibration_raster width_px=a->b height_px=a->b top_mm=a->b bottom_mm=a->b` の行が付く。確かめを行った時は、確かめの状態・ずれと上の診断を 1 行にした `recalibration_verification` の行が付く（渡されていない反復の数は `-`）。
 
 ### 版の決まり
 

@@ -1590,6 +1590,72 @@ void BeyondEnvelopeInTheReport(const Pair& pair) {
         CHECK(!HasLine(o.log_lines, "beyond_envelope_applied="));
     }
 }
+
+// The diagnostics of the check on the new profile reach the report and the log as the computation left them: a stand-in leaves a value of its
+// own in every field. Where the estimate did not carry the number of outer iterations, the report says null and the log a dash.
+void VerificationDiagnosticsInTheReport(const Pair& pair) {
+    {
+        const auto settings = MakeSettings("settings-diagnostics");
+        auto stand_in = FakeComputation(Fake::ready);
+        const auto inner = stand_in.propose;
+        stand_in.propose = [inner](const rc::Inputs& in) {
+            auto p = inner(in);
+            auto& v = p.verification;
+            v.evidence.outer_iterations = 4;
+            v.converged = true;
+            v.last_change_px = 0.015625;
+            v.change_history_px = {0.5, 0.25, 0.0625, 0.015625};
+            v.second_start = cr::RegistrationDiagnostics::SecondStart::agreed;
+            v.second_start_difference_px = 0.375;
+            v.fit_window = cr::FitWindow{true, 12.5, 20.25, 40.0, 60.5, true, false, 321, 17};
+            return p;
+        };
+        const auto request = Request(settings, pair, "staging-diagnostics", stand_in);
+        const auto o = RunRecalibrationJob(request);
+        const auto report = Tree(ReadAll(request.staging_folder / "recalibration-report.json"));
+        const auto& verification = At(report, "verification");
+        CHECK(At(verification, "performed").boolean && At(verification, "diagnostics").kind == json::JsonKind::object);
+        const auto& d = At(verification, "diagnostics");
+        CHECK(d.object.size() == 7);
+        CHECK(NumberOf(At(d, "outerIterations")) == 4 && At(d, "converged").boolean && NumberOf(At(d, "lastChangePx")) == 0.015625);
+        const auto& history = At(d, "changeHistoryPx");
+        CHECK(history.kind == json::JsonKind::array && history.array.size() == 4 && NumberOf(history.array[0]) == 0.5 && NumberOf(history.array[1]) == 0.25 &&
+              NumberOf(history.array[2]) == 0.0625 && NumberOf(history.array[3]) == 0.015625);
+        CHECK(At(d, "secondStart").string == std::string(cr::SecondStartCode(cr::RegistrationDiagnostics::SecondStart::agreed)) && NumberOf(At(d, "secondStartDifferencePx")) == 0.375);
+        const auto& w = At(d, "fitWindow");
+        CHECK(w.object.size() == 9 && At(w, "grown").boolean && NumberOf(At(w, "leftPx")) == 12.5 && NumberOf(At(w, "rightPx")) == 20.25 && NumberOf(At(w, "leftAvailablePx")) == 40 &&
+              NumberOf(At(w, "rightAvailablePx")) == 60.5 && At(w, "leftCut").boolean && !At(w, "rightCut").boolean && NumberOf(At(w, "corePoints")) == 321 && NumberOf(At(w, "refusedPoints")) == 17);
+        // The members that were there are where they were, and the new object stands at the end of the verification.
+        const auto text = ReadAll(request.staging_folder / "recalibration-report.json");
+        CHECK(InOrder(text, {"\"verification\":{\"performed\":", "\"seamDisplacementPx\":", "\"limitPx\":", "\"passed\":", "\"diagnostics\":{\"outerIterations\":4,", "\"sample\":"}));
+        CHECK(HasLine(o.log_lines, "recalibration_verification state=verified passed=1 "));
+        CHECK(HasLine(o.log_lines, " outer_iterations=4 converged=1 last_change_px=0.015625 change_history_px=0.5;0.25;0.0625;0.015625 second_start=" +
+              std::string(cr::SecondStartCode(cr::RegistrationDiagnostics::SecondStart::agreed)) + " second_start_difference_px=0.375 fit_window_grown=1"));
+        CHECK(AllPlain(o.log_lines) && PlainRecord(text));
+        // The verdict and the findings do not depend on the diagnostics: the same job without them says the same.
+        const auto plain = RunRecalibrationJob(Request(MakeSettings("settings-diagnostics-plain"), pair, "staging-diagnostics-plain", FakeComputation(Fake::ready)));
+        CHECK(plain.verdict == o.verdict && plain.findings.size() == o.findings.size());
+    }
+    {
+        // The estimate did not carry the iterations (the defaults): null, a dash, and the other fields as they were left.
+        const auto settings = MakeSettings("settings-diagnostics-default");
+        const auto request = Request(settings, pair, "staging-diagnostics-default", FakeComputation(Fake::ready));
+        const auto o = RunRecalibrationJob(request);
+        const auto report = Tree(ReadAll(request.staging_folder / "recalibration-report.json"));
+        const auto& d = At(At(report, "verification"), "diagnostics");
+        CHECK(IsNull(At(d, "outerIterations")) && !At(d, "converged").boolean && NumberOf(At(d, "lastChangePx")) == 0 && At(d, "changeHistoryPx").array.empty());
+        CHECK(At(d, "secondStart").string == std::string(cr::SecondStartCode(cr::RegistrationDiagnostics::SecondStart::not_run)));
+        CHECK(HasLine(o.log_lines, " outer_iterations=- converged=0 last_change_px=0 change_history_px= second_start="));
+    }
+    {
+        // No check was made (the computation stopped before it): no verification object at all, no log line.
+        const auto settings = MakeSettings("settings-diagnostics-none");
+        const auto request = Request(settings, pair, "staging-diagnostics-none", FakeComputation(Fake::no_overlap));
+        const auto o = RunRecalibrationJob(request);
+        const auto report = Tree(ReadAll(request.staging_folder / "recalibration-report.json"));
+        CHECK(report.object.count("verification") == 0 && !HasLine(o.log_lines, "recalibration_verification"));
+    }
+}
 }
 
 int main(int argc, char** argv) {
@@ -1624,6 +1690,7 @@ int main(int argc, char** argv) {
         RefusePolicy(pair); lap("refuse policy");
         UncheckedProfile(pair); lap("unchecked profile");
         BeyondEnvelopeInTheReport(pair); lap("the sample's registration beyond the ranges, in the report");
+        VerificationDiagnosticsInTheReport(pair); lap("the check's diagnostics, in the report");
         CommandLine(pair, argv[2], std::string(argv[3]) == "on"); lap("command line");
         if (argc >= 5 && std::string(argv[4]) == "full") { BothMoved(20.0, 50.0); lap("both moved"); }
         std::error_code ignored;

@@ -1122,6 +1122,8 @@ Verification VerifyCandidate(const Inputs& in,const Candidate& candidate){
     v.state=r.state;v.reasons=r.reasons;
     v.inliers=r.diagnostics.inliers;v.points=r.diagnostics.points;
     v.evidence=content_registration::EvidenceCountsOf(r.diagnostics);
+    v.converged=r.diagnostics.converged;v.last_change_px=r.diagnostics.last_change_px;v.change_history_px=r.diagnostics.change_history_px;
+    v.second_start=r.diagnostics.second_start;v.second_start_difference_px=r.diagnostics.second_start_difference_px;v.fit_window=r.diagnostics.fit_window;
     if(!r.has_estimate)return v;
     v.pose=r.pose;
     if(r.surface.state==SurfaceState::estimated)v.surface=r.surface.plane;
