@@ -1466,6 +1466,42 @@ void VerticalPair(){
         }
         std::error_code ignored;fs::remove_all(active.settings,ignored);
     }
+    // The seam placement that the caller names decides where the fine stage's raster ends. B moved up by more than the range's vertices
+    // reach below the raster's bottom: the rows that are given up are then the ones the vertices hold, which depend on the seam column. With the
+    // seam kept at a column that is not the middle of the band the raster differs from the one that the middle of the band gives, so a fine
+    // stage that took another placement than the caller's would be seen here. The fine stage is stopped as it starts: only its raster is read.
+    {
+        const render::OutputRaster higher=ps::Raster(560000,300000,740000,450000,254);
+        for(const bool turned:{false,true}){
+            const Case c{turned?"vertical-up-30-keep-turn":"vertical-up-30-keep",0,0,0,turned,-30.0};
+            if(!CaseWanted(c.name))continue;
+            const auto profile=RigText(turned);
+            const auto orientation=turned?MountOrientation::rotated_180:MountOrientation::normal;
+            auto active=MakeActive("pipeline-"+c.name,profile,orientation,higher,[](FixedCompositeConditionV3& condition){TestRanges(condition);condition.seam.column=1500;});
+            const auto truth=TruthOf(c);
+            const auto image_a=RenderFrame(truth.a,paper);
+            const auto image_b=RenderFrame(truth.b,paper);
+            auto in=MakeInputs(active,&image_a,&image_b);
+            in.seam=rc::SeamPlacement::keep_previous;
+            std::atomic<bool> fine_stage_started{false};
+            in.progress=[&](rc::Stage stage){if(stage==rc::Stage::fine_fit)fine_stage_started=true;};
+            in.control.stop=[&]{return fine_stage_started.load();};
+            const auto p=rc::ProposeRecalibration(in);
+            CHECK(p.wide_performed && p.wide.determined && fine_stage_started.load() && HasRefusal(p,rc::Refusal::stopped));
+            const auto parent=BindFixedCompositeProfileV3(active.condition,profile,kHash);
+            const auto by_keep=rc::ProposeRaster(active.condition,parent,p.wide.pose,rc::RasterPlacement::follow_camera_b,rc::SeamPlacement::keep_previous);
+            const auto by_band=rc::ProposeRaster(active.condition,parent,p.wide.pose,rc::RasterPlacement::follow_camera_b,rc::SeamPlacement::band_center);
+            std::cerr<<c.name<<": rows "<<by_keep.height_pixels<<" with the seam kept, "<<by_band.height_pixels<<" with the middle of the band, of "<<higher.height_pixels<<"\n";
+            CHECK(by_keep.region_um.bottom<higher.region_um.bottom && by_band.region_um.bottom<higher.region_um.bottom);
+            CHECK(!SameRaster(by_keep,by_band));
+            CHECK(p.fine_raster.has_value());
+            if(p.fine_raster){
+                CHECK(SameRaster(*p.fine_raster,by_keep));
+                CHECK(!SameRaster(*p.fine_raster,by_band));
+            }
+            std::error_code ignored;fs::remove_all(active.settings,ignored);
+        }
+    }
 }
 
 // What is refused, and why. The pairs are rendered like the ones above; only the paper or the pose of B is made to fail.
