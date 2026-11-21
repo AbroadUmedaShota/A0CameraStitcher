@@ -79,7 +79,7 @@ std::string base_profile;
 
 void Written(const Outcome& o,const Settings& s,const char* name){
     std::cout<<name<<": "<<Describe(o)<<'\n';
-    CHECK(o.saved.fixed_composite_registration.has_value() && !o.saved.fixed_composite_lens && o.text.find("\"a0.uncalibrated-still-review.v9\"")!=std::string::npos);
+    CHECK(o.saved.fixed_composite_registration.has_value() && !o.saved.fixed_composite_lens && o.text.find("\"a0.uncalibrated-still-review.v10\"")!=std::string::npos);
     CHECK(o.text.find("\"translation\"")==std::string::npos && o.text.find("\"geometryBasis\":\"fixed-composite-registration\"")!=std::string::npos);
     CHECK(o.saved.width==s.loaded.condition.raster.width_pixels && o.saved.height==s.loaded.condition.raster.height_pixels);
     const auto& f=*o.saved.fixed_composite_registration;
@@ -90,7 +90,8 @@ void Written(const Outcome& o,const Settings& s,const char* name){
     CHECK(FixedCompositeRegistrationJson(*o.result.fixed_composite_registration)==FixedCompositeRegistrationJson(f));
 }
 
-void Tamper(const Outcome& o){
+// `flat` is a capture of flat frames (G4), whose report v10 can be told as a v8 one.
+void Tamper(const Outcome& o,const Outcome& flat){
     std::cout<<"a changed report is refused\n";
     const auto damaged=root/"damaged";fs::create_directories(damaged);
     fs::copy_file(o.saved.jpeg,damaged/"uncalibrated-review.jpg",fs::copy_options::overwrite_existing);
@@ -98,26 +99,36 @@ void Tamper(const Outcome& o){
     const auto loads=[&](const std::string& text){WriteText(report,text);try{(void)LoadSavedStillReview(report);}catch(const std::exception&){return false;}return true;};
     CHECK(loads(o.text));
     {
-        // A report that was written without a position is, apart from its schema, the v8 report plus two null members. The v8 file as a whole is read by
-        // the loader (the schema picks the reader) and gives the record that the v9 file gives.
+        // A report at G4 that was written without a position is, apart from its schema, the v8 report plus two null members and the surface rule. The
+        // v8 file as a whole is read by the loader (the schema picks the reader) and gives the record that the v10 file gives.
+        const auto remove_once=[](std::string& text,const std::string& member,const char* what,int line){
+            const auto at=text.find(member);
+            Check(at!=std::string::npos && text.find(member,at+1)==std::string::npos,what,line);
+            if(at!=std::string::npos)text.erase(at,member.size());
+        };
         const std::string nulls=",\"confirmedPosition\":null,\"confirmedPositionCheck\":null";
-        auto v8=o.text;
-        const auto at=v8.find(nulls);
-        Check(at!=std::string::npos && v8.find(nulls,at+1)==std::string::npos,"the v9 file has the two null members once",__LINE__);
-        if(at!=std::string::npos)v8.erase(at,nulls.size());
-        const std::string v9_schema="a0.uncalibrated-still-review.v9";
-        const auto schema=v8.find(v9_schema);
-        Check(schema!=std::string::npos,"the v9 file names its schema",__LINE__);
-        if(schema!=std::string::npos)v8.replace(schema,v9_schema.size(),"a0.uncalibrated-still-review.v8");
-        WriteText(report,v8);
+        auto v8=flat.text;
+        remove_once(v8,nulls,"the v10 file has the two null members once",__LINE__);
+        const auto& written=flat.result.fixed_composite_registration;
+        CHECK(written && written->registration.seam_line_lambda);
+        if(written && written->registration.seam_line_lambda)
+            remove_once(v8,",\"surfaceRule\":{\"rule\":\"level-through-seam-line\",\"lambda\":"+FormatRecordNumber(*written->registration.seam_line_lambda)+"}",
+                "the v10 file has its surface rule once",__LINE__);
+        const std::string v10_schema="a0.uncalibrated-still-review.v10";
+        const auto schema=v8.find(v10_schema);
+        Check(schema!=std::string::npos,"the v10 file names its schema",__LINE__);
+        if(schema!=std::string::npos)v8.replace(schema,v10_schema.size(),"a0.uncalibrated-still-review.v8");
+        const auto as_v8=root/"as-v8";fs::create_directories(as_v8);
+        fs::copy_file(flat.saved.jpeg,as_v8/"uncalibrated-review.jpg",fs::copy_options::overwrite_existing);
+        WriteText(as_v8/"uncalibrated-review.json",v8);
         try{
-            const auto read=LoadSavedStillReview(report);
+            const auto read=LoadSavedStillReview(as_v8/"uncalibrated-review.json");
             const auto& v8_record=read.fixed_composite_registration;
-            CHECK(v8_record.has_value() && v8_record->registration.level.level==o.saved.fixed_composite_registration->registration.level.level &&
+            CHECK(v8_record.has_value() && v8_record->registration.level.level==flat.saved.fixed_composite_registration->registration.level.level &&
                 !v8_record->registration.confirmed_position && !v8_record->registration.confirmed_check);
             if(v8_record){
-                CHECK(FixedCompositeRegistrationJson(*v8_record)==FixedCompositeRegistrationJson(*o.saved.fixed_composite_registration));
-                CHECK(FixedCompositeRegistrationJson(*v8_record,RegistrationReportFormat::v9)==FixedCompositeRegistrationJson(*o.saved.fixed_composite_registration,RegistrationReportFormat::v9));
+                CHECK(FixedCompositeRegistrationJson(*v8_record)==FixedCompositeRegistrationJson(*flat.saved.fixed_composite_registration));
+                CHECK(FixedCompositeRegistrationJson(*v8_record,RegistrationReportFormat::v9)==FixedCompositeRegistrationJson(*flat.saved.fixed_composite_registration,RegistrationReportFormat::v9));
             }
         }catch(const std::exception& error){Check(false,("the v8 file is read: "+std::string(error.what())).c_str(),__LINE__);}
     }
@@ -133,9 +144,9 @@ void Tamper(const Outcome& o){
     };
 #define REJECTED(a,b) rejected(a,b,__LINE__)
     const auto& f=*o.saved.fixed_composite_registration;
-    REJECTED("a0.uncalibrated-still-review.v9","a0.uncalibrated-still-review.v7");
-    REJECTED("a0.uncalibrated-still-review.v9","a0.uncalibrated-still-review.v8");   // v8 has no confirmedPosition members
-    REJECTED("a0.uncalibrated-still-review.v9","a0.uncalibrated-still-review.v10");
+    REJECTED("a0.uncalibrated-still-review.v10","a0.uncalibrated-still-review.v7");
+    REJECTED("a0.uncalibrated-still-review.v10","a0.uncalibrated-still-review.v8");   // v8 has no confirmedPosition members
+    REJECTED("a0.uncalibrated-still-review.v10","a0.uncalibrated-still-review.v9");
     REJECTED("\"productQualityAccepted\":false","\"productQualityAccepted\":true");
     REJECTED("\"geometryBasis\":\"fixed-composite-registration\"","\"geometryBasis\":\"fixed-composite-lens\"");
     REJECTED("\"fixedCompositeRegistration\":{","\"fixedCompositeRegistration\":{\"extra\":0,");
@@ -151,49 +162,41 @@ void Tamper(const Outcome& o){
 #undef REJECTED
 }
 
-// The loader opens a v10 report (the surface rule of the G1 and G2 mappings): this capture's record with the seam line's lambda of its profile's
-// camera A and its raster, the G1 or G2 plane turned about the seam line by it, written as v10 in place of the v9 members.
+// The capture writes a v10 report (the surface rule of the G1 and G2 mappings), and the loader opens it. The lambda it wrote is the one of the
+// profile's camera A and the condition's raster and seam column, bit for bit; the G1 or G2 plane is the estimated one turned about the seam line.
 void ReadsV10(const Outcome& o,const Settings& s){
-    std::cout<<"the loader reads v10\n";
+    std::cout<<"the capture writes v10\n";
     const auto folder=root/"v10";fs::create_directories(folder);
     fs::copy_file(o.saved.jpeg,folder/"uncalibrated-review.jpg",fs::copy_options::overwrite_existing);
     const auto report=folder/"uncalibrated-review.json";
     const auto& f=*o.saved.fixed_composite_registration;
-    auto record=f;
     const double lambda=content_registration::SeamLineLambda(content_registration::PoseModel(s.loaded.profile.parameters.camera_a).Centre({}),
-        content_registration::SurfaceOriginMm(record.raster,record.seam_column));
-    record.registration.seam_line_lambda=lambda;
-    const auto level=record.registration.level.level;
+        content_registration::SurfaceOriginMm(s.loaded.condition.raster,s.loaded.condition.seam.column));
+    CHECK(o.text.find("\"a0.uncalibrated-still-review.v10\"")!=std::string::npos);
+    // The writer's lambda bit for bit; the one read back by value (the record writes -0 as 0).
+    const auto& written=o.result.fixed_composite_registration;
+    CHECK(written && written->registration.seam_line_lambda && std::memcmp(&*written->registration.seam_line_lambda,&lambda,sizeof lambda)==0);
+    CHECK(f.registration.seam_line_lambda && *f.registration.seam_line_lambda==lambda);
+    // What the writer kept and what the loader read are the same v10 record.
+    CHECK(written && FixedCompositeRegistrationJson(*written,RegistrationReportFormat::v10)==FixedCompositeRegistrationJson(f,RegistrationReportFormat::v10));
+    const auto level=f.registration.level.level;
     if(level==GeometryLevel::g1 || level==GeometryLevel::g2){
-        const auto estimated=record.registration.surface.state==SurfaceState::estimated?record.registration.surface.plane:SurfacePlane{};
-        record.registration.level.mapping.surface=content_registration::SurfaceAppliedAcrossWidthOfLambda(estimated,lambda);
+        const auto estimated=f.registration.surface.state==SurfaceState::estimated?f.registration.surface.plane:SurfacePlane{};
+        const auto applied=content_registration::SurfaceAppliedAcrossWidthOfLambda(estimated,lambda);
+        CHECK(f.registration.level.mapping.surface.h0_mm==applied.h0_mm && f.registration.level.mapping.surface.slope_x==0 && f.registration.level.mapping.surface.slope_y==applied.slope_y);
     }
-    DeriveSavedFixedCompositeRegistration(record,kHash);
     const auto replaced=[&](std::string text,const std::string& from,const std::string& to){
         const auto at=text.find(from);
         Check(at!=std::string::npos && text.find(from,at+1)==std::string::npos,("one occurrence: "+from.substr(0,40)).c_str(),__LINE__);
         if(at!=std::string::npos)text.replace(at,from.size(),to);
         return text;
     };
-    auto text=replaced(o.text,"\"a0.uncalibrated-still-review.v9\"","\"a0.uncalibrated-still-review.v10\"");
-    text=replaced(text,"\"fixedCompositeRegistration\":"+FixedCompositeRegistrationJson(f,RegistrationReportFormat::v9),
-        "\"fixedCompositeRegistration\":"+FixedCompositeRegistrationJson(record,RegistrationReportFormat::v10));
-    text=replaced(text,"\"warnings\":"+RegistrationWarningsJson(f.warnings)+",\"assessment\":"+RegistrationAssessmentJson(f.assessment),
-        "\"warnings\":"+RegistrationWarningsJson(record.warnings)+",\"assessment\":"+RegistrationAssessmentJson(record.assessment));
-    WriteText(report,text);
-    try{
-        const auto read=LoadSavedStillReview(report);
-        CHECK(read.fixed_composite_registration && read.fixed_composite_registration->registration.seam_line_lambda &&
-            *read.fixed_composite_registration->registration.seam_line_lambda==lambda && read.fixed_composite_registration->registration.level.level==level);
-        if(read.fixed_composite_registration)
-            CHECK(FixedCompositeRegistrationJson(*read.fixed_composite_registration,RegistrationReportFormat::v10)==FixedCompositeRegistrationJson(record,RegistrationReportFormat::v10));
-    }catch(const std::exception& error){Check(false,("the v10 file is read: "+std::string(error.what())).c_str(),__LINE__);}
     // The same file without its surface rule, or named v9, is refused.
     const auto rule=",\"surfaceRule\":{\"rule\":\"level-through-seam-line\",\"lambda\":"+FormatRecordNumber(lambda)+"}";
     const auto loads=[&](const std::string& t){WriteText(report,t);try{(void)LoadSavedStillReview(report);}catch(const std::exception&){return false;}return true;};
-    CHECK(!loads(replaced(text,rule,"")));
-    CHECK(!loads(replaced(text,"\"a0.uncalibrated-still-review.v10\"","\"a0.uncalibrated-still-review.v9\"")));
-    CHECK(loads(text));
+    CHECK(loads(o.text));
+    CHECK(!loads(replaced(o.text,rule,"")));
+    CHECK(!loads(replaced(o.text,"\"a0.uncalibrated-still-review.v10\"","\"a0.uncalibrated-still-review.v9\"")));
 }
 
 void Refusals(const Outcome& o,const Settings& s,const Frames& frames){
@@ -251,7 +254,7 @@ void SameAsV7(const Settings& s){
 void ConfirmedThroughTheWriter(const Settings& s,const Frames& textured,const Outcome& plain){
     std::cout<<"a confirmed position through the writer\n";
     const auto& base=s.loaded.condition.base_pose;
-    CHECK(plain.text.find("\"a0.uncalibrated-still-review.v9\"")!=std::string::npos &&
+    CHECK(plain.text.find("\"a0.uncalibrated-still-review.v10\"")!=std::string::npos &&
         plain.text.find("\"confirmedPosition\":null,\"confirmedPositionCheck\":null,\"geometryLevel\":{\"level\":\"G1\"")!=std::string::npos);
     CHECK(!plain.saved.fixed_composite_registration->registration.confirmed_position && !plain.saved.fixed_composite_registration->registration.confirmed_check);
     int counter=0;
@@ -268,7 +271,7 @@ void ConfirmedThroughTheWriter(const Settings& s,const Frames& textured,const Ou
     };
     const auto registration=[](const Outcome& o)->const CaptureRegistration&{return o.saved.fixed_composite_registration->registration;};
     const content_registration::PoseParameters pose{0.1,0,0.05,0.5,0.25,0};
-    const SurfacePlane plane{0.5,0.001,0};
+    const SurfacePlane plane{0.5,0.0,0};
     // The condition's own position, and a position of another condition: recorded, not used; the JPEG is the capture without a position, byte for byte.
     {
         const auto own=run_with(textured,position(ConfirmedPositionSource::auto_start,base,{},s.loaded.file_sha256));
@@ -289,7 +292,8 @@ void ConfirmedThroughTheWriter(const Settings& s,const Frames& textured,const Ou
         CHECK(r.confirmed_check && r.confirmed_check->seam_difference_px && *r.confirmed_check->seam_difference_px>0);
         CHECK(r.confirmed_position && r.confirmed_position->mapping.pose.rx_deg==pose.rx_deg && r.confirmed_position->mapping.pose.tx_mm==pose.tx_mm && r.confirmed_position->mapping.surface.h0_mm==0.5 &&
             r.confirmed_position->source==ConfirmedPositionSource::manual && r.confirmed_position->serial==4 && r.confirmed_position->manual_entered==given.manual_entered);
-        CHECK(r.level.mapping.pose.ty_mm==pose.ty_mm && r.level.mapping.surface.slope_x==0.001 && !r.level.mapping.parallax);
+        CHECK(r.level.mapping.pose.ty_mm==pose.ty_mm && r.level.mapping.surface.h0_mm==plane.h0_mm && r.level.mapping.surface.slope_x==plane.slope_x &&
+            r.level.mapping.surface.slope_y==plane.slope_y && !r.level.mapping.parallax);
         CHECK(o.saved.jpeg_sha256!=plain.saved.jpeg_sha256);
         // The estimate on the originals is the one without a position, bit for bit (the position is not an input of it).
         CHECK(std::memcmp(&r.registration.pose,&registration(plain).registration.pose,sizeof r.registration.pose)==0 && r.registration.covariance==registration(plain).registration.covariance &&
@@ -322,6 +326,28 @@ void ConfirmedThroughTheWriter(const Settings& s,const Frames& textured,const Ou
     }
 }
 
+// The capture's entrance (report v10): a confirmed position with a slope across the width, from any source, is refused as an input error
+// (std::invalid_argument, "confirmed position: ...") before anything is created; the report v10 cannot carry one.
+void EntranceRefusesSlopedPosition(const Settings& s){
+    std::cout<<"the entrance refuses a position with a slope across the width\n";
+    const auto frames=MakeFrames(root,"flat-sloped",Flat(128),Flat(128));
+    const content_registration::PoseParameters pose{0.1,0,0.05,0.5,0.25,0};
+    int counter=0;
+    for(const auto source:{ConfirmedPositionSource::after_capture,ConfirmedPositionSource::auto_button,ConfirmedPositionSource::manual}){
+        ConfirmedPosition sloped;sloped.mapping=RegisteredMapping{pose,SurfacePlane{0.5,0.002,0},std::nullopt};sloped.source=source;sloped.serial=4;
+        sloped.condition_sha256=s.loaded.file_sha256;
+        if(source==ConfirmedPositionSource::manual){sloped.base_source=ConfirmedPositionSource::auto_start;sloped.manual_entered=HandCounts{-3,1,-1};}
+        CHECK(*ConfirmedPositionV10Fault(sloped)!=0);
+        const auto name="sloped-position-"+std::to_string(++counter);
+        auto q=RequestFor(frames,name.c_str(),s,4);q.fixed_composite_registration->confirmed_position=sloped;
+        std::string reason;
+        try{(void)WriteUncalibratedStillReview(q);}catch(const std::invalid_argument& e){reason=e.what();}catch(const std::exception& e){reason=std::string("another exception: ")+e.what();}
+        CHECK(reason.rfind("confirmed position: ",0)==0);
+        if(reason.rfind("confirmed position: ",0)!=0)std::cerr<<"  "<<reason<<'\n';
+        CHECK(!fs::exists(frames.root/name));
+    }
+}
+
 }
 
 int main(int argc,char** argv){
@@ -348,11 +374,13 @@ int main(int argc,char** argv){
         Written(turned,turned_settings,"turned");
         CHECK(turned.saved.geometry.orientation==MountOrientation::rotated_180 && turned.text.find("\"mountOrientation\":\"rotated-180\"")!=std::string::npos);
         CHECK(turned.saved.fixed_composite_registration->registration.level.level==four.saved.fixed_composite_registration->registration.level.level);
-        Tamper(four);
+        const auto flat_frames=MakeFrames(root,"flat-tamper",Flat(128),Flat(128));
+        Tamper(four,Run(RequestFor(flat_frames,"review",upright,4)));
         ReadsV10(four,upright);
         Refusals(four,upright,frames);
         SameAsV7(upright);
         ConfirmedThroughTheWriter(upright,frames,four);
+        EntranceRefusesSlopedPosition(upright);
         std::cout<<"checks="<<checks<<" failures="<<failures<<" seconds="<<Since(started)<<"\n";
         std::error_code ignored;fs::remove_all(root,ignored);
         return failures?1:0;

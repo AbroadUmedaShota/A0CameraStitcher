@@ -109,6 +109,21 @@ ex::OutputFrameDisplay DisplayFor(bool rotated_180, render::Point raw_motion, do
     d.lens_tilt_deg = tilt;
     return d;
 }
+
+// The level reason of report v10: G1 and G2 were passed over because the estimated plane could not be turned about the seam line.
+void SurfaceRuleFailedText() {
+    const std::string why = "推定した紙面の傾きが大きく、継ぎ目の線で水平にした紙面を作れなかったため";
+    ex::GeometryLevelDecision level;
+    level.level = ex::GeometryLevel::g4;
+    level.reasons = {"surface-rule-failed"};
+    CheckText(GeometryLevelText(level), "位置合わせを G4（固定の合成条件のまま）で行いました。理由: " + why, "surface rule failed, G4");
+    level.level = ex::GeometryLevel::confirmed;
+    CheckText(GeometryLevelText(level), "位置合わせを 確定した位置（ライブの位置。紙の浮きは補正しない）で行いました。理由: " + why, "surface rule failed, the position");
+    level.level = ex::GeometryLevel::g4;
+    level.reasons = {"surface-rule-failed", "seam-outside-overlap-at-level"};
+    CheckText(GeometryLevelText(level), "位置合わせを G4（固定の合成条件のまま）で行いました。理由: " + why + "、継ぎ目が重なりの外に出るため", "surface rule failed, then the position's seam");
+    CheckSentence(GeometryLevelText(level), "surface rule failed sentence");
+}
 }   // namespace
 
 int main() {
@@ -732,6 +747,7 @@ int main() {
             for (const auto& text : {ConfirmedPositionText(record)}) CheckSentence(text, "a sentence of the record");
         }
     }
+    SurfaceRuleFailedText();
 
     std::cout << checks << " checks, " << failures << " failures\n";
     return failures == 0 ? 0 : 1;

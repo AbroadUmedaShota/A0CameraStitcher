@@ -91,6 +91,8 @@ const char* ReportVersionName(RegistrationReportFormat f){
 }
 // geometryLevel.surfaceRule.rule (v10): the only rule a v10 report knows.
 constexpr std::string_view kSurfaceRuleLevelThroughSeamLine="level-through-seam-line";
+// The level reason (v10 only) when the estimated plane could not be turned about the seam line, so G1 and G2 were not candidates.
+constexpr std::string_view kSurfaceRuleFailed="surface-rule-failed";
 std::string OutputFrameJson(const std::optional<OutputFrameDisplay>& f){
     if(!f)return "null";
     return "{\"cameraMotionMm\":"+PointJson(f->camera_motion_mm)+",\"lensDirection\":"+PointJson(f->lens_direction)+",\"lensTiltDeg\":"+Num(f->lens_tilt_deg)+
@@ -699,7 +701,8 @@ SavedFixedCompositeRegistration ReadRecord(const Value& v,RegistrationReportForm
         const auto level=ParseGeometryLevel(ReadText(At(l,"level")));if(!level)Reject("level");d.level=*level;
         if(*level==GeometryLevel::confirmed && !AtLeastV9(format))Reject("level");
         d.reasons=ReadStrings(At(l,"reasons"));
-        for(const auto& reason:d.reasons)if(reason!="seam-outside-overlap-at-level" && reason!="output-uncovered-at-level")Reject("level reason");
+        for(const auto& reason:d.reasons)if(reason!="seam-outside-overlap-at-level" && reason!="output-uncovered-at-level" &&
+            !(reason==kSurfaceRuleFailed && format==RegistrationReportFormat::v10))Reject("level reason");
         const auto& a=At(l,"applied");Fields(a,{"pose","surface","parallax"});d.applied={ReadBool(At(a,"pose")),ReadBool(At(a,"surface")),ReadBool(At(a,"parallax"))};
         d.beyond_envelope_applied=ReadBool(At(l,"beyondEnvelopeApplied"));
         const auto& m=At(l,"mapping");Fields(m,{"pose","surface","parallax"});
@@ -936,18 +939,21 @@ const char* ConfirmedFault(const SavedFixedCompositeRegistration& r){
 // What a v10 record must satisfy of its surface rule against the rest of the record (the v10 writer and reader check the same; empty:
 // consistent). The lambda is set and finite; a confirmed position has no slope across the width; the G1 and G2 mappings apply the
 // estimated plane (all zero when none was estimated) turned about the seam line by the lambda, compared by value, and a plane that cannot
-// be turned cannot be the plane of G1 or G2.
+// be turned cannot be the plane of G1 or G2. The reason surface-rule-failed is there at most once, and only where the level was chosen
+// from a trusted estimate whose plane cannot be turned (never at G1 or G2).
 const char* SurfaceRuleFault(const CaptureRegistration& c){
     if(!c.seam_line_lambda)return "no surface rule";
     if(!std::isfinite(*c.seam_line_lambda))return "surface rule lambda";
     if(c.confirmed_position){if(const char* fault=ConfirmedPositionV10Fault(*c.confirmed_position);*fault)return fault;}
+    const SurfacePlane estimated=c.surface.state==SurfaceState::estimated?c.surface.plane:SurfacePlane{};
+    std::optional<SurfacePlane> applied;
+    try{applied=cr::SurfaceAppliedAcrossWidthOfLambda(estimated,*c.seam_line_lambda);}catch(const std::invalid_argument&){}
     if(LevelAppliesEstimate(c.level.level)){
-        const SurfacePlane estimated=c.surface.state==SurfaceState::estimated?c.surface.plane:SurfacePlane{};
-        SurfacePlane applied;
-        try{applied=cr::SurfaceAppliedAcrossWidthOfLambda(estimated,*c.seam_line_lambda);}
-        catch(const std::invalid_argument&){return "surface rule cannot turn the plane";}
-        if(!SamePlane(c.level.mapping.surface,applied))return "level surface against the surface rule";
+        if(!applied)return "surface rule cannot turn the plane";
+        if(!SamePlane(c.level.mapping.surface,*applied))return "level surface against the surface rule";
     }
+    const auto failed=std::count(c.level.reasons.begin(),c.level.reasons.end(),kSurfaceRuleFailed);
+    if(failed>1 || (failed==1 && (applied || !Trusted(c.registration) || LevelAppliesEstimate(c.level.level))))return "surface rule reason";
     return "";
 }
 }  // namespace
@@ -1273,6 +1279,8 @@ std::string FixedCompositeRegistrationJson(const SavedFixedCompositeRegistration
 GeometryLevelDecision SelectGeometryLevel(const GeometryLevelInput& in){
     if(!in.registration || !in.surface || !in.lines || !in.cover_check || !in.lines->apply_beyond_envelope)
         throw std::invalid_argument("geometry level needs the estimate, the surface, the lines with applyBeyondEnvelope and the cheap check");
+    if(Trusted(*in.registration) && !(in.seam_line_lambda && std::isfinite(*in.seam_line_lambda)))
+        throw std::invalid_argument("geometry level needs the seam line's finite lambda for a trusted estimate");
     const auto& l=*in.lines;const bool apply=*l.apply_beyond_envelope;const auto& e=*in.registration;
     // A confirmed position that is not the condition's own changes the candidates (ADR-0046); the condition's own keeps them as they were.
     const ConfirmedPosition* position=in.confirmed_position;
@@ -1283,26 +1291,34 @@ GeometryLevelDecision SelectGeometryLevel(const GeometryLevelInput& in){
     const bool position_row=position && !IsConditionPosition(*position,in.base_pose);
     const bool by_hand=position_row && position->source==ConfirmedPositionSource::manual;
     std::vector<std::pair<GeometryLevel,RegisteredMapping>> candidates;
-    bool estimate_beyond=false,layer_two_beyond=false;
+    bool estimate_beyond=false,layer_two_beyond=false,surface_rule_failed=false;
     if(Trusted(e)){
         const auto components=RegistrationComponentsFromBase(e.pose,in.base_pose,l.envelope);
         const bool surface=in.surface->state==SurfaceState::estimated && l.surface_envelope.has_value();
+        // The ranges are judged on the estimated plane; the mappings apply it turned about the seam line (report v10).
         const SurfacePlane plane=surface?in.surface->plane:SurfacePlane{};
         const bool surface_beyond=surface && (std::abs(plane.h0_mm)>l.surface_envelope->height_mm || in.surface->tilt_deg>l.surface_envelope->tilt_deg);
         estimate_beyond=AnyExceeded(components) || surface_beyond;
         if(!estimate_beyond || apply){
-            if(in.parallax){
-                layer_two_beyond=LayerTwoBeyond(*in.parallax,l).any;
-                auto profile=ParallaxProfileOf(*in.parallax,in.seam_column);
-                if(profile && (!layer_two_beyond || apply))candidates.push_back({GeometryLevel::g1,RegisteredMapping{e.pose,plane,std::move(profile)}});
+            // Once: a plane that cannot be turned (it turns away from camera A across the seam) passes over G1 and G2, and the capture goes on.
+            std::optional<SurfacePlane> applied;
+            try{applied=cr::SurfaceAppliedAcrossWidthOfLambda(plane,*in.seam_line_lambda);}catch(const std::invalid_argument&){surface_rule_failed=true;}
+            if(applied){
+                if(in.parallax){
+                    layer_two_beyond=LayerTwoBeyond(*in.parallax,l).any;
+                    auto profile=ParallaxProfileOf(*in.parallax,in.seam_column);
+                    if(profile && (!layer_two_beyond || apply))candidates.push_back({GeometryLevel::g1,RegisteredMapping{e.pose,*applied,std::move(profile)}});
+                }
+                candidates.push_back({GeometryLevel::g2,RegisteredMapping{e.pose,*applied,std::nullopt}});
             }
-            candidates.push_back({GeometryLevel::g2,RegisteredMapping{e.pose,plane,std::nullopt}});
         }
     }else if(in.coarse_shift && !position_row && (!ShiftBeyond(*in.coarse_shift,l) || apply)){
         auto pose=in.base_pose;pose.tx_mm+=in.coarse_shift->translation_x_mm;pose.ty_mm+=in.coarse_shift->translation_y_mm;
         candidates.push_back({GeometryLevel::g3,RegisteredMapping{pose,SurfacePlane{l.surface_envelope?in.coarse_shift->surface_height_mm:0.0,0,0},std::nullopt}});
     }
     GeometryLevelDecision d;
+    // G1 and G2 were the best candidates; a position set by hand has them only checked, so their failure is not the level's reason there.
+    if(surface_rule_failed && !by_hand)d.reasons.emplace_back(kSurfaceRuleFailed);
     const auto cover_of=[&](const RegisteredMapping& mapping){
         MappingCoverCheck check{};
         try{check=in.cover_check(mapping);}catch(const std::invalid_argument&){check={false,false};}
@@ -1591,6 +1607,14 @@ PreparedCaptureRegistration PrepareCaptureRegistration(const CaptureRegistration
         const auto calibrated=pc::MakeBaselineGeometry(*r.parameters,r.base_pose,0.0);
         out.baseline=calibrated.direction;out.baseline_px_per_mm=calibrated.k_px_per_mm;
     }
+    // The seam line's lambda (report v10): from the calibration, camera A's centre and the plane origin of the raster and the seam column,
+    // once, outside the stages. The level, M0, layer 2's baseline and the record use this one value. What cannot be made from the
+    // calibration is an input error, as the baseline above is.
+    {
+        const double lambda=cr::SeamLineLambda(cr::PoseModel(r.parameters->camera_a).Centre({}),cr::SurfaceOriginMm(r.parameters->raster,r.estimator.geometry.seam_column));
+        if(!std::isfinite(lambda))throw std::invalid_argument("capture registration: the seam line's lambda of the calibration is not finite");
+        c.seam_line_lambda=lambda;
+    }
     // 1 The pose and the paper plane. The estimator runs the coarse and the fine stages in one call, so both must be allowed; it
     // stops (time-budget, the coarse result kept) when the time left would not hold the stages after it.
     const bool fine=plan.Begin(ReviewStage::fine_and_fit);
@@ -1623,7 +1647,8 @@ PreparedCaptureRegistration PrepareCaptureRegistration(const CaptureRegistration
     if(!Trusted(c.registration) && shift.determined)
         c.coarse_shift=UniformShift{r.lines.surface_envelope?shift.surface.h0_mm:0.0,shift.pose.tx_mm-r.base_pose.tx_mm,shift.pose.ty_mm-r.base_pose.ty_mm};
     // 2 Layer 2 (S4) on the band measured once with B placed by the pose and the plane (M0); the same measurement gives the gate its
-    // anchors. 3 The fold refit (S5) is not in the build.
+    // anchors. 3 The fold refit (S5) is not in the build. `plane` is the estimated plane; M0 applies it turned about the seam line, as the
+    // G1 and G2 mappings do, and layer 2's baseline takes that plane's height.
     const SurfacePlane plane=c.surface.state==SurfaceState::estimated?c.surface.plane:SurfacePlane{};
     if(!r.lines.max_lift_mm)c.parallax=pc::UnestimatedParallax(pc::ParallaxState::disabled,"disabled");
     else if(!Trusted(c.registration))c.parallax=pc::UnestimatedParallax(pc::ParallaxState::not_applied,"pose-untrusted");
@@ -1632,7 +1657,8 @@ PreparedCaptureRegistration PrepareCaptureRegistration(const CaptureRegistration
         plan.Drop(ReviewStage::parallax);
         c.parallax=pc::UnestimatedParallax(pc::ParallaxState::not_applied,"time-budget");
     }else if(!RunStage([&]{
-        const RegisteredMapping m0{c.registration.pose,plane,std::nullopt};
+        const RegisteredMapping m0{c.registration.pose,cr::SurfaceAppliedAcrossWidthOfLambda(plane,*c.seam_line_lambda),std::nullopt};
+        out.layer_two_mapping=m0;
         const auto pair=RegisteredDocumentMappedFixedSeamInput(*r.parameters,m0,r.estimator.geometry.seam_column);
         auto request=GateRequestOf(r,out,pair,m0);
         request.band_measure_half_width_px=r.design.band_measure_half_width_px;   // the band stage only; the gate's own band stays the estimator's
@@ -1643,7 +1669,7 @@ PreparedCaptureRegistration PrepareCaptureRegistration(const CaptureRegistration
         if(!plan.Begin(ReviewStage::parallax))c.parallax=pc::UnestimatedParallax(pc::ParallaxState::not_applied,"time-budget");
         else{
             pc::ParallaxRequest q;
-            q.baseline=pc::MakeBaselineGeometry(*r.parameters,c.registration.pose,plane.h0_mm);
+            q.baseline=pc::MakeBaselineGeometry(*r.parameters,c.registration.pose,m0.surface.h0_mm);
             q.points=PointsForLayerTwo(r,pair,*out.band,q.baseline,c.point_source);
             q.rows=RowsOfOmega(*out.layout_before_layer_two,r.design.omega,r.estimator.geometry.seam_column);
             q.rows.verify_period_rows=r.design.verify_period_rows;q.rows.verify_phase=r.design.verify_phase;
@@ -1665,6 +1691,7 @@ PreparedCaptureRegistration PrepareCaptureRegistration(const CaptureRegistration
     GeometryLevelInput level;
     level.registration=&c.registration;level.surface=&c.surface;level.parallax=c.parallax.Applied()?&c.parallax:nullptr;level.coarse_shift=c.coarse_shift;
     level.base_pose=r.base_pose;level.lines=&r.lines;level.seam_column=r.estimator.geometry.seam_column;level.cover_check=r.cover_check;
+    level.seam_line_lambda=c.seam_line_lambda;
     // #437: a position given for this condition takes part in the level; one of another condition is recorded and not used. It is not an input
     // of anything above (the estimate, layer 2): p_b stays the start, the prior and the base of the ranges.
     const bool position_belongs=r.confirmed_position && !r.condition_sha256.empty() && r.confirmed_position->condition_sha256==r.condition_sha256;

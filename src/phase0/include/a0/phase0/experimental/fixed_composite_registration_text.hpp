@@ -272,6 +272,7 @@ inline HeightMm HeightInMm(const ex::RegistrationWarning& w, const RegistrationT
         std::string text;
         if (code == "seam-outside-overlap-at-level") text = "継ぎ目が重なりの外に出るため";
         else if (code == "output-uncovered-at-level") text = "出力の端にどちらのカメラも写していない所が残るため";
+        else if (code == "surface-rule-failed") text = "推定した紙面の傾きが大きく、継ぎ目の線で水平にした紙面を作れなかったため";
         if (!text.empty() && std::find(reasons.begin(), reasons.end(), text) == reasons.end()) reasons.push_back(text);
     }
     std::string text = "位置合わせを " + GeometryLevelName(level.level) + "で行いました";

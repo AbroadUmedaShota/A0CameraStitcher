@@ -287,7 +287,7 @@ int main(int argc, char** argv) {
         // report read back from the file (never from the window's own copy). The line and the report's numbers are the same strings; the sentence says whose position it is.
         {
             m2e::ConfirmedPosition given;
-            given.mapping = m2e::RegisteredMapping{m2e::content_registration::PoseParameters{0.125, -0.0625, 0.1875, 0.75, -0.375, 0.25}, m2e::SurfacePlane{1.5, 0.00390625, -0.001953125}, std::nullopt};
+            given.mapping = m2e::RegisteredMapping{m2e::content_registration::PoseParameters{0.125, -0.0625, 0.1875, 0.75, -0.375, 0.25}, m2e::SurfacePlane{1.5, 0.0, -0.001953125}, std::nullopt};
             given.source = m2e::ConfirmedPositionSource::manual;
             given.base_source = m2e::ConfirmedPositionSource::auto_button;
             given.manual_entered = m2e::HandCounts{3, 0, -1};

@@ -173,7 +173,7 @@ inline StillReviewRequest RequestFor(const Frames& f,const char* output,const Se
 // test, the same as the ones tests/still_review_registration_tests.cpp gives the writer. The hand sum is 12 px to the right, 4 px up and 0.05 degrees clockwise.
 inline ConfirmedPosition HandPosition(const Settings& s){
     ConfirmedPosition p;
-    p.mapping=RegisteredMapping{content_registration::PoseParameters{0.1,0,0.05,0.5,0.25,0},SurfacePlane{0.5,0.001,0},std::nullopt};
+    p.mapping=RegisteredMapping{content_registration::PoseParameters{0.1,0,0.05,0.5,0.25,0},SurfacePlane{0.5,0.0,0},std::nullopt};
     p.source=ConfirmedPositionSource::manual;p.serial=4;p.condition_sha256=s.loaded.file_sha256;
     p.base_source=ConfirmedPositionSource::auto_start;p.manual_entered=HandCounts{-3,1,-1};
     return p;

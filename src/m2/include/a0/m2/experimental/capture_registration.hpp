@@ -127,11 +127,16 @@ struct GeometryLevelInput {
     // #437: the window's confirmed position, when one was given for this condition (the caller leaves it null for a position of another
     // condition). It is never an input of the estimate: p_b stays the start, the prior and the base of the ranges.
     const ConfirmedPosition* confirmed_position{};
+    // The seam line's lambda of the calibration (CaptureRegistration::seam_line_lambda): the G1 and G2 mappings apply the estimated plane
+    // turned about the seam line by it. Required (and finite) when the estimate is trusted; never a default of 0, which would apply the
+    // estimated plane with its slope across the width left out.
+    std::optional<double> seam_line_lambda;
 };
 struct GeometryLevelDecision {
     GeometryLevel level{GeometryLevel::g4};
     // Why the level is below the best one that was tried, in kebab-case codes. Known: seam-outside-overlap-at-level,
-    // output-uncovered-at-level (11.18); a new code is added with its writer, reader, text and test in one commit.
+    // output-uncovered-at-level (11.18), and surface-rule-failed (report v10: the estimated plane could not be turned about the seam
+    // line, so G1 and G2 were not candidates); a new code is added with its writer, reader, text and test in one commit.
     std::vector<std::string> reasons;
     struct Applied {bool pose{},surface{},parallax{};} applied;
     bool beyond_envelope_applied{};
@@ -155,7 +160,10 @@ private:
 // out_of_envelope, with an estimate) and, when a component is beyond its range (measured from p_b), apply_beyond_envelope is
 // true; layer 2 beyond maxLiftMm likewise. G3 only when the estimate is not trusted. A candidate whose mapping fails
 // cover_check (or cannot be built: the check throws std::invalid_argument) is passed over with the reason
-// seam-outside-overlap-at-level or output-uncovered-at-level. Throws std::invalid_argument for a missing required input and
+// seam-outside-overlap-at-level or output-uncovered-at-level. The plane of G1 and G2 is the estimated plane turned about the seam
+// line (content_registration::SurfaceAppliedAcrossWidthOfLambda with seam_line_lambda; the range checks above read the estimated plane):
+// when that throws, G1 and G2 are not candidates and the reason is surface-rule-failed (not for a position set by hand, whose G1 and G2
+// are only checked). Throws std::invalid_argument for a missing required input (the lambda, when the estimate is trusted) and
 // GeometryLevelUnavailable when G4 fails the check.
 // With a confirmed position (#437, ADR-0046) that is not the condition's own position the candidates are, from the top:
 //  - set by hand (source manual): confirmed {the position}, G4. The G1/G2 candidates are only checked, for estimate_hit;
@@ -582,11 +590,16 @@ struct PreparedCaptureRegistration {
     // the gate only when the level placed B by the estimate (G1, G2); the gate takes it.
     std::optional<seam_gate::SeamMeasurement> band;
     std::optional<registration_gate::RegistrationGateLayout> layout_before_layer_two;
+    // M0: the mapping the band before layer 2 was measured with (the estimated pose and the estimated plane turned about the seam line,
+    // the plane whose height is also layer 2's baseline paper height). Empty when that stage did not make it. Not in the report.
+    std::optional<RegisteredMapping> layer_two_mapping;
 };
-// A stage that throws (the estimate with its settings; layer 2 with the mapping M0 and the band under it) is dropped with the
-// reason stage-failed and the capture goes on: the estimate gives G4 (registration.reasons estimate-failed), layer 2 gives G2 at
-// most (parallax.reasons layer-two-failed); std::bad_alloc is passed on. Throws std::invalid_argument for a programming error
-// (sizes, missing inputs), GeometryLevelUnavailable when not even G4 can be drawn, and what RenderMappedFixedSeam throws.
+// A stage that throws (the estimate with its settings; layer 2 with the mapping M0 and the band under it, or the plane M0 applies) is
+// dropped with the reason stage-failed and the capture goes on: the estimate gives G4 (registration.reasons estimate-failed), layer 2
+// gives G2 at most (parallax.reasons layer-two-failed); std::bad_alloc is passed on. The seam line's lambda (capture.seam_line_lambda)
+// is made once from the calibration, outside the stages. Throws std::invalid_argument for a programming error (sizes, missing inputs,
+// a lambda that cannot be made or is not finite), GeometryLevelUnavailable when not even G4 can be drawn, and what
+// RenderMappedFixedSeam throws.
 [[nodiscard]] PreparedCaptureRegistration PrepareCaptureRegistration(const CaptureRegistrationRequest& request);
 // The gate on Omega with prepared.mapped (entry (b) of registration_gate.hpp: Omega and, when the time allows, the band measured
 // here, then decided). Fills prepared.capture.gate and the time budget; the gate is not_run when the time does not allow it. When
