@@ -74,15 +74,20 @@ struct CameraCentre {
 // rectangle when they hold at its four corners. False for a non-finite input.
 [[nodiscard]] bool SurfaceHomographyHoldsAt(const CameraCentre& a,const CameraCentre& b,render::Point origin_mm,const SurfacePlane& surface,
     render::Point document_mm);
-// The surface that the per-capture mapping and the live mapping apply in place of the estimated one: the estimated plane
-// turned, about the seam line, until it is level across the seam. The seam line is the line where camera a's rays through the
-// seam column (the output document points with x = origin_mm.x) meet the estimated plane. The applied plane contains that line
-// and has no slope across the width, so the mapping of every row of the seam column is the one of the estimated plane up to
-// rounding; away from the seam the slope across the width is not applied.
+// The three functions below make the surface that the per-capture mapping and the live mapping apply in place of the estimated
+// one: the estimated plane turned, about the seam line, until it is level across the seam. The seam line is the line where
+// camera a's rays through the seam column (the output document points with x = origin_mm.x) meet the estimated plane. The
+// applied plane contains that line and has no slope across the width, so the mapping of every row of the seam column is the
+// one of the estimated plane up to rounding; away from the seam the slope across the width is not applied. The applied plane
+// is the one to pass to SurfaceHomography and to the mapping makers; the estimated plane is not changed by these functions.
+// Both planes have the type SurfacePlane, so the type does not tell them apart.
 //
 // The seam line's lambda, (a.x_mm - origin_mm.x) / a.height_mm, for camera A's calibrated centre a: a's ray through the seam
-// point (origin_mm.x, y) meets a paper point P with P_x - origin_mm.x = lambda P_z. Throws std::invalid_argument, as
-// SurfaceHomography does, for a centre or an origin that is not finite or a centre that is not above the table.
+// point (origin_mm.x, y) meets a paper point P with P_x - origin_mm.x = lambda P_z. origin_mm must be the origin of the
+// estimated plane, SurfaceOriginMm(raster, seam_column) of the capture's raster; another origin gives a lambda that does not
+// belong to the estimated plane and is not detected. The result is finite. Throws std::invalid_argument, as SurfaceHomography
+// does, for a centre or an origin that is not finite, a centre that is not above the table, or a lambda that is not finite
+// (a centre so low or an origin so far away that the quotient overflows).
 [[nodiscard]] double SeamLineLambda(const CameraCentre& a,render::Point origin_mm);
 // The applied plane for a seam line's lambda: with f = 1 - estimated.slope_x lambda it is (h0_mm / f, +0, slope_y / f). The
 // returned slope_x is always +0; for a slope_x of +0 or -0, f is 1 and h0_mm and slope_y are returned bit for bit. Throws

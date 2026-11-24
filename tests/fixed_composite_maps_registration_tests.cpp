@@ -631,6 +631,9 @@ void MakerRefusals() {
 }
 
 // ---- The surface applied across the width ---------------------------------------------------------------------------------------
+// The larger of two values that keeps a NaN: std::max(worst, NaN) would return worst and drop the NaN, and once worst is NaN it stays NaN.
+double LargerKeepingNan(double worst, double value) { return (std::isnan(worst) || value <= worst) ? worst : value; }
+
 // The largest distance (mm) between G(p) Pi(pi) with the estimated plane and with another plane, over every row of the output
 // column whose document x is x_mm.
 double ColumnDifference(const cr::PoseModel& model, const cr::CameraCentre& a, Point origin, const cr::PoseParameters& p,
@@ -640,12 +643,13 @@ double ColumnDifference(const cr::PoseModel& model, const cr::CameraCentre& a, P
     for (std::uint32_t y = 0; y < rows; ++y) {
         const Point X{x_mm, frame.top_mm+(y+0.5)*frame.pitch_mm};
         const Point e = Homogeneous(he, X), o = Homogeneous(ho, X);
-        worst = std::max(worst, std::hypot(e.x-o.x, e.y-o.y));
+        worst = LargerKeepingNan(worst, std::hypot(e.x-o.x, e.y-o.y));
     }
     return worst;
 }
 
-bool SamePlane(const m2x::SurfacePlane& a, const m2x::SurfacePlane& b) {
+// Compares the bits of the three coefficients, so +0 and -0 differ.
+bool SamePlaneBits(const m2x::SurfacePlane& a, const m2x::SurfacePlane& b) {
     return SameBits(a.h0_mm, b.h0_mm) && SameBits(a.slope_x, b.slope_x) && SameBits(a.slope_y, b.slope_y);
 }
 
@@ -674,12 +678,12 @@ void SurfaceAcrossWidthOver(const RigidCamera& camera_a, const RigidCamera& came
         const m2x::SurfacePlane estimated{h0, gx, gy};
         const std::string plane = rig_name + ", " + Name(estimated);
         const auto applied = cr::SurfaceAppliedAcrossWidth(estimated, ca, origin);
-        Check(SamePlane(applied, cr::SurfaceAppliedAcrossWidthOfLambda(estimated, lambda)), plane + ": the three-argument form is the lambda form bit for bit");
+        Check(SamePlaneBits(applied,cr::SurfaceAppliedAcrossWidthOfLambda(estimated, lambda)), plane + ": the three-argument form is the lambda form bit for bit");
         Check(applied.slope_x == 0 && !std::signbit(applied.slope_x), plane + ": the applied slope across the width is +0");
         for (std::size_t i = 0; i < poses.size(); ++i) {
             const std::string what = plane + ", pose " + std::to_string(i);
             const double d = ColumnDifference(model, ca, origin, poses[i], estimated, applied, frame, rows, origin.x);
-            worst = std::max(worst, d);
+            worst = LargerKeepingNan(worst, d);
             CheckNear(d, 0, 1e-9, what + ": the applied plane keeps every row of the seam column (mm)");
             if (std::abs(h0) >= 40) {
                 const double level = ColumnDifference(model, ca, origin, poses[i], estimated, {h0, 0, gy}, frame, rows, origin.x);
@@ -691,7 +695,7 @@ void SurfaceAcrossWidthOver(const RigidCamera& camera_a, const RigidCamera& came
         for (std::uint32_t y = 0; y < rows; y += 7) {
             const Point X{origin.x, frame.top_mm+(y+0.5)*frame.pitch_mm};
             const Vec3 pe = PaperPoint(centre_a, X, estimated, origin), pa = PaperPoint(centre_a, X, applied, origin);
-            paper = std::max(paper, std::hypot(pe[0]-pa[0], pe[1]-pa[1], pe[2]-pa[2]));
+            paper = LargerKeepingNan(paper, std::hypot(pe[0]-pa[0], pe[1]-pa[1], pe[2]-pa[2]));
         }
         CheckNear(paper, 0, 1e-9, plane + ": A sees the same paper points on the seam column on both planes (mm)");
         // Away from the seam the slope across the width is not applied, so the mappings differ there.
@@ -699,6 +703,28 @@ void SurfaceAcrossWidthOver(const RigidCamera& camera_a, const RigidCamera& came
             plane + ": away from the seam the applied plane is not the estimated one");
     }
     CheckNear(worst, 0, 1e-9, rig_name + ": the largest seam column difference over all planes and poses (mm)");
+
+    // Planes whose applied plane alone is exactly zero: h0 and slope_y are 0 and the slope across the width is not. The mapping of
+    // the applied plane then takes the shortcut for the zero plane, which the estimated plane does not.
+    for (const m2x::SurfacePlane& estimated : {m2x::SurfacePlane{0, -0.05, 0}, m2x::SurfacePlane{0, 0.02, 0}}) {
+        const std::string plane = rig_name + ", " + Name(estimated);
+        const auto applied = cr::SurfaceAppliedAcrossWidth(estimated, ca, origin);
+        Check(SamePlaneBits(applied, cr::SurfaceAppliedAcrossWidthOfLambda(estimated, lambda)), plane + ": the three-argument form is the lambda form bit for bit");
+        Check(SamePlaneBits(applied, m2x::SurfacePlane{0.0, 0.0, 0.0}), plane + ": the applied plane is the zero plane with +0 in every coefficient");
+        for (std::size_t i = 0; i < poses.size(); ++i) {
+            CheckNear(ColumnDifference(model, ca, origin, poses[i], estimated, applied, frame, rows, origin.x), 0, 1e-9,
+                plane + ", pose " + std::to_string(i) + ": the zero plane keeps every row of the seam column (mm)");
+        }
+        double paper = 0;
+        for (std::uint32_t y = 0; y < rows; y += 7) {
+            const Point X{origin.x, frame.top_mm+(y+0.5)*frame.pitch_mm};
+            const Vec3 pe = PaperPoint(centre_a, X, estimated, origin), pa = PaperPoint(centre_a, X, applied, origin);
+            paper = LargerKeepingNan(paper, std::hypot(pe[0]-pa[0], pe[1]-pa[1], pe[2]-pa[2]));
+        }
+        CheckNear(paper, 0, 1e-9, plane + ": A sees the same paper points on the seam column on both planes (mm)");
+        Check(ColumnDifference(model, ca, origin, poses[0], estimated, applied, frame, rows, off_seam_x) > 1e-3,
+            plane + ": away from the seam the zero plane is not the estimated one");
+    }
 
     // A slope across the width of +0 or -0 keeps h0 and slope_y bit for bit and gives a slope_x of +0.
     for (const m2x::SurfacePlane& estimated : {m2x::SurfacePlane{}, m2x::SurfacePlane{-40, 0.0, 0.02}, m2x::SurfacePlane{-40, -0.0, 0.02},
@@ -715,7 +741,9 @@ void SurfaceAcrossWidth() {
     // The rig of the other tests: A left of the seam (lambda < 0) and B higher than A.
     const Rig rig;
     SurfaceAcrossWidthOver(rig.a, rig.b, "A left of the seam", false);
-    // A right of the seam (lambda > 0) and B lower than A.
+    // A right of the seam (lambda > 0) and B lower than A. Not the layout of the product, where A is left of the seam and B right of it:
+    // here both cameras are right of the seam so that lambda is positive. The applied plane depends on A's centre and the origin
+    // only; B only sets the size of the differences between the mappings.
     SurfaceAcrossWidthOver(MakeCamera(490, 180, 700, 0.3, -0.15, 0.1), MakeCamera(640, 186, 686, -0.4, 0.2, -0.1), "A right of the seam", true);
 
     const auto origin = cr::SurfaceOriginMm(rig.raster, rig.seam_column);
@@ -731,8 +759,13 @@ void SurfaceAcrossWidth() {
     Check(Throws([&] { (void)cr::SeamLineLambda({1, nan, 500}, {0, 0}); }), "lambda: a nonfinite centre y is refused");
     Check(Throws([&] { (void)cr::SeamLineLambda({1, 0, 0}, {0, 0}); }), "lambda: a centre on the table is refused");
     Check(Throws([&] { (void)cr::SeamLineLambda({1, 0, -1}, {0, 0}); }), "lambda: a centre below the table is refused");
+    Check(Throws([&] { (void)cr::SeamLineLambda({600, 50, 1e-310}, {100, 50}); }), "lambda: a centre so low that lambda is +inf is refused");
+    Check(Throws([&] { (void)cr::SeamLineLambda({100, 50, 1e-310}, {600, 50}); }), "lambda: a centre so low that lambda is -inf is refused");
+    Check(Throws([&] { (void)cr::SeamLineLambda({1e308, 0, 1}, {-1e308, 0}); }), "lambda: an origin so far away that lambda is not finite is refused");
 
     // The lambda form. With lambda 1, f = 1 - slope_x.
+    // f = 0 is also refused through the h0 / f that is not finite, so this row alone does not tell whether f > 0 is checked: that is
+    // held by the negative f row below, and the check that f is finite by the row with the infinite f.
     Check(Throws([&] { (void)cr::SurfaceAppliedAcrossWidthOfLambda({10, 1, 0.02}, 1); }), "f = 0 is refused");
     Check(Throws([&] { (void)cr::SurfaceAppliedAcrossWidthOfLambda({10, 2, 0.02}, 1); }), "a negative f is refused");
     Check(!Throws([&] { (void)cr::SurfaceAppliedAcrossWidthOfLambda({10, 0.5, 0.02}, 1); }), "a positive f is accepted");

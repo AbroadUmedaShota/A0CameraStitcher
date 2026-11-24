@@ -117,7 +117,9 @@ bool SurfaceHomographyHoldsAt(const CameraCentre& a,const CameraCentre& b,Point 
 double SeamLineLambda(const CameraCentre& a,Point origin_mm){
     RequireCentre(a);
     Require(std::isfinite(origin_mm.x) && std::isfinite(origin_mm.y),"registration surface: the plane origin must be finite");
-    return (a.x_mm-origin_mm.x)/a.height_mm;
+    const double lambda=(a.x_mm-origin_mm.x)/a.height_mm;
+    Require(std::isfinite(lambda),"registration surface: the seam line must be finite");
+    return lambda;
 }
 
 // A's ray through the seam point X = (x0, y) meets the paper at P with P_x - x0 = lambda P_z. On the estimated plane
