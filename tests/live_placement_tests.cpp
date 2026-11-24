@@ -515,6 +515,87 @@ void HandStepBeforeTheDraw(){
     CHECK(machine.HandStep(Counts(1),kReady,toy.Fn()).outcome==LiveHandOutcome::accepted && toy.seen.back().second==Counts(5));
 }
 
+// 17b. A burst of fourteen presses that come in every phase of the drawing of the position before them: P is drawn (the screen has its table), the position
+// of a press waits to be drawn (hand_wanted), and P was replaced by it but the screen has not been drawn with it yet. The last phase is refused by the
+// machine (not drawn: a check is made against the picture that is on the screen), which is what lost a press. The caller that holds a press until the
+// screen is drawn with P and then enters the sum of what it held ends at the position of all fourteen, to the bit; the caller that starts a check at once
+// loses the presses that came in the last phase. The caller holds a press only for the position that its own check was given (the mark that RouteLiveHandPress
+// reads as hand_undrawn): P replaced by anything else is refused, and the second part of this case holds that the machine refuses it and nothing changes.
+void HandBurstAcrossTheDrawWindows(){
+    const std::vector<ex::HandCounts> presses{Counts(3),Counts(3),Counts(0,-3),Counts(-3),Counts(0,0,4),Counts(0,3),Counts(3),Counts(0,0,-4),Counts(0,-3),Counts(0,-3),Counts(-3),Counts(3),
+        Counts(0,3),Counts(0,0,-4)};
+    ex::HandCounts total{};
+    for(const auto& p:presses)total=ex::AddHandCounts(total,p);
+    // what happens between the presses: c = the worker bakes and P is replaced by the position that waits, d = the window draws with the new table
+    const std::string script="p"  "p"  "c" "p"  "d" "p" "p" "c" "p" "c" "d" "p" "c" "p" "p" "d" "p" "c" "p" "d" "p" "c" "p" "p" "c" "d";
+    struct Outcome {unsigned refused_not_drawn{0},accepted{0},held{0};ex::HandCounts held_sum{};std::optional<ex::HandCounts> entered;ex::RegisteredMapping placement;bool bases_were_the_estimate{true};};
+    const auto run=[&](bool hold){
+        Toy toy;
+        auto machine=Placed(Pose{0.3,-0.1,0.5,2.0,-1.0,0.2});
+        const auto estimate=machine.Placement();
+        Outcome out;
+        bool drawn=true;   // the screen was drawn with a table baked for P
+        bool mark=false;   // a check of the caller was accepted and the screen is not drawn with its position yet (the window's mark)
+        ex::HandCounts held{};unsigned held_presses=0;size_t next=0;
+        const auto enter=[&](const ex::HandCounts& delta){
+            const auto result=machine.HandStep(delta,LiveHandContext{true,drawn},toy.Fn());
+            if(result.outcome==LiveHandOutcome::accepted){++out.accepted;mark=true;}
+            else if(result.outcome==LiveHandOutcome::refused_not_drawn)++out.refused_not_drawn;
+        };
+        const auto flush=[&]{
+            if(held_presses && !machine.HasPending() && drawn){
+                const auto sum=held;held={};held_presses=0;
+                if(!sum.IsZero())enter(sum);
+            }
+        };
+        for(const char step:script){
+            if(step=='p' && next<presses.size()){
+                const auto& delta=presses[next++];
+                if(drawn && !machine.HasPending())mark=false;
+                if(hold && (machine.HasPending() || (!drawn && mark))){held=ex::AddHandCounts(held,delta);++held_presses;++out.held;}
+                else enter(delta);
+            }else if(step=='c'){if(machine.HasPending()){machine.Committed();drawn=false;}}
+            else if(step=='d'){drawn=true;flush();}
+        }
+        while(machine.HasPending() || held_presses || !drawn){
+            if(machine.HasPending()){machine.Committed();drawn=false;}
+            drawn=true;flush();
+        }
+        out.held_sum=held;out.entered=machine.View().hand_entered;out.placement=machine.Placement();
+        for(const auto& call:toy.seen)if(!Same(call.first,estimate))out.bases_were_the_estimate=false;
+        return std::make_pair(out,Toy::Solved(estimate,total));
+    };
+    {
+        const auto result=run(true);
+        const auto& out=result.first;
+        CHECK(out.refused_not_drawn==0 && out.held>0);
+        CHECK(out.entered && *out.entered==total);                   // every press is in the sum
+        CHECK(Same(out.placement,result.second));                    // and P is what the sum gives from the position before the first press, to the bit
+        CHECK(out.bases_were_the_estimate);                          // no press built on the result of the one before
+    }
+    {
+        const auto result=run(false);   // the caller that starts a check at once
+        const auto& out=result.first;
+        CHECK(out.refused_not_drawn>0);
+        CHECK(!out.entered || !(*out.entered==total));
+        CHECK(!Same(out.placement,result.second));
+    }
+    {   // P was replaced by something that is not a press of the caller (a shot's result): a press before the picture is drawn with it is refused, and changes nothing
+        Toy toy;
+        auto machine=Placed(Pose{0.3,-0.1,0.5,2.0,-1.0,0.2});
+        CHECK(machine.BeginCapture(true).admission==LiveCaptureAdmission::accepted);
+        const ex::RegisteredMapping jpeg{Pose{0.31,-0.12,0.52,2.25,-1.125,0.0},ex::SurfacePlane{3.5,0.0015,-0.0025},std::nullopt};
+        CHECK(machine.ApplyCapture(jpeg,"G1",kSha));
+        const auto before=machine.View();
+        const auto refused=machine.HandStep(Counts(3),LiveHandContext{true,false},toy.Fn());
+        CHECK(refused.outcome==LiveHandOutcome::refused_not_drawn && toy.seen.empty());
+        const auto after=machine.View();
+        CHECK(!after.hand_entered && !after.hand_wanted && after.serial==before.serial && Same(after.mapping,before.mapping));
+        machine.Committed();
+        CHECK(!machine.View().hand_entered);   // nothing of the press is applied later
+    }
+}
+
 // 18. A press is refused, and changes nothing, when Live is stopped, the screen was not drawn with P, a pair capture holds P, it adds nothing,
 // the sum leaves the counts' range, the check refuses it, or something changed while the check ran.
 void HandStepRefused(){
@@ -1098,6 +1179,7 @@ int main(){
         HandStepBuildsOnTheBase();
         HandSumDoesNotDependOnTheOrder();
         HandStepBeforeTheDraw();
+        HandBurstAcrossTheDrawWindows();
         HandStepRefused();
         HandStepWithdrawsTheEstimate();
         HandSumComesBackToZero();

@@ -152,8 +152,10 @@ void LoadFixedSource(){
 // one after a shot) asks for nothing and draws with the position it was left with. Without a v3 condition there is no runtime, and C is
 // drawn as before. A setup failure leaves no runtime: C is drawn with the fixed mapping and says so.
 void PrepareLiveRuntime(){
-    DrainLiveHand(); // a check of a hand step that is still running commits to the machine that the next session carries over
-    SetLiveNotice({}); // what a press or a capture of the session before said is not about this one (the capture's result is on its own row)
+    // A check of a hand step that is still running commits to the machine that the next session carries over, so it is waited for. What a press or a
+    // capture of the session before said is not about this one (the capture's result is on its own row), but presses that were dropped here are said.
+    const unsigned dropped_at_begin=DrainLiveHand();
+    SetLiveNotice(dropped_at_begin?LiveHandQueueLostText(dropped_at_begin):std::string());
     if(live_runtime)live_placement_carry=live_runtime->PlacementMachine();
     live_runtime.reset();
     struct LayoutRefresh {~LayoutRefresh(){RefreshHandLayout();}} layout_refresh; // the hand buttons come and go with the runtime
@@ -189,13 +191,33 @@ void PrepareLiveRuntime(){
 // The button "自動調整" (the estimate button, named so with a condition v3; #437): one estimate is asked for, and the state row says so. False when there is no live
 // estimate to ask for (no runtime, or the condition has no registration.live): the request is ignored like any other position request.
 // A request while an estimate is asked for or running is taken as given: the state row already says "合成中".
-bool AskLiveEstimate(){
+// `drawn`: the plan that the picture on the screen was drawn with. The window procedure calls this under merged.mutex and gives merged.drawn_plan, so nothing
+// here may take that lock (DrawnPlanSnapshot, UpdateHandUndrawnMark): the window's mark is read as it is, with the plan that is given.
+bool AskLiveEstimate(const std::shared_ptr<const FixedPreviewPlan>& drawn){
     if(!live_runtime || !live_runtime->Enabled())return false;
+    // While a check of a hand press runs, presses wait for it, or the position that a check of the window was given is not on the screen yet (it waits to be
+    // drawn, or it is P and the picture was not drawn with it), the button is not accepted: the presses go in first (all of them), and the button is pressed
+    // again once the position has stopped moving. Nothing is dropped, and no estimate is asked for. The sentence stays until the hand has stopped moving
+    // (LiveEstimateRefusalEndsWhenStill); the button pressed again meanwhile is only logged, so that what is said after it is kept. The window's mark may come
+    // down a tick late; it holds the button only while the picture is not drawn with P. A position that cannot be drawn (its bake failed) does not hold the
+    // button: the sentence of that failure asks for it. (A capture that holds P says its own sentence.)
+    {
+        const auto status=live_runtime->Status();
+        const bool awaiting_draw=(status.placement.hand_wanted.has_value() || (hand_undrawn && !live_runtime->DrawnWithPlacement(drawn))) && !status.bake_failed;
+        if((LiveHandBusy() || hand_queued_presses || awaiting_draw) && !status.placement.capturing){
+            LiveHandLog("C ui_live_estimate_requested=1 result=hand-busy presses_waiting="+std::to_string(hand_queued_presses)+" awaiting_draw="+(awaiting_draw?"1":"0")+" quality_accepted=0");
+            if(live_notice!=LiveEstimateRefusedByHandText())SetLiveNotice(LiveEstimateRefusedByHandText());
+            return true;
+        }
+    }
     const auto result=live_runtime->RequestEstimate(LiveEstimateAsk::button);
-    Log(std::string("C ui_live_estimate_requested=1 result=")+(result==LiveAskResult::accepted?"accepted":result==LiveAskResult::capturing?"capturing":"busy")+" quality_accepted=0");
+    LiveHandLog(std::string("C ui_live_estimate_requested=1 result=")+(result==LiveAskResult::accepted?"accepted":result==LiveAskResult::capturing?"capturing":"busy")+" quality_accepted=0");
     // Empty when the estimate is asked for. A press while one is asked for or running says nothing more: the state row says so already, and a
     // notice would stay after the estimate ended.
     if(result!=LiveAskResult::busy)SetLiveNotice(LiveEstimateRefusedText(result));
+    // The estimate is the position from now on: a press that comes after it is not waited for on the picture of a position that it replaces. (The mark is
+    // up here only when the picture is drawn with P already, or when the bake of P failed.)
+    if(result==LiveAskResult::accepted)hand_undrawn=false;
     return true;
 }
 // A shot that ended with a JPEG made with the registered composite (#437 stage 1): the live C is drawn from now on with the mapping that the
@@ -822,7 +844,7 @@ LiveRowsTexts CurrentLiveRowsTexts(const std::shared_ptr<const FixedPreviewPlan>
     std::string state,orientation;
     if(live_runtime){
         const auto status=live_runtime->Status();orientation=status.orientation_line;
-        if(LiveHandBusy())state=LiveHandBusyText(hand_queued_presses);
+        if(LiveHandBusy())state=hand_future.valid()?LiveHandBusyText(hand_queued_presses):LiveHandWaitingText(hand_queued_presses);
         else{
             state=status.state_text;
             // After a restart (or a shot) the screen is drawn with the condition's table until the table of P is baked: say so, so that the row does not
@@ -961,6 +983,11 @@ std::array<std::uint64_t,6> Paint(HDC dc,RECT client){
     }else{const auto text=stopping?L"C: ライブビュー停止中です":merged.error.empty()?L"C: 両方の新しいフレームを待っています":merged.error.c_str();TextOutW(dc,12,picture_top+5,text,lstrlenW(text));}
     return drawn;
 }
+// A row of a capture that is asked for or running, with the presses that it does not take in (said on the line after it).
+std::wstring WithCaptureUnenteredAsk(std::wstring row){
+    if(capture_unentered_presses)row+=L"\n"+WidenUtf8(LiveCaptureUnenteredAskText(capture_unentered_presses));
+    return row;
+}
 void RequestCapture(int index){
     if(camera_end_restart_smoke)return; // This explicit lifecycle test never exposes.
     if(settings_future.valid())return; // No exposure while the settings are being read.
@@ -978,11 +1005,13 @@ void RequestCapture(int index){
         // only when the screen is drawn with it. A screen that is not drawn with it yet starts nothing and says what to do. A condition that C cannot be
         // drawn with (no picture) has no position to give.
         pending_confirmed.reset();
+        capture_unentered_presses=0;capture_unentered_one_camera=false;   // nothing of a capture before is carried (a pair with no picture of C has none of its own)
         if(!no_picture_by_condition && !BeginLiveCapture(merged.drawn_plan))return;
     }
     capture_stop_requested=false;review_visible=false;capture_deadline=Clock::now()+std::chrono::seconds(180);
-    capture_pending=index;capture_status=index==0?L"Aを撮影する準備中：両Liveを停止しています…":L"Bを撮影する準備中：両Liveを停止しています…";
-    if(index==2)capture_status=L"両台撮影・確認用JPEG Mergeの準備中：両Liveを停止しています…";
+    if(index!=2)DropWaitingHandPressesForOneCamera();
+    capture_pending=index;
+    capture_status=WithCaptureUnenteredAsk(index==0?L"Aを撮影する準備中：両Liveを停止しています…":index==1?L"Bを撮影する準備中：両Liveを停止しています…":L"両台撮影・確認用JPEG Mergeの準備中：両Liveを停止しています…");
     stopping=true;ClearMerge();Log("ui_capture_requested="+std::to_string(index)+" both_live_stop_required=1");
 }
 // Seams that only --pair-v3-ui-smoke replaces (a synthetic pair, a temporary settings folder and review root). The defaults are
@@ -1129,7 +1158,7 @@ void ApplyOrEndCapture(const CaptureUiOutcome& result){
 // pair is given the position that C was drawn with when it was asked for (pending_confirmed, taken by BeginLiveCapture); one camera's capture and a
 // calibration's pair are given none, and the hold of the position ends for them here. The result is taken by AdvanceCapture (ApplyOrEndCapture).
 void StartCaptureWorker(int index){
-    capture_status=index==2?L"AとBのシャッターを続けて1回ずつ切り、原画像と確認用Merge JPEGを保存しています…":index==0?L"Aを1回撮影してPCへ保存しています…":L"Bを1回撮影してPCへ保存しています…";
+    capture_status=WithCaptureUnenteredAsk(index==2?L"AとBのシャッターを続けて1回ずつ切り、原画像と確認用Merge JPEGを保存しています…":index==0?L"Aを1回撮影してPCへ保存しています…":L"Bを1回撮影してPCへ保存しています…");
 #if defined(A0_ENABLE_WPD_RECALIBRATION)
     const auto calibration_record=RecalibrationCaptureFor(index); // non-null: this pair is a calibration's (the originals only)
 #endif
@@ -1154,6 +1183,17 @@ void StartCaptureWorker(int index){
         catch(const std::exception& error){CaptureUiOutcome result;result.capture.error=ErrorSummary(error);return result;}
     });
 }
+// The presses that the capture did not take in (they were not in the position yet when it was asked for, or Live's stop dropped them meanwhile) go in front
+// of the row of its result, so that a long result cannot cut them off. The state row is not drawn while Live is stopped, and this row is.
+void PutCaptureUnenteredFirst(){
+    capture_unentered_presses+=live_stop_lost_presses;live_stop_lost_presses=0;
+    if(capture_unentered_presses)capture_status=WidenUtf8(LiveCaptureUnenteredResultText(capture_unentered_presses,!capture_unentered_one_camera))+L"\n"+capture_status;
+    capture_unentered_presses=0;capture_unentered_one_camera=false;
+}
+// The Lives did not stop safely: no shot, and the row says so.
+void EndCaptureNotSafelyStopped(){
+    capture_status=L"Liveの安全な終了を確認できません。撮影せず停止しました。";PutCaptureUnenteredFirst();EndLiveCaptureHold();
+}
 void AdvanceCapture(HWND hwnd){
     AdvanceLiveHand(); // the result of the check of a hand press, when it is in
     if(settings_future.valid() && settings_future.wait_for(std::chrono::seconds(0))==std::future_status::ready){
@@ -1163,13 +1203,13 @@ void AdvanceCapture(HWND hwnd){
         const bool safe=FinishPreview();
 #if defined(A0_ENABLE_WPD_SETTINGS_WRITE)
         // The start of the capture worker looks at the write again: a write or reread, or a held capture, drops it.
-        if(capture_pending && !closing && !SettingsWriteAdmitsCapture()){capture_pending.reset();EndLiveCaptureHold();}
+        if(capture_pending && !closing && !SettingsWriteAdmitsCapture()){capture_pending.reset();capture_unentered_presses=0;capture_unentered_one_camera=false;EndLiveCaptureHold();}
         else
 #endif
         if(capture_pending && !closing){
             const int index=*capture_pending;capture_pending.reset();
             if(safe)StartCaptureWorker(index);
-            else{capture_status=L"Liveの安全な終了を確認できません。撮影せず停止しました。";EndLiveCaptureHold();}
+            else EndCaptureNotSafelyStopped();
         }else if(!closing){
             manual_restart_waiting=false;
             capture_status.clear();
@@ -1179,6 +1219,7 @@ void AdvanceCapture(HWND hwnd){
             }
             if(capture_status.empty())capture_status=L"ライブビューを停止しました。";
             capture_status+=CanRestartPreview()?L" 両台の切断を確認済み。「ライブ再開」で再開できます。":L" 安全な切断を確認できないため再開を無効にしています。";
+            AppendStopLostPresses(live_stop_lost_presses);live_stop_lost_presses=0;   // presses that the stop dropped before this row was written
         }
     }
     if(capture_future.valid() && capture_future.wait_for(std::chrono::seconds(0))==std::future_status::ready){
@@ -1192,6 +1233,7 @@ void AdvanceCapture(HWND hwnd){
 #if defined(A0_ENABLE_WPD_RECALIBRATION)
             capture_status+=RecalibrationNudgeLine(result); // the cameras seem to have moved a lot: say which button to press (#434)
 #endif
+            PutCaptureUnenteredFirst();
             if(result.review){
                 ++pair_reviews;review_path=result.review->jpeg;const auto& thumbnail=result.review->thumbnail;
                 if(pair_cycle_smoke){pair_cycle_reports.push_back(result.review->report);std::wcout<<L"pair_cycle_report="<<result.review->report.wstring()<<std::endl;}
@@ -1222,6 +1264,7 @@ void AdvanceCapture(HWND hwnd){
             if(result.late_object_status.empty() && result.capture.late_object_event)result.late_object_status=DescribeStillSingleLateObject();
             // With a leftover image the one step is to tell the person in charge, so the focus or general sentence above is replaced, not stacked.
             if(!result.late_object_status.empty())capture_status=result.preflight_status.empty()?result.late_object_status:capture_status+L"\n"+result.late_object_status;
+            PutCaptureUnenteredFirst();
             Log("ui_capture_failed no_retry=1");
         }
     }
@@ -1517,6 +1560,9 @@ int RunPairV3UiSmoke(const std::filesystem::path& fixtures){
                         check(began_in_flight && hand_checks_running==1 && LiveHandBusy() && pending_confirmed && pending_confirmed->serial==asked.serial,
                             "in flight: the pair is taken while the check of a press runs");
                         const auto in_flight=through_worker();
+                        check(capture_status==std::wstring(L"AとBのシャッターを続けて1回ずつ切り、原画像と確認用Merge JPEGを保存しています…\n")+WidenUtf8(LiveCaptureUnenteredAskText(1)),
+                            "in flight: the row of the running capture says the press that it does not take in");
+                        capture_unentered_presses=0;
                         open=true;
                         DrainLiveHand();
                         check(in_flight.review && in_flight.review->fixed_composite_registration,"in flight: a composite is made");
@@ -1823,7 +1869,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd,UINT message,WPARAM w,LPARAM l){
             review_visible=false;
             // A fixed composite condition decides C's position (#401): no request moves it, and nothing is estimated.
             if(FixedConditionPresent()){
-                if(id==304 && AskLiveEstimate()){merged.position_refusal.clear();Log("C ui_auto_alignment=1 live_registered=1");return 0;} // #437: one estimate for the registered C
+                if(id==304 && AskLiveEstimate(merged.drawn_plan)){merged.position_refusal.clear();Log("C ui_auto_alignment=1 live_registered=1");return 0;} // #437: one estimate for the registered C
                 merged.position_refusal=FixedPreviewPositionRefusal();
                 Log("C ui_position_request_ignored=1 id="+std::to_string(id)+" fixed_composite_condition=1");return 0;
             }
@@ -2699,6 +2745,614 @@ int RunFixedCUiSmoke(){
     CheckButtonLayouts([&](bool ok){check(ok);}); // #437: the buttons at the width of a narrow screen and at a wide one
     Log("fixed_c_ui_checks="+std::to_string(checks)+" failures="+std::to_string(failures)+" camera_operations=0");return failures?1:0;
 }
+// 6h. Hand presses across the drawing of the position before them (#437), through the window's own functions (PressLiveHand, AdvanceLiveHand, AskLiveEstimate,
+//     BeginLiveCapture, PrepareLiveRuntime) with the real check of a condition and no worker: the plans are set by hand, so that the answers do not depend on
+//     a worker's timing. In a section of its own so that other work on this file does not meet it.
+//     - A press that comes while the position that a check of the window was given is not on the screen yet waits, and the presses of a burst (in every
+//       phase: P drawn / a position waits to be drawn / P replaced and not drawn yet / a check runs) end at the position of their sum, to the bit.
+//     - A picture that is not drawn with P for another reason (a shot's result) is not waited for: the press is refused with its sentence and never applied later.
+//     - The button of the estimate is not accepted while a check runs, presses wait, or an accepted position is not on the screen yet (it waits to be drawn,
+//       or it is P and the picture was not drawn with it), also through the window's own button; nothing is dropped, and the sentence that says so stays
+//       until the hand has stopped moving.
+//     - What waits is dropped, with a sentence and a log line, and never applied later, when Live stops, a pair or one camera is taken, a session begins or
+//       the condition changes; a capture says how many presses it did not take in, in the rows of the capture, and Live's stop in the row of the stop.
+void RunLiveCHandPressSmoke(const std::function<void(bool)>& check,
+    const std::function<a0::m2::experimental::LoadedFixedCompositeConditionV3(bool,const std::string&)>& condition,
+    const std::function<void()>& refresh,
+    const std::function<a0::m2::experimental::StillReviewResult(a0::m2::experimental::RegisteredMapping,a0::m2::experimental::GeometryLevel,const std::string&,bool)>& shot,
+    const a0::m2::experimental::RegisteredMapping& jpeg_mapping,
+    const std::function<void(int)>& press_button){   // a press of a button of the window (WM_COMMAND)
+    namespace m2=a0::m2::experimental;
+    namespace render=a0::m2::render;
+    using namespace std::chrono_literals;
+    live_hand_check_override=nullptr;   // the real check of the condition
+    const std::string sha(64,'1');
+    const auto real=MakeWindowHandChecker(condition(true,sha));
+    const LiveFrameSource no_frames{[]{return false;},nullptr};
+    const LiveEstimator never=[&](const LiveJob&,const render::BgrImage&,const render::BgrImage&){check(false);return LiveEstimateOutcome{};};
+    std::vector<std::string> lines;   // the lines of the hand buttons since the last begin()
+    live_hand_log_tap=&lines;
+    const auto logged=[&](const std::string& part){for(const auto& line:lines)if(line.find(part)!=std::string::npos)return true;return false;};
+    const auto begin=[&]{
+        live_placement_carry={};live_runtime.reset();
+        fixed_source={};fixed_source.loaded_v3=condition(true,sha);
+        PrepareLiveRuntime();
+        const auto plan0=PlanFixedPreviewV3(*fixed_source.loaded_v3,mount_orientation,400,267);
+        check(live_runtime && !plan0.skip && plan0.live);
+        live_runtime->PublishBase(plan0);
+        (void)live_runtime->RunPass(no_frames,never);
+        {std::lock_guard lock(merged.mutex);
+            merged.decided=true;merged.mode=PreviewCMode::fixed_composite;merged.fixed_plan=plan0;merged.drawn_plan=std::make_shared<const FixedPreviewPlan>(plan0);
+            merged.pixels=Pixels{4,4,std::vector<unsigned char>(64,90)};merged.source_a=merged.source_b=Clock::now();merged.rendered_revision=merged.revision;}
+        stopping=false;hand_fine=false;
+        hand_checks_running=0;hand_checks_total=0;hand_checks_peak=0;
+        lines.clear();
+        check(live_runtime->DrawnWithPlacement(DrawnPlanSnapshot()));
+    };
+    const auto bake=[&]{(void)live_runtime->RunPass(no_frames,never);};   // the worker: the position that waits is baked and P is replaced by it
+    const auto draw=[&]{   // the window draws with the plan in force
+        const auto plan=live_runtime->CurrentPlan();
+        if(plan){std::lock_guard lock(merged.mutex);merged.fixed_plan=*plan;merged.drawn_plan=plan;}
+    };
+    const auto in_flight=[&]{for(int i=0;i<3000 && hand_future.valid();++i){std::this_thread::sleep_for(2ms);AdvanceLiveHand();}return !hand_future.valid();};
+    // Settled: nothing runs or waits, P is drawn, and the window has seen it (its mark of a position on its way to the screen comes down at its tick, which may
+    // be the one after the tick that took the check's result: the worker may bake and draw before the window takes the result).
+    const auto settled=[&]{
+        for(int i=0;i<3000;++i){
+            AdvanceLiveHand();
+            if(!LiveHandBusy() && !live_runtime->Status().placement.hand_wanted && live_runtime->DrawnWithPlacement(DrawnPlanSnapshot()) && !hand_undrawn)return true;
+            bake();draw();std::this_thread::sleep_for(2ms);
+        }
+        return false;
+    };
+    const auto quiet=[&](int ticks){for(int i=0;i<ticks;++i){AdvanceLiveHand();bake();draw();}};   // time passes: nothing may start
+    const auto hand_entered=[&]{return live_runtime->Status().placement.hand_entered;};
+    const auto count_of=[](LiveHandButton button,bool fine){return LiveHandCountsOf(button,fine);};
+    const auto sum_of=[&](std::initializer_list<LiveHandButton> buttons){m2::HandCounts sum{};for(const auto button:buttons)sum=m2::AddHandCounts(sum,count_of(button,false));return sum;};
+    // A check that is held until the test lets it go (`open`): what the window does while a check runs is seen in its state, not in a time.
+    std::atomic<bool> open{false};
+    const auto hold_checks=[&]{open=false;live_hand_check_override=[real,&open](const m2::RegisteredMapping& base,const m2::HandCounts& total){
+        while(!open.load())std::this_thread::sleep_for(2ms);return real(base,total);};};
+    const auto wait_running=[&]{for(int i=0;i<1000 && hand_checks_running==0;++i)std::this_thread::sleep_for(2ms);return hand_checks_running==1;};
+    LiveHandResult not_drawn;not_drawn.outcome=LiveHandOutcome::refused_not_drawn;
+    const std::string not_drawn_text=LiveHandRefusalText(not_drawn);
+
+    // A burst of fourteen presses (a press after P was replaced and before the picture is drawn with it, and the rest): p press, k wait for the check that runs,
+    // b the worker bakes, w the window draws, a the window's tick.
+    {
+        struct Press {LiveHandButton button;bool fine;};
+        const std::vector<Press> presses{{LiveHandButton::right,false},{LiveHandButton::right,false},{LiveHandButton::up,false},{LiveHandButton::left,false},
+            {LiveHandButton::turn_clockwise,false},{LiveHandButton::down,true},{LiveHandButton::right,true},{LiveHandButton::turn_counter_clockwise,true},
+            {LiveHandButton::up,true},{LiveHandButton::up,false},{LiveHandButton::left,true},{LiveHandButton::right,false},{LiveHandButton::down,false},
+            {LiveHandButton::turn_counter_clockwise,false}};
+        m2::HandCounts total{};
+        for(const auto& press:presses)total=m2::AddHandCounts(total,count_of(press.button,press.fine));
+        begin();
+        size_t next=0;bool never_said_not_drawn=true,order_seen=false;
+        const std::string script="p k p b p p a w a p p k p b p w a k p p b a w a k p b p w a k p p";
+        for(const char step:script){
+            switch(step){
+            case 'p':
+                if(next<presses.size()){hand_fine=presses[next].fine;PressLiveHand(presses[next].button);++next;}
+                break;
+            case 'k':check(in_flight());break;
+            case 'b':bake();break;
+            case 'w':draw();break;
+            case 'a':AdvanceLiveHand();break;
+            }
+            if(live_notice.find("描いている途中")!=std::string::npos)never_said_not_drawn=false;
+            if(step=='p' && hand_queued_presses>0)order_seen=true;
+        }
+        check(next==presses.size());
+        check(settled());
+        const auto status=live_runtime->Status();
+        check(order_seen && never_said_not_drawn && live_notice.find("反映していません")==std::string::npos);
+        check(status.placement.counters.hand_refused==0 && hand_checks_peak==1 && hand_checks_total>=2 && hand_checks_total<14);   // the sums were checked together
+        check(!LiveHandBusy() && hand_queued_presses==0 && hand_queued.IsZero() && !hand_run_waits && !hand_undrawn);
+        check(status.placement.source==LivePlacementSource::manual && status.placement.hand_entered && *status.placement.hand_entered==total);
+        if(status.placement.hand_base){
+            const auto direct=real(*status.placement.hand_base,total);
+            check(direct.status==LiveHandCheck::Status::accepted && LivePlacementSameMapping(direct.mapping,status.placement.mapping));   // the sum solved once, to the bit
+        }else check(false);
+        check(live_runtime->DrawnWithPlacement(DrawnPlanSnapshot()));
+        // the lines that say how the presses were taken: a press that waited, the run that checked their sum
+        check(logged("route=queue") && logged("awaiting_draw=1") && logged("route=start") && logged("C ui_live_hand_queue_run presses=") && !logged("ui_live_hand_presses_dropped"));
+    }
+
+    // The state that a press was made in, a check that was accepted, and then the worker bakes it and nothing waits: a press that comes now is the one that used
+    // to be refused as "not drawn" and lost. It waits, and is entered with the first one once the screen is drawn.
+    begin();
+    PressLiveHand(LiveHandButton::right);
+    check(in_flight());
+    check(hand_undrawn && live_runtime->Status().placement.hand_wanted.has_value());
+    bake();   // P is replaced by the press; the picture is not drawn with it yet; no check runs and nothing waits
+    check(!live_runtime->DrawnWithPlacement(DrawnPlanSnapshot()) && !live_runtime->Status().placement.hand_wanted && !LiveHandBusy() && hand_undrawn);
+    PressLiveHand(LiveHandButton::up);
+    check(hand_queued_presses==1 && hand_run_waits && !hand_future.valid() && logged("route=queue") && logged("awaiting_draw=1"));
+    check(live_notice.find("描いている途中")==std::string::npos);
+    {std::lock_guard lock(merged.mutex);
+        const auto texts=CurrentLiveRowsTexts(merged.drawn_plan);
+        check(texts.state.find(L"押したことを受け付けました。前の位置を描き終えてから、まとめて入れます（1 回分）")!=std::wstring::npos &&
+            texts.state.find(L"位置を確かめています")==std::wstring::npos);}   // no check runs: the row does not say that one does
+    draw();
+    check(settled());
+    check(!hand_undrawn && hand_entered() && *hand_entered()==sum_of({LiveHandButton::right,LiveHandButton::up}) && live_runtime->Status().placement.counters.hand_refused==0);
+
+    // A press that began against a picture that was not drawn with P (the route would have made it wait) is refused with its sentence, and is not entered again.
+    begin();
+    PressLiveHand(LiveHandButton::right);
+    check(in_flight());
+    bake();
+    check(!live_runtime->DrawnWithPlacement(DrawnPlanSnapshot()));
+    StartLiveHand(count_of(LiveHandButton::up,false));
+    check(in_flight());
+    check(hand_queued_presses==0 && !hand_run_waits && live_notice==not_drawn_text && live_runtime->Status().placement.counters.hand_refused==1 && !logged("ui_live_hand_overtaken"));
+    check(settled());
+    check(hand_entered() && *hand_entered()==count_of(LiveHandButton::right,false));   // the refused press was not entered
+    // the rule that decides it, with the one case that is entered again: the same P, with a picture that was drawn with it
+    {
+        LiveHandRetryContext retry;retry.outcome=LiveHandOutcome::refused_not_drawn;retry.began_drawn=true;retry.serial_at_begin=4;retry.serial_now=4;
+        check(LiveHandCheckIsEnteredAgain(retry));
+    }
+
+    // A check that was overtaken while it ran (the machine moved) is entered again with what waits, once the screen is drawn.
+    hold_checks();
+    begin();
+    PressLiveHand(LiveHandButton::right);
+    check(wait_running() && hand_future.valid());
+    (void)live_runtime->BeginCapture(DrawnPlanSnapshot());live_runtime->EndCapture();   // moves the machine's revision while the check runs
+    open=true;
+    check(in_flight());
+    check(logged("C ui_live_hand_overtaken result=stale presses=1 retry=1") && hand_run_waits && hand_queued_presses==1);
+    check(settled());
+    check(hand_entered() && *hand_entered()==count_of(LiveHandButton::right,false) && hand_checks_total==2 && logged("C ui_live_hand_queue_run presses=1"));
+    live_hand_check_override=nullptr;
+
+    // A session begins while a check runs and the check comes back overtaken: its amount is put back among the ones that wait, and it is dropped with them (said,
+    // and logged), not carried into the session that begins. The check is waited for first, and what waits is dropped after it.
+    hold_checks();
+    begin();
+    PressLiveHand(LiveHandButton::right);
+    check(wait_running());
+    (void)live_runtime->BeginCapture(DrawnPlanSnapshot());live_runtime->EndCapture();
+    open=true;
+    PrepareLiveRuntime();
+    check(hand_queued_presses==0 && hand_queued.IsZero() && !hand_run_waits && !hand_future.valid() && live_notice==LiveHandQueueLostText(1));
+    check(logged("C ui_live_hand_overtaken result=stale presses=1 retry=1") && logged("C ui_live_hand_presses_dropped reason=session-begin presses=1"));
+    quiet(10);
+    check(hand_checks_total==1 && !hand_entered() && !LiveHandBusy());
+    live_hand_check_override=nullptr;
+
+    // A pair's result is applied and a press comes before the picture is drawn with the JPEG's position: it is not waited for (nothing of a hand press is on its
+    // way to the screen), so it is refused with its sentence, does not wait, and is never applied on top of the JPEG's position later.
+    begin();
+    check(BeginLiveCapture(DrawnPlanSnapshot()));
+    ApplyCaptureToLivePlacement(shot(jpeg_mapping,m2::GeometryLevel::g2,sha,false));
+    check(!live_runtime->DrawnWithPlacement(DrawnPlanSnapshot()) && !hand_undrawn && !live_runtime->Status().placement.hand_wanted);
+    PressLiveHand(LiveHandButton::right);
+    check(in_flight());
+    check(hand_queued_presses==0 && !hand_run_waits && live_notice==not_drawn_text && logged("route=start") && !logged("route=queue") && !logged("ui_live_hand_overtaken"));
+    check(live_runtime->Status().placement.counters.hand_refused==1);
+    bake();draw();
+    quiet(30);
+    check(!hand_entered() && hand_checks_total==0 && hand_queued_presses==0 && live_notice.empty() && live_runtime->Status().placement.source==LivePlacementSource::after_capture);
+
+    // The button of the estimate while a check runs: it is not accepted and says why; the presses wait on and all of them go in; no estimate was asked for.
+    hold_checks();
+    begin();
+    PressLiveHand(LiveHandButton::right);
+    check(wait_running());
+    PressLiveHand(LiveHandButton::up);PressLiveHand(LiveHandButton::turn_clockwise);
+    check(hand_future.valid() && hand_queued_presses==2);
+    {
+        const auto asked=live_runtime->Status().placement.counters.asked;
+        check(AskLiveEstimate(DrawnPlanSnapshot()));
+        check(live_notice==LiveEstimateRefusedByHandText() && live_notice=="手で動かしている途中です。動き終わってから押してください");
+        check(hand_future.valid() && hand_queued_presses==2 && hand_run_waits==false && live_runtime->Status().placement.counters.asked==asked);
+        check(logged("C ui_live_estimate_requested=1 result=hand-busy presses_waiting=2"));
+    }
+    open=true;
+    check(settled());
+    check(hand_entered() && *hand_entered()==sum_of({LiveHandButton::right,LiveHandButton::up,LiveHandButton::turn_clockwise}) && hand_checks_total==2 && !logged("ui_live_hand_presses_dropped"));
+    live_hand_check_override=nullptr;
+    // ... and with no check running, only the run that waits for the screen
+    begin();
+    PressLiveHand(LiveHandButton::right);
+    check(in_flight());
+    bake();
+    PressLiveHand(LiveHandButton::up);PressLiveHand(LiveHandButton::turn_clockwise);
+    check(hand_queued_presses==2 && hand_run_waits && !hand_future.valid() && hand_checks_total==1 && live_notice==LiveHandWithdrewEstimateText());
+    {
+        const auto asked=live_runtime->Status().placement.counters.asked;
+        check(AskLiveEstimate(DrawnPlanSnapshot()));
+        check(live_notice==LiveEstimateRefusedByHandText() && hand_queued_presses==2 && hand_run_waits && live_runtime->Status().placement.counters.asked==asked);
+    }
+    draw();
+    check(settled());
+    check(hand_checks_total==2 && hand_entered() && *hand_entered()==sum_of({LiveHandButton::right,LiveHandButton::up,LiveHandButton::turn_clockwise}));
+    check(live_runtime->Status().placement.activity==LivePlacementActivity::idle);
+    // once the position has stopped moving the button is accepted, and a press after it wins over the estimate, as before
+    check(AskLiveEstimate(DrawnPlanSnapshot()) && live_notice.empty() && live_runtime->Status().placement.activity==LivePlacementActivity::requested && !hand_undrawn);
+    PressLiveHand(LiveHandButton::down);
+    check(settled() && hand_checks_total==3 && live_runtime->Status().placement.activity==LivePlacementActivity::idle);
+    check(hand_entered() && *hand_entered()==sum_of({LiveHandButton::right,LiveHandButton::up,LiveHandButton::turn_clockwise,LiveHandButton::down}));
+
+    // The refusal of the button stays until the hand has stopped moving: the result of the check that ran is taken, its position waits to be drawn, it is baked,
+    // and only once the screen is drawn with it does the sentence go. Then the button is accepted.
+    hold_checks();
+    begin();
+    open=true;PressLiveHand(LiveHandButton::right);check(settled());open=false;   // this press withdraws the estimate of the session's start: nothing is asked for now
+    check(live_runtime->Status().placement.activity==LivePlacementActivity::idle);
+    {
+        const auto asked=live_runtime->Status().placement.counters.asked;
+        PressLiveHand(LiveHandButton::up);
+        check(wait_running() && hand_queued_presses==0);
+        check(AskLiveEstimate(DrawnPlanSnapshot()) && live_notice==LiveEstimateRefusedByHandText());
+        open=true;
+        for(int i=0;i<3000 && hand_future.wait_for(0ms)!=std::future_status::ready;++i)std::this_thread::sleep_for(1ms);
+        AdvanceLiveHand();   // the result is taken: the position waits to be drawn
+        check(!hand_future.valid() && live_runtime->Status().placement.hand_wanted.has_value() && live_notice==LiveEstimateRefusedByHandText());
+        AdvanceLiveHand();   // a tick before the worker bakes: the position still waits to be drawn, so the hand has not stopped
+        check(live_notice==LiveEstimateRefusedByHandText() && live_runtime->Status().placement.hand_wanted.has_value());
+        bake();AdvanceLiveHand();   // P is the hand's position, and the picture is not drawn with it yet
+        check(!live_runtime->DrawnWithPlacement(DrawnPlanSnapshot()) && live_notice==LiveEstimateRefusedByHandText());
+        draw();
+        check(settled());
+        check(live_notice.empty() && live_runtime->Status().placement.counters.asked==asked);
+        check(hand_entered() && *hand_entered()==sum_of({LiveHandButton::right,LiveHandButton::up}));
+        check(AskLiveEstimate(DrawnPlanSnapshot()) && live_notice.empty() && live_runtime->Status().placement.activity==LivePlacementActivity::requested);
+    }
+    live_hand_check_override=nullptr;
+    // The same while the estimate of the session's start is asked for: the press withdraws it, and that is said once the hand has stopped moving, not in place
+    // of the refusal.
+    hold_checks();
+    begin();
+    check(live_runtime->Status().placement.activity==LivePlacementActivity::requested);
+    PressLiveHand(LiveHandButton::right);
+    check(wait_running());
+    check(AskLiveEstimate(DrawnPlanSnapshot()) && live_notice==LiveEstimateRefusedByHandText());
+    open=true;
+    check(in_flight());
+    check(live_notice==LiveEstimateRefusedByHandText() && live_runtime->Status().placement.activity==LivePlacementActivity::idle);
+    check(settled());
+    check(live_notice==LiveHandWithdrewEstimateText());
+    live_hand_check_override=nullptr;
+    // The button pressed again while its refusal is shown: refused again and only logged, so what the check meanwhile would have said is still said once the
+    // hand has stopped moving.
+    hold_checks();
+    begin();
+    check(live_runtime->Status().placement.activity==LivePlacementActivity::requested);
+    PressLiveHand(LiveHandButton::right);
+    check(wait_running());
+    check(AskLiveEstimate(DrawnPlanSnapshot()) && live_notice==LiveEstimateRefusedByHandText());
+    open=true;
+    check(in_flight());
+    check(live_notice==LiveEstimateRefusedByHandText() && live_notice_after_hand==LiveHandWithdrewEstimateText());
+    lines.clear();
+    check(AskLiveEstimate(DrawnPlanSnapshot()) && live_notice==LiveEstimateRefusedByHandText() && logged("C ui_live_estimate_requested=1 result=hand-busy presses_waiting=0 awaiting_draw=1"));
+    check(settled());
+    check(live_notice==LiveHandWithdrewEstimateText());
+    live_hand_check_override=nullptr;
+
+    // The button while the position of an accepted press waits to be drawn (no check runs, nothing waits) is not accepted either: no estimate is asked for, so a
+    // press after it is not added on top of an estimate. The worker is given frames and an estimator that would move P, and the estimator never runs.
+    {
+        const auto old_mapping=live_mapping_check_override;
+        live_mapping_check_override=LiveMappingChecker([](const m2::RegisteredMapping&){return std::vector<std::string>{};});
+        begin();
+        const LiveFrameSource frames{[]{return true;},[](render::BgrImage& a,render::BgrImage& b){
+            a=render::BgrImage{400,267,std::vector<std::uint8_t>(400u*267u*3u,120)};b=render::BgrImage{400,267,std::vector<std::uint8_t>(400u*267u*3u,130)};return true;}};
+        const auto base=[&]{std::lock_guard lock(merged.mutex);return std::make_shared<const FixedPreviewPlan>(merged.fixed_plan);}();
+        auto estimated=base->live->baked.pose;estimated.tx_mm+=2.0;
+        int estimator_runs=0;
+        const LiveEstimator usable=[&](const LiveJob&,const render::BgrImage&,const render::BgrImage&){
+            ++estimator_runs;LiveEstimateOutcome o;o.usable=true;o.pose=estimated;o.surface=base->live->baked.surface;o.band_brightness=100;return o;};
+        PressLiveHand(LiveHandButton::right);
+        check(in_flight() && live_runtime->Status().placement.hand_wanted.has_value() && live_runtime->Status().placement.activity==LivePlacementActivity::idle);
+        const auto asked=live_runtime->Status().placement.counters.asked;
+        check(AskLiveEstimate(DrawnPlanSnapshot()) && live_notice==LiveEstimateRefusedByHandText() && logged("C ui_live_estimate_requested=1 result=hand-busy presses_waiting=0 awaiting_draw=1"));
+        check(live_runtime->Status().placement.counters.asked==asked && live_runtime->Status().placement.activity==LivePlacementActivity::idle);
+        PressLiveHand(LiveHandButton::up);
+        check(hand_queued_presses==1 && logged("route=queue"));
+        bool done=false;
+        for(int i=0;i<3000 && !done;++i){
+            AdvanceLiveHand();(void)live_runtime->RunPass(frames,usable);draw();
+            done=!LiveHandBusy() && hand_queued_presses==0 && !live_runtime->Status().placement.hand_wanted && live_runtime->DrawnWithPlacement(DrawnPlanSnapshot());
+            if(!done)std::this_thread::sleep_for(2ms);
+        }
+        AdvanceLiveHand();
+        const auto end=live_runtime->Status().placement;
+        check(done && estimator_runs==0 && end.counters.asked==asked && end.activity==LivePlacementActivity::idle && end.source==LivePlacementSource::manual);
+        check(end.hand_entered && *end.hand_entered==sum_of({LiveHandButton::right,LiveHandButton::up}) && end.counters.hand_refused==0 && live_notice.empty());
+        check(!LivePlacementSameMapping(end.mapping,m2::RegisteredMapping{estimated,base->live->baked.surface,std::nullopt}));
+        live_mapping_check_override=old_mapping;
+    }
+
+    // The hand's position is P and the screen is not drawn with it yet (no hand position waits to be drawn, the window's mark is up): the hand has not stopped
+    // moving, so the button is not accepted either. A press after it waits for the picture, and both go in; no estimate is asked for.
+    begin();
+    PressLiveHand(LiveHandButton::right);
+    check(in_flight());
+    bake();
+    check(!live_runtime->DrawnWithPlacement(DrawnPlanSnapshot()) && !live_runtime->Status().placement.hand_wanted && !LiveHandBusy() && hand_undrawn);
+    {
+        const auto asked=live_runtime->Status().placement.counters.asked;
+        lines.clear();
+        check(AskLiveEstimate(DrawnPlanSnapshot()) && live_notice==LiveEstimateRefusedByHandText() && hand_undrawn);
+        check(live_runtime->Status().placement.counters.asked==asked && live_runtime->Status().placement.activity==LivePlacementActivity::idle);
+        check(logged("C ui_live_estimate_requested=1 result=hand-busy presses_waiting=0 awaiting_draw=1"));
+        lines.clear();
+        PressLiveHand(LiveHandButton::up);
+        check(hand_queued_presses==1 && hand_run_waits && !hand_future.valid() && logged("route=queue") && !logged("route=start"));
+        draw();
+        check(settled());
+        check(hand_entered() && *hand_entered()==sum_of({LiveHandButton::right,LiveHandButton::up}) && hand_checks_total==2 && live_runtime->Status().placement.counters.hand_refused==0);
+        check(live_notice.empty() && live_runtime->Status().placement.counters.asked==asked && live_runtime->Status().placement.activity==LivePlacementActivity::idle);
+    }
+    // The same through the window's button (WM_COMMAND, under merged.mutex): the window gives the plan that it holds, so nothing takes the lock twice, the
+    // press returns, and the refusal is said.
+    begin();
+    {std::lock_guard lock(merged.mutex);merged.source_width=400;merged.source_height=267;merged.position_refusal.clear();}
+    PressLiveHand(LiveHandButton::right);
+    check(in_flight());
+    bake();
+    check(!live_runtime->DrawnWithPlacement(DrawnPlanSnapshot()) && !live_runtime->Status().placement.hand_wanted && !LiveHandBusy() && hand_undrawn);
+    {
+        const auto asked=live_runtime->Status().placement.counters.asked;
+        lines.clear();
+        press_button(304);
+        check(live_notice==LiveEstimateRefusedByHandText() && hand_undrawn && logged("C ui_live_estimate_requested=1 result=hand-busy presses_waiting=0 awaiting_draw=1"));
+        check(live_runtime->Status().placement.counters.asked==asked && live_runtime->Status().placement.activity==LivePlacementActivity::idle);
+        {std::lock_guard lock(merged.mutex);check(merged.position_refusal.empty());}
+        draw();
+        check(settled() && live_notice.empty() && hand_entered() && *hand_entered()==count_of(LiveHandButton::right,false));
+    }
+
+    // A pair asked for while the position of an accepted press waits to be drawn: the mark comes down with it, so a press after the shot's result and before the
+    // picture is drawn is refused by the machine and not waited for (it would be added on top of the JPEG's position later).
+    begin();
+    PressLiveHand(LiveHandButton::right);
+    check(in_flight() && hand_undrawn && live_runtime->Status().placement.hand_wanted.has_value());
+    check(BeginLiveCapture(DrawnPlanSnapshot()) && capture_unentered_presses==1 && !hand_undrawn);
+    ApplyCaptureToLivePlacement(shot(jpeg_mapping,m2::GeometryLevel::g2,sha,false));
+    check(!live_runtime->DrawnWithPlacement(DrawnPlanSnapshot()) && !live_runtime->Status().placement.hand_wanted);
+    lines.clear();
+    PressLiveHand(LiveHandButton::up);
+    check(in_flight());
+    check(hand_queued_presses==0 && !hand_run_waits && live_notice==not_drawn_text && logged("route=start") && !logged("route=queue"));
+    bake();draw();quiet(30);
+    check(!hand_entered() && hand_checks_total==1 && live_notice.empty() && live_runtime->Status().placement.source==LivePlacementSource::after_capture);
+    capture_unentered_presses=0;
+
+    // The result of a check that is taken after its position was already baked and drawn (the worker was quicker than the window's tick): the window's mark
+    // comes down at the next tick, and a press then is checked at once.
+    hold_checks();
+    begin();
+    PressLiveHand(LiveHandButton::right);
+    check(wait_running());
+    open=true;hand_future.wait();
+    bake();draw();
+    AdvanceLiveHand();   // the result is taken now
+    check(!hand_future.valid() && !live_runtime->Status().placement.hand_wanted && live_runtime->DrawnWithPlacement(DrawnPlanSnapshot()));
+    AdvanceLiveHand();
+    check(!hand_undrawn);
+    lines.clear();
+    PressLiveHand(LiveHandButton::up);
+    check(logged("route=start") && hand_future.valid());
+    check(settled() && !hand_undrawn && hand_entered() && *hand_entered()==sum_of({LiveHandButton::right,LiveHandButton::up}));
+    live_hand_check_override=nullptr;
+
+    // What waits is not applied later. The setup: one press is in, P is replaced by it and the picture is not drawn with it, and two presses wait.
+    const auto stage=[&]{
+        begin();
+        PressLiveHand(LiveHandButton::right);
+        check(in_flight());
+        bake();
+        PressLiveHand(LiveHandButton::up);PressLiveHand(LiveHandButton::turn_clockwise);
+        check(hand_queued_presses==2 && hand_run_waits && !hand_future.valid() && hand_checks_total==1 && live_notice==LiveHandWithdrewEstimateText());
+    };
+    const auto first_only=count_of(LiveHandButton::right,false);
+    // Live stops: the sentence says what to do next, and the row of the stop (drawn while Live is stopped) says how many presses it dropped
+    preview_joined=false;
+    stage();
+    stopping=true;AdvanceLiveHand();
+    check(hand_queued_presses==0 && !hand_run_waits && live_notice==LiveHandQueueLostText(2,true) && hand_checks_total==1 && logged("C ui_live_hand_presses_dropped reason=live-stopped presses=2"));
+    check(live_stop_lost_presses==2);   // the stop is not complete yet: the number waits for its row
+    capture_status=L"ライブビューを停止しました。";AppendStopLostPresses(live_stop_lost_presses);live_stop_lost_presses=0;
+    check(capture_status==std::wstring(L"ライブビューを停止しました。\n")+WidenUtf8("押した 2 回分は反映していません。この分では位置を変えていません。「ライブ再開」を押してから、もう一度押してください"));
+    stopping=false;draw();quiet(30);
+    check(hand_checks_total==1 && hand_entered() && *hand_entered()==first_only);
+    stage();   // the stop is complete when the drop happens: the row is written at once
+    preview_joined=true;capture_status=L"ライブビューを停止しました。";stopping=true;AdvanceLiveHand();preview_joined=false;
+    check(live_stop_lost_presses==0 && capture_status.find(L"押した 2 回分は反映していません")!=std::wstring::npos && capture_status.find(L"「ライブ再開」を押してから")!=std::wstring::npos);
+    stopping=false;draw();quiet(30);
+    check(hand_checks_total==1 && hand_entered() && *hand_entered()==first_only);
+    // a pair is asked for: it is refused while the screen is not drawn with P (what waits stays), and once drawn it is given P and does not take in what waits
+    stage();
+    check(!BeginLiveCapture(DrawnPlanSnapshot()) && live_notice==LiveCaptureRefusalText(LiveCaptureAdmission::not_drawn,false) && hand_queued_presses==2 && hand_run_waits);
+    draw();
+    check(BeginLiveCapture(DrawnPlanSnapshot()) && live_capture_held && pending_confirmed && live_notice==LiveHandDroppedByCaptureText() && hand_queued_presses==0 && !hand_run_waits);
+    check(capture_unentered_presses==2 && logged("C ui_live_hand_presses_dropped reason=capture presses=2"));
+    if(pending_confirmed)check(LivePlacementSameMapping(pending_confirmed->mapping,live_runtime->Status().placement.mapping) && pending_confirmed->manual_entered && *pending_confirmed->manual_entered==first_only);
+    EndLiveCaptureHold();
+    capture_unentered_presses=0;
+    quiet(30);
+    check(hand_checks_total==1 && hand_entered() && *hand_entered()==first_only);
+    // a pair is asked for while a position was accepted and waits to be drawn: that press is not taken in either, and is counted
+    begin();
+    PressLiveHand(LiveHandButton::right);
+    check(in_flight() && live_runtime->Status().placement.hand_wanted.has_value());
+    check(BeginLiveCapture(DrawnPlanSnapshot()) && capture_unentered_presses==1 && logged("C ui_live_hand_presses_dropped reason=capture presses=1"));
+    check(pending_confirmed && pending_confirmed->source==m2::ConfirmedPositionSource::fixed_condition && !pending_confirmed->manual_entered);
+    EndLiveCaptureHold();
+    capture_unentered_presses=0;
+    // a session begins with the same condition: the position is carried, what waited is not, and the sentence says so
+    stage();
+    PrepareLiveRuntime();
+    check(hand_queued_presses==0 && !hand_run_waits && live_notice==LiveHandQueueLostText(2) && live_runtime && hand_entered() && *hand_entered()==first_only);
+    check(logged("C ui_live_hand_presses_dropped reason=session-begin presses=2"));
+    quiet(10);
+    check(hand_checks_total==1 && hand_entered() && *hand_entered()==first_only);
+    // the condition changes: the hand position goes with it, and what waited is not applied to the new one
+    stage();
+    fixed_source.loaded_v3=condition(true,std::string(64,'2'));
+    PrepareLiveRuntime();
+    check(hand_queued_presses==0 && !hand_run_waits && live_notice==LiveHandQueueLostText(2) && live_runtime && !hand_entered() && live_runtime->Status().placement.source!=LivePlacementSource::manual);
+    quiet(10);
+    check(hand_checks_total==1 && !hand_entered());
+    // a sum that leaves the range of the counts is refused with its sentence (it used to be only in the log)
+    stage();
+    hand_queued.seam_dx=std::numeric_limits<std::int32_t>::max();
+    PressLiveHand(LiveHandButton::left);
+    {
+        LiveHandResult refused;refused.outcome=LiveHandOutcome::refused_range;
+        check(live_notice==LiveHandRefusalText(refused) && hand_queued_presses==2 && hand_queued.seam_dx==std::numeric_limits<std::int32_t>::max());
+    }
+    hand_queued={};hand_queued_presses=0;hand_run_waits=false;SetLiveNotice({});
+    // presses that add up to nothing: no check runs for them, the log says so in the same shape as for a sum that is checked, and the position is the first press's
+    hold_checks();
+    begin();
+    PressLiveHand(LiveHandButton::right);
+    check(wait_running());
+    PressLiveHand(LiveHandButton::left);PressLiveHand(LiveHandButton::right);
+    open=true;
+    check(settled());
+    check(logged("C ui_live_hand_queue_run presses=2 delta_seam_dx_counts=0 delta_seam_dy_counts=0 delta_rotation_counts=0 sum_is_zero=1 quality_accepted=0"));
+    check(hand_checks_total==1 && hand_entered() && *hand_entered()==first_only);
+    live_hand_check_override=nullptr;
+    begin();
+    PressLiveHand(LiveHandButton::right);
+    check(in_flight());
+    bake();
+    PressLiveHand(LiveHandButton::left);PressLiveHand(LiveHandButton::right);
+    draw();
+    check(settled());
+    check(logged("C ui_live_hand_queue_run presses=2 delta_seam_dx_counts=0 delta_seam_dy_counts=0 delta_rotation_counts=0 sum_is_zero=1 quality_accepted=0"));
+    check(hand_checks_total==1 && hand_entered() && *hand_entered()==first_only && live_notice.empty());
+    // a press while a pair holds P and a check still runs is refused now with its sentence, not queued (it would only be dropped later), and the pair says
+    // that it did not take the press in
+    hold_checks();
+    begin();
+    PressLiveHand(LiveHandButton::right);
+    check(wait_running() && hand_future.valid());
+    check(BeginLiveCapture(DrawnPlanSnapshot()) && live_capture_held && hand_capture_dropped && capture_unentered_presses==1);
+    PressLiveHand(LiveHandButton::up);
+    {
+        LiveHandResult refused;refused.outcome=LiveHandOutcome::refused_capturing;
+        check(live_notice==LiveHandRefusalText(refused) && hand_queued_presses==0 && hand_queued.IsZero() && logged("route=refuse-capturing"));
+    }
+    open=true;
+    check(in_flight());
+    EndLiveCaptureHold();
+    capture_unentered_presses=0;
+    check(!LiveHandBusy() && hand_queued_presses==0 && !live_runtime->Status().placement.hand_entered && !live_runtime->Status().placement.hand_wanted);   // the check's press was not applied
+    live_hand_check_override=nullptr;
+
+    // The rows of a pair that did not take presses in, through the window's own request: Live is stopped for the capture, and the state row is not drawn then,
+    // so the row under the picture of C (capture_status, drawn whether or not Live is stopped) says it when the pair is asked for and in front of its result.
+    hold_checks();
+    begin();
+    PressLiveHand(LiveHandButton::right);
+    check(wait_running());
+    PressLiveHand(LiveHandButton::up);
+    check(hand_future.valid() && hand_queued_presses==1);
+    for(int i=0;i<40;++i){
+        refresh();{std::lock_guard lock(merged.mutex);merged.source_a=merged.source_b=Clock::now();merged.rendered_revision=merged.revision;}
+        capture_pending.reset();capture_status.clear();RequestCapture(2);
+        if(capture_pending || !capture_status.empty())break;
+        std::this_thread::sleep_for(50ms);
+    }
+    check(capture_pending && *capture_pending==2 && stopping && live_capture_held && capture_unentered_presses==2);
+    check(LiveCaptureUnenteredAskText(2)=="（撮影の直前に押した手の押下 2 回分は、入れずに撮ります）");
+    check(capture_status==std::wstring(L"両台撮影・確認用JPEG Mergeの準備中：両Liveを停止しています…\n")+WidenUtf8("（撮影の直前に押した手の押下 2 回分は、入れずに撮ります）"));
+    capture_status=L"撮影を保存しました。";   // what the result row says; the presses go in front of it
+    PutCaptureUnenteredFirst();
+    check(LiveCaptureUnenteredResultText(2)=="撮影の直前に押した手の押下 2 回分は入っていません。JPEG とライブは、撮影の前の位置のままです");
+    check(capture_status==WidenUtf8("撮影の直前に押した手の押下 2 回分は入っていません。JPEG とライブは、撮影の前の位置のままです")+L"\n撮影を保存しました。" && capture_unentered_presses==0);
+    open=true;
+    check(in_flight());
+    EndLiveCaptureHold();
+    capture_pending.reset();stopping=false;
+    live_hand_check_override=nullptr;
+    // One camera's capture while presses wait: they are not taken in either, and the rows of the capture say how many, as for a pair. The press whose check
+    // runs is not dropped: one camera's capture does not hold P, and the check goes on.
+    hold_checks();
+    begin();
+    PressLiveHand(LiveHandButton::right);
+    check(wait_running());
+    PressLiveHand(LiveHandButton::up);PressLiveHand(LiveHandButton::turn_clockwise);
+    check(hand_future.valid() && hand_queued_presses==2);
+    lines.clear();
+    for(int i=0;i<40;++i){
+        refresh();{std::lock_guard lock(merged.mutex);merged.source_a=merged.source_b=Clock::now();merged.rendered_revision=merged.revision;}
+        capture_pending.reset();capture_status.clear();RequestCapture(0);
+        if(capture_pending || !capture_status.empty())break;
+        std::this_thread::sleep_for(50ms);
+    }
+    check(capture_pending && *capture_pending==0 && stopping && !live_capture_held && capture_unentered_presses==2 && hand_queued_presses==0 && !hand_run_waits);
+    check(capture_status==std::wstring(L"Aを撮影する準備中：両Liveを停止しています…\n")+WidenUtf8(LiveCaptureUnenteredAskText(2)) && logged("C ui_live_hand_presses_dropped reason=capture presses=2"));
+    open=true;
+    check(in_flight());
+    AdvanceLiveHand();
+    check(capture_unentered_presses==2 && live_stop_lost_presses==0 && !logged("reason=live-stopped"));
+    check(live_runtime->Status().placement.hand_wanted && *live_runtime->Status().placement.hand_wanted==count_of(LiveHandButton::right,false));   // the check's press is in
+    capture_status=L"保存済み";
+    PutCaptureUnenteredFirst();
+    check(LiveCaptureUnenteredResultText(2,false)=="撮影の直前に押した手の押下 2 回分は入っていません");
+    check(capture_status==WidenUtf8(LiveCaptureUnenteredResultText(2,false))+L"\n保存済み" && capture_unentered_presses==0 && !capture_unentered_one_camera);
+    capture_unentered_presses=0;live_stop_lost_presses=0;
+    capture_pending.reset();stopping=false;
+    live_hand_check_override=nullptr;
+    // a pair that was asked for with nothing pending says nothing of presses
+    begin();
+    check(BeginLiveCapture(DrawnPlanSnapshot()) && capture_unentered_presses==0 && live_notice.empty());
+    EndLiveCaptureHold();
+
+    // The result rows of a capture that did not take presses in, through the window's own steps (AdvanceCapture takes the result of the capture's worker; no
+    // camera is touched): a saved capture, a failed one, and Lives that did not stop safely. The presses are said first, and the result follows.
+    {
+        const bool joined_before=preview_joined,closing_before=closing,blocked_before=capture_restart_blocked,passed_before=all_sessions_passed;
+        const auto saved_before=captures_saved;
+        const auto take=[&](CaptureUiOutcome outcome){
+            std::promise<CaptureUiOutcome> done;capture_future=done.get_future();done.set_value(std::move(outcome));
+            preview_joined=true;   // the Lives are stopped and joined (the stop's own step of AdvanceCapture is not taken)
+            AdvanceCapture(nullptr);
+        };
+        const std::wstring unentered=WidenUtf8(LiveCaptureUnenteredResultText(2))+L"\n";
+        // saved (the window is closing, so that no Live is started again: the row is written before that)
+        capture_unentered_presses=2;capture_unentered_one_camera=false;capture_status.clear();
+        CaptureUiOutcome saved;saved.capture.success=true;saved.capture.closed=true;saved.capture.path=L"saved.jpg";
+        closing=true;take(saved);closing=closing_before;
+        check(capture_status==unentered+L"保存済み: saved.jpg" && capture_unentered_presses==0 && !capture_future.valid());
+        // failed: Live stays stopped and the row says so
+        capture_unentered_presses=2;capture_status.clear();
+        CaptureUiOutcome failed;failed.capture.success=false;
+        take(failed);
+        check(capture_status==unentered+L"撮影・保存に失敗しました。再撮影せず停止中です。" && capture_unentered_presses==0);
+        // the Lives did not stop safely: no shot
+        capture_unentered_presses=2;capture_status.clear();
+        EndCaptureNotSafelyStopped();
+        check(capture_status==unentered+L"Liveの安全な終了を確認できません。撮影せず停止しました。" && capture_unentered_presses==0);
+        // presses that Live's stop drops while a capture is asked for or running are kept for the capture's result row (the running row is replaced by it),
+        // and counted there with the ones that it did not take in
+        capture_pending=0;stopping=true;capture_status=L"Aを1回撮影してPCへ保存しています…";
+        hand_queued=LiveHandCountsOf(LiveHandButton::right,false);hand_queued_presses=2;hand_run_waits=true;
+        AdvanceLiveHand();
+        check(capture_status==L"Aを1回撮影してPCへ保存しています…" && live_stop_lost_presses==2 && hand_queued_presses==0 && !hand_run_waits);
+        capture_pending.reset();stopping=false;
+        capture_unentered_presses=1;capture_status=L"保存済み";
+        PutCaptureUnenteredFirst();
+        check(capture_status==WidenUtf8(LiveCaptureUnenteredResultText(3))+L"\n保存済み" && live_stop_lost_presses==0);
+        preview_joined=joined_before;capture_restart_blocked=blocked_before;all_sessions_passed=passed_before;captures_saved=saved_before;
+        capture_status.clear();
+    }
+
+    ClearMerge();stopping=true;
+    live_hand_log_tap=nullptr;
+    live_placement_carry={};live_runtime.reset();fixed_source={};
+    SetLiveNotice({});
+}
+
 // Camera-free contract of the registered live C (condition v3, #417 LC), on synthetic frames. The real merge worker with its helper
 // thread (the worker of the live registration), Paint with its two rows, the position buttons and the pair-capture admission run;
 // the condition comes from memory (two pinhole cameras built here), the estimator is a scripted function (live_estimator_override,
@@ -2814,7 +3468,9 @@ int RunLiveCUiSmoke(){
     const auto press=[&](int id){SendMessageW(window,WM_COMMAND,MAKEWPARAM(id,BN_CLICKED),reinterpret_cast<LPARAM>(id==404?seam_button:merge_buttons[id-300]));};
     const auto capture_admitted=[&]{
         capture_pending.reset();RequestCapture(2);const bool admitted=capture_pending.has_value() && *capture_pending==2;
-        capture_pending.reset();return admitted;
+        capture_pending.reset();
+        EndLiveCaptureHold();   // the request held the position (the machine's capture, the mark); no shot follows, so it ends here
+        return admitted;
     };
     // The pair must be fresh when the capture is asked for, and a busy machine can make a check or a paint take longer than that:
     // ask again with fresh frames a few times; a refusal is still a failure after that.
@@ -3320,7 +3976,7 @@ int RunLiveCUiSmoke(){
             const auto after=live_runtime->Status().placement;
             check(hand_checks_total==1 && hand_checks_peak==1);
             check(after.source==LivePlacementSource::fixed_condition && !after.hand_entered && after.serial==before.serial && LivePlacementSameMapping(after.mapping,before.mapping));
-            check(live_notice.find("この位置では継ぎ目が重なりの外に出るため、動かせません。位置は変えていません 続けて押した 2 回分も入れていません")!=std::string::npos);
+            check(live_notice.find("この位置では継ぎ目が重なりの外に出るため、動かせません。位置は変えていません。続けて押した 2 回分も反映していません")!=std::string::npos);
             check(hand_queued_presses==0 && hand_queued.IsZero());
         }
         finish();live_runtime.reset();
@@ -3486,7 +4142,7 @@ int RunLiveCUiSmoke(){
         check(live_runtime->DrawnWithPlacement(DrawnPlanSnapshot()) && live_runtime->Status().placement.activity==LivePlacementActivity::requested);
         // the button while the estimate is asked for: refused as busy, and no notice is added (the row says it already)
         SetLiveNotice({});
-        check(AskLiveEstimate() && live_notice.empty());
+        check(AskLiveEstimate(DrawnPlanSnapshot()) && live_notice.empty());
         // a press, and one more while it is checked; the first is accepted and waits to be drawn, the second waits for that
         hand_checks_running=0;hand_checks_total=0;hand_checks_peak=0;
         PressLiveHand(LiveHandButton::right);
@@ -3527,8 +4183,13 @@ int RunLiveCUiSmoke(){
     }
     rearm();
 
-    // 6g. The check of a hand press and the check of an estimate's position go through one gate: with the real checks, a hand press's check is held
-    //     inside the gate, the button's estimate ends meanwhile and its check waits at the gate, and at no time are two inside.
+    // 6h. Hand presses across the drawing of the position before them (the section is RunLiveCHandPressSmoke, before this function).
+    RunLiveCHandPressSmoke(check,condition,refresh,shot,jpeg_mapping,press);
+    rearm();
+
+    // 6g. The check of a hand press and the check of an estimate's position go through one gate: with the real checks, the check of the button's estimate
+    //     is held inside the gate, a hand press comes meanwhile (the button is not accepted while a press runs, but a press is accepted while the estimate
+    //     runs) and its check waits at the gate, and at no time are two inside.
     {
         real_mapping_check=true;live_hand_check_override=nullptr;
         start(true,true);
@@ -3536,14 +4197,15 @@ int RunLiveCUiSmoke(){
         std::atomic<bool> open{false};
         cover_gate_peak=0;cover_gate_entered=0;
         cover_gate_hold=[&open]{while(!open.load())std::this_thread::sleep_for(2ms);};
-        click_hand(kPreviewHandRight);
+        press(304);   // the button: the worker estimates, and the check of its position comes to the gate and is held there
         check(wait_for([&]{return cover_gate_inside.load()==1;},5000));
-        press(304);   // the button: the worker estimates, and the check of its position comes to the gate
+        click_hand(kPreviewHandRight);   // the check of this press comes to the gate and waits
         check(wait_for([&]{return cover_gate_waiting.load()==1;},5000));
         check(cover_gate_inside==1 && cover_gate_peak==1);
         open=true;
         check(wait_for(hand_settled,20000) && wait_for([&]{return live_runtime->Status().placement.activity==LivePlacementActivity::idle && cover_gate_waiting==0 && cover_gate_inside==0;}));
         check(cover_gate_peak==1 && cover_gate_entered>=2);
+        check(live_runtime->Status().placement.source==LivePlacementSource::manual);   // the press that came after the button is the position
         cover_gate_hold=nullptr;
         finish();live_runtime.reset();
         real_mapping_check=false;
