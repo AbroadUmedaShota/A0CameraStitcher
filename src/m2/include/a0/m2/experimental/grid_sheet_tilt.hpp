@@ -198,6 +198,16 @@ struct GridSheetTilt {
     render::Point lean_sheet_deg{};
     double image_x_azimuth_deg{};                    // the picture's x axis in the sheet frame, turned from the sheet's x toward its y, (-180, 180]
     double calibration_x_azimuth_deg{};              // the same for the given projection (turn at calibration)
+    // The lattice behind the value, for a reader who needs the map and not only the angle: the lattice-to-plane matrix of the
+    // last fit, row-major, taking (i, j, 1), the position on the lattice in units of one grid pitch, to the plane of normalised
+    // camera coordinates (x / z, y / z) with the profile's lens distortion taken out. It is as fitted, free in all eight numbers
+    // (its two lattice steps are not forced to be square and equal) and scaled so that its last number is 1. The numbering of the
+    // lattice is the fit's own: it is fixed only up to whole pitches and a quarter turn. tilt_deg, lean_sheet_deg and
+    // image_x_azimuth_deg are what content_registration::OrientationOf gives for this matrix.
+    std::array<double, 9> lattice_to_plane{};
+    // The largest distance (pixels) of a point inside the final gate to its lattice line: the value whose rms is
+    // GridSheetEvidence::residual_rms_px.
+    double residual_max_px{};
 };
 
 struct GridSheetTiltOutcome {

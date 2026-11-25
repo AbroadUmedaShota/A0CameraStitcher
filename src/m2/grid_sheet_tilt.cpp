@@ -183,11 +183,12 @@ GridSheetTiltOutcome MeasureGridSheetTilt(std::string_view camera, const ImageVi
     ev.lattice_skew_deg = shape.skew_deg;
 
     const detail::Assignment assignment = detail::AssignPoints(fit.parameters, points, focal, det.direction_match_deg, det.final_gate_px);
-    double sum_sq = 0;
+    double sum_sq = 0, max_distance_px = 0;
     for (std::size_t i = 0; i < points.size(); ++i) {
         if (!assignment.ok[i]) continue;
         ++ev.used_points;
         sum_sq += static_cast<double>(assignment.distance_px[i]) * assignment.distance_px[i];
+        max_distance_px = std::max(max_distance_px, static_cast<double>(assignment.distance_px[i]));
     }
     ev.used_point_fraction = static_cast<double>(ev.used_points) / static_cast<double>(ev.ridge_points);
     if (ev.used_points == 0) return refuse(GridSheetRefusal::fit_failed);
@@ -251,6 +252,8 @@ GridSheetTiltOutcome MeasureGridSheetTilt(std::string_view camera, const ImageVi
     tilt.calibration_x_azimuth_deg = calibration_azimuth;
     tilt.lean_screen_deg = Rotate(main.lean_sheet_deg, -main.image_x_azimuth_deg);
     tilt.lean_drawing_deg = Rotate(tilt.lean_screen_deg, calibration_azimuth);
+    tilt.lattice_to_plane = h;
+    tilt.residual_max_px = max_distance_px;
     out.refusal = GridSheetRefusal::none;
     out.tilt = tilt;
     return out;

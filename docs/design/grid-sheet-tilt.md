@@ -18,6 +18,8 @@ From one picture of a flat square-grid sheet it reports, for one camera:
 - the lean: the direction the lens points on the sheet, as an angle times a unit direction, in three frames (the sheet's own axes, the picture's axes with x right and y down, and the drawing's axes);
 - how it got there (`GridSheetEvidence`): the number of ridge points, the number used and their share of the ridge points, lines and intersections used, whether the fit settled, the residual, the share of the picture that holds grid points, the pitch of the first lattice, the lattice's step ratio and skew on the sheet, three tilts (lattice fit, line intersections, vanishing points) and their largest vector distance, a formal standard deviation of the tilt, the spread between halves of the picture, and the share of picture cells that hold a coherent grid which is not on the fitted lattice.
 
+With the value it returns the lattice behind it: the last fit's lattice-to-plane matrix (lattice positions in grid pitches to the normalised plane of the profile's lens without distortion, as fitted in all eight numbers, not forced to a square sheet) and the largest distance of a used point to its lattice line. The tilt, the lean and the azimuth are `OrientationOf` of that matrix. A refusal carries neither.
+
 For two cameras that see the same sheet it also reports the angle between the two optical axes, the difference of their leans in the reference camera's drawing frame, the turn of their picture axes against each other and the rotation mismatch against the calibration.
 
 The reference is the sheet, not gravity. A sheet that lies tilted on the table is measured as it lies.
@@ -72,6 +74,7 @@ The share of the ridge points that were used (`used_point_fraction`) is reported
 - distractors: a bundle of straight lines that is not a grid, a rectangle, slanted lines;
 - refusals: no sheet, one direction, too small a piece, a bent sheet (with room above the flatness line), a rectangular grid, a reduced picture with the full-size profile, every acceptance line made impossible one at a time, a flatness that cannot be judged, and the programming errors;
 - pairs: two cameras over the same sheet, the answer the same for every way the mat lies and every numbering; one camera's mat turned by 1.5 to 40 degrees, compared below the mismatch line and refused above it;
+- mapping: the returned lattice map is the last fit's matrix and the largest residual is the largest distance of a used point (both recomputed from the stages, bit for bit); the map gives the reported tilt, lean and azimuth back bit for bit; the map takes lattice points to the true lattice points of the drawn sheet (three poses, mats and mounts, the fit's numbering a quarter turn of the drawn one); a refusal has no map;
 - isolation: the result types do not convert to a pose, an orientation, a relative orientation, a projection or a surface;
 - defaults: `WorkingDraftSettings()` itself on full-size pictures: a clean sheet is measured, a bent sheet is refused, and a sheet under a dense or a wide bundle of lines or at a pitch above the assumed range is refused or measured within 0.05 degrees;
 - speed: a full-size picture, with the thread count varied.

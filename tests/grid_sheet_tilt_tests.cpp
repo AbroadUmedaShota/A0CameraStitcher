@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cmath>
 #include <cstdint>
 #include <iomanip>
@@ -493,6 +494,7 @@ void Decomposition() {
 // ---- accuracy on drawn pictures --------------------------------------------------------------------------------------------------
 // Bounds set from the largest errors measured on these pictures (about 0.0003 degrees), with a wide margin.
 constexpr double kTiltTolerance = 0.01, kLeanTolerance = 0.02, kDrawingTolerance = 0.02;
+constexpr double kMapTolerancePitch = 0.001;   // the returned map against the drawn sheet, in lattice pitches
 
 // The evidence a measured value carries.
 void CheckEvidence(const gst::GridSheetTiltOutcome& o, const std::string& name) {
@@ -967,6 +969,137 @@ void Speed() {
     Check(single.tilt.has_value() && outcome.tilt.has_value() && single.tilt->tilt_deg == outcome.tilt->tilt_deg, "the thread count does not change the result");
 }
 
+// ---- the lattice map and the largest residual that a measured value carries ---------------------------------------------------------
+// The returned map is the last fit's lattice-to-plane matrix: eight free numbers, as fitted. Its truth is the drawn sheet: a lattice
+// point goes to the plane and through the lens to a picture position, where the drawn sheet has its own lattice coordinates.
+det::Mat3 InverseOf(const det::Mat3& m) {
+    const double c0 = m[4] * m[8] - m[5] * m[7], c1 = m[5] * m[6] - m[3] * m[8], c2 = m[3] * m[7] - m[4] * m[6];
+    const double d = m[0] * c0 + m[1] * c1 + m[2] * c2;
+    return {c0 / d, (m[2] * m[7] - m[1] * m[8]) / d, (m[1] * m[5] - m[2] * m[4]) / d,
+            c1 / d, (m[0] * m[8] - m[2] * m[6]) / d, (m[2] * m[3] - m[0] * m[5]) / d,
+            c2 / d, (m[1] * m[6] - m[0] * m[7]) / d, (m[0] * m[4] - m[1] * m[3]) / d};
+}
+// The drawn sheet's lattice coordinates at the picture position that the returned map gives the lattice point (i, j).
+bool TrueLatticeAt(const gs::Renderer& drawn, const det::Lens& lens, const det::Mat3& map, double i, double j, double& lx, double& ly) {
+    const double w = map[6] * i + map[7] * j + map[8];
+    const double x = (map[0] * i + map[1] * j + map[2]) / w, y = (map[3] * i + map[4] * j + map[5]) / w;
+    double xd = 0, yd = 0;
+    det::DistortNormalized(lens, x, y, xd, yd);
+    return drawn.LatticeAt(lens.fx * xd + lens.cx, lens.fy * yd + lens.cy, lx, ly);
+}
+struct Recomputed {
+    bool ok{};
+    det::Mat3 map{};
+    double residual_max_px{};
+};
+// The stages in the order the measurement runs them, up to the last fit: what the returned values must be, bit for bit.
+Recomputed RecomputeLastFit(const Camera& c, const render::BgrImage& image, const gst::GridSheetTiltSettings& settings) {
+    const auto& d = settings.detection;
+    const det::RidgeResult ridge = det::DetectRidges(gst::ViewOf(image), d);
+    const det::Lens lens = det::LensOf(c.projection());
+    const double focal = lens.MeanFocal();
+    const det::PreparedPoints points = det::PreparePoints(ridge.points, lens, true);
+    Recomputed r;
+    const auto initial = det::FindInitialLattice(points, focal, d);
+    if (!initial) return r;
+    const det::LatticeFit fit = det::FitLattice(points, focal, *initial, d);
+    r.ok = fit.ok && fit.converged;
+    r.map = det::LatticeToPlane(fit.parameters);
+    const det::Assignment a = det::AssignPoints(fit.parameters, points, focal, d.direction_match_deg, d.final_gate_px);
+    for (std::size_t i = 0; i < points.size(); ++i)
+        if (a.ok[i]) r.residual_max_px = std::max(r.residual_max_px, static_cast<double>(a.distance_px[i]));
+    return r;
+}
+void PrintBits(int index, const gst::GridSheetTiltOutcome& o) {
+    const auto& t = *o.tilt;
+    std::printf("dump %d tilt %a lean_sheet %a %a lean_screen %a %a lean_drawing %a %a azimuth %a cal %a fit %a nodes %a vanish %a spread %a rms %a vis %a\n", index, t.tilt_deg,
+        t.lean_sheet_deg.x, t.lean_sheet_deg.y, t.lean_screen_deg.x, t.lean_screen_deg.y, t.lean_drawing_deg.x, t.lean_drawing_deg.y, t.image_x_azimuth_deg,
+        t.calibration_x_azimuth_deg, o.evidence.tilt_deg_fit, o.evidence.tilt_deg_nodes, o.evidence.tilt_deg_vanishing, o.evidence.method_spread_deg,
+        o.evidence.residual_rms_px, o.evidence.visible_fraction);
+}
+
+void MappingReturned() {
+    const double scale = 0.5;
+    const auto settings = TestSettings(scale);
+    // Poses, mat turns and image-axis mounts that put the fit's numbering of the lattice at several quarter turns against the drawn one.
+    struct Item { double rx, ry, rz, mat, mount; };
+    const Item items[] = {{1.2, -0.8, 0.2, 37, 180}, {-2.5, 1.5, -0.3, 123, 90}, {3.0, 0.0, 0.8, 10, 37}};
+    int index = 0;
+    for (const auto& it : items) {
+        const std::string name = "mapping " + std::to_string(index);
+        const int this_index = index++;
+        const Camera c = MakeCamera(scale, 0, it.mount, it.rx, it.ry, it.rz);
+        const gs::Scene scene = SceneOf(c, it.mat);
+        const gs::Renderer drawn(scene);
+        const render::BgrImage image = drawn.Render();
+        const auto outcome = gst::MeasureGridSheetTilt("CAM-T", gst::ViewOf(image), c.profile(), settings);
+        Check(outcome.tilt.has_value(), name + " is measured");
+        if (!outcome.tilt) continue;
+        const gst::GridSheetTilt& t = *outcome.tilt;
+        PrintBits(this_index, outcome);
+
+        // (1) what the map is: the last fit's matrix and the largest distance of a used point, bit for bit.
+        const Recomputed again = RecomputeLastFit(c, image, settings);
+        Check(again.ok, name + ": the stages run again settle");
+        bool same_map = true;
+        for (std::size_t k = 0; k < 9; ++k) same_map = same_map && t.lattice_to_plane[k] == again.map[k];
+        Check(same_map, name + ": the returned map is the last fit's lattice-to-plane matrix");
+        Check(t.residual_max_px == again.residual_max_px, name + ": the returned largest residual is the largest distance of a used point");
+        Check(t.lattice_to_plane[8] == 1.0, name + ": the map is scaled so that its last number is one");
+        Check(t.residual_max_px > outcome.evidence.residual_rms_px && t.residual_max_px <= settings.detection.final_gate_px,
+            name + ": the largest residual lies between the rms and the final gate");
+
+        // (2) returning the map does not change the tilt: the map gives the reported numbers back, bit for bit.
+        const det::Mat3& map = t.lattice_to_plane;
+        const det::OrientationNumbers back = det::OrientationOfLattice(c.projection(), map);
+        Check(back.ok && back.tilt_deg == t.tilt_deg && back.lean_sheet_deg.x == t.lean_sheet_deg.x && back.lean_sheet_deg.y == t.lean_sheet_deg.y &&
+            back.image_x_azimuth_deg == t.image_x_azimuth_deg, name + ": the map gives the reported tilt, lean and azimuth back bit for bit");
+
+        // (3) where it points: the map takes lattice points to the true lattice points of the drawn sheet. The fit numbers the lattice by
+        // its own: it differs from the drawn one by whole pitches and a quarter turn, which the first node and its neighbours tell.
+        const det::Lens lens = det::LensOf(c.projection());
+        const det::Mat3 inverse = InverseOf(map);
+        std::vector<std::array<double, 2>> nodes;
+        for (double fu : {0.2, 0.4, 0.6, 0.8}) {
+            for (double fv : {0.25, 0.5, 0.75}) {
+                double x = 0, y = 0;
+                const double u = fu * c.rig.width, v = fv * c.rig.height;
+                if (!det::UndistortNormalized(lens, (u - lens.cx) / lens.fx, (v - lens.cy) / lens.fy, x, y)) continue;
+                const double w = inverse[6] * x + inverse[7] * y + inverse[8];
+                nodes.push_back({std::round((inverse[0] * x + inverse[1] * y + inverse[2]) / w), std::round((inverse[3] * x + inverse[4] * y + inverse[5]) / w)});
+            }
+        }
+        Check(nodes.size() == 12, name + ": lattice points near twelve picture positions are found");
+        if (nodes.empty()) continue;
+        const double i0 = nodes[0][0], j0 = nodes[0][1];
+        double x0 = 0, y0 = 0, x1 = 0, y1 = 0, x2 = 0, y2 = 0;
+        const bool found = TrueLatticeAt(drawn, lens, map, i0, j0, x0, y0) && TrueLatticeAt(drawn, lens, map, i0 + 1, j0, x1, y1) &&
+            TrueLatticeAt(drawn, lens, map, i0, j0 + 1, x2, y2);
+        Check(found, name + ": the true lattice is defined at the first nodes");
+        if (!found) continue;
+        const double qa = std::round(x1 - x0), qb = std::round(y1 - y0), qc = std::round(x2 - x0), qd = std::round(y2 - y0);
+        Check(std::abs(qa * qd - qb * qc - 1.0) < 1e-9 && std::abs(qa) + std::abs(qb) == 1.0 && std::abs(qc) + std::abs(qd) == 1.0,
+            name + ": the fit's numbering is a quarter turn of the drawn one, not a mirror image");
+        const double sx = std::round(x0), sy = std::round(y0);
+        double worst = 0;
+        for (const auto& n : nodes) {
+            double lx = 0, ly = 0;
+            if (!TrueLatticeAt(drawn, lens, map, n[0], n[1], lx, ly)) { worst = 1e9; continue; }
+            const double ex = sx + qa * (n[0] - i0) + qc * (n[1] - j0), ey = sy + qb * (n[0] - i0) + qd * (n[1] - j0);
+            worst = std::max(worst, std::hypot(lx - ex, ly - ey));
+        }
+        std::cout << "  " << name << ": the largest distance of a returned map's lattice point from the true one is " << std::setprecision(4) << worst << " pitch\n";
+        CheckNear(worst, 0, kMapTolerancePitch, name + ": the map takes lattice points to the true lattice points");
+    }
+    {   // a refused measurement carries no value, so no map and no largest residual
+        const Camera c = MakeCamera(scale, 0, 180, 1.0, -1.0, 0);
+        gs::Scene s = SceneOf(c, 0);
+        s.region[0] = s.region[1] = 0; s.region[2] = s.region[3] = 0;
+        const auto refused = Measure(s, c, settings).outcome;
+        Check(!refused.tilt.has_value() && refused.refusal != gst::GridSheetRefusal::none, "a refused measurement has no map");
+    }
+}
+
 }   // namespace
 
 int main(int argc, char** argv) {
@@ -984,6 +1117,7 @@ int main(int argc, char** argv) {
     if (wanted("layouts")) Layouts();
     if (wanted("distractors")) Distractors();
     if (wanted("refusals")) Refusals();
+    if (wanted("mapping")) MappingReturned();
     if (wanted("pairs")) Pairs();
     if (wanted("defaults")) WorkingDraftDefaults();
     if (wanted("speed")) Speed();
