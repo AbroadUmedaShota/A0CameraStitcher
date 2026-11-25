@@ -4,7 +4,7 @@ Status: library and contract tests only. Nothing in the preview window, the capt
 
 ## Input
 
-One original picture per camera, decoded in stored pixel order, at the full size of the pictures the camera's rig profile was calibrated on. The sheet itself (the cutting mat) is what the picture shows; a drawing or a booklet lying on it covers the grid and is outside what this code is made for.
+One original picture per camera, decoded in stored pixel order, at the full size of the pictures the camera's rig profile was calibrated on. The sheet itself (the cutting mat) is what the picture shows; a sheet of paper over the middle of it is measured from the mat around it, as long as the grid is seen in a fifth of the picture (`min_visible_fraction` of `WorkingDraftSettings()`), while a drawing or a booklet that covers most of the grid is outside what this code is made for.
 
 The caller passes the profile as `GridSheetProfile`: the projection (intrinsics, distortion, document matrix) and the profile's picture width and height (its sensor size). A picture of any other size is refused with `picture-not-profile-size` before anything is detected: the pixel numbers of a projection hold for that size only, and a reduced picture with a full-size projection would put the principal point and the focal length in the wrong place and roughly double the tilt. Live view frames and reduced copies are therefore not measured; there is no rescaling. A profile whose principal point does not lie in the middle half of its own declared size is a programming error (`std::invalid_argument`).
 
@@ -75,6 +75,7 @@ The share of the ridge points that were used (`used_point_fraction`) is reported
 - refusals: no sheet, one direction, too small a piece, a bent sheet (with room above the flatness line), a rectangular grid, a reduced picture with the full-size profile, every acceptance line made impossible one at a time, a flatness that cannot be judged, and the programming errors;
 - pairs: two cameras over the same sheet, the answer the same for every way the mat lies and every numbering; one camera's mat turned by 1.5 to 40 degrees, compared below the mismatch line and refused above it;
 - mapping: the returned lattice map is the last fit's matrix and the largest residual is the largest distance of a used point (both recomputed from the stages, bit for bit); the map gives the reported tilt, lean and azimuth back bit for bit; the map takes lattice points to the true lattice points of the drawn sheet (three poses, mats and mounts, the fit's numbering a quarter turn of the drawn one); a refusal has no map;
+- visible: a sheet of paper hiding the middle of the mat, drawn at three sizes: a share of the picture that holds grid points above the working line is measured within the tolerances of the tests above, a share below it is refused as `view-too-small`, and the line is the working draft's own;
 - isolation: the result types do not convert to a pose, an orientation, a relative orientation, a projection or a surface;
 - defaults: `WorkingDraftSettings()` itself on full-size pictures: a clean sheet is measured, a bent sheet is refused, and a sheet under a dense or a wide bundle of lines or at a pitch above the assumed range is refused or measured within 0.05 degrees;
 - speed: a full-size picture, with the thread count varied.

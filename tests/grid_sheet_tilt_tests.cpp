@@ -1100,6 +1100,58 @@ void MappingReturned() {
     }
 }
 
+// ---- a sheet of paper over the middle of the mat ------------------------------------------------------------------------------------
+// The mat is measured from what is left around the paper. The line for the share of the picture that holds grid points is the
+// working draft's own (the other lines are the test's), so a change of that line shows here. `hole` is the paper: the drawn sheet
+// is missing there.
+struct PaperRun {
+    gst::GridSheetTiltOutcome outcome;
+    Error error;
+};
+PaperRun MeasureUnderPaper(const Camera& c, double mat, double hole_width, double hole_height, const gst::GridSheetTiltSettings& settings,
+    const std::string& name) {
+    gs::Scene scene = SceneOf(c, mat);
+    scene.hole[0] = 0.5 - hole_width / 2; scene.hole[2] = 0.5 + hole_width / 2;
+    scene.hole[1] = 0.5 - hole_height / 2; scene.hole[3] = 0.5 + hole_height / 2;
+    const Run run = Measure(scene, c, settings);
+    const gs::Truth truth = gs::TruthOf(c.pose), profile_truth = gs::TruthOf(c.profile_pose);
+    Print(name, run.outcome, truth, profile_truth, run.seconds);
+    PaperRun r;
+    r.outcome = run.outcome;
+    if (run.outcome.tilt) r.error = ErrorOf(*run.outcome.tilt, truth, profile_truth);
+    return r;
+}
+
+void VisibleFractionLine() {
+    const double scale = 0.5;
+    const double line = gst::WorkingDraftSettings().acceptance.min_visible_fraction;
+    Check(line == 0.2, "the working line for the share of the picture that holds grid points is a fifth");
+    auto settings = TestSettings(scale);
+    settings.acceptance.min_visible_fraction = line;
+    const Camera c = MakeCamera(scale, 0, 180, 1.2, -0.8, 0.2);
+    // The paper's size against the share that is left: measured above the line, refused below it.
+    struct Paper { double side; bool measured; double visible_low, visible_high; };
+    const Paper papers[] = {{0.88, true, 0.26, 0.30}, {0.90, true, 0.22, 0.26}, {0.92, true, 0.21, 0.24}, {0.94, false, 0.17, 0.20}, {0.96, false, 0.12, 0.16}};
+    for (const auto& p : papers) {
+        const std::string name = "paper " + std::to_string(p.side).substr(0, 4);
+        const PaperRun r = MeasureUnderPaper(c, 37, p.side, p.side, settings, name);
+        const double visible = r.outcome.evidence.visible_fraction;
+        Check(visible >= p.visible_low && visible <= p.visible_high, name + ": the share of the picture that holds grid points is the intended one");
+        if (p.measured) {
+            Check(r.outcome.tilt.has_value(), name + ": a share above the line is measured");
+            if (r.outcome.tilt) {
+                CheckNear(r.error.tilt, 0, kTiltTolerance, name + " tilt");
+                CheckNear(r.error.lean_screen, 0, kLeanTolerance, name + " lean (screen)");
+                Check(r.outcome.evidence.fit_converged, name + ": the fit settled");
+                CheckNear(r.outcome.evidence.lattice_aspect_ratio, 1, 0.002, name + ": the lattice is square");
+                Check(r.outcome.evidence.method_spread_deg < 0.2, name + " three methods agree");
+            }
+        } else {
+            Check(!r.outcome.tilt.has_value() && r.outcome.refusal == gst::GridSheetRefusal::view_too_small, name + ": a share below the line is refused as view-too-small");
+        }
+    }
+}
+
 }   // namespace
 
 int main(int argc, char** argv) {
@@ -1117,6 +1169,7 @@ int main(int argc, char** argv) {
     if (wanted("layouts")) Layouts();
     if (wanted("distractors")) Distractors();
     if (wanted("refusals")) Refusals();
+    if (wanted("visible")) VisibleFractionLine();
     if (wanted("mapping")) MappingReturned();
     if (wanted("pairs")) Pairs();
     if (wanted("defaults")) WorkingDraftDefaults();

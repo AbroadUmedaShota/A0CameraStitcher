@@ -97,7 +97,7 @@ GridSheetTiltSettings WorkingDraftSettings() {
     s.acceptance.min_ridge_points = 20000;
     s.acceptance.min_lines_per_family = 20;
     s.acceptance.min_lattice_span = 20;
-    s.acceptance.min_visible_fraction = 0.3;          // the picture is of the sheet itself, not of a drawing on it
+    s.acceptance.min_visible_fraction = 0.2;          // the middle may be hidden (a sheet of paper on the mat); the mat around it is measured
     s.acceptance.max_lattice_aspect_deviation = 0.02;
     s.acceptance.max_lattice_skew_deg = 1.0;
     s.acceptance.max_residual_rms_px = 0.8;           // below the final gate's 2.5 / sqrt(3)
