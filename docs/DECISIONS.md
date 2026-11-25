@@ -1475,6 +1475,205 @@ CCP2はWBのプリセットを、**PCから白を測って保存先を選べる*
 - 段Bは、段Bの前提条件の3つの時点のとおりに進める。実装と偽のtransportの試験は時点(i)の後に並行で進め、gateの設計レビュー（前提条件4）と統合前のレビュー、独立の試験を経てmainに入れ、時点(iii)が揃った後に、別に承認した実機の受入に進む。その後に#374の撮り直し。
 - 段Cは、段Cの前提条件が揃ってから、論点を設計で決め、securityのレビューを通して実装する。段Cの行の改定の対象の本文は、段Cを始める変更で書き換える。
 
+## ADR-0039: 製品の経路で、WPD経由のno-AFのSDRAM撮影とPC保存を認める
+
+- 状態: Proposed（下書き。所有者の承認待ち）。所有者の決定（#351）に基づく。製品の経路のWPD経由の撮影は未実装・未受入。あるのは開発用の経路（#332・#343・#345・#381・#389）の実装と、開発用の実機の撮影だけ。承認までは、下の「変える既存の決定」の表の対象の今の文面が効く。securityの確認（判定は条件付き）の指摘を決定2・4・6・8と変更表に入れ、所有者の決定（#416・#351）で範囲を`DualCamera`に限り、カードの扱いとAFを決めた。最初の下書きの後に、ADR-0038の照合の項目の増加（#416）、撮影をライブと同じプロセスで行う事（#437）、撮った組を校正に使う事（#434）を入れ、合成の時期の参照を取り下げた下書き（ADR-0040）からADR-0050に移した。
+- 起票: #351の所有者の補足を受けて起票した
+- 決定日: 未決定
+- 関連: #351（所有者の決定と補足）、#326（Nikon SDK同梱の資料の論点）、#416（ADR-0038・0041）、#437（ADR-0046、確定した位置）、#434（撮影の1組からの校正の取り直し）、#332・#336・#343・#345・#381・#389（開発用のWPD撮影）、#385・#417（合成の品質）、#227（製品の二台の受入）、ADR-0002・0006・0015・0016・0017・0018・0020・0022・0023・0024・0025・0027・0028・0030・0032・0033・0036・0038・0041・0044・0045・0046・0050、`CON-002`・`CON-003`・`CON-004`、`FR-CAP-001`〜`FR-CAP-007`、`FR-LV-002`、`docs/WPD_STILL_CAPTURE.md`、`docs/WPD_STILL_REVIEW.md`、`docs/WPD_PREVIEW_FOCUS.md`、`src/phase0/include/a0/phase0/experimental/wpd_still_capture.hpp`、`third_party/digicamcontrol-NOTICE.txt`、`third_party/PTP_PROTOCOL_REFERENCES.md`、AGENTS.md
+- 背景: 製品の撮影の経路は、SDKでカードに1枚撮り、WPDでその1枚を回収し、PCの原本を確かめた後にカードのそのobjectだけを消す形（ADR-0020、`FR-CAP-003`・`FR-CAP-004`）。二台はこの形をCaptureRecoveryOnlyとして評価している（ADR-0027・0028、`FR-CAP-007`）。標準のWPDの撮影（`0x100E`）は、D810で`0x2002`を返して成り立たなかった（ADR-0015）。開発用プレビューでは、公開の資料を根拠にしたno-AFのSDRAM撮影（`0x90C0`、引数`0xFFFFFFFF`）で、A・Bの撮影とPC保存を実装し、開発用に実機で撮っている（`docs/WPD_STILL_CAPTURE.md`。保存したprivateな組は#336で使っている。合否は開発状況記録にあり、本ADRでは製品の証拠に数えない）。所有者は、製品の経路の撮影もWPDにそろえると決めた。この撮影は、vendor operationを送らないと定めたADR-0016・0020・0028と`CON-003`、SDKで撮る前提のADR-0002・0023・0024・0027と要件に当たる。例外と置き換えの範囲を明文にする必要がある。
+
+### ADR-0039の所有者の決定（#351）
+
+所有者は#351で次を決めた。
+
+- 本番でもWPDを使ってよい。本番の経路は、開発用プレビュー（#330〜#343、#389、#405）と同じくWPD経由で撮影・2台同時のライブ・合成をそろえる方向で組む。
+- 実装の根拠は公開の資料（libgphoto2・digiCamControlの固定commit、MicrosoftのWPDの資料）だけを使い、Nikon SDK同梱の資料は使わない今の約束は変えない。
+- 製品の経路で合成をつなぐのは、合成の品質（#385・#417）が出た後（所有者の指示「まず継ぎ目をしっかり合わせる」）。この項は、その後の所有者の回答（#351、ADR-0050）で置き換わる案: 正式な校正の前でも合成を「未確認」と数付きで出す。#385の線は変えない。
+- 補足: 「本番でもWPDを使ってよい」は、ライブビューだけでなく撮影も含む。本番の経路でWPD経由の撮影を認めるADRを続けて下書きする（ADR-0020・0023・0024・0027・0028と`CON-003`に触れる）。
+
+所有者は、下書きに残っていた未決について次を決めた（#416・#351）。
+
+- 本番でもPCからピント合わせ（AF `0x90C1`）をできるようにする（本体に手が届かないため）。AFは撮影の命令ではなく、ライブの間の別の操作として扱う（ADR-0036決定2の2-a）。近遠の微調整`0x9204`は決まっていないので入れない。
+- 一台だけの撮影（`SingleCamera`）はWPDに切り替えない。本ADRの範囲は`DualCamera`だけ。
+- WPDの撮影の経路では、撮影の前にカードが空であることを求めない。カードに記録されないことは、実機の受入で1回確かめる。
+
+#293のリリースの条件D1（「合成なしの二台は製品として出さない。合成ができるまでリリースしない。二台は今の評価経路（CaptureRecoveryOnly）のままとし、製品の位置づけを変えるADRは作らない」）のうち、後半（二台を評価経路のままにし、製品の位置づけを変えるADRを作らない）は、#351の所有者の決定で置き換わったと読む（※読み方。ADR-0050で所有者に見せる）。前半の「合成ができるまでリリースしない」と、配布は社内のPCだけ（D2）は変えない。
+
+撮影の時に合成の位置を動かさず、ボタンで決めた位置（ライブで見ていた位置）のままJPEGを作る事（#437の所有者の回答）は、別の変更でADR-0046とAGENTS.mdを改める。本ADRはその決まりを製品の経路でもそのまま使い、ここでは書き直さない。
+
+ライブビューの命令の例外とAFはADR-0036決定2の改訂案で、カメラの設定の書き込みはADR-0038・0041で扱う。下の「決定」は、撮影について所有者の決定を規則の形に落とした案で、承認を要する。
+
+### 開発用の経路で分かっている事実
+
+どれも開発用の経路の事実で、製品の経路では未実装・未受入。
+
+| 項目 | 事実 | 根拠 |
+|---|---|---|
+| 撮影の命令 | no-AFのSDRAM撮影`0x90C0`（引数`0xFFFFFFFF`、データ相なし）を、撮影を許した時（armed）だけ1回送る。AFと撮影を一緒にする命令は使わない | `docs/WPD_STILL_CAPTURE.md`の冒頭の2段落、`wpd_still_capture.hpp`の`BuildWpdStillRequest`・`AllowedWpdStillRequest`、`third_party/digicamcontrol-NOTICE.txt`（digiCamControlの固定commit `a95ee52`の`NikonBase.cs`） |
+| ほかに送る命令 | DeviceReady `0x90C8`、イベントの読み取り`0x90C7`、`0x1015`で`0xD1A2`（Live状態）・`0x5004`（画質）・`0x5003`（画像サイズ）を読む。撮影後のイベントに結び付いたhandleだけに`0x1008`（ObjectInfo）・`0x1009`（Object）を送る。撮影の許可リストはこれだけ | `wpd_still_capture.hpp`の`AllowedWpdStillRequest` |
+| 撮影先とカード | 引数`0xFFFFFFFF`は公開の資料でSDRAMへの撮影。画像は撮影後の新しいSDRAMのobjectのイベント1件に結び付けて取り込む。カードの列挙・削除・formatは送らない。カードに画像が記録されないことを実機で確かめた記録は、本書と`docs/WPD_STILL_CAPTURE.md`には無い（※要確認） | `docs/WPD_STILL_CAPTURE.md`の2・3・4段落 |
+| 撮影前の条件 | LiveViewStatus=0、JPEG Fineだけ、7360×4912を読み、違えば設定を変えずに拒否する。2回の事前のイベントの読み取りで未回収の画像があれば拒否する。StoreAdded（`0x4004`）などの状態の変化の後は撮影条件を1回だけ読み直し、さらに2回イベントを確かめる。両台撮影では、両Liveを止めてCloseした後に、A・Bの非撮影のpreflightとCloseを先に行い、実際の撮影の時にも読み直す。Aのシャッターの後のDeviceReadyでOutOfFocusが分かったら止める | `docs/WPD_STILL_CAPTURE.md`（#343・#345の段落、#389の節）、AGENTS.mdの#343の行、`third_party/PTP_PROTOCOL_REFERENCES.md` |
+| 期限 | 両台撮影は1つの180秒のtransaction（1つのdeadline）。期限の後は次のtransport、rename、成功状態を始めない。取得済みのpartialとoriginalは消さない | `docs/WPD_STILL_CAPTURE.md`の#389の節、AGENTS.md（#389の行と180秒のwatchdogの行）、ADR-0022 |
+| sessionの持ち方 | SDKのsessionは開かない。両台撮影では、A・Bの2つのWPD sessionを照合から完了イベントの見届けまで開いたままにし、WPDの呼び出しは1つのスレッドから順に送る。leaseは全sessionのCloseまで持つ | `docs/WPD_STILL_CAPTURE.md`の#389の節 |
+| 順番 | Aのシャッター → Bのシャッター → Aの取り込みと保存 → Bの取り込みと保存。Bのシャッターは、Aの受付を確かめた後だけ送る | `docs/WPD_STILL_CAPTURE.md`の#389の節、AGENTS.mdの#389の行 |
+| 再試行しない | シャッター・取り込み・保存・期限のどれかが失敗したら、再送・再試行・画像の差し替えをしない。停止要求は未送信のシャッターを止め、送信済みの1枚の取り込みと保存は続ける。Bが露光済みなら、Aの取り込みが失敗してもBを1回だけ取り込む。結果の分からないシャッターの候補はprivateなpartialに留め、originalにしない | `docs/WPD_STILL_CAPTURE.md`の#389の表、AGENTS.mdの#389の行 |
+| 完了イベント | 取り込みの後、同じsessionで完了イベント（`0xC102`か`0x400D`）を最大5秒（推定の設計定数）見届けてからCloseする。観測であり再試行ではない | `docs/WPD_STILL_CAPTURE.md`の#381の節 |
+| PCの保存 | privateな`*-transport.jpg.partial`に逐次書き、最終転送、JPEGの全画素の復号と実寸、SHA-256、atomicな`original.jpg`のpublish、再読み込みのsize・hashを確かめる | `docs/WPD_STILL_CAPTURE.md`の5段落 |
+| シャッターの時刻差 | `shutter_gap_ms`を測って記録するだけで、同時の露光も上限も保証しない。目標の値は所有者が決める | `docs/WPD_STILL_CAPTURE.md`の#389の節、`CON-002` |
+| 根拠の資料 | 公開の資料（digiCamControl・libgphoto2の固定commit）だけ。Nikon SDK同梱の仕様書は使わない | `docs/WPD_STILL_CAPTURE.md`の2段落、`third_party/` |
+| 撮影のgateが見る物 | 許可リストが見るのはMTPの命令（`WPD_COMMAND_MTP_EXT_*`）だけ。READ_DATAとENDはcontextを見ずに通す。WPDのContent・Properties・ResourcesのAPI（削除、列挙、objectの作成、propertyの書き込み）はgateを通らない。製品のspoolの経路は`Content()->Delete`でカードの画像を消し、それをcleanup token（回収の後にだけ発行）が止めている | `wpd_still_capture.hpp`の`AllowedWpdStillRequest`、`src/phase0/wpd_transport.cpp`の`DeleteRecoveredObject` |
+| 取り込みが終わらなかった画像 | 期限切れや取り込みの失敗の時、画像はカメラのSDRAMに残り、保存されない。帰属は撮影の後の新しい`0xC101`のイベント1件とhandleの対応だけで決まる。読み終えたイベントは次のpreflightで「未回収」として見つからない。次の撮影で返るhandleの中身が新しい画像か残った画像かは、確かめた記録が無い（※未検証） | `docs/WPD_STILL_CAPTURE.md`の#389の表、`wpd_still_capture.hpp`の`WpdStillEventLedger` |
+| 記録先 | 開発用のライブのgateは記録先のproperty（`0xD10B`。注記ではrecording media）を読むが、撮影のpreflightは読まない。記録先がカードの時の`0x90C0`の振る舞いは確かめていない（※未検証）。カードの画像のイベント`0x4002`は撮影を終端の失敗にする | `d810_preview.hpp`の`D810PreviewPropertyBytes`、`wpd_still_capture.hpp`の`WpdStillEventLedger` |
+| 確定した位置の受け渡し | 開発用の窓は、撮影を頼んだ時のライブの確定した位置Pを、同じプロセスの中で撮影の合成へ渡す | ADR-0046、`docs/WPD_DUAL_PREVIEW.md`の#437の節 |
+
+### 開発用の命令のうち製品の経路に入れる物・入れない物（案）
+
+| 命令 | 開発用での使い方 | 製品の経路（案） | 根拠と状態 |
+|---|---|---|---|
+| `0x90C0`（引数`0xFFFFFFFF`） | 撮影 | 入れる。1回の撮影でカメラごとに1回まで、armedの時だけ。ライブを閉じた後のtransactionからだけ送る | 開発用で使っている撮影の命令はこれだけで、標準の`0x100E`は成り立たなかった（ADR-0015）。ライブを開いたまま撮る送り方（ADR-0044の探り）は入れない。※所有者の承認の点 |
+| DeviceReady `0x90C8` | 撮影の前後の確認 | 入れる | ADR-0036決定2の改訂案の1でも、ライブビューの前提として例外に入れる案。※所有者の承認の点 |
+| イベントの読み取り`0x90C7` | 事前の確認と画像の帰属 | 入れる | 画像の帰属と撮影前の条件に要る（上の表）。※所有者の承認の点 |
+| `0x1015`（`0xD1A2`・`0x5004`・`0x5003`） | 撮影前の読み取り | 入れる | 標準の命令。上の表の「撮影前の条件」 |
+| `0x1008`・`0x1009`（イベントに結び付いたhandleだけ） | 取り込み | 入れる | 標準の命令 |
+| `0x1015`（`0x500D`・`0x500A`・`0x5001`） | #343の読み取りの診断 | ※要確認（製品の撮影の前の確認に使うか、診断だけにするか） | AGENTS.mdの#343の行 |
+| AF `0x90C1` | 撮影の前の別の操作（#331） | 製品の経路に入れる（所有者の決定、#416・#351）。ただし撮影の経路のgateには入れない。ライブの間の別の操作として、ADR-0036決定2の2-aの条件とgateで送る | 開発用の事実は`docs/WPD_PREVIEW_FOCUS.md`。2台ともMFにする今の運用（ADR-0033の6節、`docs/OPERATOR_GUIDE.md`）と、製品の要件の対象外の「AFを使った撮影」の扱いは、ADR-0036決定2の「影響する対象」の表 |
+| 近遠の微調整`0x9204` | 同上 | 入れない（決まっていない。※要確認） | 開発用だけの指示（AGENTS.md、`docs/WPD_PREVIEW_FOCUS.md`） |
+| AF枠の移動`0x9205` | ライブの画面のクリック（#426） | 入れない | 開発用だけの指示（AGENTS.mdの#426の行） |
+| 標準の撮影`0x100E` | 送らない | 入れない | ADR-0015。今のhybridの経路でも送らない |
+| `0x9207` | 送らない | 送らない（変えない） | ADR-0016・0020、`CON-003`、AGENTS.md |
+| ChangeCameraMode `0x90C2` | 通常のgateで拒否 | 送らない（変えない） | AGENTS.mdの#337の行、ADR-0038の決定14 |
+| SetDevicePropValue `0x1016` | 撮影の経路では送らない | 撮影の経路では送らない。設定の書き込みはADR-0038・0041のgateだけ | ADR-0038の決定9 |
+| カードの列挙・削除・format | 送らない | 送らない | 上の表の「撮影先とカード」 |
+
+### 決定（案）
+
+1. **範囲**: 製品の`DualCamera`の撮影を、WPD経由のno-AFのSDRAM撮影とPC保存で行ってよい。`SingleCamera`はWPDに切り替えない（所有者の決定、#416・#351。今は二台だけ）。`SingleCamera`の契約（ADR-0023・0024の`SingleCamera`の部分）は変えない。
+2. **命令**: 製品の撮影の経路で送ってよい命令は、上の表で撮影の経路に「入れる」とした物だけにする。許可リストは送る直前のgateで固定し、operation番号と引数を32 bit全体で比べる（開発用の`AllowedWpdStillRequest`と同じ考え方、※案）。`0x9207`、`0x90C2`、`0x90C1`、`0x9204`、`0x9205`、`0x1016`は撮影のgateで拒否する。表で※要確認とした命令は、所有者が決めるまで入れない。次も守る（securityの確認）。
+   - 撮影のchannelは、identityの読み取りのほかに、WPDのContent・Properties・ResourcesのAPIを使わない。列挙・削除・objectの作成・propertyの書き込み（`IPortableDeviceContent::Delete`・`EnumObjects`・`CreateObjectWithPropertiesAndData`、`IPortableDeviceProperties::SetValues`、`IPortableDeviceResources`の書き込み）は構造上呼べない作りにする。撮影の経路を今の製品のspoolのtransport（`src/phase0/wpd_transport.cpp`）の上に作らない。
+   - SDRAMの経路ではcleanup tokenを発行しない。
+   - READ_DATAとENDは、gateがbeginの応答から持つ自分のcontextだけを通す（開発用のgateはcontextを見ずに通している）。
+   - 偽のtransportの試験で次を固定する（ADR-0038段Bの前提条件5と同じ形）: armedでない`0x90C0`、2回目の`0x90C0`、結び付けていないhandleと0・`0xFFFFFFFF`、`AuthorizeObject`の前と2回目、シャッターの前の`0xC101`、2件の`0xC101`、別の台のイベントの取り違え、`0x4002`が終端になること、`Delete`と`SetValues`の呼び出しが0回、期限の後のrenameが0回。
+3. **手順**: 両台撮影は、開発用の#389の順（両台の非撮影のpreflightとClose → 両台のsessionを開いて照合と撮影直前の再確認 → Aのシャッター → Bのシャッター → Aの取り込みと保存 → Bの取り込みと保存 → 完了イベントの見届けとClose）を、1つの180秒のdeadlineで行う。CAM-AからCAM-Bの順（ADR-0023）は、シャッターの順と取り込みの順として保つ。撮影の前にすべてのライブを止めて閉じ、閉じた事を確かめる（ADR-0036の不変条件2）。ライブを開いたまま撮る順（ADR-0044）は本ADRに含めない。
+4. **原本とカード**: PCの`original.jpg`を唯一の正本にする（ADR-0018は変えない）。この経路はカードを使わない前提なので、ADR-0020のsingle-slot spool（撮影前のカードの空の確認、回収した1件の削除、空の再確認）を適用せず、カードの削除は0にする（※案）。撮影の前にカードが空であることを求めない（所有者の決定、#416・#351）。カードに記録されないことは、製品の実機の受入で1回確かめる（下の「実機の受入で必ず確かめる項目」の1）。preflightで記録先のproperty（`0xD10B`）を読み、期待の値でなければ撮らない（値は書かない）案は※要確認（値の意味と期待の値が公開の資料で確かめられていない）。
+   - SDRAMの経路では、PCの保存が終わるまで、カメラの側に控え（spoolの経路のカード）が残らない。シャッターの後の失敗は、撮り直しで回復する（原稿は静止しているので撮り直せる）。操作者向けの文書にもこの扱いを書く。
+5. **sessionとidentity**: SDKのsessionを開かない。両台撮影の間は登録済みのカメラ（今はCAM-AとCAM-B）に1つずつのWPD sessionを開く（`FR-CAP-005`の改定）。WPDの呼び出しは1つのスレッドから順に送る。カメラは登録済みのWPD serial digestで照合し、開くたびに照合し直す（開発用と同じ、※案）。カメラはカメラの一覧から扱い、台数を2に固定した書き方を新しい欄・gate・試験に増やさない（ADR-0045）。ADR-0025のSDKの候補を操作者が割り当てる照合は、WPDの経路では使わない（※案、所有者の承認の点）。ADR-0025の照合はSDKのModuleの保持（ADR-0028）を要し、WPDの経路の「SDKのModuleを保持しない」（変更表のADR-0028の行）と両立しないため。operator-session-wideのleaseは全sessionのCloseまで持つ。
+   - WPD serial digestは公開の固定の文字列・長さ・serialのSHA-256で、鍵が無い（`src/phase0/wpd_transport.cpp`の`DeriveWpdStableIdentity`）。serialの取りうる値が少なければ、digestから総当たりでserialに戻せる（※想定シナリオ。D810のserialの桁数は確かめていない）。digestもserialと同じ扱いにする（不変条件8）。
+6. **再試行しない**: 上の表の「再試行しない」のとおり。原本の扱い（partialを残す、結果の分からない候補を昇格させない、期限の後に成功状態へ進まない）は変えない。完了イベントの見届けは観測として残す。
+   - 取り込みが途中で失敗した後の止め（securityの確認）: `AuthorizeObject`の後に取り込みか保存が終わらなかった側は、そのカメラの電源を入れ直したことを確かめるまで撮影を止める（`CameraStateRequiresInspection`と同じ扱い）。SDRAMに残った画像が次の撮影の原画像になると、別の原稿の画像を組にする曖昧な画像の採用になり、`NFR-REL-001`の0件に反するため。電源の入れ直しでSDRAMが空になるか、残った画像が次の取り込みに出るかは、製品の受入の前に、別に承認した1回で確かめる（※未検証）。
+7. **capture profileと設定の照合**: 撮影の直前の承認済みのcapture profileとの照合（ADR-0024、`FR-CAP-007`）を残す。今のprofileの項目（シャッター速度・絞り・ISO・WBなど）はSDKで読んでいて、開発用のWPDの撮影は画質・画像サイズ・Live状態しか読んでいない。WPDの経路で同じ項目を読む方法は、ADR-0038の段Aの読み取り（`0x1014`・`0x1015`）で決める（※要確認）。読む項目には、ADR-0038・0041で両台を比べる項目（露出の5項目と、行が有効な間のホワイトバランスの種類と測光）を両台とも含める（ADR-0038段Cの前提条件の(e)。今の画面の`SettingsMismatch`のBlockerをWPDの経路でも効かせるため）。
+   - 設定の書き込みが確かめた一致で終わらなかった時の撮影の止め（AGENTS.mdの#416段Bの行。読み直しで一致を確かめるまで撮らない、閉じても再起動しても解けない）を、製品の撮影の経路でも守る。製品の経路が止めの記録を読む作りは※要確認（書き込みのoptionの無いbuildは記録を読まないので、そのbuildでも撮らない、というAGENTS.mdの文と同じ扱いにする案）。
+8. **経路の選び方**: 製品のWPDの撮影の経路が受入を通るまで、今のSDKの撮影とカードのspoolの経路を残す。2つの経路を自動で切り替えない（ADR-0030の不変条件のno fallback）。SDKの経路を外す時期は、受入の後に別に決める（※案）。次も守る（securityの確認）。
+   - 経路はtransactionを作る時に固定し、記録に残し、transactionの間は変えない。
+   - 既定値を持たない。設定が無い・読めない・知らない値の時は撮影を拒否する。
+   - 受入を通っていない経路は、製品のbuildで選べないようにする。
+   - ライブ（ADR-0035のSDK／ADR-0036決定2のWPD）と撮影（spool／SDRAM）の組み合わせも同じ扱いにし、承認した組み合わせだけを選べるようにする。
+9. **入れる順**: ライブ（ADR-0036決定2）、撮影（本ADR）、合成を別々の変更で入れる。いつもの撮影用アプリに載せる順と、合成を正式な校正の前に「未確認」と数付きで出す扱いはADR-0050で決める。
+10. **根拠**: 実装・試験・文書の根拠は公開の資料だけにし、Nikon SDK同梱の資料を使わない（#326・#351）。実装の時の決まりはADR-0036決定2の3の(a)〜(c)に従う（撮影前の確認の読み取りの手順も出典の記録の対象）。`CON-004`は変えない。
+11. **ライブと同じプロセスで撮る**（#437）: 製品の両台撮影は、ライブを持つのと同じCamera Agentのプロセスの中で行う。撮影を頼んだ時のライブの確定した位置P（ADR-0046）は、そのプロセスの中で撮影の合成へ渡し、WPFを経由して写し直さない。撮影の前にライブを止めて閉じる順（3）は変えない。SDKを使うCamera Agentとは別のプロセスにし、1つのプロセスでSDKとWPDを混ぜない（※案。ビルドの組み合わせはADR-0050の7）。
+12. **撮った組を校正に使う**（#434）: 製品の両台撮影で確かめた原画像2枚は、ワンボタン校正（撮影の1組からの校正の取り直し）の入力にしてよい。使い方・範囲・断る条件は、開発用の側で先に決める決まり（ADR-0048の案。mainに未登録）に従い、製品の画面で使い始めるのはその決まりがAcceptedになった後（ADR-0050の5）。校正の取り直しは新しい撮影をしない。原画像は消さず書き換えない。
+
+### 実機の受入で必ず確かめる項目
+
+1. カードに画像が記録されないこと。系列の前後でカードのpayloadを数えて確かめる。カードの列挙は撮影の許可リストの外なので、別に承認した読むだけの確認として行う（決定4、所有者の決定）。
+2. 1回のシャッターにつき各台の`0xC101`が1件で、別の台に数えないこと。完了イベントの見届けが記録に残ること。
+3. 保存の完全性: 全画素の復号、SHA-256、上書きしないrename、読み直し。失敗した時に`.partial`が残り、期限の後にrenameしないこと。
+4. 取り込みの途中の失敗（別の系列。ADR-0032のUSB抜去の扱い）の後、SDRAMに残った画像が次の撮影の取り込みに混ざらないこと。混ざる余地があるなら、決定6の止めが働くこと。
+5. AとBのシャッターの間に停止要求を入れた時、Bが露光しないこと。
+6. WPDのtransactionの間、SDKの操作が0回であること（`NFR-OBS-001`の記録の形で）。
+7. `shutter_gap_ms`が記録され、画面に「同時」「同期」と出ないこと。
+8. 撮影の直前のprofileの照合が、決定7で決めた項目をWPDで読んで行われること。
+9. 撮影に渡した位置が、頼んだ時のライブの確定した位置と同じで、記録とライブのログに同じ数で残ること（決定11、ADR-0046）。
+
+### 製品の受入
+
+- 製品の経路の実機の受入は、開発用の確認（#332・#343・#345・#389の実機の撮影、#336のprivateな組）と別の系列にする。開発用の撮影は製品の受入に数えない。
+- 系列は新しく始め、ADR-0030の最大5組とADR-0032の数え方（試行の定義、ソフト起因でシャッター0の拒否、USB抜去の別系列、保存の合格線）に従う。最初のone-shotを5組に含める。最初の失敗・未確定で止め、補充と自動の再試行をしない。
+- 対象（機体と系列）、回数、中止の条件、カードの扱いを、受入の前に所有者が別に承認する。本ADRの承認は受入の承認を含まない。
+- CaptureRecoveryOnly（ADR-0027）の系列の記録と、WPDの経路の系列の記録を混ぜない（※案）。
+
+### Acceptedにする前提条件
+
+1. 上の命令の表で※要確認とした命令（`0x9204`・#343の読み取りの診断）を所有者が決めている。決めない物は「入れない」として承認してよい。AF`0x90C1`は所有者が決めた（ADR-0036決定2の2-a。どのgateから送るかの案1・案2はADR-0036で決める）。
+2. ADR-0025の照合をWPDの経路で使わないこと（決定5の※案）を所有者が承認している。`SingleCamera`を含めないこと（決定1）とカードの空を求めないこと（決定4）は所有者が決めた（#416・#351）。
+3. ADR-0036決定2の改訂案（WPD経由のライブビュー）が、本ADRと同時かそれより先にAcceptedになっている。撮影の前後にライブビューを止めて開き直す手順が、決定2の例外に依存するため。
+4. securityの設計レビューを、製品の撮影のgate（許可リスト、armedの持ち方、handleの結び付け、2つのsessionの持ち方）に加えて、WPDのAPIのほかの面とcleanup token（決定2）、SDRAMに残った画像（決定6）、経路の選び方（決定8）で通している。
+5. 下の「変える既存の決定」の表を承認し、AGENTS.mdの改定の文を人が承認している（文の案はADR-0050の「AGENTS.mdに入れる文」）。
+6. 決定7で、profileの照合に読む項目（ADR-0038・0041で比べる項目を含む）を決めている（ADR-0038段Cの前提条件の(e)と同じもの）。
+7. 撮影の経路で使う番号・意味・手順（撮影前の確認の読み取りの手順を含む）の出典が、ADR-0036決定2の3の(c)のとおり記録されている。
+
+実装に進むのはAcceptedの後、実機に進むのは上の「製品の受入」の別の承認の後。
+
+### 守る不変条件
+
+1. `0x9207`と`0x90C2`を送らない。
+2. 撮影のtransactionは同時に1つだけ。シャッターはカメラごとに1回まで。no retry（ADR-0006）。
+3. PCの`original.jpg`を唯一の正本にし、検証の前に昇格させない（ADR-0018）。
+4. 同じカメラでSDKとWPDのsessionを重ねない。WPDの経路の撮影のtransactionの間はSDKのsessionを開かない。別々のカメラの間でSDKとWPDを同時に開いてよいかは本ADRでも決めない（ADR-0036の不変条件1）。
+5. 撮影の前に、すべてのライブビューを閉じて確かめる（ADR-0036の不変条件2）。
+6. シャッターの同期を保証しない（`CON-002`）。
+7. カードの一括削除・formatをしない。
+8. 実カメラの識別子を記録・公開しない（`CON-004`、AGENTS.md）。WPD serial digestもserialと同じ扱いにし、記録・ログ・画面・Issue・公開リポジトリに出さない。登録の記録は`%LOCALAPPDATA%\A0CameraStitcher`の下に置く（push前の漏れの検査が、その下の64桁のhexとNikonのUSBのserialを針にするため）。
+
+### 変える既存の決定（案）
+
+本ADRがProposedの間は、どの対象の本文も変えず、追記も置かない（承認の時に置く、※案）。表の「変えない部分」は、SDKの経路が残る間そのまま効く。
+
+| 対象 | 今の文（要旨か引用） | 変える範囲 | 変えない部分 |
+|---|---|---|---|
+| ADR-0002 | 「`DualCamera`は`CAM-A`の撮影・回収・close後に`CAM-B`へ進む」 | WPDの経路では、シャッターをA→Bの順に送り、両方の後にA→Bの順で取り込む（#389の順）。2つのWPD sessionを開く | 同時に開くSDK sessionは1つ。SDKの経路の順 |
+| ADR-0016 | 「撮影commandとvendor operationは送らない」 | 製品のWPDの撮影の経路で、上の表の「入れる」のvendor operation（`0x90C0`・`0x90C8`・`0x90C7`）を送ってよい例外を足す | `0x9207`の扱い、query-onlyの確認 |
+| ADR-0017（Superseded） | 「vendor operationを実装・送信せず」 | ADR-0016と同じ方向の追記 | hybridの経路の判断 |
+| ADR-0020 | 「SDK exactly-one capture後にWPDで唯一のexact objectを回収」「vendor operation（`0x9207`を含む）は禁止する」 | WPDの経路はspoolを使わない別の経路とし（決定4）、本ADRの命令だけをvendor operationの禁止の例外にする | spoolの規則、`0x9207`の禁止、カードの一括削除・formatの禁止 |
+| ADR-0019 | 影響の「承認済みADR-0020のsingle-slot spool経路を除き、captureをfail-closedにする」 | 本ADRの`DualCamera`のWPDのSDRAMの経路を、fail-closedの例外に足す | device datetimeとobject dateのcutoffを製品の帰属の契約に使わないこと。ほかの撮影はfail-closedのまま |
+| ADR-0023 | 「両modeでdedicated single-slot spool、SDK/WPD session非重複…」 | `DualCamera`のWPDの経路ではspoolを求めない（決定4） | `SingleCamera`の部分は変えない（決定1。`SingleCamera`はWPDに切り替えない）。mode境界、自動降格の禁止、lease、180秒、canonical原本、no retry。撮影設定のread-onlyの文はADR-0038で扱う |
+| ADR-0025、`NFR-SEC-001` | 「Dual bindingのpreview、raw identifier、serial、source objectまたはcandidate ordinalを保存・公開しない」。SDKの候補を一台ずつ表示し、操作者が`CAM-A`・`CAM-B`に割り当てる | WPDの経路では、ADR-0025の照合を使わず、登録済みのWPD serial digestで照合する（決定5の※案）。`DualCamera`でもdigestを手元に保存することになるので、digestを保存してよい物として足す。保存の場所は`%LOCALAPPDATA%\A0CameraStitcher`の下に限り、公開はしない（不変条件8） | serialとraw identifierを保存・公開しないこと、誤割当のリスクの記録、previewを保存しない |
+| `NFR-OBS-001` | 「WPD capture command未送信」を記録の項目にする | spoolの経路に限る文に直す。WPDの経路では、送った撮影の命令（`0x90C0`の回数と結果）、経路の種類（決定8）、SDKの操作が0回であることを記録する | 匿名の記録、ほかの項目 |
+| `FR-UI-001`、`docs/OPERATOR_UI_SPEC.md`のカードの確認（「modeが要求するcameraの接続、identity、read-only設定整合、card、Live View」と、mode変更の時のcardの再検査）、画面の`CardNotKnownEmpty`のBlocker（`OperatorWorkflowModel.cs`） | 撮影の前にカードが空であることを確かめ、確かめられなければ撮影のBlocker | `DualCamera`のWPDの経路では、カードの空を求めない（決定4、所有者の決定）。この経路では`CardNotKnownEmpty`をBlockerにしない。カードの欄は「この経路はカードに記録しない」の表示にする（表示の形は※案）。決定6の止め（取り込みが終わらなかったカメラの電源の入れ直し）は`CameraInspectionRequired`と同じ扱いのBlockerにする | spoolの経路では今のBlockerのまま |
+| ADR-0027 | 「DualのSDK撮影・WPD回収・canonical PC原本保存だけを評価する`CaptureRecoveryOnly`」「CAM-A失敗時はCAM-Bへ進まず」 | WPDの経路の撮影を、CaptureRecoveryOnlyとは別の製品の経路として足す。Aが失敗した時の扱いは#389の表に合わせる（Aのシャッターが拒否・未確認ならBを露光しない。Bが露光済みなら1回だけ取り込む） | CaptureRecoveryOnlyの契約とschema |
+| ADR-0028 | 「WPD open中はSDK API…を一切行わず」、vendor operationの禁止 | WPDの経路ではSDK Moduleを保持しない。vendor operationの禁止に本ADRの例外を足す | SDKの経路のModule保持の規則 |
+| ADR-0036 決定2の7（改訂案） | 2つのWPD sessionはライブビューの間に限る | 撮影のtransactionの間の2つのsessionは本ADRで認める | ライブビューの例外の範囲 |
+| `CON-003` | 「専用empty/cleared card single-slot spool以外の帰属・削除経路を実装・実行しない」「vendor operation（`0x9207`を含む）…は禁止する」 | WPDのSDRAMの撮影の帰属（撮影後の新しいobjectのイベント1件に結び付ける）を、spoolとは別の帰属の経路として認める。本ADRの命令だけをvendor operationの禁止の例外にする | `0x9207`、カードの一括削除・format、retry、SDKとWPDの重なりの禁止、削除はPC原本の検証の後だけ |
+| `FR-CAP-001`・`FR-CAP-002` | SDKの候補の割り当てとWPDの登録 | `DualCamera`のWPDの経路では、登録済みのWPD serial digestで照合する（決定5の※案） | fail closed、alias不足の拒否、`SingleCamera`の文 |
+| `FR-CAP-003`・`FR-CAP-004` | SDKでカードに撮影 → WPDで回収 → 削除 → 空の確認 | WPDの経路では、SDRAMの撮影 → 取り込み → PC保存とし、カードの削除を行わない | SDKの経路の文、PC原本の検証 |
+| `FR-CAP-005` | 「同時に…一つのWPD sessionだけを開く」 | 撮影のtransactionの間、登録済みのカメラに1つずつのWPD sessionを認める（ADR-0036決定2の7のライブビューの改定と合わせる） | 撮影のtransactionは1つ、SDKとWPDの非重複 |
+| `FR-CAP-007` | CaptureRecoveryOnly | 変えない。WPDの経路は別の要件として足す（※案） | 全文 |
+| `FR-LV-002` | spoolのtransactionの後にSDKのLive Viewを再開 | WPDの経路では、保存とsessionのCloseを確かめた後にWPDのライブビューを再開する（開発用と同じ） | 自動で再開しない |
+| `docs/PRODUCT_REQUIREMENTS.md`の対象外 | 「vendor operation（`0x9207`を含む）の実装・送信」 | 本ADRとADR-0036決定2の命令を除く | `0x9207` |
+| `docs/PRODUCT_REQUIREMENTS.md`のMVP受入条件2・4・8 | SDK撮影とWPD回収、spoolの言葉 | WPDの経路の言葉を足す | 原画像を失わない、no retry、lease、180秒 |
+| AGENTS.md | `Never overlap SDK and WPD sessions. Stop and fully close SDK Live View before the hybrid transaction; ...`、#332・#389の開発用の行、``Never send vendor operation `0x9207` or retry the transaction.`` | 製品の経路でもWPDの撮影を認める文を足す（文の案はADR-0050の「AGENTS.mdに入れる文」） | `0x9207`とretryの禁止、SDKとWPDを重ねない |
+| `docs/WPD_STILL_CAPTURE.md` | 開発用の経路 | 製品の経路の節を足すか、別の文書にする（※案） | 開発用の記録 |
+| `docs/D810_PC_CONTROL_CAPABILITIES.md` | 撮影の行 | WPDの撮影を製品の経路として書く | Phase 0のCLIの行 |
+| #293のリリースの条件D1 | 二台は評価経路（CaptureRecoveryOnly）のまま、製品の位置づけを変えるADRは作らない | 後半は#351の決定で置き換わったと記録する（※読み方） | 「合成ができるまでリリースしない」、D2（配布は社内のPCだけ） |
+
+変えないもの: ADR-0006・0018・0022（no retry、PCの原本、180秒とlease）、ADR-0024（`SingleCamera`の契約。`SingleCamera`はWPDに切り替えない、決定1）、ADR-0029（SDKのPC直接保存の評価）、ADR-0030・0032（回数と数え方。製品の受入は新しい系列）、ADR-0044（ライブを開いたまま撮る探り。開発用だけ）、`CON-002`・`CON-004`。
+
+承認後に確かめる対象（追記は置かない）: ADR-0022の「承認済み実機撮影入口は…に限定する」が製品のCamera AgentのWPDの撮影の入口にも及ぶか（※要確認）、`HG-0008`（spoolの承認をSDKの経路に限るか）、`docs/PHASE0_TEST_PLAN.md`、`docs/HARDWARE_CAMERA_AGENT_DUAL_BINDING_V1.md`、`docs/OPERATOR_GUIDE.md`・`docs/PILOT_CAPTURE_PROCEDURE.md`（カードの扱い）、`.autodev/requirements/normalized.json`。
+
+### 範囲外と未決
+
+- SDKの撮影とカードのspoolの経路を外す時期（決定8）。
+- 微調整・#343の読み取りの診断を製品の経路に入れるか（命令の表）。AFは入れる（所有者の決定）。
+- ADR-0025の照合を使わないこと（決定5の※案）。`SingleCamera`を含めないこととカードの空を求めないことは所有者が決めた。
+- カードに画像が記録されないことの確認（実機の受入の1）。preflightで記録先を読む案（決定4、※要確認）。
+- 電源の入れ直しでSDRAMに残った画像が消えるか（決定6、※未検証）。
+- capture profileの項目をWPDで読む方法と、設定の書き込みの止めの記録を製品の経路が読む作り（決定7）。
+- 完了イベントの待ちの上限5秒は推定（`docs/WPD_STILL_CAPTURE.md`）。`shutter_gap_ms`の目標の値は所有者が決める。
+
+### ADR-0039で所有者に承認していただく点
+
+1. 決定1〜12。特に、命令の表の撮影の経路に「入れる」（`0x90C0`・`0x90C8`・`0x90C7`と、標準の読み取り・取り込み）と、`0x9207`・`0x90C2`を送らないこと。撮影のchannelがWPDのAPIのほかの面を使わずcleanup tokenを発行しないこと（2）、取り込みが終わらなかったカメラを電源の入れ直しまで止めること（6）、設定の照合の項目と書き込みの止め（7）、経路に既定値を持たないこと（8）、ライブと同じプロセスで撮ること（11）、撮った組を校正に使うこと（12）。
+2. 命令の表の※要確認の命令（`0x9204`・#343の読み取りの診断）と、決定4の記録先を読む案、決定5の※案。
+3. 製品の受入を開発用の確認と分けること、Acceptedにする前提条件。
+4. 変える既存の決定の表と、追記を承認の時に置く扱い。#293のD1の後半の読み方。
+
+### 承認後の作業
+
+- 状態をAcceptedにし、決定日を記入する。表の対象に「ADR-0039で改定」の追記を置く。AGENTS.mdは人が承認した文を入れる。
+- 製品の撮影のgateを設計し、securityのレビューを通してから実装する。
+- 製品の受入の系列を別に承認してから実機に進む。
+- ADR-0038の段Cの前提条件2（本番の経路の受入）が満たされたかを、受入の後に記録する。
+
 ## ADR-0041: PCでカメラごとに選んだ撮影の設定の値を、両台のカメラに書く（CAM-Bを先に、CAM-Aを最後に）
 
 - 状態: Accepted（#416、所有者）。所有者は、AGENTS.mdの決まりの文（#416の段Bの項の(b)と、ADR-0041の例外の項）と、下の「ADR-0041の所有者の決定」を承認した。**承認は書いてよい範囲を決めたもので、書き込みを有効にしたものではない。** 段T3のコードは、CAM-Bに選んだ値と、CAM-Aに選んだ値（CAM-Aは5項目すべて）を書けるようにしてある（製品の表の`chosen_values`と定数`kD810Adr41Accepted`は真。CAM-Aの版の欄はCAM-Bの欄を参照で持つ。有効な行の集合は`static_assert`が見張る）。実機では、T1（CAM-Bに選んだ値）、T2（CAM-AのISO。CAM-Aの本体の照合は表と一致）、T3（CAM-Aの残り4項目を1回の確定で）を試して、どれも読み戻しと読み直しが一致した（下の「実機の事実」）。有効にするのは、下の「有効にする順」の段ごとに、前の段が実機で一致してから使う、表を開く別のcommitだけ（使う＝起動する・mainへ入れるのは、前の段が一致した後）。本ADRの承認は、開発用プレビューの段B（ADR-0038の段の呼び名）に限る。
