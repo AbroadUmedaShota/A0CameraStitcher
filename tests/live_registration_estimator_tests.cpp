@@ -28,6 +28,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <iomanip>
 #include <iostream>
 #include <map>
@@ -516,7 +517,7 @@ void DeterministicAndMounted(){
     };
     CHECK(one.usable && same(one,two) && same(one,three));
     // A follow-up from the estimate, on the same frames, moves by less than its line and keeps its points.
-    job.kind=LiveJobKind::follow;job.start_pose=one.pose;job.start_surface=one.surface;
+    job.kind=LiveJobKind::follow;job.start_pose=one.pose;job.start_surface=one.estimated_surface;
     const auto follow=session.estimator(job,scene.a,scene.b);
     std::cerr<<std::fixed<<std::setprecision(3)<<"info follow on the same frames: change "<<follow.change_px<<" px, inlier fraction "<<follow.inlier_fraction
         <<", brightness "<<follow.band_brightness<<'\n';
@@ -641,7 +642,7 @@ void Timing(){
     std::cerr<<std::fixed<<std::setprecision(1)<<"timing full estimate: wall "<<(WallSeconds()-wall)/kRuns*1000<<" ms (slowest "<<slowest*1000<<" ms), processor "
         <<(CpuSeconds()-cpu)/kRuns*1000<<" ms, mean of "<<kRuns<<" on a grid of "<<live.plan.grid.width<<" x "<<live.plan.grid.height<<" with "<<kLiveEstimatorDesignDraft.thread_count<<" threads\n";
     CHECK(full.usable);
-    job.kind=LiveJobKind::follow;job.start_pose=full.pose;job.start_surface=full.surface;
+    job.kind=LiveJobKind::follow;job.start_pose=full.pose;job.start_surface=full.estimated_surface;
     LiveEstimateOutcome follow;
     wall=WallSeconds();cpu=CpuSeconds();slowest=0;
     for(int k=0;k<kRuns;++k){const double t=WallSeconds();follow=session.estimator(job,scene.a,scene.b);slowest=std::max(slowest,WallSeconds()-t);}
@@ -656,6 +657,49 @@ void Timing(){
     Check(baked.ok,("the estimate can be baked: "+baked.detail).c_str());
     // The follow job is not on the live path any more (nothing asks for it); its time is reported for whoever brings it back.
     (void)follow_wall;
+}
+
+// ---- 9. The surface that the live mapping applies is the estimated one turned about the seam line ------------------------------------
+// The real estimate on the scene of "mixed, paper 5 mm up" (FullEstimates), through the connection the runtime uses. The entrance is
+// wrapped so that the inputs the product made and the outcome it returned are seen: the outcome carries the estimated plane and the
+// applied one, the applied one is the live mouth's answer for those inputs, and what a pair capture is then given is that applied one.
+// The rule itself is tested elsewhere (T24, the runtime's rows); this checks the wiring.
+bool SameBits(double a,double b){std::uint64_t x{},y{};std::memcpy(&x,&a,sizeof x);std::memcpy(&y,&b,sizeof y);return x==y;}
+bool SameSurfaceBits(const ex::SurfacePlane& a,const ex::SurfacePlane& b){return SameBits(a.h0_mm,b.h0_mm) && SameBits(a.slope_x,b.slope_x) && SameBits(a.slope_y,b.slope_y);}
+void AppliedSurfaceOfTheEstimate(){
+    LiveRig live;
+    ps::HeightField field;
+    field.plane=ps::PlaneOver(live.seam,5.0,0,0);
+    const auto scene=MakeLiveScene(live,"waves-up",kWaves,field,Pose{0.2,0.1,-0.6,3.0,-2.0,0.4},107);
+    Session session(live);
+    session.Show(scene);
+    std::optional<LiveEstimateOutcome> seen;
+    std::optional<ex::SurfacePlane> mouth;
+    session.estimator=MakeLiveEstimator([&session]{return session.runtime->BasePlan();},session.runtime->Design(),[&](const LiveEstimatorInputs& in){
+        auto outcome=EstimateLiveRegistration(in,kLiveEstimatorDesignDraft);
+        seen=outcome;
+        mouth=LiveAppliedSurfaceOf(in,outcome.estimated_surface);
+        return outcome;
+    },Ranges());
+    const auto pass=session.Pass();
+    Check(pass.job_ran && pass.accept==LiveAcceptKind::applied && pass.rebaked,("the estimate is taken and drawn ("+session.LogText()+")").c_str());
+    CHECK(seen.has_value() && mouth.has_value());
+    if(!seen || !mouth)return;
+    const auto& o=*seen;
+    std::cerr<<std::setprecision(17)<<"info applied surface: estimated h0 "<<o.estimated_surface.h0_mm<<" gx "<<o.estimated_surface.slope_x<<" gy "<<o.estimated_surface.slope_y
+        <<"; applied h0 "<<o.surface.h0_mm<<" gx "<<o.surface.slope_x<<" gy "<<o.surface.slope_y<<'\n'<<std::fixed<<std::setprecision(3);
+    // The scene estimates a surface with a slope across the width; otherwise the rows below say nothing.
+    CHECK(o.usable && o.estimated_surface.slope_x!=0);
+    CHECK(SameSurfaceBits(o.surface,*mouth));
+    CHECK(o.surface.slope_x==0 && !std::signbit(o.surface.slope_x));
+    CHECK(!SameSurfaceBits(o.surface,o.estimated_surface));
+    // What C is drawn with and what a pair capture is given is the applied surface, bit for bit.
+    const auto status=session.runtime->Status();
+    CHECK(SameSurfaceBits(status.placement.mapping.surface,o.surface));
+    const auto begin=session.runtime->BeginCapture(session.runtime->CurrentPlan());
+    CHECK(begin.admission==LiveCaptureAdmission::accepted && begin.grant.has_value());
+    if(begin.grant)CHECK(SameSurfaceBits(begin.grant->mapping.surface,o.surface) && begin.grant->mapping.pose.tx_mm==o.pose.tx_mm);
+    session.runtime->EndCapture();
 }
 }
 
@@ -676,6 +720,8 @@ int main(){
         std::cerr<<"FAILED: exception "<<error.what()<<'\n';
         ++failures;
     }
+    try{AppliedSurfaceOfTheEstimate();}
+    catch(const std::exception& error){std::cerr<<"FAILED: exception in AppliedSurfaceOfTheEstimate "<<error.what()<<'\n';++failures;}
     std::cerr<<std::fixed<<std::setprecision(1)<<"timing whole run: "<<WallSeconds()-started<<" s\n";
     std::cout<<"live_registration_estimator: "<<checks<<" checks, "<<failures<<" failures\n";
     return failures?1:0;

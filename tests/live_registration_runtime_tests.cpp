@@ -8,6 +8,8 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <deque>
 #include <functional>
 #include <future>
@@ -1470,6 +1472,71 @@ void Rejects(){
     catch(const std::invalid_argument&){threw=true;}
     CHECK(threw);   // a base pose that is not finite
 }
+
+// The live mouth (LiveAppliedSurfaceOf) on the inputs the product makes from the plan in force: the estimator made by MakeLiveEstimator is
+// given an entrance that only keeps its inputs, so camera A's centre, the plane origin, B's model and the raster are the product's, not
+// rebuilt here. The planes are made up and rounded.
+//  (a1) the applied plane has a slope across the width of +0;
+//  (a2) a plane with a slope across the width comes back changed; one without it keeps its height and its slope along the seam bit for bit;
+//  (a3) on every row of the seam column the two planes put B's document point at the same place (1e-9 mm), with the product's
+//       RegisteredDisplacement on the condition's raster;
+//  (a4) away from the seam they do not (printed only, no line), nor does the product's measure over the seam rows say more than rounding;
+//  (j)  a plane that turns away from camera A across the seam (|g_x lambda| >= 1) is refused with std::invalid_argument.
+bool SameBits(double a,double b){std::uint64_t x{},y{};std::memcpy(&x,&a,sizeof x);std::memcpy(&y,&b,sizeof y);return x==y;}
+void AppliedSurfaceAtTheSeam(){
+    Rig rig;
+    if(!Usable(rig)){Check(false,"plan");return;}
+    rig.runtime->PublishBase(rig.plan);
+    const auto plan=rig.runtime->BasePlan();
+    std::optional<LiveEstimatorInputs> got;
+    const auto estimator=MakeLiveEstimator([&]{return plan;},rig.runtime->Design(),[&](const LiveEstimatorInputs& in){got=in;return LiveEstimatorNotConnected(in);});
+    LiveJob job;
+    job.kind=LiveJobKind::full;
+    (void)estimator(job,rig.a,rig.b);
+    CHECK(got.has_value() && got->model_b!=nullptr && plan && plan->live);
+    if(!got || !got->model_b || !plan || !plan->live)return;
+    const auto& in=*got;
+    // The lambda that the product's inputs give, read only to tell whether a plane can be turned (|g_x lambda| < 1).
+    const double lambda=cr::SeamLineLambda(in.centre_a,in.surface_origin_mm);
+    std::cerr<<std::setprecision(17)<<"info seam line lambda "<<lambda<<'\n';
+    const Pose pose{0.125,-0.0625,0.25,1.5,-0.75,0.5};
+    const ex::SurfacePlane tilted_low{-120.0,0.035,0.009},tilted_high{39.9,0.035,0.009},level{-120.0,0.0,0.009},level_negative_zero{-120.0,-0.0,0.009};
+    const auto frame=cr::FrameOfRaster(in.raster);
+    for(const auto& estimated:{tilted_low,tilted_high,level,level_negative_zero}){
+        CHECK(std::abs(estimated.slope_x*lambda)<1);
+        const auto applied=LiveAppliedSurfaceOf(in,estimated);
+        CHECK(applied.slope_x==0 && !std::signbit(applied.slope_x));   // (a1)
+        if(estimated.slope_x!=0){
+            CHECK(!(SameBits(applied.h0_mm,estimated.h0_mm) && SameBits(applied.slope_x,estimated.slope_x) && SameBits(applied.slope_y,estimated.slope_y)));   // (a2)
+        }else{
+            CHECK(SameBits(applied.h0_mm,estimated.h0_mm) && SameBits(applied.slope_y,estimated.slope_y));   // (a2)
+        }
+        // (a3) every row of the seam column, in document mm.
+        double seam_mm=0;
+        for(std::uint32_t y=0;y<in.raster.height_pixels;++y){
+            const auto a=cr::RegisteredDisplacement(*in.model_b,frame,in.centre_a,in.surface_origin_mm,pose,applied,static_cast<double>(in.seam_column),static_cast<double>(y));
+            const auto e=cr::RegisteredDisplacement(*in.model_b,frame,in.centre_a,in.surface_origin_mm,pose,estimated,static_cast<double>(in.seam_column),static_cast<double>(y));
+            seam_mm=std::max(seam_mm,std::hypot(a.x-e.x,a.y-e.y)*frame.pitch_mm);
+        }
+        CHECK(seam_mm<=1e-9);
+        // (a4) the first and the last column, and the product's measure at the seam (output px of the condition's raster).
+        double edge_mm=0;
+        for(const double x:{0.0,static_cast<double>(in.raster.width_pixels-1)})
+            for(const double y:{0.0,static_cast<double>(in.raster.height_pixels-1)}){
+                const auto a=cr::RegisteredDisplacement(*in.model_b,frame,in.centre_a,in.surface_origin_mm,pose,applied,x,y);
+                const auto e=cr::RegisteredDisplacement(*in.model_b,frame,in.centre_a,in.surface_origin_mm,pose,estimated,x,y);
+                edge_mm=std::max(edge_mm,std::hypot(a.x-e.x,a.y-e.y)*frame.pitch_mm);
+            }
+        const double measured_px=LiveSeamMappingDifferenceOutputPx(*plan,ex::RegisteredMapping{pose,applied,std::nullopt},ex::RegisteredMapping{pose,estimated,std::nullopt});
+        std::cerr<<"info applied surface h0 "<<estimated.h0_mm<<" gx "<<estimated.slope_x<<": seam "<<seam_mm<<" mm, first and last column "<<edge_mm
+            <<" mm, LiveSeamMappingDifferenceOutputPx "<<measured_px<<" px\n";
+    }
+    // (j)
+    const ex::SurfacePlane away{-120.0,-50.0,0.009};
+    CHECK(away.slope_x*lambda>=1);
+    REJECT(LiveAppliedSurfaceOf(in,away));
+    std::cerr<<std::fixed;
+}
 }
 
 // One line of the log is one line: a control character becomes a space, a message that may hold a path is withheld, and a plain message is kept.
@@ -1518,6 +1585,8 @@ int main(){
         WorkerSurvives();
         Rejects();
     }catch(const std::exception& e){++failures;std::cerr<<"unexpected exception: "<<e.what()<<'\n';}
+    try{AppliedSurfaceAtTheSeam();}
+    catch(const std::exception& e){++failures;std::cerr<<"unexpected exception in AppliedSurfaceAtTheSeam: "<<e.what()<<'\n';}
     std::cout<<checks<<" checks, "<<failures<<" failures\n";
     return failures?1:0;
 }

@@ -135,8 +135,9 @@ struct LiveJob {
     std::uint64_t revision{};
     LiveJobKind kind{LiveJobKind::full};
     std::optional<LiveFullReason> full_reason;          // full only
-    // follow: the estimate in force. full: the fixed mapping. The estimator starts the fine stage from the pose and the
-    // surface of a follow-up, and a full estimate from the base pose.
+    // follow: the estimate in force (its pose and its estimated surface, LiveEstimateOutcome::estimated_surface; not the surface
+    // that is drawn). full: the fixed mapping. The estimator starts the fine stage from the pose and the surface of a follow-up,
+    // and a full estimate from the base pose.
     a0::m2::experimental::content_registration::PoseParameters start_pose;
     a0::m2::experimental::SurfacePlane start_surface;
     a0::m2::experimental::content_registration::PoseParameters base_pose;   // p_b
@@ -151,7 +152,12 @@ struct LiveJob {
 struct LiveEstimateOutcome {
     bool usable{false};
     a0::m2::experimental::content_registration::PoseParameters pose;   // p-hat, against the calibrated pose
-    a0::m2::experimental::SurfacePlane surface;                        // pi-hat
+    // The surface that the mapping applies: the estimated plane turned about the seam line until it is level across the width
+    // (content_registration::SurfaceAppliedAcrossWidth, the rule of the capture's report v10). All zero when no surface was estimated.
+    // What is drawn, compared and placed reads this one.
+    a0::m2::experimental::SurfacePlane surface;
+    // The estimated plane, pi-hat (all zero when no surface was estimated). The ranges, the log and the start of a follow-up read it.
+    a0::m2::experimental::SurfacePlane estimated_surface;
     bool beyond_envelope{false};                                       // information for the display
     // Follow-up only. NaN when not measured; a follow-up that did not measure what a detection needs counts as a change.
     double change_px=std::numeric_limits<double>::quiet_NaN();         // change of the seam column's displacement from the start
@@ -264,7 +270,7 @@ public:
         }else if(has_estimate_){
             if(now<next_follow_at_)return std::nullopt;
             job.kind=LiveJobKind::follow;
-            job.start_pose=estimate_.pose;job.start_surface=estimate_.surface;
+            job.start_pose=estimate_.pose;job.start_surface=estimated_surface_;
             ++counters_.follow_jobs;
         }else return std::nullopt;
         job.id=++job_counter_;job.revision=revision_;
@@ -429,6 +435,7 @@ private:
         result.replaced=replace;result.seam_difference_px=distance_px;result.adopt_line_px=line;
         if(replace){
             estimate_.pose=outcome.pose;estimate_.surface=outcome.surface;estimate_.parallax.reset();
+            estimated_surface_=outcome.estimated_surface;
             beyond_envelope_=outcome.beyond_envelope;
             exceeded_=outcome.exceeded;
         }else ++counters_.held;
@@ -449,6 +456,7 @@ private:
     LiveTrackerSettings settings_;
     Pose base_;
     a0::m2::experimental::RegisteredMapping fixed_,estimate_,drawn_,baked_;
+    Surface estimated_surface_;   // the estimated surface of the estimate in force: a follow-up starts from it (estimate_ holds the applied one)
     bool has_estimate_{false},last_ok_{false},beyond_envelope_{false};
     double last_verified_{0};
     double next_follow_at_{0};

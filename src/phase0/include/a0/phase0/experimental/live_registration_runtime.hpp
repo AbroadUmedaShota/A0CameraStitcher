@@ -129,6 +129,14 @@ using LiveEstimatorEntrance=std::function<LiveEstimateOutcome(const LiveEstimato
     return outcome;
 }
 
+// The surface that the live mapping applies for an estimated plane: the plane turned about the seam line until it is level across the
+// width, made with camera A's calibrated centre and the plane origin of the inputs (the ones behind camera_b_on_grid). The capture's
+// mapping applies the same rule (report v10). This is the one call of content_registration::SurfaceAppliedAcrossWidth on the live path.
+// Throws std::invalid_argument as that function does (a plane that turns away from camera A across the seam, a value that is not finite).
+[[nodiscard]] inline a0::m2::experimental::SurfacePlane LiveAppliedSurfaceOf(const LiveEstimatorInputs& in,const a0::m2::experimental::SurfacePlane& estimated){
+    return a0::m2::experimental::content_registration::SurfaceAppliedAcrossWidth(estimated,in.centre_a,in.surface_origin_mm);
+}
+
 // ---- The estimate of the live C --------------------------------------------------------------------------------------------------
 //
 // content_registration's estimate on a grid (EstimateRegistrationOnGrid), on C's grid with C's own mappings. A full job runs every
@@ -256,7 +264,12 @@ inline constexpr std::string_view kLiveEstimateRefusedReason="estimate-refused";
         if(outcome.beyond_envelope && !applied)outcome.reasons.emplace_back(kLiveEstimateBeyondEnvelopeReason);
         if(r.has_estimate){
             outcome.pose=r.pose;
-            if(r.surface.state==a0::m2::experimental::SurfaceState::estimated)outcome.surface=r.surface.plane;
+            // The estimated plane is kept as it is; the mapping applies it turned about the seam line. A plane that cannot be turned
+            // throws here, inside the try: the estimate is refused.
+            if(r.surface.state==a0::m2::experimental::SurfaceState::estimated){
+                outcome.estimated_surface=r.surface.plane;
+                outcome.surface=LiveAppliedSurfaceOf(in,r.surface.plane);
+            }
         }
         if(job.kind==LiveJobKind::follow){outcome.change_px=result.change_px;outcome.inlier_fraction=result.inlier_fraction;}
         outcome.usable=applied && r.has_estimate;

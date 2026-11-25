@@ -513,7 +513,8 @@ SavedStillReview ReadReviewMetadata(const std::filesystem::path& path){
     // v8 is the registered fixed composite (#417): the profile's mapping with this capture's pose, surface and layer 2.
     // Like v7 there is no translation, adjustment or crop. Its own members are read by ReadFixedCompositeRegistrationReport.
     // v9 (#437) is the same with the confirmed position the window gave the capture, and the level confirmed; the members at this level are v8's.
-    const bool registered=schema=="a0.uncalibrated-still-review.v8" || schema=="a0.uncalibrated-still-review.v9";
+    // v10 is v9 with the surface rule the G1 and G2 mappings apply (inside fixedCompositeRegistration); the members at this level are v8's.
+    const bool registered=schema=="a0.uncalibrated-still-review.v8" || schema=="a0.uncalibrated-still-review.v9" || schema=="a0.uncalibrated-still-review.v10";
     const auto basis=automatic?ReviewString(ReviewAt(root,"geometryBasis")):std::string();
     const bool corrected=basis=="auto-still-similarity" || basis=="auto-still-rotation";
     if(automatic && !corrected && basis!="auto-still-translation" && basis!="live-preview")ReviewReject();

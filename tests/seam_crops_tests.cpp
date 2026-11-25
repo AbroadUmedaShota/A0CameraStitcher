@@ -5,8 +5,8 @@
 // With the rig profile v2 fixture (argument 2) it also writes registered reviews (upright and mounted a half turn) with the real
 // writer and opens them: the window, the export, and a JPEG changed by one byte (#418). What the window holds and draws (the picture, every
 // pixel of the three crops read back from the drawing surface, the sentences of its panel) is compared with the saved JPEG decoded here by WIC
-// and with the sentences made here from the record, never with the window's own copies. The second argument is required. The writer's report is v9; the cases are a v9
-// report without a position, a v9 report with a position set by hand (level confirmed), and the first of them in the v8 form (what a
+// and with the sentences made here from the record, never with the window's own copies. The second argument is required. The writer's report is v10; the cases are a v10
+// report without a position, a v10 report with a position set by hand (level confirmed), and the first of them in the v8 form (what a
 // capture made before v9 saved).
 #include "a0/m2/experimental/seam_crops.hpp"
 #include "a0/phase0/experimental/seam_crops_export.hpp"
@@ -532,17 +532,36 @@ void ChangedJpeg(const fs::path& root,const fs::path& inspector,const StillRevie
         Check(Has(window.err,std::string("still review failed: ")+kRejectedReview));
     }
 }
-// What a capture made before v9 saved: the v9 report of a capture without a position is, apart from its schema, the v8 report plus
-// two null members. Written back to the v8 form beside the same JPEG, in a folder of its own.
+// What a capture made before v9 saved: the record of the same capture as a writer before v10 left it (the G1 and G2 mappings apply the
+// estimated plane, no surface rule), written in the v8 form beside the same JPEG, in a folder of its own. The JPEG was drawn with the plane
+// turned about the seam line, which differs a little from the record's G1 plane in this v8 text; the window and the export show the saved
+// JPEG only and never draw it again from the record, so what is checked of them here does not depend on that difference.
 fs::path AsV8(const fs::path& root,const StillReviewResult& made,const std::string& label){
     const auto folder=root/("v8-"+label)/"review";fs::create_directories(folder);
     std::string text;{std::ifstream in(made.report,std::ios::binary);text.assign(std::istreambuf_iterator<char>(in),{});}
-    const std::string nulls=",\"confirmedPosition\":null,\"confirmedPositionCheck\":null",v9="a0.uncalibrated-still-review.v9";
-    const auto at=text.find(nulls),schema=text.find(v9);
-    Check(at!=std::string::npos && text.find(nulls,at+1)==std::string::npos && schema!=std::string::npos && text.find(v9,schema+1)==std::string::npos);
-    if(at==std::string::npos || schema==std::string::npos)return folder/"uncalibrated-review.json";
-    text.erase(at,nulls.size());
-    text.replace(text.find(v9),v9.size(),"a0.uncalibrated-still-review.v8");
+    const auto read=LoadSavedStillReview(made.report);
+    Check(read.fixed_composite_registration.has_value());
+    if(!read.fixed_composite_registration)return folder/"uncalibrated-review.json";
+    const auto& written=*read.fixed_composite_registration;
+    auto before=written;
+    const auto level=before.registration.level.level;
+    if(level==GeometryLevel::g1 || level==GeometryLevel::g2)
+        before.registration.level.mapping.surface=before.registration.surface.state==SurfaceState::estimated?before.registration.surface.plane:SurfacePlane{};
+    before.registration.seam_line_lambda.reset();
+    DeriveSavedFixedCompositeRegistration(before,registered_review_fixture::kHash);
+    bool replaced=true;
+    const auto replace_once=[&](const std::string& from,const std::string& to){
+        const auto at=text.find(from);
+        const bool once=at!=std::string::npos && text.find(from,at+1)==std::string::npos;
+        Check(once);replaced=replaced && once;
+        if(once)text.replace(at,from.size(),to);
+    };
+    replace_once("\"fixedCompositeRegistration\":"+FixedCompositeRegistrationJson(written,RegistrationReportFormat::v10),
+        "\"fixedCompositeRegistration\":"+FixedCompositeRegistrationJson(before));
+    replace_once("\"warnings\":"+RegistrationWarningsJson(written.warnings)+",\"assessment\":"+RegistrationAssessmentJson(written.assessment),
+        "\"warnings\":"+RegistrationWarningsJson(before.warnings)+",\"assessment\":"+RegistrationAssessmentJson(before.assessment));
+    replace_once("a0.uncalibrated-still-review.v10","a0.uncalibrated-still-review.v8");
+    if(!replaced)return folder/"uncalibrated-review.json";
     { std::ofstream out(folder/"uncalibrated-review.json",std::ios::binary|std::ios::trunc);out.write(text.data(),static_cast<std::streamsize>(text.size())); }
     fs::copy_file(made.jpeg,folder/"uncalibrated-review.jpg",fs::copy_options::overwrite_existing);
     return folder/"uncalibrated-review.json";
@@ -557,15 +576,15 @@ void Registered(const fs::path& root,const fs::path& inspector,const fs::path& f
         const auto name=std::string(turned?"turned":"upright");
         const auto settings=rf::MakeSettings(root/("settings-"+name),rf::ProfileText(base_profile,turned),turned?MountOrientation::rotated_180:MountOrientation::normal,rf::TallRaster());
         const auto frames=rf::TexturedFrames(root,"frames-"+name,settings,turned,world);
-        // A capture without a position (v9), the same capture with a position set by hand (v9, level confirmed), the first in the v8 form.
+        // A capture without a position (v10), the same capture with a position set by hand (v10, level confirmed), the first in the v8 form.
         const auto made=WriteUncalibratedStillReview(rf::RequestFor(frames,"review",settings,4));
         auto hand_request=rf::RequestFor(frames,"review-hand",settings,4);
         hand_request.fixed_composite_registration->confirmed_position=rf::HandPosition(settings);
         const auto by_hand=WriteUncalibratedStillReview(hand_request);
         Check(ReadBytes(made.jpeg)!=ReadBytes(by_hand.jpeg));   // the position changed the saved JPEG: the two cases do not show the same picture
         const std::vector<fs::path> guarded{settings.folder,fixture};
-        OneRegistered(root,inspector,made.report,turned,name,{"v9",false},guarded);
-        OneRegistered(root,inspector,by_hand.report,turned,name+"-hand",{"v9",true},guarded);
+        OneRegistered(root,inspector,made.report,turned,name,{"v10",false},guarded);
+        OneRegistered(root,inspector,by_hand.report,turned,name+"-hand",{"v10",true},guarded);
         OneRegistered(root,inspector,AsV8(root,made,name),turned,name+"-v8",{"v8",false},guarded);
         if(!turned){upright=made;upright_hand=by_hand;}
     }

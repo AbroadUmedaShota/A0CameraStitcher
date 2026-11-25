@@ -127,11 +127,16 @@ struct GeometryLevelInput {
     // #437: the window's confirmed position, when one was given for this condition (the caller leaves it null for a position of another
     // condition). It is never an input of the estimate: p_b stays the start, the prior and the base of the ranges.
     const ConfirmedPosition* confirmed_position{};
+    // The seam line's lambda of the calibration (CaptureRegistration::seam_line_lambda): the G1 and G2 mappings apply the estimated plane
+    // turned about the seam line by it. Required (and finite) when the estimate is trusted; never a default of 0, which would apply the
+    // estimated plane with its slope across the width left out.
+    std::optional<double> seam_line_lambda;
 };
 struct GeometryLevelDecision {
     GeometryLevel level{GeometryLevel::g4};
     // Why the level is below the best one that was tried, in kebab-case codes. Known: seam-outside-overlap-at-level,
-    // output-uncovered-at-level (11.18); a new code is added with its writer, reader, text and test in one commit.
+    // output-uncovered-at-level (11.18), and surface-rule-failed (report v10: the estimated plane could not be turned about the seam
+    // line, so G1 and G2 were not candidates); a new code is added with its writer, reader, text and test in one commit.
     std::vector<std::string> reasons;
     struct Applied {bool pose{},surface{},parallax{};} applied;
     bool beyond_envelope_applied{};
@@ -155,7 +160,10 @@ private:
 // out_of_envelope, with an estimate) and, when a component is beyond its range (measured from p_b), apply_beyond_envelope is
 // true; layer 2 beyond maxLiftMm likewise. G3 only when the estimate is not trusted. A candidate whose mapping fails
 // cover_check (or cannot be built: the check throws std::invalid_argument) is passed over with the reason
-// seam-outside-overlap-at-level or output-uncovered-at-level. Throws std::invalid_argument for a missing required input and
+// seam-outside-overlap-at-level or output-uncovered-at-level. The plane of G1 and G2 is the estimated plane turned about the seam
+// line (content_registration::SurfaceAppliedAcrossWidthOfLambda with seam_line_lambda; the range checks above read the estimated plane):
+// when that throws, G1 and G2 are not candidates and the reason is surface-rule-failed (not for a position set by hand, whose G1 and G2
+// are only checked). Throws std::invalid_argument for a missing required input (the lambda, when the estimate is trusted) and
 // GeometryLevelUnavailable when G4 fails the check.
 // With a confirmed position (#437, ADR-0046) that is not the condition's own position the candidates are, from the top:
 //  - set by hand (source manual): confirmed {the position}, G4. The G1/G2 candidates are only checked, for estimate_hit;
@@ -396,6 +404,11 @@ struct CaptureRegistration {
     // neither (the position was not given: a calibration's sample, a window that has none). Never an input of the estimate.
     std::optional<ConfirmedPosition> confirmed_position;
     std::optional<ConfirmedPositionCheck> confirmed_check;
+    // Report v10: the seam line's lambda (content_registration::SeamLineLambda of camera A's calibrated centre and the plane origin of the
+    // raster and the seam column) that turns the estimated plane into the plane the G1 and G2 mappings apply
+    // (content_registration::SurfaceAppliedAcrossWidthOfLambda). It depends on the calibration only, so it is set at every level. Empty: not
+    // set; a v10 writer refuses that, and the v8 and v9 writers do not write it.
+    std::optional<double> seam_line_lambda;
 };
 
 // The four range components of p-hat - p_b (11.19.2): |(dtx, dty)| mm, |drz| deg, |(drx, dry)| deg, |dtz| percent, each against
@@ -462,12 +475,22 @@ struct SavedFixedCompositeRegistration {
 // fixedCompositeRegistration.confirmedPosition and .confirmedPositionCheck (before geometryLevel), the geometry level confirmed, and the
 // warning codes position-by-hand, position-from-live and estimate-beyond-envelope with the component confirmed-position. Everything
 // else is v8's, name for name.
-enum class RegistrationReportFormat {v8,v9};
+// v10 (schema a0.uncalibrated-still-review.v10) is v9 with fixedCompositeRegistration.geometryLevel.surfaceRule
+// {"rule":"level-through-seam-line","lambda":<the record's seam_line_lambda>}, written at every level: the G1 and G2 mappings apply the
+// estimated plane turned about the seam line (SurfaceAppliedAcrossWidthOfLambda of the estimated plane, all zero when none was estimated,
+// and the lambda), never the estimated plane itself. A v10 confirmed position has no slope across the width (ConfirmedPositionV10Fault).
+// Everything else is v9's, name for name.
+enum class RegistrationReportFormat {v8,v9,v10};
+// What a v10 report cannot carry of a confirmed position (empty: it can): a slope across the width that is not 0, compared by value (-0 is
+// 0). The v10 writer, the v10 reader and the capture's entrance that writes v10 call this one function; PositionFault (all versions) is
+// not changed by it.
+[[nodiscard]] const char* ConfirmedPositionV10Fault(const ConfirmedPosition& position);
 // The JSON values of the three members the registered composite owns: fixedCompositeRegistration (object), warnings (array),
 // assessment (object). No spaces, members in the formats document's order, numbers with 17 significant digits in the classic
 // locale, -0 written as 0. The record must be consistent (its derived fields equal to their derivation); the writer checks it
 // and throws std::logic_error otherwise, so a report it writes is one the reader accepts. A record with a confirmed position, the level
-// confirmed or a v9 warning cannot be written as v8 (std::logic_error).
+// confirmed or a v9 warning cannot be written as v8 (std::logic_error). A record without a seam line lambda, or one that breaks the v10
+// rules above, cannot be written as v10 (std::logic_error); the v8 and v9 writers do not read the lambda.
 [[nodiscard]] std::string FixedCompositeRegistrationJson(const SavedFixedCompositeRegistration& record,RegistrationReportFormat format=RegistrationReportFormat::v8);
 [[nodiscard]] std::string RegistrationWarningsJson(const std::vector<RegistrationWarning>& warnings);
 [[nodiscard]] std::string RegistrationAssessmentJson(const RegistrationAssessment& assessment);
@@ -567,11 +590,16 @@ struct PreparedCaptureRegistration {
     // the gate only when the level placed B by the estimate (G1, G2); the gate takes it.
     std::optional<seam_gate::SeamMeasurement> band;
     std::optional<registration_gate::RegistrationGateLayout> layout_before_layer_two;
+    // M0: the mapping the band before layer 2 was measured with (the estimated pose and the estimated plane turned about the seam line,
+    // the plane whose height is also layer 2's baseline paper height). Empty when that stage did not make it. Not in the report.
+    std::optional<RegisteredMapping> layer_two_mapping;
 };
-// A stage that throws (the estimate with its settings; layer 2 with the mapping M0 and the band under it) is dropped with the
-// reason stage-failed and the capture goes on: the estimate gives G4 (registration.reasons estimate-failed), layer 2 gives G2 at
-// most (parallax.reasons layer-two-failed); std::bad_alloc is passed on. Throws std::invalid_argument for a programming error
-// (sizes, missing inputs), GeometryLevelUnavailable when not even G4 can be drawn, and what RenderMappedFixedSeam throws.
+// A stage that throws (the estimate with its settings; layer 2 with the mapping M0 and the band under it, or the plane M0 applies) is
+// dropped with the reason stage-failed and the capture goes on: the estimate gives G4 (registration.reasons estimate-failed), layer 2
+// gives G2 at most (parallax.reasons layer-two-failed); std::bad_alloc is passed on. The seam line's lambda (capture.seam_line_lambda)
+// is made once from the calibration, outside the stages. Throws std::invalid_argument for a programming error (sizes, missing inputs,
+// a lambda that cannot be made or is not finite), GeometryLevelUnavailable when not even G4 can be drawn, and what
+// RenderMappedFixedSeam throws.
 [[nodiscard]] PreparedCaptureRegistration PrepareCaptureRegistration(const CaptureRegistrationRequest& request);
 // The gate on Omega with prepared.mapped (entry (b) of registration_gate.hpp: Omega and, when the time allows, the band measured
 // here, then decided). Fills prepared.capture.gate and the time budget; the gate is not_run when the time does not allow it. When
@@ -605,11 +633,13 @@ struct RegistrationRecordIdentity {
 [[nodiscard]] SavedFixedCompositeRegistration RecordOfCapture(const RegistrationRecordIdentity& identity,const CaptureRegistrationRequest& request,
     const PreparedCaptureRegistration& prepared,const FixedCompositeSha256& hash);
 
-// The strict reader of a whole v8 or v9 report text's three members above (the rest of the report is the caller's; the report's schema
-// names the version, and any other schema is refused). Rejects a missing, extra or duplicated member, a value of the wrong kind or out
-// of range, an unknown code, any derived field that differs from its derivation (components, applied flags, warnings, assessment, both
+// The strict reader of a whole v8, v9 or v10 report text's three members above (the rest of the report is the caller's; the report's
+// schema names the version, and any other schema is refused). Rejects a missing, extra or duplicated member, a value of the wrong kind or
+// out of range, an unknown code, any derived field that differs from its derivation (components, applied flags, warnings, assessment, both
 // geometry hashes), and any text that the writer would not write for the values read. A v8 text that has anything of v9 is refused: the
 // v8 reader reads a v8 report as it always did. A v9 text whose level confirmed has a mapping that is not its confirmed position, or whose
-// position and check disagree with the rest of the record, is refused. Every failure is std::invalid_argument.
+// position and check disagree with the rest of the record, is refused. A v8 or v9 text with a surfaceRule is refused, and so is a v10 text
+// without one, with an unknown rule, a G1 or G2 mapping whose plane is not the turned plane of its estimate and lambda (or whose plane
+// cannot be turned), or a confirmed position with a slope across the width. Every failure is std::invalid_argument.
 [[nodiscard]] SavedFixedCompositeRegistration ReadFixedCompositeRegistrationReport(std::string_view report_text,const FixedCompositeSha256& hash);
 }

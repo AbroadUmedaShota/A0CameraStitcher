@@ -10,12 +10,19 @@
 // stages the time budget drops (the deadline is the only thing that differs), and the sentences made from a real report.
 #include "a0/m2/experimental/fixed_composite_maps.hpp"
 #include "a0/m2/experimental/fixed_composite_selection.hpp"
+#include "a0/m2/experimental/confirmed_position.hpp"
+#include "a0/phase0/experimental/live_registration_runtime.hpp"
 #include "a0/phase0/experimental/pair_review_registration.hpp"
 #include "a0/phase0/experimental/pair_review_synthetic.hpp"
 #include "similarity_scene.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <memory>
+#include <optional>
+#include <stdexcept>
 #include <fstream>
 #include <iostream>
 #include <new>
@@ -234,6 +241,134 @@ void SentencesAndMachine() {
     }
 }
 
+// A position that the live estimate decided goes through the capture's entrance and the report v10's writer (#434): the estimate's outcome
+// is made with the product's live mouth (LiveAppliedSurfaceOf) on the inputs that the product's estimator makes from the plan of this
+// condition, then it goes through the machine of the window (session, job, accept, drawn, capture) and the grant is given to
+// ComposePairWithSelection, the function the window's SavePairReview calls. The estimated plane and the pose are made up and rounded
+// (those of 1b, with a slope across the width). No level and no `used` is asserted: only that the report is written and read, and its
+// surface.
+//  (1) the live position: the report is v10, and the position read back has no slope across the width and the mouth's height and slope;
+//  (2) the same position moved once by hand (the product's SolveHandStep on the same model, centre and origin): the same;
+//  (3) the estimated plane itself as the position (the outcome before the mouth): the entrance refuses it and nothing is created.
+namespace live_position {
+bool SameBits(double a, double b) { std::uint64_t x{}, y{}; std::memcpy(&x, &a, sizeof x); std::memcpy(&y, &b, sizeof y); return x == y; }
+m2e::ConfirmedPositionSource SourceOf(LivePlacementSource source) {
+    const auto parsed = m2e::ParseConfirmedPositionSource(LivePlacementSourceCode(source));
+    if (!parsed) throw std::logic_error("a position source that the report does not know");
+    return *parsed;
+}
+// The fields that the window copies from a grant (live_placement_controls_ui.hpp ConfirmedPositionOfGrant).
+m2e::ConfirmedPosition PositionOfGrant(const LivePlacementGrant& grant) {
+    m2e::ConfirmedPosition position;
+    position.mapping = grant.mapping;
+    position.source = SourceOf(grant.source);
+    position.serial = grant.serial;
+    position.condition_sha256 = grant.condition_sha256;
+    if (grant.base_source) position.base_source = SourceOf(*grant.base_source);
+    position.manual_entered = grant.hand_entered;
+    return position;
+}
+}
+
+void LivePositionThroughTheWriter(const Settings& settings, const m2e::FixedCompositeSelection& selection, const Frames& frames) {
+    namespace cr = m2e::content_registration;
+    using live_position::SameBits;
+    const auto& condition = settings.loaded.condition;
+    // The inputs that the product makes: from the plan of this condition when it has a registered context, else from the context's own constructor.
+    const auto plan = std::make_shared<const FixedPreviewPlan>(PlanFixedPreviewV3(settings.loaded, m2e::MountOrientation::normal, 640, 424));
+    std::optional<LiveEstimatorInputs> inputs;
+    std::optional<LiveRegistrationContext> own_context;
+    if (plan->live && plan->mapped) {
+        const auto estimator = MakeLiveEstimator([plan] { return plan; }, kLiveTrackerDesignDraft, [&](const LiveEstimatorInputs& in) { inputs = in; return LiveEstimatorNotConnected(in); });
+        const render::BgrImage frame{1, 1, {0, 0, 0}};
+        LiveJob job;
+        job.kind = LiveJobKind::full;
+        (void)estimator(job, frame, frame);
+        std::cout << "live position: the inputs come from the plan's registered context\n";
+    } else {
+        std::cout << "live position: the plan has no registered context (" << plan->detail << "); the inputs come from LiveRegistrationContext\n";
+        const m2e::RegisteredMapping fixed{condition.base_pose, {}, std::nullopt};
+        own_context.emplace(settings.loaded.profile.parameters, condition.raster, condition.seam.column, MakeFixedPreviewGrid(condition.raster, 640.0 / kWidth), 640.0 / kWidth,
+            640.0 / kWidth, 640, 424, false, fixed);
+        LiveEstimatorInputs in;
+        in.raster = condition.raster;
+        in.seam_column = condition.seam.column;
+        in.model_b = &own_context->model_b;
+        in.centre_a = own_context->centre_a;
+        in.surface_origin_mm = own_context->origin_mm;
+        inputs = in;
+    }
+    CHECK(inputs.has_value() && inputs->model_b != nullptr);
+    if (!inputs || !inputs->model_b) return;
+    const auto in = *inputs;
+    const m2e::content_registration::PoseParameters pose{0.125, -0.0625, 0.1875, 0.75, -0.375, 0.25};
+    const m2e::SurfacePlane estimated{1.5, 0.00390625, -0.001953125};
+    const auto applied = LiveAppliedSurfaceOf(in, estimated);
+    CHECK(applied.slope_x == 0 && !std::signbit(applied.slope_x) && !SameBits(applied.h0_mm, estimated.h0_mm));
+    // The machine of the window, from the session to the grant of a pair capture.
+    const auto grant_of = [&](const m2e::SurfacePlane& surface, bool by_hand) {
+        LivePlacementMachine machine;
+        machine.BeginSession(settings.loaded.file_sha256, condition.base_pose, true);
+        const auto job = machine.BeginJob();
+        if (!job) throw std::logic_error("the machine began no job");
+        LiveEstimateOutcome outcome;
+        outcome.usable = true;
+        outcome.pose = pose;
+        outcome.estimated_surface = estimated;
+        outcome.surface = surface;
+        if (machine.Accept(*job, outcome) != LivePlacementMachine::AcceptKind::pending_draw) throw std::logic_error("the outcome was not taken");
+        machine.Committed();
+        if (by_hand) {
+            const LiveHandChecker check = [&](const m2e::RegisteredMapping& base, const m2e::HandCounts& total) {
+                LiveHandCheck out;
+                out.status = LiveHandCheck::Status::accepted;
+                out.mapping = m2e::SolveHandStep(*in.model_b, in.centre_a, in.surface_origin_mm, cr::FrameOfRaster(in.raster), base, total, static_cast<double>(in.seam_column),
+                    (static_cast<double>(in.raster.height_pixels) - 1) / 2);
+                return out;
+            };
+            if (machine.HandStep(m2e::HandCounts{3, 0, 0}, LiveHandContext{true, true}, check).outcome != LiveHandOutcome::accepted) throw std::logic_error("the hand step was refused");
+            machine.Committed();
+        }
+        const auto begin = machine.BeginCapture(true);
+        if (!begin.grant) throw std::logic_error("the capture was given no position");
+        return *begin.grant;
+    };
+    const auto written = [&](const char* name, const LivePlacementGrant& grant, LivePlacementSource source) {
+        CHECK(grant.source == source && SameBits(grant.mapping.surface.h0_mm, applied.h0_mm) && SameBits(grant.mapping.surface.slope_y, applied.slope_y));
+        auto outcome = ComposePairWithSelection(selection, RequestFor(frames, name, m2e::MountOrientation::normal, std::chrono::seconds(900)), std::nullopt, live_position::PositionOfGrant(grant));
+        CHECK(outcome.review.has_value() && !outcome.skip);
+        if (!outcome.review || !outcome.review->fixed_composite_registration) return;
+        const auto text = ReadText(outcome.review->report);
+        CHECK(Contains(text, "\"a0.uncalibrated-still-review.v10\""));
+        const auto saved = m2e::LoadSavedStillReview(outcome.review->report);
+        CHECK(saved.fixed_composite_registration.has_value() && saved.fixed_composite_registration->registration.confirmed_position.has_value());
+        if (!saved.fixed_composite_registration || !saved.fixed_composite_registration->registration.confirmed_position) return;
+        const auto& read = saved.fixed_composite_registration->registration;
+        const auto& surface = read.confirmed_position->mapping.surface;
+        std::cout << name << ": level " << m2e::GeometryLevelCode(read.level.level) << ", position h0 " << surface.h0_mm << " slope_x " << surface.slope_x << " slope_y " << surface.slope_y << '\n';
+        CHECK(surface.slope_x == 0);
+        CHECK(SameBits(surface.h0_mm, applied.h0_mm) && SameBits(surface.slope_y, applied.slope_y));
+    };
+    // (1)
+    written("review-live", grant_of(applied, false), LivePlacementSource::auto_start);
+    // (2)
+    written("review-live-hand", grant_of(applied, true), LivePlacementSource::manual);
+    // (3)
+    {
+        const auto grant = grant_of(estimated, false);
+        CHECK(grant.mapping.surface.slope_x != 0);
+        bool refused = false;
+        std::string what;
+        try {
+            (void)ComposePairWithSelection(selection, RequestFor(frames, "review-live-estimated", m2e::MountOrientation::normal, std::chrono::seconds(900)), std::nullopt,
+                live_position::PositionOfGrant(grant));
+        } catch (const std::invalid_argument& error) { refused = true; what = error.what(); }
+        std::cout << "estimated plane as the position: " << (refused ? what : std::string("not refused")) << '\n';
+        CHECK(refused && what.rfind("confirmed position: ", 0) == 0 && Contains(what, "slope across the width"));
+        CHECK(!fs::exists(frames.root / "review-live-estimated"));
+    }
+}
+
 int main(int argc, char** argv) {
     try {
         if (argc < 2) throw std::invalid_argument("usage: pair_review_registration_tests <rig-profile-v2 fixture folder>");
@@ -287,7 +422,7 @@ int main(int argc, char** argv) {
         // report read back from the file (never from the window's own copy). The line and the report's numbers are the same strings; the sentence says whose position it is.
         {
             m2e::ConfirmedPosition given;
-            given.mapping = m2e::RegisteredMapping{m2e::content_registration::PoseParameters{0.125, -0.0625, 0.1875, 0.75, -0.375, 0.25}, m2e::SurfacePlane{1.5, 0.00390625, -0.001953125}, std::nullopt};
+            given.mapping = m2e::RegisteredMapping{m2e::content_registration::PoseParameters{0.125, -0.0625, 0.1875, 0.75, -0.375, 0.25}, m2e::SurfacePlane{1.5, 0.0, -0.001953125}, std::nullopt};
             given.source = m2e::ConfirmedPositionSource::manual;
             given.base_source = m2e::ConfirmedPositionSource::auto_button;
             given.manual_entered = m2e::HandCounts{3, 0, -1};
@@ -354,6 +489,14 @@ int main(int argc, char** argv) {
             // A capture without a position says so in one line, and nothing about cameras.
             const auto none = ConfirmedPositionLogLine(m2e::SavedFixedCompositeRegistration{});
             CHECK(none == "pair_review_confirmed_position given=0 used=0 quality_accepted=0");
+        }
+
+        // 1c. A position that the live estimate decided, through the entrance and the report v10's writer.
+        try {
+            LivePositionThroughTheWriter(settings, selection, frames);
+        } catch (const std::exception& error) {
+            ++failures;
+            std::cerr << "FAILED: exception in LivePositionThroughTheWriter: " << error.what() << '\n';
         }
 
         // 2. The same pair with less time: the stages the time holds are run and the others are named. The deadline is the only

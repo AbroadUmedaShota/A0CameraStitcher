@@ -1335,7 +1335,7 @@ int RunPairV3UiSmoke(const std::filesystem::path& fixtures){
                 check(record.registration.level.level==m2e::GeometryLevel::g4,"v3: flat frames give G4");
                 check(record.condition_sha256==v3.loaded.file_sha256 && record.condition_sequence==1,"v3: the revision in force is the one recorded");
                 const auto saved=m2e::LoadSavedStillReview(first.review->report);
-                check(saved.fixed_composite_registration.has_value() && ps::ReadText(first.review->report).find("a0.uncalibrated-still-review.v9")!=std::string::npos,"v3: the report is v9 and reads back");
+                check(saved.fixed_composite_registration.has_value() && ps::ReadText(first.review->report).find("a0.uncalibrated-still-review.v10")!=std::string::npos,"v3: the report is v10 and reads back");
                 const auto lines=DescribeRegistrationReview(*first.review);
                 check(lines.status.size()>=4 && lines.log.size()>=4,"v3: the status and the log have their lines");
                 const auto status=SavedCaptureStatus(first);

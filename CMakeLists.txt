@@ -2190,6 +2190,11 @@ if(BUILD_TESTING)
     a0_add_registration_lane_test(m2_fixed_composite_registration_text_contracts tests/fixed_composite_registration_text_tests.cpp)
     target_include_directories(m2_fixed_composite_registration_text_contracts PRIVATE src/phase0/include)
     target_link_libraries(m2_fixed_composite_registration_text_contracts PRIVATE a0_m2_capture_registration)
+    # The live and capture mappings apply the same surface (#434): the live outcome, the capture's level and their drawing, on synthetic scenes;
+    # and the rule against the synthetic values of an independent implementation (the fixture's folder is the argument).
+    a0_add_registration_lane_test(m2_live_capture_agreement_contracts tests/live_capture_agreement_tests.cpp "${CMAKE_SOURCE_DIR}/tests/fixtures/surface-applied")
+    target_include_directories(m2_live_capture_agreement_contracts PRIVATE src/phase0/include src/common/include)
+    target_link_libraries(m2_live_capture_agreement_contracts PRIVATE a0_m2_capture_registration a0_m2_fixed_composite_v2 a0_m2_fixed_composite a0_m2_seam_blend a0_m2_content_registration a0_m2_registration_pose a0_m2_render)
 
     # Parallax scene generator (#417 S3, docs/design/fixed-composite-registration.md, parallax correction 11.10): paper-height
     # fields to the raw images of A and B and their truth, and the checks of the generator itself. Test-only (tests/parallax_scene.hpp

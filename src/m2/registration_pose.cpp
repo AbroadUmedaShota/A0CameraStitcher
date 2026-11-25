@@ -114,6 +114,32 @@ bool SurfaceHomographyHoldsAt(const CameraCentre& a,const CameraCentre& b,Point 
     return t.n_a>0 && d>0 && den>0;
 }
 
+double SeamLineLambda(const CameraCentre& a,Point origin_mm){
+    RequireCentre(a);
+    Require(std::isfinite(origin_mm.x) && std::isfinite(origin_mm.y),"registration surface: the plane origin must be finite");
+    const double lambda=(a.x_mm-origin_mm.x)/a.height_mm;
+    Require(std::isfinite(lambda),"registration surface: the seam line must be finite");
+    return lambda;
+}
+
+// A's ray through the seam point X = (x0, y) meets the paper at P with P_x - x0 = lambda P_z. On the estimated plane
+// P_z = h0 + gx lambda P_z + gy (P_y - y0), so P_z = (h0 + gy (P_y - y0)) / f: every such P lies on the level plane
+// (h0 / f, 0, gy / f), and a ray meets a plane once, so both planes give the same P on every row of the seam column.
+SurfacePlane SurfaceAppliedAcrossWidthOfLambda(const SurfacePlane& estimated,double lambda){
+    Require(std::isfinite(estimated.h0_mm) && std::isfinite(estimated.slope_x) && std::isfinite(estimated.slope_y),
+        "registration surface: the surface plane must be finite");
+    Require(std::isfinite(lambda),"registration surface: the seam line must be finite");
+    const double f=1.0-estimated.slope_x*lambda;
+    Require(std::isfinite(f) && f>0,"registration surface: the surface turns away from camera A across the seam");
+    const SurfacePlane applied{estimated.h0_mm/f,0.0,estimated.slope_y/f};
+    Require(std::isfinite(applied.h0_mm) && std::isfinite(applied.slope_y),"registration surface: the applied surface is not finite");
+    return applied;
+}
+
+SurfacePlane SurfaceAppliedAcrossWidth(const SurfacePlane& estimated,const CameraCentre& a,Point origin_mm){
+    return SurfaceAppliedAcrossWidthOfLambda(estimated,SeamLineLambda(a,origin_mm));
+}
+
 PlaneFrame FrameOfRaster(const render::OutputRaster& raster){
     render::ValidateOutputRaster(raster);
     return {static_cast<double>(raster.region_um.left)/1000.0,static_cast<double>(raster.region_um.top)/1000.0,25.4/raster.dpi};
