@@ -1,8 +1,8 @@
-# 固定の合成条件 v3 と報告 v8・v9 の書式
+# 固定の合成条件 v3 と報告 v8・v9・v10 の書式
 
 Issue #417（撮影ごとに図面の中身で左右のカメラの継ぎ目を合わせる）で、複数の実装が同時に書く条件 v3 と報告 v8 の欄を 1 か所に固めた表。設計の正本は `fixed-composite-registration.md` の 11 節（11.9 の配線、11.17 の警告、11.19〜11.22、11.25、11.27）。この文書は欄の名前・型・単位・必須か・埋める担当・予約かを決めるだけで、処理の説明は設計に任せる。実測の値、機体の識別子、パス、作業の日付は書かない。
 
-状態: v3 と v8 は main に入るまで凍結しない。v8 は main に入ったので、その後の変更は報告 v9（4.13）にした（#437。v8 の読み手は残す）。表の中身は、設計の追補（11.16 以降）と所有者の決定（12 項）に合わせてある。所有者の確認済み: 古い試し撮りの記録（この書式より前の v8）は読めなくてよい。版は上げず、欄を省略可にもしない。v3 の `basePose` が `registration.envelope` の内にあることは手直し（`manual-adjustment`）の書き込みと読み込みでは求めず、条件を撮影やライブの C に使う読み手が求める。
+状態: v3 と v8 は main に入るまで凍結しない。v8 は main に入ったので、その後の変更は報告 v9（4.13）にした（#437。v8 の読み手は残す）。G1・G2 の写像の紙面の意味を変える変更は報告 v10（4.14）にした（#434。v8・v9 の読み手は残す）。表の中身は、設計の追補（11.16 以降）と所有者の決定（12 項）に合わせてある。所有者の確認済み: 古い試し撮りの記録（この書式より前の v8）は読めなくてよい。版は上げず、欄を省略可にもしない。v3 の `basePose` が `registration.envelope` の内にあることは手直し（`manual-adjustment`）の書き込みと読み込みでは求めず、条件を撮影やライブの C に使う読み手が求める。
 
 ## 1. 欄を足す時の決まり
 
@@ -224,12 +224,12 @@ Issue #417（撮影ごとに図面の中身で左右のカメラの継ぎ目を�
 `{level, reasons[], applied{pose, surface, parallax}, beyondEnvelopeApplied, mapping, coarseShift}`。`level` は `G1`〜`G4`。
 
 - `mapping`: その段で B の写像に当てた値。`{pose{rxDeg, ryDeg, rzDeg, txMm, tyMm, tzPercent}, surface{h0Mm, slopeX, slopeY}, parallax}`。`parallax` は null か `{baseline{x, y}, rowSpacingPx, firstRowPx, qPx[], aPx, lPx, seamColumn}`（`ParallaxProfile`）。合成とゲートはこの値で `RegisteredDocumentMappedFixedSeamInput` を作る
-  - G1: `pose` が `registration.pose`、`surface` が推定した紙面（推定が無ければ 0）、`parallax` が層 2 の行から作った標本（当てない行は 0）
+  - G1: `pose` が `registration.pose`、`surface` が推定した紙面（推定が無ければ 0）、`parallax` が層 2 の行から作った標本（当てない行は 0）。v10 の `surface` は推定した紙面そのものでなく、継ぎ目の線のまわりに回した紙面（4.14）
   - G2: G1 と同じで `parallax` が null
   - G3: `pose` が `basePose` に `coarseShift` の `translationXMm`・`translationYMm` を足した物、`surface` が `{coarseShift.surfaceHeightMm, 0, 0}`（条件の `surfaceEnvelope` が null なら h0 も 0）、`parallax` が null
   - G4: `pose` が `basePose`、`surface` が 0、`parallax` が null
 - `coarseShift`: G3 の候補（粗の段の一様なずれ）。null か `{surfaceHeightMm, translationXMm, translationYMm}`。G3 以外の段でも、候補があれば書く
-- `reasons`: `seam-outside-overlap-at-level`／`output-uncovered-at-level`（上の段の写像が安い検査に落ちた時）
+- `reasons`: `seam-outside-overlap-at-level`／`output-uncovered-at-level`（上の段の写像が安い検査に落ちた時）。v10 だけ `surface-rule-failed`（推定した紙面を回せず、G1・G2 が候補にならなかった時。4.14）
 - `applied`（派生値）: `pose` は G1〜G3、`surface` は `mapping.surface` が 0 でない時、`parallax` は `mapping.parallax` がある時
 - `beyondEnvelopeApplied`（派生値）: 当てた段の量に範囲を超えた物があるか（G1・G2 は姿勢の成分と紙面、G1 は層 2 の `maxLiftMm` も、G3 は粗の段の 2 自由度）
 
@@ -274,7 +274,7 @@ Issue #417（撮影ごとに図面の中身で左右のカメラの継ぎ目を�
 
 ### 4.13 報告 v9（`a0.uncalibrated-still-review.v9`、#437 段 2）
 
-開発用プレビューの窓が持つ「確定した位置」（ライブの合成と JPEG の合成が共有する CAM-B の位置。ADR-0046）を、撮影ごとに記録する版。条件 v3 の撮影の報告は、以後すべて v9 で書く（v8 は書かない）。v8 の読み手は残し、v8 の報告を今までどおり読む。決まり 8 により、欄を足す変更なので版を上げた（既にある欄だけを使う符号の追加ではない: 出どころ・通し番号・手で入れた量に新しい欄が要る）。
+開発用プレビューの窓が持つ「確定した位置」（ライブの合成と JPEG の合成が共有する CAM-B の位置。ADR-0046）を、撮影ごとに記録する版。条件 v3 の撮影の報告は、v10（4.14）が入るまでは v9 で書いた（v8 は書かない）。v8 の読み手は残し、v8 の報告を今までどおり読む。決まり 8 により、欄を足す変更なので版を上げた（既にある欄だけを使う符号の追加ではない: 出どころ・通し番号・手で入れた量に新しい欄が要る）。
 
 v8 との差はこれだけで、ほかの欄は名前・型・単位・並びとも v8 のまま。
 
@@ -355,6 +355,51 @@ v8 との差はこれだけで、ほかの欄は名前・型・単位・並び�
 
 撮影の側の行は、窓が写した値でなく、JPEG の作り手が書いた記録（報告を読み直した物）から書く: `pair_review_confirmed_position given=1 serial=<n> source=<符号> base_source=<符号か none> reference_camera=CAM-A target_camera=CAM-B <9 数> manual_seam_dx_px=<数> manual_seam_dy_px=<数> manual_rotation_deg=<数>（手でない時は manual_entered=none） condition_sha256=<hash> condition_matches=0|1 used=0|1 seam_difference_px=<数か none> level=<符号> quality_accepted=0`。位置が無かった時は `pair_review_confirmed_position given=0 used=0 quality_accepted=0`。9 数は `LivePlacementFields`、2 台の名前は `LivePlacementCameraFields`（ライブの行 `C live_placement serial=… source=… <9 数> condition_sha256=… drawn=1 reference_camera=CAM-A target_camera=CAM-B …` も同じ 2 関数）が書き、数の字面は報告と同じ。
 
+### 4.14 報告 v10（`a0.uncalibrated-still-review.v10`、#434）
+
+G1 と G2 の写像が当てる紙面を、推定した紙面そのものから、継ぎ目の線のまわりに回して継ぎ目をまたぐ傾きを無くした紙面に変えた版。条件 v3 の撮影の報告は、以後すべて v10 で書く（v9 は書かない）。v8 と v9 の読み手は残し、v8・v9 の報告を今までどおり読む。`mapping.surface` の意味が変わり、v9 の読み手は回した紙面の G1・G2 を拒否するので、同じ版には書けない。決まり 8 により版を上げた。
+
+v9 との差はこれだけで、ほかの欄は名前・型・単位・並びとも v9 のまま。
+
+| JSON の名前 | C++ の名前 | 型 | 必須 | 埋める担当 |
+|---|---|---|---|---|
+| `schema` | （定数） | 文字列 `a0.uncalibrated-still-review.v10` | 必須 | J8 |
+| `fixedCompositeRegistration.geometryLevel.surfaceRule`（`coarseShift` の後。最後のメンバー） | `registration.seam_line_lambda` と定数の規則名 | `{rule, lambda}` | 必須（v10 のどの段でも書く） | J8 |
+| `geometryLevel.reasons` の要素 | `registration.level.reasons` | 符号 `surface-rule-failed`（v10 だけ） | 条件つき | J8 |
+
+- `surfaceRule.rule`: 文字列 `level-through-seam-line`（v10 が知っている規則はこの 1 つ。読み手は別の値を拒否）
+- `surfaceRule.lambda`: 有限の数（2 節の書き方）。継ぎ目の線の λ で、カメラ A の校正した中心の x から紙面の原点の x を引いた値を、その中心の高さで割った物。紙面の原点は出力の raster と継ぎ目の列で決まり、λ は校正だけで決まる（推定には依らない）。撮影の準備（`PrepareCaptureRegistration`）が校正から 1 回だけ作り、段の選び・M0・層 2 の基線の高さ・記録が同じ値を使う。有限でなければ入口で `std::invalid_argument`
+- 回した紙面: 推定した紙面（`surface` の欄の値。推定が無ければ 0）を `(h0, slopeX, slopeY)` として、`f = 1 - slopeX × λ`、回した紙面 `(h0 / f, 0, slopeY / f)`。`slopeX` が +0 でも -0 でも `f` は 1 で、`h0` と `slopeY` はビットで同じ。`f` が有限で正でない時（紙面が継ぎ目をまたいでカメラ A から背を向ける時）と、結果が有限でない時は回せない
+- G1・G2 の `mapping.surface` は、この回した紙面と値で同じ（`slopeX` は +0）。読み手は推定した紙面と `lambda` から作り直して比べ、推定した紙面そのものや別の λ で回した紙面は拒否する。G1・G2 で回せない紙面の記録も拒否する。G3・G4・`confirmed` の `mapping` は v9 のまま（4.9・4.13.3）で、`lambda` は有限である事だけを確かめる。G1・G2 では `geometryHash` が v9 の同じ記録と違う値になり、G3・G4 では同じ
+- 記録の `surface`（4.7）、範囲の比べ、警告は、推定した紙面のまま。回した紙面は G1・G2 の写像にだけ当てる
+- v8 と v9 の文に `surfaceRule` があれば拒否し、v10 の文に無ければ拒否する。`surfaceRule` に欠けた・余分なメンバー、数でない・有限でない `lambda`、`null` があっても拒否する
+
+#### 4.14.1 `surface-rule-failed`
+
+推定した紙面を回せなかったために G1・G2 が候補にならなかった事を残す、段を下げた理由の符号（v10 だけ。v8・v9 の読み手は拒否）。
+
+- 書き手が書く時: 推定が確かで、範囲の決め（超えていなければ、または `applyBeyondEnvelope` が true なら）で G1・G2 が候補になる場面で、推定した紙面が回せなかった時。G1・G2 を飛ばして次の候補（位置があれば `confirmed`、なければ G4。G3 は確かでない推定の候補なのでここでは作らない）に進み、`reasons` の先頭に 1 つ書く。手で直した位置（`manual`）では G1・G2 は確かめるだけなので書かない
+- 読み手が確かめる事: 2 つ以上は拒否。推定が確かでない時、紙面が回せる時、段が G1・G2 の時に書いてあれば拒否
+- 画面の文は、この符号を「推定した紙面の傾きが大きく、継ぎ目の線で水平にした紙面を作れなかったため」と言う（`fixed_composite_registration_text.hpp`）
+
+#### 4.14.2 確定した位置（v10 だけ）
+
+v10 は、`confirmedPosition.surface.slopeX` が 0 でない位置を書かず、読まない（値で比べる。-0 は 0）。位置の紙面は継ぎ目をまたぐ傾きを持たない紙面で、ライブの推定が決めた位置も、手で動かした位置も、条件の位置も、この形になる。
+
+- 撮影の入口は、位置の `slopeX` が 0 でなければ、ほかの何かを作る前に `std::invalid_argument`（`confirmed position: position slope across the width`）で断る。ほかの条件の位置（記録だけで使わない物）も同じ
+- 書き手と読み手は同じ検査を通る。v9 は今までどおり傾きのある位置を書き、読む。ほかの位置の検査（`PositionFault`）は変えない
+
+#### 4.14.3 書き手と読み手の拒否
+
+- 書き手: v10 の記録が上の決まりに合わない時（λ が無い・有限でない、G1・G2 の紙面が回した紙面でない、理由の置き方が合わない、傾きのある位置）は `std::logic_error`（文は `report v10 record ` で始まる。例: `report v10 record is not consistent: ...`）。v8 と v9 の書き手は λ を読まず、書く文は今までと同じ
+- 読み手: すべて `std::invalid_argument`（文は `report v10: ` で始まる）。保存した報告を開く側は、v10 の schema を v8・v9 と同じ「登録済みの合成」として扱い、中身を上の読み手に渡す
+
+#### 4.14.4 例（数は例の値）
+
+```
+..."geometryLevel":{"level":"G2","reasons":[],"applied":{...},"beyondEnvelopeApplied":false,"mapping":{...},"coarseShift":null,"surfaceRule":{"rule":"level-through-seam-line","lambda":-0.125}},"gate":{...
+```
+
 ## 5. 符号
 
 ### 5.1 警告の符号（`code`）と `class`・`remedy`
@@ -398,7 +443,7 @@ v8 との差はこれだけで、ほかの欄は名前・型・単位・並び�
 
 ### 5.4 その他
 
-- 段（`level`）: `G1`／`G2`／`G3`／`G4`、v9 だけ `confirmed`（4.13.3）。段を下げた理由の符号は `seam-outside-overlap-at-level`、`output-uncovered-at-level`（設計 11.18）。符号を足す時は 1 節の 6
+- 段（`level`）: `G1`／`G2`／`G3`／`G4`、v9 だけ `confirmed`（4.13.3）。段を下げた理由の符号は `seam-outside-overlap-at-level`、`output-uncovered-at-level`（設計 11.18）、v10 だけ `surface-rule-failed`（4.14）。符号を足す時は 1 節の 6
 - 層 2 の理由の符号: `not-implemented`（層 2 が入る前の固定値。今は書かない）、`disabled`、`pose-untrusted`、`time-budget`、`baseline-unmeasured`、`too-few-points`、`beyond-lift-line`、`layer-two-failed`（層 2 か、その下の写像 M0・帯の測定が例外を投げた）（`parallax_correction.hpp` の注）。行の `reason` の符号も同じ注
 - 推定の理由の符号に増えた物（`registration.reasons`）: `repeating-only`、`coarse-ambiguous`、`time-budget`（`content_registration.hpp` の注）、`estimate-failed`（推定か、その設定の検査が例外を投げた。撮影の経路が書く）
 - 折り目の種類: `fold`／`gutter`
