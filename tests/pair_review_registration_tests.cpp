@@ -247,9 +247,9 @@ void SentencesAndMachine() {
 // ComposePairWithSelection, the function the window's SavePairReview calls. The estimated plane and the pose are made up and rounded
 // (those of 1b, with a slope across the width). No level and no `used` is asserted: only that the report is written and read, and its
 // surface.
-//  (H2-1) the live position: the report is v10, and the position read back has no slope across the width and the mouth's height and slope;
-//  (H2-2) the same position moved once by hand (the product's SolveHandStep on the same model, centre and origin): the same;
-//  (H2-3) the estimated plane itself as the position (the outcome before the mouth): the entrance refuses it and nothing is created.
+//  (1) the live position: the report is v10, and the position read back has no slope across the width and the mouth's height and slope;
+//  (2) the same position moved once by hand (the product's SolveHandStep on the same model, centre and origin): the same;
+//  (3) the estimated plane itself as the position (the outcome before the mouth): the entrance refuses it and nothing is created.
 namespace live_position {
 bool SameBits(double a, double b) { std::uint64_t x{}, y{}; std::memcpy(&x, &a, sizeof x); std::memcpy(&y, &b, sizeof y); return x == y; }
 m2e::ConfirmedPositionSource SourceOf(LivePlacementSource source) {
@@ -349,11 +349,11 @@ void LivePositionThroughTheWriter(const Settings& settings, const m2e::FixedComp
         CHECK(surface.slope_x == 0);
         CHECK(SameBits(surface.h0_mm, applied.h0_mm) && SameBits(surface.slope_y, applied.slope_y));
     };
-    // (H2-1)
+    // (1)
     written("review-live", grant_of(applied, false), LivePlacementSource::auto_start);
-    // (H2-2)
+    // (2)
     written("review-live-hand", grant_of(applied, true), LivePlacementSource::manual);
-    // (H2-3)
+    // (3)
     {
         const auto grant = grant_of(estimated, false);
         CHECK(grant.mapping.surface.slope_x != 0);
