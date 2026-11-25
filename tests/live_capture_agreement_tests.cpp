@@ -643,8 +643,9 @@ void CheckFixtureCase(const pj::JsonValue& item,const FixtureRig& rig,FixtureTot
     const auto a=Numbers(Field(item,"applied",pj::JsonKind::array),3);
     const double h0_gap=std::abs(applied.h0_mm-a[0]);
     totals.h0_mm=std::max(totals.h0_mm,h0_gap);
-    totals.slope_y=std::max(totals.slope_y,std::abs(applied.slope_y-a[2]));
-    CHECK(h0_gap<=kIndependentLineMm && BitsOf(applied.slope_x)==BitsOf(0.0));
+    const double slope_y_gap=std::abs(applied.slope_y-a[2]);
+    totals.slope_y=std::max(totals.slope_y,slope_y_gap);
+    CHECK(h0_gap<=kIndependentLineMm && slope_y_gap<=kIndependentLineMm && BitsOf(applied.slope_x)==BitsOf(0.0));
     const auto h=cr::RegisteredHomography(*rig.model_b,rig.centre,rig.origin,pose,applied);
     double worst=0;int n=0;
     for(const auto& point:Field(item,"points",pj::JsonKind::array).array){
@@ -674,7 +675,10 @@ void CheckFixtureRig(const pj::JsonValue& item,FixtureTotals& totals){
     const double origin_gap=std::max(std::abs(rig.origin.x-o[0]),std::abs(rig.origin.y-o[1]));
     totals.centre_mm=std::max(totals.centre_mm,centre_gap);totals.origin_mm=std::max(totals.origin_mm,origin_gap);
     CHECK(centre_gap<=kIndependentLineMm && origin_gap<=kIndependentLineMm);
-    totals.lambda=std::max(totals.lambda,std::abs(cr::SeamLineLambda(rig.centre,rig.origin)-NumberField(item,"lambda")));
+    // lambda has no unit; it is held to the same bound as the lengths.
+    const double lambda_gap=std::abs(cr::SeamLineLambda(rig.centre,rig.origin)-NumberField(item,"lambda"));
+    totals.lambda=std::max(totals.lambda,lambda_gap);
+    CHECK(lambda_gap<=kIndependentLineMm);
     for(const auto& one:Field(item,"cases",pj::JsonKind::array).array)CheckFixtureCase(one,rig,totals);
 }
 void AgreesWithAnIndependentImplementation(const char* folder){
@@ -693,7 +697,7 @@ void AgreesWithAnIndependentImplementation(const char* folder){
     const auto& rigs=Field(root,"rigs",pj::JsonKind::array).array;
     for(const auto& rig:rigs)CheckFixtureRig(rig,totals);
     std::cout<<std::setprecision(6)<<"    "<<rigs.size()<<" rigs, "<<totals.cases<<" cases ("<<totals.refused<<" refused), "<<totals.points<<" points; largest differences: centre "
-        <<totals.centre_mm<<" mm, origin "<<totals.origin_mm<<" mm, applied h0 "<<totals.h0_mm<<" mm, point "<<totals.point_mm<<" mm; printed only: lambda "
+        <<totals.centre_mm<<" mm, origin "<<totals.origin_mm<<" mm, applied h0 "<<totals.h0_mm<<" mm, point "<<totals.point_mm<<" mm, lambda "
         <<totals.lambda<<", applied slope along the height "<<totals.slope_y<<'\n';
     CHECK(!rigs.empty() && totals.cases>totals.refused && totals.refused>0 && totals.points>0);
 }
