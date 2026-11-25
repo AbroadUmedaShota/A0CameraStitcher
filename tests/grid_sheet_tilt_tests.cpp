@@ -1149,6 +1149,43 @@ void VisibleFractionLine() {
     }
 }
 
+// ---- the working draft's own lines on full-size pictures with part of the mat hidden ------------------------------------------------
+// The pictures are drawn at the size of a profile's pictures and measured with WorkingDraftSettings() as it is: the counts of ridge
+// points, lines and lattice span, the cell size of the share and the share's line are the product's, not the test's. The tests above
+// scale those numbers to small pictures and take only the share's line from the working draft.
+void PaperAndCornerUnderWorkingDraftLines() {
+    const auto settings = gst::WorkingDraftSettings();
+    const double line = settings.acceptance.min_visible_fraction;
+    const Camera c = MakeCamera(1.0, 0, 180, 1.2, -0.8, 0.2);
+    const gs::Truth truth = gs::TruthOf(c.pose), profile_truth = gs::TruthOf(c.profile_pose);
+    {   // a sheet of paper in the middle: about a quarter of the picture still shows the mat
+        const PaperRun r = MeasureUnderPaper(c, 37, 0.90, 0.90, settings, "full size paper");
+        const double visible = r.outcome.evidence.visible_fraction;
+        Check(visible >= line && visible < 0.3, "full size paper: the share of the picture that holds grid points is above the line and under three tenths");
+        Check(r.outcome.tilt.has_value(), "full size paper: the mat around the paper is measured with the working draft's lines");
+        if (r.outcome.tilt) {
+            CheckNear(r.error.tilt, 0, kTiltTolerance, "full size paper tilt");
+            CheckNear(r.error.lean_screen, 0, kLeanTolerance, "full size paper lean (screen)");
+            CheckNear(r.error.lean_drawing, 0, kDrawingTolerance, "full size paper lean (drawing)");
+            Check(r.outcome.evidence.fit_converged, "full size paper: the fit settled");
+        }
+    }
+    {   // the mat seen in one corner only, a bit over a fifth of the picture
+        gs::Scene scene = SceneOf(c, 37);
+        scene.region[0] = 0; scene.region[1] = 0; scene.region[2] = 0.47; scene.region[3] = 0.47;
+        const Run run = Measure(scene, c, settings);
+        Print("full size corner", run.outcome, truth, profile_truth, run.seconds);
+        const double visible = run.outcome.evidence.visible_fraction;
+        Check(visible >= line && visible < 0.3, "full size corner: the share of the picture that holds grid points is above the line and under three tenths");
+        Check(run.outcome.tilt.has_value(), "full size corner: the mat in the corner is measured with the working draft's lines");
+        if (run.outcome.tilt) {
+            const Error e = ErrorOf(*run.outcome.tilt, truth, profile_truth);
+            CheckNear(e.tilt, 0, kTiltTolerance, "full size corner tilt");
+            CheckNear(e.lean_screen, 0, kLeanTolerance, "full size corner lean (screen)");
+        }
+    }
+}
+
 }   // namespace
 
 int main(int argc, char** argv) {
@@ -1167,6 +1204,7 @@ int main(int argc, char** argv) {
     if (wanted("distractors")) Distractors();
     if (wanted("refusals")) Refusals();
     if (wanted("visible")) VisibleFractionLine();
+    if (wanted("paper")) PaperAndCornerUnderWorkingDraftLines();
     if (wanted("mapping")) MappingReturned();
     if (wanted("pairs")) Pairs();
     if (wanted("defaults")) WorkingDraftDefaults();
