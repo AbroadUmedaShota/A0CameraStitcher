@@ -5,7 +5,6 @@
 
 #include <algorithm>
 #include <chrono>
-#include <cstdio>
 #include <cmath>
 #include <cstdint>
 #include <iomanip>
@@ -697,6 +696,12 @@ void Refusals() {
         // the evidence of a refusal is kept
         const auto refused = change([](gst::GridSheetAcceptance& a) { a.max_residual_rms_px = 1e-6; });
         Check(refused.evidence.used_points > 1000 && !refused.tilt.has_value(), "a refusal keeps its evidence");
+        // A refusal by the residual line still shows the largest residual next to the rms: it is what a reader of the refusal needs.
+        Check(refused.refusal == gst::GridSheetRefusal::residual_too_large && std::isfinite(refused.evidence.residual_rms_px) && std::isfinite(refused.evidence.residual_max_px) &&
+            refused.evidence.residual_max_px > refused.evidence.residual_rms_px && refused.evidence.residual_max_px <= settings.detection.final_gate_px,
+            "a refusal by the residual line keeps the rms and the largest residual");
+        Check(refused.evidence.residual_rms_px == good.evidence.residual_rms_px && refused.evidence.residual_max_px == good.evidence.residual_max_px,
+            "the residuals of a refusal are those of the same picture measured");
         Check(gst::RefusalCode(gst::GridSheetRefusal::sheet_not_flat) == "sheet-not-flat", "refusal codes are words");
     }
     // programming errors are exceptions, not refusals
@@ -1010,13 +1015,6 @@ Recomputed RecomputeLastFit(const Camera& c, const render::BgrImage& image, cons
         if (a.ok[i]) r.residual_max_px = std::max(r.residual_max_px, static_cast<double>(a.distance_px[i]));
     return r;
 }
-void PrintBits(int index, const gst::GridSheetTiltOutcome& o) {
-    const auto& t = *o.tilt;
-    std::printf("dump %d tilt %a lean_sheet %a %a lean_screen %a %a lean_drawing %a %a azimuth %a cal %a fit %a nodes %a vanish %a spread %a rms %a vis %a\n", index, t.tilt_deg,
-        t.lean_sheet_deg.x, t.lean_sheet_deg.y, t.lean_screen_deg.x, t.lean_screen_deg.y, t.lean_drawing_deg.x, t.lean_drawing_deg.y, t.image_x_azimuth_deg,
-        t.calibration_x_azimuth_deg, o.evidence.tilt_deg_fit, o.evidence.tilt_deg_nodes, o.evidence.tilt_deg_vanishing, o.evidence.method_spread_deg,
-        o.evidence.residual_rms_px, o.evidence.visible_fraction);
-}
 
 void MappingReturned() {
     const double scale = 0.5;
@@ -1026,8 +1024,7 @@ void MappingReturned() {
     const Item items[] = {{1.2, -0.8, 0.2, 37, 180}, {-2.5, 1.5, -0.3, 123, 90}, {3.0, 0.0, 0.8, 10, 37}};
     int index = 0;
     for (const auto& it : items) {
-        const std::string name = "mapping " + std::to_string(index);
-        const int this_index = index++;
+        const std::string name = "mapping " + std::to_string(index++);
         const Camera c = MakeCamera(scale, 0, it.mount, it.rx, it.ry, it.rz);
         const gs::Scene scene = SceneOf(c, it.mat);
         const gs::Renderer drawn(scene);
@@ -1036,7 +1033,6 @@ void MappingReturned() {
         Check(outcome.tilt.has_value(), name + " is measured");
         if (!outcome.tilt) continue;
         const gst::GridSheetTilt& t = *outcome.tilt;
-        PrintBits(this_index, outcome);
 
         // (1) what the map is: the last fit's matrix and the largest distance of a used point, bit for bit.
         const Recomputed again = RecomputeLastFit(c, image, settings);
@@ -1044,9 +1040,9 @@ void MappingReturned() {
         bool same_map = true;
         for (std::size_t k = 0; k < 9; ++k) same_map = same_map && t.lattice_to_plane[k] == again.map[k];
         Check(same_map, name + ": the returned map is the last fit's lattice-to-plane matrix");
-        Check(t.residual_max_px == again.residual_max_px, name + ": the returned largest residual is the largest distance of a used point");
+        Check(outcome.evidence.residual_max_px == again.residual_max_px, name + ": the evidence's largest residual is the largest distance of a used point");
         Check(t.lattice_to_plane[8] == 1.0, name + ": the map is scaled so that its last number is one");
-        Check(t.residual_max_px > outcome.evidence.residual_rms_px && t.residual_max_px <= settings.detection.final_gate_px,
+        Check(outcome.evidence.residual_max_px > outcome.evidence.residual_rms_px && outcome.evidence.residual_max_px <= settings.detection.final_gate_px,
             name + ": the largest residual lies between the rms and the final gate");
 
         // (2) returning the map does not change the tilt: the map gives the reported numbers back, bit for bit.
@@ -1091,12 +1087,13 @@ void MappingReturned() {
         std::cout << "  " << name << ": the largest distance of a returned map's lattice point from the true one is " << std::setprecision(4) << worst << " pitch\n";
         CheckNear(worst, 0, kMapTolerancePitch, name + ": the map takes lattice points to the true lattice points");
     }
-    {   // a refused measurement carries no value, so no map and no largest residual
+    {   // a refused measurement carries no value, so no map
         const Camera c = MakeCamera(scale, 0, 180, 1.0, -1.0, 0);
         gs::Scene s = SceneOf(c, 0);
         s.region[0] = s.region[1] = 0; s.region[2] = s.region[3] = 0;
         const auto refused = Measure(s, c, settings).outcome;
         Check(!refused.tilt.has_value() && refused.refusal != gst::GridSheetRefusal::none, "a refused measurement has no map");
+        Check(std::isnan(refused.evidence.residual_max_px), "a measurement that stopped before the fit has no largest residual");
     }
 }
 

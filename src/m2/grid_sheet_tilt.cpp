@@ -193,6 +193,7 @@ GridSheetTiltOutcome MeasureGridSheetTilt(std::string_view camera, const ImageVi
     ev.used_point_fraction = static_cast<double>(ev.used_points) / static_cast<double>(ev.ridge_points);
     if (ev.used_points == 0) return refuse(GridSheetRefusal::fit_failed);
     ev.residual_rms_px = std::sqrt(sum_sq / static_cast<double>(ev.used_points));
+    ev.residual_max_px = max_distance_px;
     ev.visible_fraction = detail::VisibleFraction(ridge.points, points, assignment, picture.width, picture.height, det.coverage_cell_px, det.coverage_cell_min_points);
 
     // (e) the tilt, three ways
@@ -253,7 +254,6 @@ GridSheetTiltOutcome MeasureGridSheetTilt(std::string_view camera, const ImageVi
     tilt.lean_screen_deg = Rotate(main.lean_sheet_deg, -main.image_x_azimuth_deg);
     tilt.lean_drawing_deg = Rotate(tilt.lean_screen_deg, calibration_azimuth);
     tilt.lattice_to_plane = h;
-    tilt.residual_max_px = max_distance_px;
     out.refusal = GridSheetRefusal::none;
     out.tilt = tilt;
     return out;
