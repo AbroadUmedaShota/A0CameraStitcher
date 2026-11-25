@@ -8,6 +8,8 @@
 //    slope across the width and have a height stretch the mapping across the width by less than the line;
 //  - C draws the mapping the JPEG's maker draws, at the capture's scale and at the live view's;
 //  - one estimate given to both paths gives one mapping;
+//  - the live estimator (half size, both mounts) and the capture's estimator (raw size), each on its own frames of one scene, give
+//    mappings that agree at the seam column and the last column within the line, also with the paper's content moved between the two;
 //  - the rule gives the values of an independent implementation (tests/fixtures/surface-applied: synthetic rigs, estimates and poses,
 //    and what that implementation made of them), within 1e-6 mm.
 // Everything is synthetic: the scenes of tests/parallax_scene.hpp on its standard raster (48 dpi) and camera A, with camera B 2 percent
@@ -490,6 +492,80 @@ void OneEstimateOneMapping(){
     }
 }
 
+// ---- T28 (b0)(b1)(b2): the live estimator and the capture's estimator on one scene ----------------------------------------------------------
+std::string Join(const std::vector<std::string>& codes){std::string s;for(const auto& c:codes)s+=(s.empty()?"":",")+c;return s.empty()?"none":s;}
+// How far a mapping is from the truth along the seam column (drawing mm, every fourth row of the condition's raster): where it puts B's
+// drawing point minus where that point has to be for B to show the paper point that A shows there (SeamErrorOf of the estimator's tests,
+// measured on the condition's raster). Printed only.
+double TruthSeamErrorMm(const LiveRegistrationContext& c,const ps::SceneModel& model,const ex::RegisteredMapping& mapping){
+    const auto h=RulerOf(c,mapping);
+    double worst=0;
+    for(std::uint32_t y=0;y<c.raster.height_pixels;y+=4){
+        const auto document=DrawingPoint(c.raster,c.seam_column,y);
+        render::Point raw_a{},raw_b{},wanted{},placed{};
+        if(!render::TryProjectDocument(model.rig.camera_a,document,raw_a) || !ps::InsideFrame(raw_a))continue;
+        const auto surface=ps::SolveSurface(model.spec.field,model.geometry_a,document);
+        if(!render::TryProjectDocument(model.camera_b_true,ps::TablePointOfSurface(model.geometry_b_true,surface),raw_b) || !ps::InsideFrame(raw_b))continue;
+        if(!model.b_calibrated_to_table(raw_b.x,raw_b.y,wanted) || !render::TryTransform(h,document,placed))continue;
+        worst=std::max(worst,std::hypot(wanted.x-placed.x,wanted.y-placed.y));
+    }
+    return worst;
+}
+void PrintDifferences(const LiveEstimateOutcome& o,const ex::CaptureRegistration& c){
+    const auto& p=o.pose;const auto& q=c.registration.pose;
+    std::cout<<"    pose live - capture: "<<p.rx_deg-q.rx_deg<<' '<<p.ry_deg-q.ry_deg<<' '<<p.rz_deg-q.rz_deg<<' '<<p.tx_mm-q.tx_mm<<' '<<p.ty_mm-q.ty_mm<<' '
+        <<p.tz_percent-q.tz_percent<<"; estimated plane "<<o.estimated_surface.h0_mm-c.surface.plane.h0_mm<<' '<<o.estimated_surface.slope_x-c.surface.plane.slope_x<<' '
+        <<o.estimated_surface.slope_y-c.surface.plane.slope_y<<"; applied plane "<<o.surface.h0_mm-c.level.mapping.surface.h0_mm<<' '
+        <<o.surface.slope_x-c.level.mapping.surface.slope_x<<' '<<o.surface.slope_y-c.level.mapping.surface.slope_y<<'\n';
+}
+// The two estimates of one scene, each on its own frames: the live outcome's mapping against the capture level's (without layer 2, which C
+// does not draw), at the seam column and the last column on every row of the condition's raster.
+void CompareEstimators(const std::string& label,const LiveSide& live,const LiveRun& run,const ps::SceneModel& live_model,const CaptureSide& capture,
+    const ps::SceneModel& capture_model){
+    const auto& o=run.outcome;
+    const auto& c=capture.Capture();
+    const bool capture_estimated=c.level.level==ex::GeometryLevel::g1 || c.level.level==ex::GeometryLevel::g2;
+    std::cout<<std::setprecision(6)<<"  "<<label<<": live usable "<<o.usable<<" (reasons "<<Join(o.reasons)<<"), capture level "<<ex::GeometryLevelCode(c.level.level)<<'\n';
+    Check(o.usable && capture_estimated,label+": both paths estimated the scene",__LINE__);
+    if(!o.usable || !capture_estimated)return;
+    const ex::RegisteredMapping on_live{o.pose,o.surface,std::nullopt},on_capture{c.level.mapping.pose,c.level.mapping.surface,std::nullopt};
+    const auto& ruler=*live.context;
+    const double pitch=PitchMm(ruler.raster);
+    const auto s=SpreadOf(ruler,on_live,on_capture);
+    std::cout<<"    largest |delta|: seam column "<<s.seam_mm<<" mm ("<<s.seam_mm/pitch<<" px at 48 dpi), last column "<<s.last_mm<<" mm ("<<s.last_mm/pitch
+        <<" px at 48 dpi); line "<<kStretchLineMm<<" mm, 0.8 px at 48 dpi is "<<0.8*pitch<<" mm; rows "<<s.rows<<'\n';
+    PrintDifferences(o,c);
+    std::cout<<"    truth along the seam: live "<<TruthSeamErrorMm(ruler,live_model,on_live)<<" mm, capture "<<TruthSeamErrorMm(ruler,capture_model,on_capture)<<" mm\n";
+    Check(s.seam_mm<=kStretchLineMm && s.last_mm<=kStretchLineMm,label+": the two estimates' mappings agree within the line",__LINE__);
+}
+// (b0) The tilted sheet, estimated by the live view (half size, both mounts) and by the capture (raw size).
+void TwoEstimatorsOneScene(){
+    std::cout<<"the live estimator and the capture's estimator on one scene\n";
+    const auto& s=Tilted();
+    CompareEstimators("tilted sheet, normal mount",s.live,s.live_run,*s.paper.model,*s.capture,*s.paper.model);
+    const LiveSide turned(s.rig,true);
+    const auto run=RunLive(turned,LiveFrame(s.paper.raw_a,23,true),LiveFrame(s.paper.raw_b,24,true),true);
+    CompareEstimators("tilted sheet, turned mount",turned,run,*s.paper.model,*s.capture,*s.paper.model);
+}
+// (b1)(b2) A flat paper and B at a mixed pose, drawn twice with the paper's content moved by shift_mm along x between the two (X and Y,
+// noise of other seeds): X through the live view and Y through the capture, and the other way round.
+const Pose kMixedPose{0.2,0.1,-0.6,3.0,-2.0,0.4};
+void ShiftedContent(double shift_mm,std::uint64_t seed){
+    const auto rig=AgreementRig();
+    const auto seam=ps::PlaceSeam(rig);
+    const auto x=Draw(rig,seam,ps::HeightField{},kMixedPose,0),y=Draw(rig,seam,ps::HeightField{},kMixedPose,shift_mm);
+    const LiveSide live(rig,false);
+    const auto live_x=RunLive(live,LiveFrame(x.raw_a,seed,false),LiveFrame(x.raw_b,seed+1,false),true);
+    const auto live_y=RunLive(live,LiveFrame(y.raw_a,seed+2,false),LiveFrame(y.raw_b,seed+3,false),true);
+    const CaptureSide capture_x(rig,seam.column,CaptureFrame(x.raw_a,seed+4),CaptureFrame(x.raw_b,seed+5));
+    const CaptureSide capture_y(rig,seam.column,CaptureFrame(y.raw_a,seed+6),CaptureFrame(y.raw_b,seed+7));
+    const std::string moved="content moved "+std::to_string(shift_mm)+" mm";
+    CompareEstimators(moved+", live X and capture Y",live,live_x,*x.model,capture_y,*y.model);
+    CompareEstimators(moved+", live Y and capture X",live,live_y,*y.model,capture_x,*x.model);
+}
+void ShiftedContentHalfMillimetre(){std::cout<<"the two estimators on content moved by 0.5 mm\n";ShiftedContent(0.5,300);}
+void ShiftedContentFiveMillimetres(){std::cout<<"the two estimators on content moved by 5 mm\n";ShiftedContent(5.0,400);}
+
 // ---- T26 (f): the rule against the values of an independent implementation ----------------------------------------------------------------
 namespace pj=a0::common::protocol_json;
 struct FixtureFailure {
@@ -629,6 +705,9 @@ int main(int argc,char** argv){
     try{StretchAcrossTheWidth();}catch(const std::exception& e){Threw("StretchAcrossTheWidth",e);}
     try{LiveDrawsTheJpegMapping();}catch(const std::exception& e){Threw("LiveDrawsTheJpegMapping",e);}
     try{OneEstimateOneMapping();}catch(const std::exception& e){Threw("OneEstimateOneMapping",e);}
+    try{TwoEstimatorsOneScene();}catch(const std::exception& e){Threw("TwoEstimatorsOneScene",e);}
+    try{ShiftedContentHalfMillimetre();}catch(const std::exception& e){Threw("ShiftedContentHalfMillimetre",e);}
+    try{ShiftedContentFiveMillimetres();}catch(const std::exception& e){Threw("ShiftedContentFiveMillimetres",e);}
     // The fixture's folder is required: without it the test fails, it is not skipped.
     Check(argc>=2,"the folder of the fixture is given",__LINE__);
     if(argc>=2)try{AgreesWithAnIndependentImplementation(argv[1]);}catch(const std::exception& e){Threw("AgreesWithAnIndependentImplementation",e);}
