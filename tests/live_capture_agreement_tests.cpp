@@ -7,9 +7,12 @@
 //  - estimates that differ only in the slope across the width give the same mapping on both paths, and estimates that differ in the
 //    slope across the width and have a height stretch the mapping across the width by less than the line;
 //  - C draws the mapping the JPEG's maker draws, at the capture's scale and at the live view's;
-//  - one estimate given to both paths gives one mapping.
+//  - one estimate given to both paths gives one mapping;
+//  - the rule gives the values of an independent implementation (tests/fixtures/surface-applied: synthetic rigs, estimates and poses,
+//    and what that implementation made of them), within 1e-6 mm.
 // Everything is synthetic: the scenes of tests/parallax_scene.hpp on its standard raster (48 dpi) and camera A, with camera B 2 percent
-// higher than A. No camera, window or file.
+// higher than A, and the synthetic values of the fixture. No camera or window; the one file read is the fixture (argv[1] is its folder).
+#include "a0/common/protocol_json.hpp"
 #include "a0/m2/experimental/capture_registration.hpp"
 #include "a0/m2/experimental/fixed_composite_maps.hpp"
 #include "a0/m2/experimental/seam_blend.hpp"
@@ -17,16 +20,21 @@
 #include "parallax_scene.hpp"
 
 #include <algorithm>
+#include <cerrno>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <fstream>
 #include <iomanip>
+#include <iterator>
 #include <iostream>
 #include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -51,6 +59,8 @@ constexpr double kStretchLineMm=0.113;
 constexpr double kWiringLineMm=1e-9;
 // C's pixel against the JPEG maker's pixel at the same drawing point, in live pixels.
 constexpr double kLiveConventionLinePx=1e-6;
+// The products' functions against the values of the independent implementation (drawing mm).
+constexpr double kIndependentLineMm=1e-6;
 
 // ---- Bits ----------------------------------------------------------------------------------------------------------------------------
 std::uint64_t BitsOf(double v){std::uint64_t b{};std::memcpy(&b,&v,sizeof b);return b;}
@@ -479,14 +489,149 @@ void OneEstimateOneMapping(){
         CHECK(gap<=kWiringLineMm);
     }
 }
+
+// ---- T26 (f): the rule against the values of an independent implementation ----------------------------------------------------------------
+namespace pj=a0::common::protocol_json;
+struct FixtureFailure {
+    [[noreturn]] static void Fail(std::string_view code,std::string_view detail){
+        throw std::invalid_argument("fixture: "+std::string(code)+": "+std::string(detail));
+    }
+};
+const pj::JsonValue& Field(const pj::JsonValue& object,std::string_view name,pj::JsonKind kind){return pj::RequireFieldWith<FixtureFailure>(object,name,kind);}
+// The reader keeps a number's lexeme; it is read here by std::strtod, the whole lexeme and nothing else, to a finite double.
+double NumberOf(const pj::JsonValue& value){
+    if(value.kind!=pj::JsonKind::number)throw std::invalid_argument("fixture: a number is expected");
+    char* end=nullptr;
+    errno=0;
+    const double number=std::strtod(value.string.c_str(),&end);
+    if(end!=value.string.c_str()+value.string.size() || errno==ERANGE || !std::isfinite(number))throw std::invalid_argument("fixture: a number is not read whole");
+    return number;
+}
+double NumberField(const pj::JsonValue& object,std::string_view name){return NumberOf(Field(object,name,pj::JsonKind::number));}
+std::vector<double> Numbers(const pj::JsonValue& array,std::size_t count){
+    if(array.kind!=pj::JsonKind::array || array.array.size()!=count)throw std::invalid_argument("fixture: an array of numbers has another length");
+    std::vector<double> numbers;
+    for(const auto& v:array.array)numbers.push_back(NumberOf(v));
+    return numbers;
+}
+// A whole number field (the raster's edges in micrometres, its size, a column or a row).
+std::int64_t WholeField(const pj::JsonValue& object,std::string_view name){
+    const double v=NumberField(object,name);
+    if(v!=std::floor(v) || std::abs(v)>4294967295.0)throw std::invalid_argument("fixture: a whole number is expected");
+    return static_cast<std::int64_t>(v);
+}
+std::uint32_t Unsigned(std::int64_t v){if(v<0)throw std::invalid_argument("fixture: a count is negative");return static_cast<std::uint32_t>(v);}
+// A camera of the fixture: its intrinsics and document-to-image matrix, no lens distortion (the fixture has none).
+render::CameraProjection CameraOf(const pj::JsonValue& camera){
+    const auto& i=Field(camera,"intrinsics",pj::JsonKind::object);
+    const auto& rows=Field(camera,"documentToImage",pj::JsonKind::array);
+    if(rows.array.size()!=3)throw std::invalid_argument("fixture: documentToImage has another number of rows");
+    render::Matrix3 h{};
+    for(std::size_t r=0;r<3;++r){const auto row=Numbers(rows.array[r],3);for(std::size_t c=0;c<3;++c)h[3*r+c]=row[c];}
+    return render::CameraProjection(render::CameraIntrinsics(NumberField(i,"fxPixels"),NumberField(i,"fyPixels"),NumberField(i,"cxPixels"),NumberField(i,"cyPixels")),
+        render::LensDistortion{0,0,0,0,0},h);
+}
+std::string ReadFixture(const std::string& path){
+    std::ifstream in(path,std::ios::binary);
+    if(!in)throw std::runtime_error("fixture: the file cannot be opened");
+    return std::string(std::istreambuf_iterator<char>(in),std::istreambuf_iterator<char>());
 }
 
-int main(){
+// What the product makes of one rig of the fixture: camera A's centre, the plane origin, and B's model.
+struct FixtureRig {
+    double left_mm{},top_mm{},pitch_mm{};
+    cr::CameraCentre centre;
+    render::Point origin{};
+    std::shared_ptr<const cr::PoseModel> model_b;
+};
+struct FixtureTotals {
+    int cases{},refused{},points{};
+    double centre_mm{},origin_mm{},h0_mm{},point_mm{},lambda{},slope_y{};
+};
+// (f2) and (f3) for one case: the applied plane, and the drawing point that the registered mapping gives each listed sample.
+void CheckFixtureCase(const pj::JsonValue& item,const FixtureRig& rig,FixtureTotals& totals){
+    const auto p=Numbers(Field(item,"pose",pj::JsonKind::array),6);
+    const Pose pose{p[0],p[1],p[2],p[3],p[4],p[5]};
+    const auto e=Numbers(Field(item,"estimated",pj::JsonKind::array),3);
+    const ex::SurfacePlane estimated{e[0],e[1],e[2]};
+    ++totals.cases;
+    if(Field(item,"refused",pj::JsonKind::boolean).boolean){
+        ++totals.refused;
+        bool refused=false;
+        try{(void)cr::SurfaceAppliedAcrossWidth(estimated,rig.centre,rig.origin);}catch(const std::invalid_argument&){refused=true;}
+        CHECK(refused);
+        CHECK(!item.object.count("applied") && !item.object.count("points"));
+        return;
+    }
+    const auto applied=cr::SurfaceAppliedAcrossWidth(estimated,rig.centre,rig.origin);
+    const auto a=Numbers(Field(item,"applied",pj::JsonKind::array),3);
+    const double h0_gap=std::abs(applied.h0_mm-a[0]);
+    totals.h0_mm=std::max(totals.h0_mm,h0_gap);
+    totals.slope_y=std::max(totals.slope_y,std::abs(applied.slope_y-a[2]));
+    CHECK(h0_gap<=kIndependentLineMm && BitsOf(applied.slope_x)==BitsOf(0.0));
+    const auto h=cr::RegisteredHomography(*rig.model_b,rig.centre,rig.origin,pose,applied);
+    double worst=0;int n=0;
+    for(const auto& point:Field(item,"points",pj::JsonKind::array).array){
+        const double column=static_cast<double>(Unsigned(WholeField(point,"column"))),row=static_cast<double>(Unsigned(WholeField(point,"row")));
+        const auto mm=Numbers(Field(point,"mm",pj::JsonKind::array),2);
+        const auto placed=Moved(h,render::Point{rig.left_mm+(column+0.5)*rig.pitch_mm,rig.top_mm+(row+0.5)*rig.pitch_mm});
+        worst=std::max(worst,std::hypot(placed.x-mm[0],placed.y-mm[1]));++n;
+    }
+    totals.point_mm=std::max(totals.point_mm,worst);totals.points+=n;
+    CHECK(n>0 && worst<=kIndependentLineMm);
+}
+// (f1) for one rig, then its cases.
+void CheckFixtureRig(const pj::JsonValue& item,FixtureTotals& totals){
+    const auto& r=Field(item,"raster",pj::JsonKind::object);
+    const std::int64_t left=WholeField(r,"leftUm"),top=WholeField(r,"topUm"),right=WholeField(r,"rightUm"),bottom=WholeField(r,"bottomUm");
+    const auto dpi=Unsigned(WholeField(r,"dpi"));
+    const render::OutputRaster raster(render::DocumentRegionUm(left,top,right,bottom),dpi,Unsigned(WholeField(r,"widthPx")),Unsigned(WholeField(r,"heightPx")));
+    const auto seam=Unsigned(WholeField(item,"seamColumn"));
+    FixtureRig rig;
+    rig.left_mm=static_cast<double>(left)/1000.0;rig.top_mm=static_cast<double>(top)/1000.0;rig.pitch_mm=25.4/dpi;
+    rig.centre=cr::PoseModel(CameraOf(Field(item,"cameraA",pj::JsonKind::object))).Centre({});
+    rig.origin=cr::SurfaceOriginMm(raster,seam);
+    rig.model_b=std::make_shared<const cr::PoseModel>(CameraOf(Field(item,"cameraB",pj::JsonKind::object)));
+    const auto c=Numbers(Field(item,"centreA",pj::JsonKind::array),3);
+    const auto o=Numbers(Field(item,"originMm",pj::JsonKind::array),2);
+    const double centre_gap=std::max({std::abs(rig.centre.x_mm-c[0]),std::abs(rig.centre.y_mm-c[1]),std::abs(rig.centre.height_mm-c[2])});
+    const double origin_gap=std::max(std::abs(rig.origin.x-o[0]),std::abs(rig.origin.y-o[1]));
+    totals.centre_mm=std::max(totals.centre_mm,centre_gap);totals.origin_mm=std::max(totals.origin_mm,origin_gap);
+    CHECK(centre_gap<=kIndependentLineMm && origin_gap<=kIndependentLineMm);
+    totals.lambda=std::max(totals.lambda,std::abs(cr::SeamLineLambda(rig.centre,rig.origin)-NumberField(item,"lambda")));
+    for(const auto& one:Field(item,"cases",pj::JsonKind::array).array)CheckFixtureCase(one,rig,totals);
+}
+void AgreesWithAnIndependentImplementation(const char* folder){
+    std::cout<<"the rule against the values of an independent implementation\n";
+    // The reader keeps the sign of a zero and an exponent, and the number is std::strtod's.
+    {
+        const auto tree=pj::BasicJsonParser<FixtureFailure>("[-0.0,-2.489965219686127e-06,0.035]").Parse();
+        CHECK(tree.array.size()==3 && tree.array[0].string=="-0.0" && std::signbit(NumberOf(tree.array[0])) && NumberOf(tree.array[0])==0);
+        CHECK(tree.array.size()==3 && BitsOf(NumberOf(tree.array[1]))==BitsOf(std::strtod("-2.489965219686127e-06",nullptr)) &&
+            BitsOf(NumberOf(tree.array[2]))==BitsOf(0.035));
+    }
+    const auto text=ReadFixture(std::string(folder)+"/surface-applied-agreement.json");
+    const auto root=pj::BasicJsonParser<FixtureFailure>(text).Parse();
+    CHECK(Field(root,"kind",pj::JsonKind::string).string=="surface-applied-agreement");
+    FixtureTotals totals;
+    const auto& rigs=Field(root,"rigs",pj::JsonKind::array).array;
+    for(const auto& rig:rigs)CheckFixtureRig(rig,totals);
+    std::cout<<std::setprecision(6)<<"    "<<rigs.size()<<" rigs, "<<totals.cases<<" cases ("<<totals.refused<<" refused), "<<totals.points<<" points; largest differences: centre "
+        <<totals.centre_mm<<" mm, origin "<<totals.origin_mm<<" mm, applied h0 "<<totals.h0_mm<<" mm, point "<<totals.point_mm<<" mm; printed only: lambda "
+        <<totals.lambda<<", applied slope along the height "<<totals.slope_y<<'\n';
+    CHECK(!rigs.empty() && totals.cases>totals.refused && totals.refused>0 && totals.points>0);
+}
+}
+
+int main(int argc,char** argv){
     try{LiveSurfaceIsTheCaptureRule();}catch(const std::exception& e){Threw("LiveSurfaceIsTheCaptureRule",e);}
     try{SlopeAcrossAloneLeavesTheMapping();}catch(const std::exception& e){Threw("SlopeAcrossAloneLeavesTheMapping",e);}
     try{StretchAcrossTheWidth();}catch(const std::exception& e){Threw("StretchAcrossTheWidth",e);}
     try{LiveDrawsTheJpegMapping();}catch(const std::exception& e){Threw("LiveDrawsTheJpegMapping",e);}
     try{OneEstimateOneMapping();}catch(const std::exception& e){Threw("OneEstimateOneMapping",e);}
+    // The fixture's folder is required: without it the test fails, it is not skipped.
+    Check(argc>=2,"the folder of the fixture is given",__LINE__);
+    if(argc>=2)try{AgreesWithAnIndependentImplementation(argv[1]);}catch(const std::exception& e){Threw("AgreesWithAnIndependentImplementation",e);}
     std::cout<<checks<<" checks, "<<failures<<" failures\n";
     return failures==0?0:1;
 }
