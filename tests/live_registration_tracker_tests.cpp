@@ -4,6 +4,8 @@
 // file is used. The settings below are values of this test, not proposals.
 #include "a0/phase0/experimental/live_registration_tracker.hpp"
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <deque>
 #include <iostream>
 #include <limits>
@@ -39,7 +41,7 @@ const Pose kBase{0,0,0.25,1.5,-2,0};
 const render::BgrImage kFrame{1,1,{0,0,0}};
 
 LiveEstimateOutcome Full(double tx,double h0=0,double brightness=100){
-    LiveEstimateOutcome o;o.usable=true;o.pose=kBase;o.pose.tx_mm=tx;o.surface.h0_mm=h0;o.band_brightness=brightness;return o;
+    LiveEstimateOutcome o;o.usable=true;o.pose=kBase;o.pose.tx_mm=tx;o.surface.h0_mm=h0;o.estimated_surface=o.surface;o.band_brightness=brightness;return o;
 }
 LiveEstimateOutcome Follow(double tx,double change=0.1,double inliers=0.9,double brightness=100,double h0=0){
     LiveEstimateOutcome o=Full(tx,h0,brightness);o.change_px=change;o.inlier_fraction=inliers;return o;
@@ -515,6 +517,59 @@ void Step(){
     REJECT(RunLiveStep(t,2.0,kFrame,kFrame,LiveEstimator{}));
 }
 
+// The applied surface and the estimated one of an outcome are kept apart (T26 g): what is drawn is the applied surface, and a follow-up
+// starts from the estimated surface of the estimate in force. When a later estimate replaces the one in force, the next follow-up starts
+// from the later estimated surface; when it is held, from the one before. The values are made up and rounded.
+bool SameBits(double a,double b){std::uint64_t x{},y{};std::memcpy(&x,&a,sizeof x);std::memcpy(&y,&b,sizeof y);return x==y;}
+bool SameSurfaceBits(const ex::SurfacePlane& a,const ex::SurfacePlane& b){return SameBits(a.h0_mm,b.h0_mm) && SameBits(a.slope_x,b.slope_x) && SameBits(a.slope_y,b.slope_y);}
+LiveEstimateOutcome WithSurfaces(LiveEstimateOutcome o,const ex::SurfacePlane& applied,const ex::SurfacePlane& estimated){o.surface=applied;o.estimated_surface=estimated;return o;}
+void FollowStartsFromTheEstimate(){
+    const ex::SurfacePlane applied_1{1.25,0.0,0.0078125},estimated_1{1.5,0.03125,0.00390625};
+    const ex::SurfacePlane applied_2{-2.5,0.0,-0.015625},estimated_2{-2.75,-0.0625,-0.01171875};
+    CHECK(!SameSurfaceBits(applied_1,estimated_1) && !SameSurfaceBits(applied_2,estimated_2) && !SameSurfaceBits(estimated_1,estimated_2));
+    // Every estimate that is taken replaces the one in force.
+    {
+        LiveRegistrationTracker t(Settings(),kBase);
+        const auto full=t.BeginJob(0);
+        CHECK(full && full->kind==LiveJobKind::full && full->start_surface.IsZero());
+        CHECK(t.Accept(*full,WithSurfaces(Full(1.0),applied_1,estimated_1),0).kind==LiveAcceptKind::applied);
+        const auto drawn=t.View(0).mapping;
+        CHECK(SameSurfaceBits(drawn.surface,applied_1) && drawn.pose.tx_mm==1.0);
+        const auto follow=t.BeginJob(0.5);
+        CHECK(follow && follow->kind==LiveJobKind::follow);
+        if(follow){
+            CHECK(SameSurfaceBits(follow->start_surface,estimated_1));
+            CHECK(follow->start_pose.tx_mm==1.0);
+            const auto second=t.Accept(*follow,WithSurfaces(Follow(1.1,0.1),applied_2,estimated_2),0.6);
+            CHECK(second.kind==LiveAcceptKind::applied && second.replaced);
+        }
+        CHECK(SameSurfaceBits(t.View(0.6).mapping.surface,applied_2));
+        const auto next=t.BeginJob(1.1);
+        CHECK(next && next->kind==LiveJobKind::follow);
+        if(next)CHECK(SameSurfaceBits(next->start_surface,estimated_2) && next->start_pose.tx_mm==1.1);
+    }
+    // A follow-up that is below the significance line is held: what is drawn and where the next follow-up starts stay the first estimate's.
+    {
+        auto s=Settings();
+        s.adopt_threshold_px=1.0;
+        LiveRegistrationTracker t(s,kBase);
+        const auto full=t.BeginJob(0);
+        CHECK(full.has_value());
+        if(full)CHECK(t.Accept(*full,WithSurfaces(Full(1.0),applied_1,estimated_1),0).kind==LiveAcceptKind::applied);
+        const auto follow=t.BeginJob(0.5);
+        CHECK(follow && follow->kind==LiveJobKind::follow);
+        if(follow){
+            CHECK(SameSurfaceBits(follow->start_surface,estimated_1));
+            const auto held=t.Accept(*follow,WithSurfaces(Follow(1.1,0.1),applied_2,estimated_2),0.6);
+            CHECK(held.kind==LiveAcceptKind::applied && !held.replaced);
+        }
+        CHECK(SameSurfaceBits(t.View(0.6).mapping.surface,applied_1));
+        const auto next=t.BeginJob(1.1);
+        CHECK(next && next->kind==LiveJobKind::follow);
+        if(next)CHECK(SameSurfaceBits(next->start_surface,estimated_1) && next->start_pose.tx_mm==1.0);
+    }
+}
+
 // The same sequence of calls gives the same sequence of states: a trace of a long run is compared with the same run again.
 std::string Trace(){
     Fake fake;
@@ -558,6 +613,8 @@ int main(){
         Step();
         Determinism();
     }catch(const std::exception& e){++failures;std::cerr<<"unexpected exception: "<<e.what()<<'\n';}
+    try{FollowStartsFromTheEstimate();}
+    catch(const std::exception& e){++failures;std::cerr<<"unexpected exception in FollowStartsFromTheEstimate: "<<e.what()<<'\n';}
     std::cout<<checks<<" checks, "<<failures<<" failures\n";
     return failures?1:0;
 }
