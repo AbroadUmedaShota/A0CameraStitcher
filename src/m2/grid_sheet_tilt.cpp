@@ -97,7 +97,7 @@ GridSheetTiltSettings WorkingDraftSettings() {
     s.acceptance.min_ridge_points = 20000;
     s.acceptance.min_lines_per_family = 20;
     s.acceptance.min_lattice_span = 20;
-    s.acceptance.min_visible_fraction = 0.3;          // the picture is of the sheet itself, not of a drawing on it
+    s.acceptance.min_visible_fraction = 0.2;          // the middle may be hidden (a sheet of paper on the mat); the mat around it is measured
     s.acceptance.max_lattice_aspect_deviation = 0.02;
     s.acceptance.max_lattice_skew_deg = 1.0;
     s.acceptance.max_residual_rms_px = 0.8;           // below the final gate's 2.5 / sqrt(3)
@@ -183,15 +183,17 @@ GridSheetTiltOutcome MeasureGridSheetTilt(std::string_view camera, const ImageVi
     ev.lattice_skew_deg = shape.skew_deg;
 
     const detail::Assignment assignment = detail::AssignPoints(fit.parameters, points, focal, det.direction_match_deg, det.final_gate_px);
-    double sum_sq = 0;
+    double sum_sq = 0, max_distance_px = 0;
     for (std::size_t i = 0; i < points.size(); ++i) {
         if (!assignment.ok[i]) continue;
         ++ev.used_points;
         sum_sq += static_cast<double>(assignment.distance_px[i]) * assignment.distance_px[i];
+        max_distance_px = std::max(max_distance_px, static_cast<double>(assignment.distance_px[i]));
     }
     ev.used_point_fraction = static_cast<double>(ev.used_points) / static_cast<double>(ev.ridge_points);
     if (ev.used_points == 0) return refuse(GridSheetRefusal::fit_failed);
     ev.residual_rms_px = std::sqrt(sum_sq / static_cast<double>(ev.used_points));
+    ev.residual_max_px = max_distance_px;
     ev.visible_fraction = detail::VisibleFraction(ridge.points, points, assignment, picture.width, picture.height, det.coverage_cell_px, det.coverage_cell_min_points);
 
     // (e) the tilt, three ways
@@ -251,6 +253,7 @@ GridSheetTiltOutcome MeasureGridSheetTilt(std::string_view camera, const ImageVi
     tilt.calibration_x_azimuth_deg = calibration_azimuth;
     tilt.lean_screen_deg = Rotate(main.lean_sheet_deg, -main.image_x_azimuth_deg);
     tilt.lean_drawing_deg = Rotate(tilt.lean_screen_deg, calibration_azimuth);
+    tilt.lattice_to_plane = h;
     out.refusal = GridSheetRefusal::none;
     out.tilt = tilt;
     return out;

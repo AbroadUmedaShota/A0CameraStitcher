@@ -163,6 +163,7 @@ struct GridSheetEvidence {
     double fit_last_step_px{std::numeric_limits<double>::quiet_NaN()};      // how far that step moved the lines (pixels)
     std::size_t nodes{};                             // line intersections used by the second method
     double residual_rms_px{std::numeric_limits<double>::quiet_NaN()};       // used points to their lines
+    double residual_max_px{std::numeric_limits<double>::quiet_NaN()};       // the largest of those distances; the same unit as the rms (first order, lens distortion taken out)
     double node_residual_rms_px{std::numeric_limits<double>::quiet_NaN()};  // second method, intersections to the fitted lattice
     double visible_fraction{std::numeric_limits<double>::quiet_NaN()};      // share of the picture's cells that hold at least a few used points
     double lattice_aspect_ratio{std::numeric_limits<double>::quiet_NaN()};  // second lattice step over the first, on the sheet
@@ -198,6 +199,20 @@ struct GridSheetTilt {
     render::Point lean_sheet_deg{};
     double image_x_azimuth_deg{};                    // the picture's x axis in the sheet frame, turned from the sheet's x toward its y, (-180, 180]
     double calibration_x_azimuth_deg{};              // the same for the given projection (turn at calibration)
+    // The lattice behind the value, for a reader who needs the map and not only the angle: the lattice-to-plane matrix of the
+    // last fit, row-major, taking (i, j, 1) to the plane of normalised camera coordinates (x / z, y / z) with the profile's lens
+    // distortion taken out. It is as fitted, free in all eight numbers (its two lattice steps are not forced to be square and
+    // equal) and scaled so that its last number is 1. tilt_deg, lean_sheet_deg and image_x_azimuth_deg are what
+    // content_registration::OrientationOf gives for this matrix.
+    //   i, j     The position on the lattice. i is counted across the first family's lines (they are the lines of constant i,
+    //            the sheet frame's x), j across the second family's lines (the lines of constant j, the sheet frame's y).
+    //   unit     One grid pitch. The sheet's real pitch is not known here: a position in millimetres needs the pitch from the
+    //            caller.
+    //   numbering  The fit's own. It is fixed only up to whole pitches (a shift of i and j by integers) and a turn by multiples of
+    //            90 degrees. It is never a mirror image: a fit whose matrix turns the lattice the other way round (a negative
+    //            determinant of the matrix's first two rows and columns) is refused before a value is built, so the map
+    //            always has the same handedness as the picture's own axes.
+    std::array<double, 9> lattice_to_plane{};
 };
 
 struct GridSheetTiltOutcome {

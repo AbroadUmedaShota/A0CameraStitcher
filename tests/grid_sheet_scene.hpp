@@ -130,6 +130,7 @@ struct Scene {
     int thick_every{5};
     double noise{1.5};
     double region[4]{0, 0, 1, 1};     // left, top, right, bottom as fractions of the picture: where the sheet is visible
+    double hole[4]{0, 0, 0, 0};       // the same for a place inside it where the sheet is covered (a sheet of paper); all zero: none
     bool fold{false};
     double fold_x_mm{0}, fold_deg{0}; // the sheet right of X = fold_x_mm is bent out of the table plane toward the camera
     bool lines_only_in_first_family{false};
@@ -157,13 +158,16 @@ public:
         LatticeRow(0, lx0, ly0, ok0);
         const int u_lo = static_cast<int>(s_.region[0] * w), u_hi = static_cast<int>(s_.region[2] * w);
         const int v_lo = static_cast<int>(s_.region[1] * h), v_hi = static_cast<int>(s_.region[3] * h);
+        const int hu_lo = static_cast<int>(s_.hole[0] * w), hu_hi = static_cast<int>(s_.hole[2] * w);
+        const int hv_lo = static_cast<int>(s_.hole[1] * h), hv_hi = static_cast<int>(s_.hole[3] * h);
         for (int v = 0; v < h; ++v) {
             LatticeRow(v + 1, lx1, ly1, ok1);
             std::mt19937_64 rng(s_.seed * 1000003ull + static_cast<std::uint64_t>(v));
             std::normal_distribution<double> noise(0.0, s_.noise);
             for (int u = 0; u < w; ++u) {
                 double value = s_.background;
-                const bool inside = ok0[u] && ok0[u + 1] && ok1[u] && u >= u_lo && u < u_hi && v >= v_lo && v < v_hi;
+                const bool covered = u >= hu_lo && u < hu_hi && v >= hv_lo && v < hv_hi;
+                const bool inside = ok0[u] && ok0[u + 1] && ok1[u] && u >= u_lo && u < u_hi && v >= v_lo && v < v_hi && !covered;
                 if (inside) {
                     for (int family = 0; family < 2; ++family) {
                         if (family == 1 && s_.lines_only_in_first_family) continue;
